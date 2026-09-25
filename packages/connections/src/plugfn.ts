@@ -200,6 +200,25 @@ export class PlugFnConnectionOrchestrator {
     }
   }
 
+  /** Apply the same provider policy used by connection setup to public selection. */
+  async select(input: { actorUserId: string; workspaceId: string; provider: string; connectionId: string }) {
+    const readiness = this.providerReadiness(input.provider);
+    if (!readiness.available) throw new ProviderUnavailableError(readiness.state);
+    return this.authority.select(input);
+  }
+
+  async listAvailable(input: { actorUserId: string; workspaceId: string; provider?: string }) {
+    const bindings = await this.authority.listAvailable(input);
+    const providerStates = new Map(bindings.map(({ provider }) => [provider,
+      this.providerReadiness(provider, bindings.filter((binding) => binding.provider === provider)).state,
+    ]));
+    return bindings.map((binding) => {
+      const providerState = providerStates.get(binding.provider)!;
+      return { ...binding, providerState, selectable: providerState === "ready" &&
+        binding.status === "active" && binding.readiness === "ready" };
+    });
+  }
+
   async startOAuth(input: {
     actorUserId: string;
     workspaceId: string;

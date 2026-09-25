@@ -100,6 +100,7 @@ describe("OMR MCP server", () => {
       "demo.read",
       "demo.write",
       "omr.approvals.execute",
+      "omr.catalog.providers",
       "omr.catalog.refresh",
       "omr.connections.list",
       "omr.connections.select",

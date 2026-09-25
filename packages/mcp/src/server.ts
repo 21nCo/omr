@@ -13,6 +13,7 @@ const CONNECTIONS_TOOL = "omr.connections.list";
 const SELECT_CONNECTION_TOOL = "omr.connections.select";
 const EXECUTE_APPROVAL_TOOL = "omr.approvals.execute";
 const REFRESH_CATALOG_TOOL = "omr.catalog.refresh";
+const PROVIDERS_TOOL = "omr.catalog.providers";
 
 function objectSchema(value: unknown): McpFnObjectSchema {
   if (value && typeof value === "object" && !Array.isArray(value) &&
@@ -68,7 +69,7 @@ export async function createOMRMcpServer(input: {
   }
   const manifests = await discoverManifests();
 
-  const reservedNames = new Set([CONNECTIONS_TOOL, SELECT_CONNECTION_TOOL, EXECUTE_APPROVAL_TOOL, REFRESH_CATALOG_TOOL]);
+  const reservedNames = new Set([CONNECTIONS_TOOL, SELECT_CONNECTION_TOOL, EXECUTE_APPROVAL_TOOL, REFRESH_CATALOG_TOOL, PROVIDERS_TOOL]);
   const collision = manifests.find((manifest) => reservedNames.has(manifest.id));
   if (collision) throw new Error(`OMR catalog tool ${collision.id} conflicts with an MCP control tool`);
 
@@ -110,6 +111,21 @@ export async function createOMRMcpServer(input: {
   const registry = new McpFnRegistry<ReadonlyMap<string, string>>({ compileSchema: input.schemaCompiler });
 
   tools.push(
+    {
+      name: PROVIDERS_TOOL,
+      title: "List OMR Provider Readiness",
+      description: "Show the workspace-scoped v1 provider catalog and readiness, including providers with no visible tools or connections.",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      metadata: { surface: "omr-control-plane" },
+      async handler() {
+        const { catalogSchemaVersion, revision, providers } = await client.discoverTools({
+          workspaceId: input.workspaceId, limit: 1,
+        });
+        if (!providers) throw new Error("OMR discovery did not include provider readiness");
+        return structuredResult({ catalogSchemaVersion, revision, providers });
+      },
+    },
     {
       name: REFRESH_CATALOG_TOOL,
       title: "Refresh OMR Tool Catalog",
@@ -222,7 +238,7 @@ export async function createOMRMcpServer(input: {
     info: {
       name: "oh-my-router",
       version: "0.0.0",
-      instructions: "Tools are projected from the authenticated OMR catalog. For multiple ready connections, list and select one with omr.connections.list and omr.connections.select. Call omr.catalog.refresh after connection or selection changes; changed schemas require restarting this session. Revoked tools are hidden on the next list and call. Write, destructive, and unknown-effect calls create an OMR approval instead of executing immediately. After approval in the OMR control plane, call omr.approvals.execute with the returned approvalId.",
+      instructions: "Use omr.catalog.providers to inspect the workspace-scoped v1 provider states, including unavailable providers. Tools are projected from the authenticated OMR catalog. For multiple ready connections, list and select one with omr.connections.list and omr.connections.select. Call omr.catalog.refresh after connection or selection changes; changed schemas require restarting this session. Revoked tools are hidden on the next list and call. Write, destructive, and unknown-effect calls create an OMR approval instead of executing immediately. After approval in the OMR control plane, call omr.approvals.execute with the returned approvalId.",
     },
     transports: ["stdio", "streamable-http"],
     registry,

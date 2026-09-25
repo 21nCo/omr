@@ -348,7 +348,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
     },
     async list(request, input) {
       const principal = await authenticate(event, request, input.workspaceId, "connections:read");
-      return withConnections((_orchestrator, authority) => authority.listAvailable({
+      return withConnections((orchestrator) => orchestrator.listAvailable({
         actorUserId: principal.userId,
         workspaceId: input.workspaceId,
         ...(input.provider ? { provider: input.provider } : {}),
@@ -357,7 +357,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
     async select(request, input) {
       if (!bearerCredential(request)) requireSameOrigin(request);
       const principal = await authenticate(event, request, input.workspaceId, "connections:read");
-      return withConnections((_orchestrator, authority) => authority.select({
+      return withConnections((orchestrator) => orchestrator.select({
         actorUserId: principal.userId,
         ...input,
       }));

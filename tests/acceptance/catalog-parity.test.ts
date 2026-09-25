@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { OMRClient } from "@oh-my-router/client";
 import { createOMRMcpServer } from "@oh-my-router/mcp";
-import { ToolCatalog } from "@oh-my-router/tools";
+import { ToolCatalog, v1ProviderCatalog } from "@oh-my-router/tools";
 import { describe, expect, it } from "vitest";
 
 import { createOMRRouter } from "../../apps/web/src/lib/server/router.js";
@@ -26,11 +26,21 @@ describe("v1 catalog surface parity", () => {
       } },
     }] } }, (schema) => schema as never);
     let ready = true;
+    let configured = true;
+    const linear = {
+      name: "linear", displayName: "Linear", version: "1.0.0", description: "Issues",
+      auth: { type: "oauth2" }, actions: { get_issue: {} },
+    };
+    const providers = () => v1ProviderCatalog({
+      get: (name) => name === "linear" ? linear : undefined,
+      configured: (name) => name === "linear" && configured,
+      connections: new Map([["linear", ready ? [{ status: "active", readiness: "ready" }] : []]]),
+    });
     const router = createOMRRouter(undefined, undefined, {
       async discover(_request, input) {
         return {
-          ...catalog.discover({ allowedProviders: new Set(ready ? ["linear"] : []), limit: input.limit }),
-          providers: [{ provider: "linear", displayName: "Linear", state: ready ? "ready" : "disconnected", available: true }],
+          ...catalog.discover({ allowedProviders: new Set(ready && configured ? ["linear"] : []), limit: input.limit }),
+          providers: providers(),
         };
       },
       async manifest(_request, toolId) { return ready ? catalog.get(toolId) : null; },
@@ -65,7 +75,15 @@ describe("v1 catalog surface parity", () => {
       expect(mcpTool?.inputSchema).toEqual(webManifest.inputSchema);
       expect(mcpTool?.description).toBe(webManifest.description);
       expect(JSON.stringify(mcpTool)).toContain(webManifest.hash);
-      expect(webPage.providers).toMatchObject([{ provider: "linear", state: "ready" }]);
+      expect(webPage.providers?.map(({ provider, state }) => [provider, state])).toEqual([
+        ["github", "unsupported"], ["linear", "ready"],
+        ["slack", "unsupported"], ["notion", "unsupported"],
+      ]);
+      const mcpProviders = async () => (await agent!.callTool({
+        name: "omr.catalog.providers", arguments: {},
+      })).structuredContent;
+      expect(await mcpProviders()).toEqual({ catalogSchemaVersion: webPage.catalogSchemaVersion,
+        revision: webPage.revision, providers: webPage.providers });
       ready = false;
       const disconnected = await api.discoverTools({ workspaceId: "workspace_1" });
       const { stdout: cliDisconnected } = await execute(process.execPath,
@@ -74,7 +92,12 @@ describe("v1 catalog surface parity", () => {
         });
       expect(disconnected.tools).toEqual([]);
       expect(JSON.parse(cliDisconnected)).toEqual(disconnected);
+      expect(await mcpProviders()).toMatchObject({ providers: disconnected.providers });
       expect((await agent.listTools()).tools.some(({ name }) => name === webManifest.id)).toBe(false);
+      configured = false;
+      expect((await api.discoverTools({ workspaceId: "workspace_1" })).providers?.[1]?.state).toBe("unconfigured");
+      expect(await mcpProviders()).toMatchObject({ providers: providers() });
+      configured = true;
       ready = true;
       expect((await agent.listTools()).tools.find(({ name }) => name === webManifest.id)?._meta)
         .toMatchObject({ manifestHash: webManifest.hash });

@@ -1,5 +1,18 @@
 # v1 provider catalog and readiness
 
+MCP clients can call `omr.catalog.providers` for the same workspace-scoped four-provider
+status list, schema version, and revision returned by HTTP discovery and CLI `tools list`.
+This control tool remains available when no connection or action is usable. Its result
+reflects the latest discovery response on each call, including configuration and
+health transitions within a long-lived MCP session.
+
+Connection selection checks v1 support and server configuration in addition to
+binding health. A previously healthy binding cannot be selected after its adapter
+or configuration is removed. `connections list` keeps the binding's stored
+`readiness` and adds `providerState` and `selectable` to distinguish current
+provider eligibility from connection health. The web control plane uses the
+catalog's provider state when displaying bindings and offering “Select connection”.
+
 The named v1 providers, in stable order, are GitHub, Linear, Slack, and Notion. Other PlugFn adapters remain registered internally but are not listed as v1 providers, cannot start new connections, and have no discoverable/executable OMR manifests. The provider policy in `packages/tools/src/providers.ts` is shared by connection setup, authenticated discovery, and execution. No database migration is required.
 
 ## Contract
@@ -14,7 +27,7 @@ The named v1 providers, in stable order, are GitHub, Linear, Slack, and Notion. 
 - `expired`: accessible non-ready or reauthorization-required binding, with no ready binding. New OAuth connection may start; tools remain hidden until health/reauthorization restores readiness.
 - `ready`: at least one accessible active/ready binding on a configured v1 adapter. Only actions whose required scopes are granted by the selected (or sole) ready connection are discoverable. Multiple ready connections without a selection cannot be executed implicitly, so no actions are advertised until one is selected. Explicit execution against an accessible binding still checks that binding's grants. Execution and approval requests recheck scopes after connection resolution; approval execution rechecks again after approval.
 
-`POST /api/connections/select` accepts `workspaceId`, `provider`, and `connectionId`. It requires a workspace-authenticated browser request from the same origin or a scoped client credential with `connections:read`; the connection authority verifies workspace membership, ownership visibility, provider match, and active/ready status before saving the per-user choice. An inaccessible or unhealthy binding cannot be selected. The web control plane offers “Use for tools”, CLI offers `omr connections select <id> --provider <provider>`, and MCP offers `omr.connections.select` after `omr.connections.list`. Selection does not change the default grant, bypass scope checks, or pick implicitly between accounts. Call `omr.catalog.refresh` on a long-lived MCP session after selecting.
+`POST /api/connections/select` accepts `workspaceId`, `provider`, and `connectionId`. It requires a workspace-authenticated browser request from the same origin or a scoped client credential with `connections:read`; the connection authority verifies workspace membership, ownership visibility, provider match, and active/ready status before saving the per-user choice. An inaccessible or unhealthy binding cannot be selected. The web control plane offers “Select connection”, CLI offers `omr connections select <id> --provider <provider>`, and MCP offers `omr.connections.select` after `omr.connections.list`. Selection does not change the default grant, bypass scope checks, or pick implicitly between accounts. Call `omr.catalog.refresh` on a long-lived MCP session after selecting.
 
 Readiness is based on stored binding health, not a live provider probe on every catalog request. Catalog discovery does inspect the effective ready binding's remote grant: if PlugFn reports the connection missing, it marks only that binding as needing reauthorization and omits its tools; other providers remain discoverable. Other remote or authorization failures are errors, not silently treated as missing grants. `POST /api/connections/health` updates the binding; a remote credential that expires between checks may not be reflected until then, and execution/provider errors still fail safely. Revocation is terminal, including when a health probe or refresh was already in flight; a second healthy binding can still make a provider ready.
 

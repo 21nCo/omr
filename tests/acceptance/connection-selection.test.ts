@@ -5,6 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { OMRClient } from "@oh-my-router/client";
 import { ConnectionAuthority } from "@oh-my-router/connections";
+import { PlugFnConnectionOrchestrator, type PlugFnConnectionPort } from "@oh-my-router/connections";
 import { MemoryConnectionBindingStore } from "@oh-my-router/connections/testing";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
 import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
@@ -36,6 +37,15 @@ describe("effective connection selection across public surfaces", () => {
       providerConnectionId: "remote_profile", ownership: "personal", label: "Profile" });
     const repo = await bindings.attach({ actorUserId, workspaceId: workspace.id, provider,
       providerConnectionId: "remote_repo", ownership: "personal", label: "Repository" });
+    const stripe = await bindings.attach({ actorUserId, workspaceId: workspace.id, provider: "stripe",
+      providerConnectionId: "remote_stripe", ownership: "personal", label: "Legacy Stripe" });
+    const integrationConfig = { integrations: { github: { type: "oauth2" } } };
+    const orchestrator = new PlugFnConnectionOrchestrator(bindings, {
+      config: integrationConfig,
+      providers: { get: (name: string) => name === "github" || name === "stripe" ? {
+        name, displayName: name, auth: { type: "oauth2" }, actions: {},
+      } : undefined },
+    } as unknown as PlugFnConnectionPort);
     const grants = new Map([["remote_profile", ["read:user"]], ["remote_repo", ["repo"]]]);
     const catalog = await ToolCatalog.create({ providers: { list: () => [{
       name: provider, displayName: "GitHub", version: "1.0.0", description: "",
@@ -50,9 +60,9 @@ describe("effective connection selection across public surfaces", () => {
       async (name) => bindings.resolve({ actorUserId, workspaceId: workspace.id, provider: name }),
       async (id) => grants.get(id), async () => {});
     const connectionServices = {
-      list: async () => bindings.listAvailable({ actorUserId, workspaceId: workspace.id }),
+      list: async () => orchestrator.listAvailable({ actorUserId, workspaceId: workspace.id }),
       select: async (_request: Request, input: { workspaceId: string; provider: string; connectionId: string }) =>
-        bindings.select({ actorUserId, ...input }),
+        orchestrator.select({ actorUserId, ...input }),
     } as unknown as ConnectionRouteServices;
     const executionServices = {
       execute: async (_request: Request, input: { workspaceId: string; toolId: string }) => {
@@ -94,6 +104,18 @@ describe("effective connection selection across public surfaces", () => {
         ["packages/cli/dist/bin.js", ...args, "--json"], {
           env: { ...process.env, OMR_BACKEND: baseUrl, OMR_API_KEY: "test", OMR_WORKSPACE_ID: workspace.id },
         })).stdout) as unknown;
+      expect(await api.listConnections(workspace.id)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: stripe.id, providerState: "unsupported", selectable: false }),
+      ]));
+      await expect(api.selectConnection({ workspaceId: workspace.id, provider: "stripe", connectionId: stripe.id }))
+        .rejects.toMatchObject({ status: 409, body: { state: "unsupported" } });
+      integrationConfig.integrations = {} as typeof integrationConfig.integrations;
+      expect(await cli("connections", "list")).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: profile.id, providerState: "unconfigured", selectable: false }),
+      ]));
+      await expect(api.selectConnection({ workspaceId: workspace.id, provider, connectionId: profile.id }))
+        .rejects.toMatchObject({ status: 409, body: { state: "unconfigured" } });
+      integrationConfig.integrations = { github: { type: "oauth2" } };
       expect((await api.discoverTools({ workspaceId: workspace.id })).tools).toEqual([]);
       await expect(api.getTool("github.repo", workspace.id)).rejects.toMatchObject({ status: 404 });
       await expect(api.execute({ workspaceId: workspace.id, toolId: "github.repo", params: {} }))
@@ -103,6 +125,13 @@ describe("effective connection selection across public surfaces", () => {
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
       await mcp.connect(serverTransport);
       await agent.connect(clientTransport);
+      expect((await agent.callTool({ name: "omr.connections.list", arguments: {} })).structuredContent)
+        .toMatchObject({ connections: expect.arrayContaining([
+          expect.objectContaining({ id: stripe.id, providerState: "unsupported", selectable: false }),
+        ]) });
+      await expect(agent.callTool({ name: "omr.connections.select",
+        arguments: { provider: "stripe", connectionId: stripe.id } }))
+        .resolves.toMatchObject({ isError: true, structuredContent: { error: { details: { state: "unsupported" } } } });
       expect((await agent.listTools()).tools.filter(({ name }) => name.startsWith("github."))).toEqual([]);
       await expect(bindings.select({ actorUserId: "outsider", workspaceId: workspace.id,
         provider, connectionId: repo.id })).rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });

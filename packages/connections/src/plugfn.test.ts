@@ -95,6 +95,34 @@ function fakePlugFn() {
 }
 
 describe("PlugFn connection orchestration", () => {
+  it("keeps old healthy bindings visible but ineligible when support or config is removed", async () => {
+    const { authority, orchestrator, plugfn, workspaceId } = await fixture();
+    const github = await authority.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "github", providerConnectionId: "remote_github", ownership: "personal", label: "GitHub" });
+    const expired = await authority.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "github", providerConnectionId: "remote_expired", ownership: "personal", label: "Expired" });
+    await authority.recordHealth({ connectionId: expired.id, status: "needs_reauth",
+      readiness: "unavailable", reason: "expired" });
+    const stripe = await authority.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "stripe", providerConnectionId: "remote_stripe", ownership: "personal", label: "Stripe" });
+    const input = { actorUserId: "user_owner", workspaceId };
+    expect(await orchestrator.listAvailable(input)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: github.id, providerState: "ready", selectable: true }),
+      expect.objectContaining({ id: expired.id, providerState: "ready", selectable: false }),
+      expect.objectContaining({ id: stripe.id, providerState: "unsupported", selectable: false }),
+    ]));
+    await expect(orchestrator.select({ ...input, provider: "stripe", connectionId: stripe.id }))
+      .rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE", state: "unsupported" });
+    plugfn.port.config!.integrations = {};
+    expect(await orchestrator.listAvailable(input)).toContainEqual(expect.objectContaining({
+      id: github.id, status: "active", readiness: "ready", providerState: "unconfigured", selectable: false,
+    }));
+    await expect(orchestrator.select({ ...input, provider: "github", connectionId: github.id }))
+      .rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE", state: "unconfigured" });
+    plugfn.port.config!.integrations = { github: { type: "oauth2" } };
+    await expect(orchestrator.select({ ...input, provider: "github", connectionId: github.id }))
+      .resolves.toMatchObject({ connectionId: github.id });
+  });
   it("reports provider setup readiness without exposing credentials", async () => {
     const { orchestrator } = await fixture();
     expect(orchestrator.providerReadiness(" Linear ")).toMatchObject({
