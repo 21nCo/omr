@@ -1,0 +1,42 @@
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 8,19,304-306,426
+apps/web/src/lib/server/scoped-catalog.ts
+  h_a39f9495f9ec1d 3,26
+apps/web/src/lib/workspace-catalog.test.ts
+  h_a39f9495f9ec1d 1-48
+apps/web/src/lib/workspace-catalog.ts
+  h_a39f9495f9ec1d 1-37
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 4,96-108,110-114
+docs/provider-catalog-v1.md
+  h_a39f9495f9ec1d 34-35,40-41
+packages/connections/src/index.ts
+  h_a39f9495f9ec1d 28-29
+packages/connections/src/plugfn.ts
+  h_a39f9495f9ec1d 1,190
+packages/connections/src/remote.ts
+  h_a39f9495f9ec1d 1-20
+packages/execution/src/execution.test.ts
+  h_a39f9495f9ec1d 4,20,34-37,49-51,63,67,73-76,155-214
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 2-5,204,252,316,395-404,419-428
+packages/mcp/src/server.test.ts
+  h_a39f9495f9ec1d 202-242
+packages/mcp/src/server.ts
+  h_a39f9495f9ec1d 246-254
+packages/tools/src/index.ts
+  h_a39f9495f9ec1d 20
+packages/tools/src/providers.ts
+  h_a39f9495f9ec1d 42-49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9b4d5d1f27c2c2994c4eb56d0f9dacd3424d3dc8",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
