@@ -13,23 +13,35 @@ export function createWorkspaceCatalogLoader<Overview extends { selectedWorkspac
   publish: (state: WorkspaceCatalogState<Overview, Catalog>) => void,
 ): (workspaceId: string) => Promise<void> {
   let generation = 0;
+  let visible: WorkspaceCatalogState<Overview, Catalog> | null = null;
+  const show = (state: WorkspaceCatalogState<Overview, Catalog>) => {
+    visible = state;
+    publish(state);
+  };
   return async (workspaceId) => {
     const current = ++generation;
-    let overview: Overview | null = null;
+    const retained = visible?.selectedWorkspaceId === workspaceId ? visible : null;
+    let overview: Overview | null = retained?.overview ?? null;
     let selectedWorkspaceId = workspaceId;
-    publish({ overview, catalog: null, selectedWorkspaceId, loading: true, error: "" });
+    show({ overview, catalog: retained?.catalog ?? null, selectedWorkspaceId, loading: true, error: "" });
+    let fetchedOverview = false;
     try {
       overview = await fetchOverview(workspaceId);
       if (current !== generation) return;
+      fetchedOverview = true;
       selectedWorkspaceId = overview.selectedWorkspaceId ?? "";
-      publish({ overview, catalog: null, selectedWorkspaceId, loading: true, error: "" });
+      show({
+        overview,
+        catalog: retained?.selectedWorkspaceId === selectedWorkspaceId ? retained.catalog : null,
+        selectedWorkspaceId, loading: true, error: "",
+      });
       const catalog = selectedWorkspaceId ? await fetchCatalog(selectedWorkspaceId) : null;
       if (current !== generation) return;
-      publish({ overview, catalog, selectedWorkspaceId, loading: false, error: "" });
+      show({ overview, catalog, selectedWorkspaceId, loading: false, error: "" });
     } catch (caught) {
       if (current !== generation) return;
-      publish({
-        overview, catalog: null, selectedWorkspaceId, loading: false,
+      show({
+        overview: fetchedOverview ? overview : null, catalog: null, selectedWorkspaceId, loading: false,
         error: caught instanceof Error ? caught.message : "Could not load the control plane",
       });
     }

@@ -3,9 +3,50 @@ import { describe, expect, it } from "vitest";
 import { createWorkspaceCatalogLoader, type WorkspaceCatalogState } from "./workspace-catalog.js";
 
 type Overview = { selectedWorkspaceId: string; connections: { provider: string; status: string }[] };
-type Catalog = { providers: { provider: string; state: string }[] };
+type Catalog = { providers: { provider: string; state: string; available?: boolean; authMode?: string }[] };
 
 describe("workspace catalog loading", () => {
+  it("keeps the overview and chosen OAuth provider during a same-workspace refresh", async () => {
+    const states: WorkspaceCatalogState<Overview, Catalog>[] = [];
+    const providers = [
+      { provider: "github", state: "ready", available: true, authMode: "oauth" },
+      { provider: "slack", state: "ready", available: true, authMode: "oauth" },
+    ];
+    let selectedOAuthProvider = "";
+    let finishRefresh!: (catalog: Catalog) => void;
+    let catalogRequests = 0;
+    const load = createWorkspaceCatalogLoader<Overview, Catalog>(
+      async () => ({ selectedWorkspaceId: "A", connections: [] }),
+      async () => {
+        catalogRequests++;
+        if (catalogRequests === 2) return new Promise<Catalog>((resolve) => { finishRefresh = resolve; });
+        if (catalogRequests === 3) throw new Error("catalog unavailable");
+        return { providers };
+      },
+      (state) => {
+        states.push(state);
+        if (!state.catalog) selectedOAuthProvider = "";
+        else if (!state.catalog.providers.some((item) => item.provider === selectedOAuthProvider && item.available)) {
+          selectedOAuthProvider = state.catalog.providers.find((item) => item.available && item.authMode === "oauth")?.provider ?? "";
+        }
+      },
+    );
+    await load("A");
+    selectedOAuthProvider = "slack";
+
+    const refresh = load("A");
+    await Promise.resolve();
+    expect(states.at(-1)).toMatchObject({ selectedWorkspaceId: "A", loading: true, overview: { selectedWorkspaceId: "A" } });
+    expect(states.at(-1)?.catalog?.providers).toEqual(providers);
+    expect(selectedOAuthProvider).toBe("slack");
+    finishRefresh({ providers });
+    await refresh;
+    expect(selectedOAuthProvider).toBe("slack");
+
+    await load("A");
+    expect(states.at(-1)).toMatchObject({ catalog: null, error: "catalog unavailable" });
+  });
+
   it("clears A readiness when B discovery fails and restores only B after retry", async () => {
     const states: WorkspaceCatalogState<Overview, Catalog>[] = [];
     let failB = true;
