@@ -1,0 +1,18 @@
+export {
+  ApprovalUnavailableError,
+  ExecutionApprovalRequiredError,
+  ExecutionCapabilityDeniedError,
+  ExecutionFailedError,
+  ExecutionIdempotencyConflictError,
+  ExecutionInProgressError,
+  ExecutionInputError,
+  ExecutionService,
+  type ApprovalStatus,
+  type ExecutionApproval,
+  type ExecutionApprovalStore,
+  type ExecutionPrincipal,
+  type ExecutionReceipt,
+  type ExecutionReceiptStore,
+  type ExecutionStatus,
+  type PlugFnActionPort,
+} from "./execution.js";

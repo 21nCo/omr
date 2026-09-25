@@ -1,0 +1,21 @@
+{
+  "name": "@oh-my-router/client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@oh-my-router/client-access": "0.0.0",
+    "@oh-my-router/tools": "0.0.0"
+  }
+}

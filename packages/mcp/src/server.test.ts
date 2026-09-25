@@ -1,0 +1,219 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { ToolManifest } from "@oh-my-router/tools";
+import { afterEach, describe, expect, it } from "vitest";
+
+import { createOMRMcpServer } from "./server.js";
+
+function requestUrl(request: RequestInfo | URL): URL {
+  if (typeof request === "string") return new URL(request);
+  return request instanceof URL ? request : new URL(request.url);
+}
+
+function manifest(id: string, effect: ToolManifest["contract"]["effect"]): ToolManifest {
+  const [provider, ...actionParts] = id.split(".");
+  return {
+    catalogSchemaVersion: "1.0.0",
+    id,
+    provider: provider!,
+    providerVersion: "1.0.0",
+    action: actionParts.join("."),
+    displayName: id,
+    description: `Test tool ${id}`,
+    contract: {
+      version: "1.0.0",
+      effect,
+      requiredScopes: [],
+      resources: [],
+      sensitiveKeys: [],
+      pagination: { kind: "none" },
+      retry: effect === "read" ? "safe" : "never",
+    },
+    inputSchema: {
+      type: "object",
+      properties: { value: { type: "string" } },
+      required: ["value"],
+      additionalProperties: false,
+    },
+    outputSchema: { type: "object" },
+    hash: `hash-${id}`,
+  };
+}
+
+describe("OMR MCP server", () => {
+  const closeables: Array<{ close(): Promise<void> }> = [];
+
+  afterEach(async () => {
+    await Promise.all(closeables.splice(0).map((value) => value.close().catch(() => undefined)));
+  });
+
+  it("projects reads, creates approvals for writes, and exposes control-plane tools", async () => {
+    const requests: Array<{ path: string; body: Record<string, unknown> | null }> = [];
+    const fetchImpl: typeof fetch = async (request, init) => {
+      const url = requestUrl(request);
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null;
+      requests.push({ path: url.pathname, body });
+      if (url.pathname === "/api/tools") {
+        return Response.json({
+          catalogSchemaVersion: "1.0.0",
+          revision: "revision-1",
+          tools: [manifest("demo.read", "read"), manifest("demo.write", "write")],
+        });
+      }
+      if (url.pathname === "/api/tools/execute") {
+        return Response.json({ status: "succeeded", output: { value: "read" } });
+      }
+      if (url.pathname === "/api/connections/list") {
+        return Response.json([{ id: "connection-1", provider: "demo" }]);
+      }
+      if (url.pathname === "/api/approvals") {
+        return Response.json({
+          id: "approval-1",
+          status: "pending",
+          expiresAt: 1_800_000,
+        }, { status: 201 });
+      }
+      if (url.pathname === "/api/approvals/execute") {
+        return Response.json({ id: "receipt-1", status: "succeeded" });
+      }
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    };
+    const server = await createOMRMcpServer({
+      baseUrl: "https://omr.test",
+      credential: "credential",
+      workspaceId: "workspace-1",
+      fetchImpl,
+    });
+    const client = new Client({ name: "test", version: "1.0.0" }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closeables.push(client, server);
+
+    const listed = await client.listTools();
+    expect(listed.tools.map(({ name }) => name)).toEqual([
+      "demo.read",
+      "demo.write",
+      "omr.approvals.execute",
+      "omr.connections.list",
+    ]);
+
+    await expect(client.callTool({
+      name: "demo.read",
+      arguments: { value: "read" },
+    })).resolves.toMatchObject({
+      structuredContent: { status: "succeeded", output: { value: "read" } },
+    });
+    await expect(client.callTool({
+      name: "omr.connections.list",
+      arguments: { provider: "demo" },
+    })).resolves.toMatchObject({
+      structuredContent: { connections: [{ id: "connection-1", provider: "demo" }] },
+    });
+    await expect(client.callTool({
+      name: "demo.write",
+      arguments: { value: "write" },
+    })).resolves.toMatchObject({
+      structuredContent: {
+        status: "approval_required",
+        executed: false,
+        approvalId: "approval-1",
+        toolId: "demo.write",
+        resume: {
+          tool: "omr.approvals.execute",
+          arguments: { approvalId: "approval-1" },
+        },
+      },
+    });
+    await expect(client.callTool({
+      name: "omr.approvals.execute",
+      arguments: { approvalId: "approval-1" },
+    })).resolves.toMatchObject({
+      structuredContent: { id: "receipt-1", status: "succeeded" },
+    });
+
+    expect(requests.filter(({ path }) => path === "/api/tools/execute")).toHaveLength(1);
+    expect(requests.find(({ path }) => path === "/api/approvals")?.body).toEqual({
+      workspaceId: "workspace-1",
+      toolId: "demo.write",
+      params: { value: "write" },
+    });
+    expect(requests.find(({ path }) => path === "/api/approvals/execute")?.body).toEqual({
+      approvalId: "approval-1",
+    });
+  });
+
+  it("preserves OMR error response details in MCP tool errors", async () => {
+    const fetchImpl: typeof fetch = async (request) => {
+      const url = requestUrl(request);
+      if (url.pathname === "/api/tools") {
+        return Response.json({
+          catalogSchemaVersion: "1.0.0",
+          revision: "revision-1",
+          tools: [],
+        });
+      }
+      return Response.json({ error: "APPROVAL_UNAVAILABLE" }, { status: 409 });
+    };
+    const server = await createOMRMcpServer({
+      baseUrl: "https://omr.test",
+      credential: "credential",
+      workspaceId: "workspace-1",
+      fetchImpl,
+    });
+    const client = new Client({ name: "test", version: "1.0.0" }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closeables.push(client, server);
+
+    await expect(client.callTool({
+      name: "omr.approvals.execute",
+      arguments: { approvalId: "approval-missing" },
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: {
+        ok: false,
+        error: {
+          code: "OMR_HTTP_ERROR",
+          details: { error: "APPROVAL_UNAVAILABLE" },
+        },
+      },
+    });
+  });
+
+  it("serves the projected catalog over stateless Streamable HTTP", async () => {
+    const apiFetch: typeof fetch = async (request) => {
+      if (requestUrl(request).pathname === "/api/tools") {
+        return Response.json({
+          catalogSchemaVersion: "1.0.0",
+          revision: "revision-1",
+          tools: [manifest("demo.read", "read")],
+        });
+      }
+      return Response.json({ status: "succeeded", output: { value: "remote" } });
+    };
+    const server = await createOMRMcpServer({
+      baseUrl: "https://omr.test",
+      credential: "credential",
+      workspaceId: "workspace-1",
+      fetchImpl: apiFetch,
+    });
+    const handler = await server.createWebStandardHandler({ enableJsonResponse: true });
+    const transport = new StreamableHTTPClientTransport(new URL("https://omr.test/mcp"), {
+      fetch: async (request, init) => handler(new Request(request, init)),
+    });
+    const client = new Client({ name: "remote-test", version: "1.0.0" }, { capabilities: {} });
+    await client.connect(transport);
+    closeables.push(client, server);
+
+    await expect(client.listTools()).resolves.toMatchObject({
+      tools: expect.arrayContaining([expect.objectContaining({ name: "demo.read" })]),
+    });
+    await expect(client.callTool({ name: "demo.read", arguments: { value: "remote" } }))
+      .resolves.toMatchObject({
+        structuredContent: { status: "succeeded", output: { value: "remote" } },
+      });
+  });
+});

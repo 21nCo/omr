@@ -1,0 +1,24 @@
+{
+  "name": "@oh-my-router/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@cloudflare/cabidela": "^0.2.4",
+    "@cloudflare/workers-oauth-provider": "0.10.3",
+    "@oh-my-router/client-access": "0.0.0",
+    "@oh-my-router/connections": "0.0.0",
+    "@oh-my-router/data": "0.0.0",
+    "@oh-my-router/execution": "0.0.0",
+    "@oh-my-router/identity": "0.0.0",
+    "@oh-my-router/mcp": "0.0.0",
+    "@oh-my-router/plugfn-runtime": "0.0.0",
+    "@oh-my-router/tools": "0.0.0"
+  },
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run"
+  }
+}
