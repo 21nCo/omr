@@ -1,0 +1,30 @@
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 351,360
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 80-83,279-280,286-287
+docs/provider-catalog-v1.md
+  h_a39f9495f9ec1d 3-15,30
+packages/connections/src/plugfn.test.ts
+  h_a39f9495f9ec1d 98-125
+packages/connections/src/plugfn.ts
+  h_a39f9495f9ec1d 203-221
+packages/mcp/src/server.test.ts
+  h_a39f9495f9ec1d 103
+packages/mcp/src/server.ts
+  h_a39f9495f9ec1d 16,72,114-128,241
+tests/acceptance/catalog-parity.test.ts
+  h_a39f9495f9ec1d 8,29-38,42-43,78-86,95,97-100
+tests/acceptance/connection-selection.test.ts
+  h_a39f9495f9ec1d 8,40-48,63,65,107-118,128-134
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "11750f02c750abf57f3378104e823373d893800c",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
