@@ -1,0 +1,20 @@
+docs/provider-catalog-v1.md
+  h_a39f9495f9ec1d 22-23
+packages/execution/src/execution.test.ts
+  h_a39f9495f9ec1d 245,247-248,254-259
+packages/tools/src/catalog.test.ts
+  h_a39f9495f9ec1d 1,102-135
+packages/tools/src/catalog.ts
+  h_a39f9495f9ec1d 87-91,129,166-169,252
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "212c3558de2e8ade0b576ac28edf1c957fca0260",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
