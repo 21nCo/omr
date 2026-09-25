@@ -1,0 +1,25 @@
+apps/web/src/lib/server/router.ts
+  s_a2bd3276976ac7::t_b1cf0dca0971a5 59,200,483-494
+apps/web/src/routes/app/+page.svelte
+  s_a2bd3276976ac7::t_dbe9d5359e230c 276-284
+docs/provider-catalog-v1.md
+  s_a2bd3276976ac7::t_4ec86f90c34f42 17-18,23
+packages/mcp/src/server.ts
+  s_a2bd3276976ac7::t_5e4953d09a0ee2 13,71,109,133-137,168-191,225
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9feac247b94c2f1e58c7d68e7ac3b455bc3e3c8a",
+  "prompts": {},
+  "sessions": {
+    "s_a2bd3276976ac7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0d8b0-85e2-7702-9013-989547be5d4f",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
