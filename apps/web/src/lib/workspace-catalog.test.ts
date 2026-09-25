@@ -65,13 +65,33 @@ describe("workspace catalog loading", () => {
     expect(states.at(-1)).toMatchObject({ selectedWorkspaceId: "B", catalog: null, error: "catalog unavailable" });
     expect(states.at(-1)?.overview?.connections).toEqual([{ provider: "github", status: "active" }]);
     expect(providerDisplayState(states.at(-1)?.catalog ?? null, "github")).toBe("unknown");
-    expect(providerDisplayState(states.at(-1)?.catalog ?? null, "github") === "ready").toBe(false);
+    expect(providerDisplayState(states.at(-1)?.catalog ?? null, "github")).not.toBe("ready");
     expect(states.slice(-3).every((state) => state.catalog === null)).toBe(true);
     failB = false;
     await load("B");
     expect(states.at(-1)?.catalog?.providers[0]?.state).toBe("unconfigured");
     expect(providerDisplayState(states.at(-1)?.catalog ?? null, "github")).toBe("unconfigured");
     expect(providerDisplayState(states.at(-1)?.catalog ?? null, "stripe")).toBe("unsupported");
+  });
+
+  it("retains the last same-workspace overview when its refresh fails", async () => {
+    const states: WorkspaceCatalogState<Overview, Catalog>[] = [];
+    let fail = false;
+    const load = createWorkspaceCatalogLoader<Overview, Catalog>(
+      async () => {
+        if (fail) throw new Error("overview unavailable");
+        return { selectedWorkspaceId: "A", connections: [{ provider: "linear", status: "active" }] };
+      },
+      async () => ({ providers: [{ provider: "linear", state: "ready" }] }),
+      (state) => states.push(state),
+    );
+    await load("A");
+    fail = true;
+    await load("A");
+    expect(states.at(-1)).toMatchObject({
+      overview: { selectedWorkspaceId: "A", connections: [{ provider: "linear", status: "active" }] },
+      catalog: null, error: "overview unavailable", loading: false,
+    });
   });
 
   it("discards a late catalog response from a previous workspace", async () => {

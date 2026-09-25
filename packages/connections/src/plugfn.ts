@@ -1,4 +1,5 @@
 import { isProviderConfigured, providerStatus, type ProviderStatus } from "@oh-my-router/tools";
+import { isMissingRemoteConnection } from "./remote.js";
 
 import {
   ConnectionAuthority,
@@ -208,8 +209,14 @@ export class PlugFnConnectionOrchestrator {
 
   async listAvailable(input: { actorUserId: string; workspaceId: string; provider?: string }) {
     const bindings = await this.authority.listAvailable(input);
-    const providerStates = new Map(bindings.map(({ provider }) => [provider,
-      this.providerReadiness(provider, bindings.filter((binding) => binding.provider === provider)).state,
+    const byProvider = new Map<string, ConnectionBindingRecord[]>();
+    for (const binding of bindings) {
+      const group = byProvider.get(binding.provider) ?? [];
+      group.push(binding);
+      byProvider.set(binding.provider, group);
+    }
+    const providerStates = new Map([...byProvider].map(([provider, group]) => [provider,
+      this.providerReadiness(provider, group).state,
     ]));
     return bindings.map((binding) => {
       const providerState = providerStates.get(binding.provider)!;
@@ -342,7 +349,7 @@ export class PlugFnConnectionOrchestrator {
       });
     }
     const remote = await this.plugfn.connections.get(binding.providerConnectionId).catch((error: unknown) => {
-      if (error instanceof Error && "code" in error && error.code === "CONNECTION_NOT_FOUND") return null;
+      if (isMissingRemoteConnection(error)) return null;
       throw error;
     });
     const status = remote?.status === "error" ? "error" : "needs_reauth";

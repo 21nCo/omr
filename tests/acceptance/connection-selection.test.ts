@@ -5,6 +5,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { OMRClient } from "@oh-my-router/client";
 import { ConnectionAuthority } from "@oh-my-router/connections";
+import { ExecutionInputError } from "@oh-my-router/execution";
+import { hasRequiredScopes } from "@oh-my-router/tools";
 import { PlugFnConnectionOrchestrator, type PlugFnConnectionPort } from "@oh-my-router/connections";
 import { MemoryConnectionBindingStore } from "@oh-my-router/connections/testing";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
@@ -68,8 +70,9 @@ describe("effective connection selection across public surfaces", () => {
       execute: async (_request: Request, input: { workspaceId: string; toolId: string }) => {
         const binding = await bindings.resolve({ actorUserId, workspaceId: input.workspaceId, provider });
         const manifest = catalog.get(input.toolId);
-        if (!manifest || !manifest.contract.requiredScopes.every((scope) =>
-          grants.get(binding.providerConnectionId)?.includes(scope))) throw new Error("Missing scope");
+        if (!manifest || !hasRequiredScopes(manifest, grants.get(binding.providerConnectionId))) {
+          throw new ExecutionInputError("Connection lacks required action scopes");
+        }
         return { bindingId: binding.id, toolId: input.toolId };
       },
     } as unknown as ExecutionRouteServices;
@@ -103,6 +106,7 @@ describe("effective connection selection across public surfaces", () => {
       const cli = async (...args: string[]) => JSON.parse((await exec(process.execPath,
         ["packages/cli/dist/bin.js", ...args, "--json"], {
           env: { ...process.env, OMR_BACKEND: baseUrl, OMR_API_KEY: "test", OMR_WORKSPACE_ID: workspace.id },
+          timeout: 5_000,
         })).stdout) as unknown;
       expect(await api.listConnections(workspace.id)).toEqual(expect.arrayContaining([
         expect.objectContaining({ id: stripe.id, providerState: "unsupported", selectable: false }),
@@ -170,11 +174,11 @@ describe("effective connection selection across public surfaces", () => {
       await expect(agent.callTool({ name: "github.repo", arguments: {} }))
         .resolves.toMatchObject({ structuredContent: { bindingId: repo.id } });
       await expect(api.execute({ workspaceId: workspace.id, toolId: "github.profile", params: {} }))
-        .rejects.toMatchObject({ status: 500 });
+        .rejects.toMatchObject({ status: 400, body: { error: "EXECUTION_INPUT_INVALID" } });
     } finally {
       await agent?.close().catch(() => undefined);
       await mcp?.close().catch(() => undefined);
       server.close();
     }
-  });
+  }, 20_000);
 });

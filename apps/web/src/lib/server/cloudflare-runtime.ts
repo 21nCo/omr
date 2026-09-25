@@ -298,27 +298,27 @@ export function createCloudflareDeviceServices(event: RequestEvent): DeviceRoute
   };
 }
 
+function statuses(
+  plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"],
+  bindings: readonly (ProviderBinding & { provider: string })[] = [],
+): ProviderStatus[] {
+  const byProvider = new Map<string, ProviderBinding[]>();
+  for (const binding of bindings) {
+    const entries = byProvider.get(binding.provider) ?? [];
+    entries.push(binding);
+    byProvider.set(binding.provider, entries);
+  }
+  return v1ProviderCatalog({
+    get: (provider) => plugfn.providers.get(provider),
+    configured: (provider) => isProviderConfigured(
+      plugfn.providers.get(provider), provider, plugfn.config?.integrations,
+    ),
+    connections: byProvider,
+  });
+}
+
 export function createCloudflareRouteServices(event: RequestEvent): CloudflareRouteServices {
   const device = createCloudflareDeviceServices(event);
-
-  function statuses(
-    plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"],
-    bindings: readonly (ProviderBinding & { provider: string })[] = [],
-  ): ProviderStatus[] {
-    const byProvider = new Map<string, ProviderBinding[]>();
-    for (const binding of bindings) {
-      const entries = byProvider.get(binding.provider) ?? [];
-      entries.push(binding);
-      byProvider.set(binding.provider, entries);
-    }
-    return v1ProviderCatalog({
-      get: (provider) => plugfn.providers.get(provider),
-      configured: (provider) => isProviderConfigured(
-        plugfn.providers.get(provider), provider, plugfn.config?.integrations,
-      ),
-      connections: byProvider,
-    });
-  }
 
   function configuredProviders(plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"]): Set<string> {
     return new Set(statuses(plugfn).filter((status) => status.available).map((status) => status.provider));

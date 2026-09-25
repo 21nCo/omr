@@ -14,9 +14,9 @@ import {
 } from "./execution.js";
 import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "./testing.js";
 
-async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes = ["issues:read", "repo"]) {
+async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes: string[] | undefined = ["issues:read", "repo"], scopeFree = false) {
   let now = 1_700_000_000_000;
-  let grantedScopes = initialScopes;
+  let grantedScopes: string[] | undefined = initialScopes;
   let remoteError: Error | null = null;
   const workspaceStore = new MemoryWorkspaceStore();
   const workspaces = new WorkspaceAuthority(workspaceStore, () => now);
@@ -45,6 +45,14 @@ async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes = [
         get_issue: action("get_issue", "read"),
         create_issue: action("create_issue", "write"),
         mystery: action("mystery", "unknown"),
+        ...(scopeFree ? {
+          no_scope_read: { ...action("no_scope_read", "read"), contract: {
+            ...action("no_scope_read", "read").contract, requiredScopes: [],
+          } },
+          no_scope_write: { ...action("no_scope_write", "write"), contract: {
+            ...action("no_scope_write", "write").contract, requiredScopes: [],
+          } },
+        } : {}),
       },
     }, {
       name: "github", displayName: "GitHub", version: "1.0.0", description: "GitHub",
@@ -63,7 +71,7 @@ async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes = [
     otherBinding,
     receipts,
     workspace,
-    setScopes(scopes: string[]) { grantedScopes = scopes; },
+    setScopes(scopes: string[] | undefined) { grantedScopes = scopes; },
     setRemoteError(error: Error | null) { remoteError = error; },
     service: new ExecutionService(
       catalog,
@@ -152,6 +160,26 @@ describe("execution service", () => {
     expect(actionCall).toHaveBeenCalledTimes(1);
   });
 
+  it("fails closed for an unknown grant even when actions require no scopes", async () => {
+    const { actionCall, approvals, receipts, service, workspace, setScopes } = await fixture(undefined, [], true);
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const approval = await service.requestApproval({ principal, toolId: "linear.no_scope_write", params: {} });
+    await service.approve(approval.id, "user_1");
+    setScopes(undefined);
+    await expect(service.execute({ principal, toolId: "linear.no_scope_read", params: {} }))
+      .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    await expect(service.requestApproval({ principal, toolId: "linear.no_scope_write", params: {} }))
+      .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    await expect(service.executeApproved(principal, approval.id))
+      .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    expect(approvals.approvals.get(approval.id)?.status).toBe("failed");
+    expect(receipts.receipts.size).toBe(0);
+    expect(actionCall).not.toHaveBeenCalled();
+    setScopes([]);
+    await expect(service.execute({ principal, toolId: "linear.no_scope_read", params: {} }))
+      .resolves.toMatchObject({ status: "succeeded" });
+  });
+
   it("degrades a deleted remote binding across direct, approval request, and approved execution", async () => {
     for (const entry of ["direct", "request", "approved"] as const) {
       const { actionCall, approvals, connections, firstBinding, receipts, service, workspace, setRemoteError } = await fixture();
@@ -210,6 +238,22 @@ describe("execution service", () => {
       .toContainEqual(expect.objectContaining({ id: firstBinding.id, status: "needs_reauth" }));
     await expect(service.execute({ principal, toolId: "github.get_issue", params: {} }))
       .resolves.toMatchObject({ status: "succeeded" });
+  });
+
+  it("keeps missing-remote responses deterministic when recording health fails", async () => {
+    for (const phase of ["scope", "action"] as const) {
+      const { actionCall, connections, receipts, service, workspace, setRemoteError } = await fixture();
+      const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+      vi.spyOn(connections, "recordHealth").mockRejectedValue(new Error("health store unavailable"));
+      const missing = Object.assign(new Error("remote missing"), { code: "CONNECTION_NOT_FOUND" });
+      if (phase === "scope") setRemoteError(missing);
+      else actionCall.mockRejectedValueOnce(missing);
+      await expect(service.execute({ principal, toolId: "linear.get_issue", params: {} }))
+        .rejects.toBeInstanceOf(ConnectionUnavailableError);
+      expect([...receipts.receipts.values()]).toEqual(phase === "scope" ? [] : [
+        expect.objectContaining({ status: "failed", errorCode: "connection_unavailable" }),
+      ]);
+    }
   });
 
   it("does not execute or request approval for an unconfigured provider, even with a ready old binding", async () => {

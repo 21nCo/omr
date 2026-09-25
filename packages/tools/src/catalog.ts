@@ -158,10 +158,10 @@ export class ToolCatalog {
     const query = input.query?.trim().toLowerCase();
     const filterKey = canonicalJson({
       query: query ?? null,
-      providers: providers ? [...providers].sort() : null,
-      effects: effects ? [...effects].sort() : null,
-      allowedProviders: input.allowedProviders ? [...input.allowedProviders].sort() : null,
-      allowedToolIds: input.allowedToolIds ? [...input.allowedToolIds].sort() : null,
+      providers: providers ? [...providers].sort((a, b) => a.localeCompare(b)) : null,
+      effects: effects ? [...effects].sort((a, b) => a.localeCompare(b)) : null,
+      allowedProviders: input.allowedProviders ? [...input.allowedProviders].sort((a, b) => a.localeCompare(b)) : null,
+      allowedToolIds: input.allowedToolIds ? [...input.allowedToolIds].sort((a, b) => a.localeCompare(b)) : null,
     }, "discovery filter");
     const filtered = this.manifests.filter((manifest) =>
       (!providers || providers.includes(manifest.provider)) &&
@@ -263,23 +263,18 @@ function encodeCursor(revision: string, filterKey: string, offset: number): stri
 }
 
 function decodeCursor(cursor: string, revision: string, filterKey: string): number {
+  let value: { revision?: unknown; filterKey?: unknown; offset?: unknown };
   try {
     const base64 = cursor.replace(/-/g, "+").replace(/_/g, "/");
-    const value = JSON.parse(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, "="))) as {
-      revision?: unknown;
-      filterKey?: unknown;
-      offset?: unknown;
-    };
-    if (
-      value.revision !== revision ||
-      value.filterKey !== filterKey ||
-      !Number.isInteger(value.offset) ||
-      Number(value.offset) < 0
-    ) {
-      throw new Error("invalid");
-    }
-    return Number(value.offset);
+    value = JSON.parse(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, "=")));
   } catch {
-    throw new ToolCatalogInputError("cursor is invalid or belongs to another catalog revision");
+    throw new ToolCatalogInputError("cursor is invalid");
   }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ToolCatalogInputError("cursor is invalid");
+  }
+  if (value.revision !== revision) throw new ToolCatalogInputError("cursor belongs to another catalog revision");
+  if (value.filterKey !== filterKey) throw new ToolCatalogInputError("catalog filters or grants changed; restart discovery");
+  if (!Number.isInteger(value.offset) || Number(value.offset) < 0) throw new ToolCatalogInputError("cursor is invalid");
+  return Number(value.offset);
 }

@@ -14,6 +14,7 @@ const SELECT_CONNECTION_TOOL = "omr.connections.select";
 const EXECUTE_APPROVAL_TOOL = "omr.approvals.execute";
 const REFRESH_CATALOG_TOOL = "omr.catalog.refresh";
 const PROVIDERS_TOOL = "omr.catalog.providers";
+type VisibilityContext = { manifests?: Promise<Map<string, string>> };
 
 function objectSchema(value: unknown): McpFnObjectSchema {
   if (value && typeof value === "object" && !Array.isArray(value) &&
@@ -73,7 +74,7 @@ export async function createOMRMcpServer(input: {
   const collision = manifests.find((manifest) => reservedNames.has(manifest.id));
   if (collision) throw new Error(`OMR catalog tool ${collision.id} conflicts with an MCP control tool`);
 
-  const definition = (manifest: ToolManifest): McpFnToolDefinition<ReadonlyMap<string, string>> => ({
+  const definition = (manifest: ToolManifest): McpFnToolDefinition<VisibilityContext> => ({
     name: manifest.id,
     title: manifest.displayName,
     description: manifest.description,
@@ -104,11 +105,11 @@ export async function createOMRMcpServer(input: {
       return structuredResult(structured(await client.execute(execution)));
     },
   });
-  const tools: McpFnToolDefinition<ReadonlyMap<string, string>>[] = manifests.map(definition);
+  const tools: McpFnToolDefinition<VisibilityContext>[] = manifests.map(definition);
 
   const registeredHashes = new Map(manifests.map(({ id, hash }) => [id, hash]));
   let visibleAtLastRefresh = new Set(manifests.map(({ id }) => id));
-  const registry = new McpFnRegistry<ReadonlyMap<string, string>>({ compileSchema: input.schemaCompiler });
+  const registry = new McpFnRegistry<VisibilityContext>({ compileSchema: input.schemaCompiler });
 
   tools.push(
     {
@@ -131,7 +132,7 @@ export async function createOMRMcpServer(input: {
       title: "Refresh OMR Tool Catalog",
       description: "Refresh this MCP session after connecting a provider; changed schemas require restarting the session.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       metadata: { surface: "omr-control-plane" },
       async handler() {
         const fresh = await discoverManifests();
@@ -243,17 +244,14 @@ export async function createOMRMcpServer(input: {
     transports: ["stdio", "streamable-http"],
     registry,
   }).createServer({
-    context: async () => {
-      try {
-        return new Map((await discoverManifests()).map(({ id, hash }) => [id, hash]));
-      } catch {
-        // Discovery is only the visibility gate for projected actions. Reserved
-        // controls use their own endpoints and report their own structured errors.
-        return new Map<string, string>();
-      }
+    context: () => ({}),
+    toolVisibility: async ({ tool, context }) => {
+      if (reservedNames.has(tool.name)) return true;
+      context.manifests ??= discoverManifests()
+        .then((fresh) => new Map(fresh.map(({ id, hash }) => [id, hash])))
+        .catch(() => new Map<string, string>());
+      return (await context.manifests).get(tool.name) === registeredHashes.get(tool.name);
     },
-    toolVisibility: ({ tool, context }) =>
-      reservedNames.has(tool.name) || context.get(tool.name) === registeredHashes.get(tool.name),
   });
   return server;
 }

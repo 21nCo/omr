@@ -33,11 +33,9 @@ export function createWorkspaceCatalogLoader<Overview extends { selectedWorkspac
     let overview: Overview | null = retained?.overview ?? null;
     let selectedWorkspaceId = workspaceId;
     show({ overview, catalog: retained?.catalog ?? null, selectedWorkspaceId, loading: true, error: "" });
-    let fetchedOverview = false;
     try {
       overview = await fetchOverview(workspaceId);
       if (current !== generation) return;
-      fetchedOverview = true;
       selectedWorkspaceId = overview.selectedWorkspaceId ?? "";
       show({
         overview,
@@ -47,11 +45,11 @@ export function createWorkspaceCatalogLoader<Overview extends { selectedWorkspac
       const catalog = selectedWorkspaceId ? await fetchCatalog(selectedWorkspaceId) : null;
       if (current !== generation) return;
       show({ overview, catalog, selectedWorkspaceId, loading: false, error: "" });
-    } catch (caught) {
+    } catch (error_) {
       if (current !== generation) return;
       show({
-        overview: fetchedOverview ? overview : null, catalog: null, selectedWorkspaceId, loading: false,
-        error: caught instanceof Error ? caught.message : "Could not load the control plane",
+        overview, catalog: null, selectedWorkspaceId, loading: false,
+        error: error_ instanceof Error ? error_.message : "Could not load the control plane",
       });
     }
   };

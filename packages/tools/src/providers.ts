@@ -47,6 +47,24 @@ export function isProviderConfigured(
   return !!definition && (definition.auth.type !== "oauth2" || !!integrations?.[provider]);
 }
 
+function providerAuthMode(definition?: ProviderDefinition): ProviderStatus["authMode"] {
+  switch (definition?.auth.type) {
+    case "oauth2": return "oauth";
+    case "api-key": return "api_key";
+    case "jwt":
+    case "basic":
+    case "none": return definition.auth.type;
+    default: return "unknown";
+  }
+}
+
+function bindingState(connections: readonly ProviderBinding[]): ProviderState {
+  if (connections.some(({ status, readiness }) => status === "active" && readiness === "ready")) return "ready";
+  if (connections.some(({ status, readiness }) => status === "needs_reauth" || status === "error" ||
+    (status !== "revoked" && readiness !== "ready"))) return "expired";
+  return "disconnected";
+}
+
 export function providerStatus(input: {
   provider: string;
   definition?: ProviderDefinition;
@@ -55,18 +73,11 @@ export function providerStatus(input: {
 }): ProviderStatus {
   const { provider, definition, configured, connections = [] } = input;
   const supported = isV1Provider(provider);
-  const authMode = definition?.auth.type === "oauth2" ? "oauth"
-    : definition?.auth.type === "api-key" ? "api_key"
-    : definition?.auth.type === "jwt" || definition?.auth.type === "basic" || definition?.auth.type === "none"
-      ? definition.auth.type : "unknown";
-  const state: ProviderState = !supported || !definition || authMode === "unknown"
-    ? "unsupported"
-    : !configured ? "unconfigured"
-    : connections.some((binding) => binding.status === "active" && binding.readiness === "ready")
-      ? "ready"
-      : connections.some((binding) => binding.status === "needs_reauth" || binding.status === "error" ||
-        (binding.status !== "revoked" && binding.readiness !== "ready"))
-        ? "expired" : "disconnected";
+  const authMode = providerAuthMode(definition);
+  let state: ProviderState;
+  if (!supported || !definition || authMode === "unknown") state = "unsupported";
+  else if (!configured) state = "unconfigured";
+  else state = bindingState(connections);
   return {
     provider,
     displayName: supported ? NAMES[provider] : definition?.displayName ?? provider,

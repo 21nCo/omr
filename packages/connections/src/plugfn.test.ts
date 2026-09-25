@@ -156,10 +156,12 @@ describe("PlugFn connection orchestration", () => {
       actorUserId: "user_owner", workspaceId, provider: "github", ownership: "personal",
       code: "code", state: "state", label: "GitHub",
     })).rejects.toBeInstanceOf(ProviderUnavailableError);
+    plugfn.port.config!.integrations = { github: { type: "oauth2" } };
+    expect(orchestrator.providerReadiness("github").state).toBe("disconnected");
     await expect(orchestrator.connectApiKey({
       actorUserId: "user_owner", workspaceId, provider: "github", ownership: "personal",
       apiKey: "not-a-real-key", label: "GitHub",
-    })).rejects.toBeInstanceOf(ProviderUnavailableError);
+    })).rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE", state: "disconnected" });
     expect(plugfn.methods.getAuthUrl).not.toHaveBeenCalled();
     expect(plugfn.methods.handleCallback).not.toHaveBeenCalled();
     expect(plugfn.methods.connect).not.toHaveBeenCalled();

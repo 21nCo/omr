@@ -1,4 +1,5 @@
 import { MemoryAdapter, plugFn } from "plugfn";
+import { randomBytes } from "node:crypto";
 import { githubProvider, linearProvider, notionProvider, slackProvider } from "@plugfn/providers";
 import { createPlugFnToolCatalog, v1ProviderCatalog } from "@oh-my-router/tools";
 
@@ -7,7 +8,7 @@ const runtime = plugFn({
   database: new MemoryAdapter(),
   auth: {},
   baseUrl: "https://omr.local",
-  encryptionKey: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  encryptionKey: randomBytes(32).toString("hex"),
   integrations: {},
 });
 for (const provider of [githubProvider, linearProvider, slackProvider, notionProvider]) {

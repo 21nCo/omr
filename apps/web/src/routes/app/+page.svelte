@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { oauthCallbackUri, savePendingOAuthConnection } from "$lib/oauth-connection.js";
   import { createWorkspaceCatalogLoader, providerDisplayState } from "$lib/workspace-catalog.js";
+  import { V1_PROVIDERS } from "@oh-my-router/tools";
 
   type WorkspaceAccess = {
     workspace: { id: string; name: string; kind: "personal" | "team" };
@@ -199,7 +200,7 @@
 
   onMount(() => {
     const connected = new URLSearchParams(location.search).get("connected");
-    if (connected && ["github", "linear", "slack", "notion"].includes(connected)) {
+    if (connected && (V1_PROVIDERS as readonly string[]).includes(connected)) {
       notice = `Connected ${connected}.`;
     }
     void load("");
@@ -258,7 +259,7 @@
             <span>{overview.connections.length} active records</span>
           </div>
 
-          <div class="rows" aria-label="v1 provider catalog">
+          <div class="rows" role="region" aria-label="v1 provider catalog">
             {#each catalog?.providers ?? [] as entry}
               <article class="row">
                 <div class="provider-mark">{entry.provider.slice(0, 2).toUpperCase()}</div>

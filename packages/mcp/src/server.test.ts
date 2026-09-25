@@ -112,12 +112,14 @@ describe("OMR MCP server", () => {
     })).resolves.toMatchObject({
       structuredContent: { status: "succeeded", output: { value: "read" } },
     });
+    const discoveryCalls = requests.filter(({ path }) => path === "/api/tools").length;
     await expect(client.callTool({
       name: "omr.connections.list",
       arguments: { provider: "demo" },
     })).resolves.toMatchObject({
       structuredContent: { connections: [{ id: "connection-1", provider: "demo" }] },
     });
+    expect(requests.filter(({ path }) => path === "/api/tools")).toHaveLength(discoveryCalls);
     await expect(client.callTool({
       name: "omr.connections.select",
       arguments: { provider: "demo", connectionId: "connection-1" },

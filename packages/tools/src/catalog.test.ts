@@ -94,7 +94,9 @@ describe("tool catalog", () => {
     expect(catalog.discover({ allowedToolIds: restricted }).tools).toEqual([catalog.get("linear.get_issue")]);
     expect(catalog.revision).toBe(first.revision);
     expect(() => catalog.discover({ allowedToolIds: restricted, cursor: first.nextCursor }))
-      .toThrow(ToolCatalogInputError);
+      .toThrow(/filters or grants changed/);
+    expect(catalog.discover({ allowedToolIds: new Set([...all].reverse()), limit: 1 }).nextCursor)
+      .toBe(first.nextCursor);
   });
 
   it("paginates against one catalog revision and rejects stale or malformed cursors", async () => {
@@ -111,6 +113,8 @@ describe("tool catalog", () => {
     expect(() => changed.discover({ cursor: first.nextCursor }))
       .toThrow(ToolCatalogInputError);
     expect(() => catalog.discover({ cursor: "not-a-cursor" }))
+      .toThrow(ToolCatalogInputError);
+    expect(() => catalog.discover({ cursor: btoa("null") }))
       .toThrow(ToolCatalogInputError);
     expect(() => catalog.discover({ query: "different", cursor: first.nextCursor }))
       .toThrow(ToolCatalogInputError);

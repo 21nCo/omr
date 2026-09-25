@@ -156,7 +156,7 @@ async function main(): Promise<void> {
   if (command === "approvals" && subcommand === "execute" && subject) {
     return output.json(await api.executeApproved(subject));
   }
-  throw new Error("Usage: omr login|tools list|get|run|connections list|approvals request|execute");
+  throw new Error("Usage: omr login|tools list|get|run|connections list|connections select|approvals request|execute");
 }
 
 main().catch((error) => {
