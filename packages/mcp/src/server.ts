@@ -57,7 +57,7 @@ export async function createOMRMcpServer(input: {
   const manifests: ToolManifest[] = [];
   let cursor: string | undefined;
   do {
-    const page = await client.discoverTools({ limit: 100, ...(cursor ? { cursor } : {}) });
+    const page = await client.discoverTools({ workspaceId: input.workspaceId, limit: 100, ...(cursor ? { cursor } : {}) });
     manifests.push(...page.tools);
     cursor = page.nextCursor;
   } while (cursor);

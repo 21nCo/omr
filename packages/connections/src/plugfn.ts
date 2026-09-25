@@ -1,3 +1,5 @@
+import { providerStatus, type ProviderStatus } from "@oh-my-router/tools";
+
 import {
   ConnectionAuthority,
   ConnectionInputError,
@@ -96,11 +98,14 @@ export interface PlugFnConnectionPort {
   };
 }
 
-export interface ProviderReadiness {
-  provider: string;
-  available: boolean;
-  authMode: "oauth" | "api_key" | "jwt" | "basic" | "none" | "unknown";
-  actionCount: number;
+export type ProviderReadiness = ProviderStatus;
+
+export class ProviderUnavailableError extends Error {
+  readonly code = "PROVIDER_UNAVAILABLE";
+  constructor(readonly state: ProviderStatus["state"]) {
+    super(`Provider is ${state} or does not support this connection method`);
+    this.name = "ProviderUnavailableError";
+  }
 }
 
 const PROVIDER = /^[a-z0-9][a-z0-9_-]{0,79}$/;
@@ -166,31 +171,32 @@ function assertConnectionOwner(
   }
 }
 
-function authMode(type: string): ProviderReadiness["authMode"] {
-  if (type === "oauth2") return "oauth";
-  if (type === "api-key") return "api_key";
-  if (type === "jwt" || type === "basic" || type === "none") return type;
-  return "unknown";
-}
-
 export class PlugFnConnectionOrchestrator {
   constructor(
     private readonly authority: ConnectionAuthority,
     private readonly plugfn: PlugFnConnectionPort,
   ) {}
 
-  providerReadiness(providerValue: string): ProviderReadiness {
+  providerReadiness(
+    providerValue: string,
+    connections: readonly ConnectionBindingRecord[] = [],
+  ): ProviderReadiness {
     const provider = normalizeProvider(providerValue);
     const definition = this.plugfn.providers.get(provider);
-    return {
+    return providerStatus({
       provider,
-      available: Boolean(
-        definition &&
-        (definition.auth.type !== "oauth2" || this.plugfn.config?.integrations?.[provider]),
-      ),
-      authMode: definition ? authMode(definition.auth.type) : "unknown",
-      actionCount: definition ? Object.keys(definition.actions).length : 0,
-    };
+      definition,
+      configured: !!definition &&
+        (definition.auth.type !== "oauth2" || !!this.plugfn.config?.integrations?.[provider]),
+      connections,
+    });
+  }
+
+  private assertConnectable(provider: string, mode: "oauth" | "api_key"): void {
+    const readiness = this.providerReadiness(provider);
+    if (!readiness.available || readiness.authMode !== mode) {
+      throw new ProviderUnavailableError(readiness.state);
+    }
   }
 
   async startOAuth(input: {
@@ -208,6 +214,7 @@ export class PlugFnConnectionOrchestrator {
     const provider = normalizeProvider(input.provider);
     const label = normalizeLabel(input.label);
     await this.authority.authorizeInstall(input);
+    this.assertConnectable(provider, "oauth");
     const owner = ownerFor(input);
     // GitHub's PlugFn defaults include write-capable repository scopes. An empty
     // array would fall back to the shared OAuth descriptor's profile/email grant.
@@ -240,6 +247,7 @@ export class PlugFnConnectionOrchestrator {
     const provider = normalizeProvider(input.provider);
     const label = normalizeLabel(input.label);
     await this.authority.authorizeInstall(input);
+    this.assertConnectable(provider, "oauth");
     const owner = ownerFor(input);
     const actor = actorFor(input);
     const result = await this.plugfn.connections.handleCallback({
@@ -279,6 +287,7 @@ export class PlugFnConnectionOrchestrator {
       throw new ConnectionInputError("API key must contain 1 to 16384 characters");
     }
     await this.authority.authorizeInstall(input);
+    this.assertConnectable(provider, "api_key");
     const owner = ownerFor(input);
     const actor = actorFor(input);
     const plugFnConnection = await this.plugfn.connections.connect({

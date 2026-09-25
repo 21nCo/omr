@@ -117,6 +117,7 @@ async function main(): Promise<void> {
 
   if (command === "tools" && subcommand === "list") {
     return output.json(await api.discoverTools({
+      workspaceId,
       provider: option("--provider"),
       query: option("--query"),
       effect: option("--effect") as ToolEffect | undefined,
@@ -124,7 +125,7 @@ async function main(): Promise<void> {
     }));
   }
   if (command === "tools" && subcommand === "get" && subject) {
-    return output.json(await api.getTool(subject));
+    return output.json(await api.getTool(subject, workspaceId));
   }
   if (command === "tools" && subcommand === "run" && subject) {
     return output.json(await api.execute({

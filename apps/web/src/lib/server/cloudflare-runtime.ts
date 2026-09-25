@@ -4,13 +4,19 @@ import {
   connectPostgresClientAccess,
   connectPostgresDeviceLogin,
 } from "@oh-my-router/client-access/postgres";
-import { PlugFnConnectionOrchestrator } from "@oh-my-router/connections";
+import { ConnectionAccessDeniedError, PlugFnConnectionOrchestrator } from "@oh-my-router/connections";
 import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
 import { ExecutionService, type ExecutionPrincipal } from "@oh-my-router/execution";
 import { connectPostgresExecutionReceipts } from "@oh-my-router/execution/postgres";
 import { connectPostgresIdentityRuntime } from "@oh-my-router/identity/postgres";
 import { connectPostgresPlugFn } from "@oh-my-router/plugfn-runtime";
-import { createPlugFnToolCatalog, type JsonValue } from "@oh-my-router/tools";
+import {
+  createPlugFnToolCatalog,
+  v1ProviderCatalog,
+  type JsonValue,
+  type ProviderBinding,
+  type ProviderStatus,
+} from "@oh-my-router/tools";
 import type { IntegrationConfig } from "plugfn";
 
 import {
@@ -182,7 +188,7 @@ async function authenticate(
     try {
       const principal = await runtime.clients.authenticate(credential, capability);
       if (workspaceId && principal.workspaceId !== workspaceId) {
-        throw new RuntimeUnavailableError("Client workspace does not match the request");
+        throw new ConnectionAccessDeniedError();
       }
       return {
         kind: "client",
@@ -277,6 +283,31 @@ export function createCloudflareDeviceServices(event: RequestEvent): DeviceRoute
 export function createCloudflareRouteServices(event: RequestEvent): CloudflareRouteServices {
   const device = createCloudflareDeviceServices(event);
 
+  function statuses(
+    plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"],
+    bindings: readonly (ProviderBinding & { provider: string })[] = [],
+  ): ProviderStatus[] {
+    const byProvider = new Map<string, ProviderBinding[]>();
+    for (const binding of bindings) {
+      const entries = byProvider.get(binding.provider) ?? [];
+      entries.push(binding);
+      byProvider.set(binding.provider, entries);
+    }
+    return v1ProviderCatalog({
+      get: (provider) => plugfn.providers.get(provider),
+      configured: (provider) => {
+        const definition = plugfn.providers.get(provider);
+        return !!definition && (definition.auth.type !== "oauth2" ||
+          !!plugfn.config?.integrations?.[provider]);
+      },
+      connections: byProvider,
+    });
+  }
+
+  function configuredProviders(plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"]): Set<string> {
+    return new Set(statuses(plugfn).filter((status) => status.available).map((status) => status.provider));
+  }
+
   async function withConnections<T>(
     callback: (
       orchestrator: PlugFnConnectionOrchestrator,
@@ -299,9 +330,16 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
   }
 
   const connections: ConnectionRouteServices = {
-    async providerReadiness(request, provider) {
-      await authenticate(event, request, undefined, "connections:read");
-      return withConnections(async (orchestrator) => orchestrator.providerReadiness(provider));
+    async providerReadiness(request, provider, workspaceId) {
+      const principal = await authenticate(event, request, workspaceId, "connections:read");
+      return withConnections(async (orchestrator, authority) => orchestrator.providerReadiness(
+        provider,
+        workspaceId ? await authority.listAvailable({
+          actorUserId: principal.userId,
+          workspaceId,
+          provider,
+        }) : [],
+      ));
     },
     async list(request, input) {
       const principal = await authenticate(event, request, input.workspaceId, "connections:read");
@@ -344,10 +382,14 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
 
   async function withCatalog<T>(callback: (
     catalog: Awaited<ReturnType<typeof createPlugFnToolCatalog>>,
+    plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"],
   ) => Promise<T> | T): Promise<T> {
     const plugfn = await connectPlugFn(event);
     try {
-      return await callback(await createPlugFnToolCatalog(plugfn.plugfn));
+      return await callback(
+        await createPlugFnToolCatalog(plugfn.plugfn, configuredProviders(plugfn.plugfn)),
+        plugfn.plugfn,
+      );
     } finally {
       await plugfn.close();
     }
@@ -355,12 +397,43 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
 
   const tools: ToolRouteServices = {
     async discover(request, input) {
-      await authenticate(event, request, undefined, "tools:discover");
-      return withCatalog((catalog) => catalog.discover(input));
+      const principal = await authenticate(event, request, input.workspaceId, "tools:discover");
+      return withCatalog(async (catalog, plugfn) => {
+        const runtime = await connectPostgresConnections({ connectionString: databaseConnectionString(event) });
+        try {
+          const bindings = await runtime.connections.listAvailable({
+            actorUserId: principal.userId,
+            workspaceId: input.workspaceId,
+          });
+          const providers = statuses(plugfn, bindings);
+          const allowedProviders = new Set(providers.filter((entry) => entry.state === "ready")
+            .map((entry) => entry.provider));
+          return { ...catalog.discover({ ...input, allowedProviders }), providers };
+        } finally {
+          await runtime.close();
+        }
+      });
     },
-    async manifest(request, toolId) {
-      await authenticate(event, request, undefined, "tools:discover");
-      return withCatalog((catalog) => catalog.get(toolId));
+    async manifest(request, toolId, workspaceId) {
+      const principal = await authenticate(event, request, workspaceId, "tools:discover");
+      return withCatalog(async (catalog, plugfn) => {
+        const manifest = catalog.get(toolId);
+        if (!manifest || !statuses(plugfn).some((entry) => entry.provider === manifest.provider && entry.available)) {
+          return null;
+        }
+        const runtime = await connectPostgresConnections({ connectionString: databaseConnectionString(event) });
+        try {
+          const bindings = await runtime.connections.listAvailable({
+            actorUserId: principal.userId,
+            workspaceId,
+            provider: manifest.provider,
+          });
+          return statuses(plugfn, bindings).some((entry) => entry.provider === manifest.provider && entry.state === "ready")
+            ? manifest : null;
+        } finally {
+          await runtime.close();
+        }
+      });
     },
   };
 
@@ -376,7 +449,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
         connectionString: databaseConnectionString(event),
         resultWrappingKey: executionWrappingKey(event),
       });
-      const catalog = await createPlugFnToolCatalog(plugfn.plugfn);
+      const catalog = await createPlugFnToolCatalog(plugfn.plugfn, configuredProviders(plugfn.plugfn));
       return await callback(new ExecutionService(
         catalog,
         connectionRuntime.connections,

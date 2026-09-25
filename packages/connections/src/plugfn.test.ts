@@ -5,6 +5,7 @@ import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
 import { ConnectionAccessDeniedError, ConnectionAuthority } from "./connections.js";
 import {
   PlugFnConnectionOrchestrator,
+  ProviderUnavailableError,
   type PlugFnConnection,
   type PlugFnConnectionPort,
 } from "./plugfn.js";
@@ -70,9 +71,17 @@ function fakePlugFn() {
     })),
   };
   const port: PlugFnConnectionPort = {
+    config: { integrations: { github: { type: "oauth2" } } },
     connections: methods,
     providers: {
-      get: (name) => name === "linear"
+      get: (name) => name === "github"
+        ? {
+            name: "github",
+            displayName: "GitHub",
+            auth: { type: "oauth2" },
+            actions: { get_user: {} },
+          }
+        : name === "linear"
         ? {
             name: "linear",
             displayName: "Linear",
@@ -88,17 +97,44 @@ function fakePlugFn() {
 describe("PlugFn connection orchestration", () => {
   it("reports provider setup readiness without exposing credentials", async () => {
     const { orchestrator } = await fixture();
-    expect(orchestrator.providerReadiness(" Linear ")).toEqual({
+    expect(orchestrator.providerReadiness(" Linear ")).toMatchObject({
       provider: "linear",
       available: true,
       authMode: "api_key",
       actionCount: 1,
+      state: "disconnected",
     });
     expect(orchestrator.providerReadiness("github")).toMatchObject({
       provider: "github",
-      available: false,
-      authMode: "unknown",
+      available: true,
+      authMode: "oauth",
+      state: "disconnected",
     });
+  });
+
+  it("refuses experimental, unconfigured and wrong-mode connection attempts before PlugFn side effects", async () => {
+    const { orchestrator, plugfn, workspaceId } = await fixture();
+    await expect(orchestrator.startOAuth({
+      actorUserId: "user_owner", workspaceId, provider: "stripe", ownership: "personal",
+      redirectUri: "https://omr.example/app/oauth/callback", label: "Stripe",
+    })).rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE", state: "unsupported" });
+    plugfn.port.config!.integrations = {};
+    expect(orchestrator.providerReadiness("github").state).toBe("unconfigured");
+    await expect(orchestrator.startOAuth({
+      actorUserId: "user_owner", workspaceId, provider: "github", ownership: "personal",
+      redirectUri: "https://omr.example/app/oauth/callback", label: "GitHub",
+    })).rejects.toBeInstanceOf(ProviderUnavailableError);
+    await expect(orchestrator.completeOAuth({
+      actorUserId: "user_owner", workspaceId, provider: "github", ownership: "personal",
+      code: "code", state: "state", label: "GitHub",
+    })).rejects.toBeInstanceOf(ProviderUnavailableError);
+    await expect(orchestrator.connectApiKey({
+      actorUserId: "user_owner", workspaceId, provider: "github", ownership: "personal",
+      apiKey: "not-a-real-key", label: "GitHub",
+    })).rejects.toBeInstanceOf(ProviderUnavailableError);
+    expect(plugfn.methods.getAuthUrl).not.toHaveBeenCalled();
+    expect(plugfn.methods.handleCallback).not.toHaveBeenCalled();
+    expect(plugfn.methods.connect).not.toHaveBeenCalled();
   });
 
   it("authorizes installs before starting OAuth or storing API keys", async () => {

@@ -1,3 +1,5 @@
+import type { ProviderStatus } from "./providers.js";
+
 export type ToolEffect = "read" | "write" | "destructive" | "unknown";
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
@@ -55,6 +57,8 @@ export interface ToolDiscoveryPage {
   catalogSchemaVersion: "1.0.0";
   revision: string;
   tools: ToolManifest[];
+  /** Workspace-scoped readiness, present on authenticated HTTP discovery. */
+  providers?: ProviderStatus[];
   nextCursor?: string;
 }
 
@@ -89,10 +93,12 @@ export class ToolCatalog {
   static async create(
     source: ToolCatalogSource,
     toJsonSchema: (schema: unknown) => JsonValue,
+    allowedProviders?: ReadonlySet<string>,
   ): Promise<ToolCatalog> {
     const manifests: ToolManifest[] = [];
     for (const provider of source.providers.list()) {
       const providerName = normalizedProviderName(provider.name);
+      if (allowedProviders && !allowedProviders.has(providerName)) continue;
       for (const [actionKey, action] of Object.entries(provider.actions)) {
         const actionName = validatedActionName(action.name || actionKey);
         if (actionKey !== action.name) {

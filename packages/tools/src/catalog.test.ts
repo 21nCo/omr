@@ -59,6 +59,33 @@ describe("tool catalog", () => {
       .toEqual([]);
   });
 
+  it("excludes unsupported and unconfigured adapters from manifest IDs and revision", async () => {
+    const linear = source().providers.list()[0]!;
+    const stripe = { ...linear, name: "stripe", displayName: "Stripe" };
+    const configured = await ToolCatalog.create({ providers: { list: () => [stripe, linear] } },
+      jsonSchema, new Set(["linear"]));
+    const baseline = await ToolCatalog.create(source(), jsonSchema, new Set(["linear"]));
+    expect(configured.revision).toBe(baseline.revision);
+    expect(configured.get("stripe.get_issue")).toBeNull();
+    expect(configured.discover().tools.map(({ id, hash }) => ({ id, hash })))
+      .toEqual(baseline.discover().tools.map(({ id, hash }) => ({ id, hash })));
+
+    const changed = source();
+    changed.providers.list()[0]!.actions.get_issue!.parameters = {
+      type: "object", properties: { issueId: { type: "integer" } },
+    };
+    const changedCatalog = await ToolCatalog.create(changed, jsonSchema, new Set(["linear"]));
+    expect(changedCatalog.get("linear.get_issue")?.hash).not.toBe(baseline.get("linear.get_issue")?.hash);
+    expect(changedCatalog.revision).not.toBe(baseline.revision);
+  });
+
+  it("invalidates a cursor when the ready provider set changes", async () => {
+    const catalog = await ToolCatalog.create(source(), jsonSchema);
+    const cursor = catalog.discover({ limit: 1, allowedProviders: new Set(["linear"]) }).nextCursor;
+    expect(() => catalog.discover({ limit: 1, cursor, allowedProviders: new Set() }))
+      .toThrow(ToolCatalogInputError);
+  });
+
   it("paginates against one catalog revision and rejects stale or malformed cursors", async () => {
     const catalog = await ToolCatalog.create(source(), jsonSchema);
     const first = catalog.discover({ limit: 1 });

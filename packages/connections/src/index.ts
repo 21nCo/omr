@@ -19,6 +19,7 @@ export {
 
 export {
   PlugFnConnectionOrchestrator,
+  ProviderUnavailableError,
   type PlugFnConnection,
   type PlugFnConnectionPort,
   type PlugFnDisconnectResult,

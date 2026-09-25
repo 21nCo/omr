@@ -19,6 +19,7 @@ import {
   ConnectionInputError,
   ConnectionSelectionRequiredError,
   ConnectionUnavailableError,
+  ProviderUnavailableError,
   type ConnectionOwnership,
 } from "@oh-my-router/connections";
 import { publicDatafnSchema } from "@oh-my-router/data";
@@ -53,7 +54,7 @@ export interface DeviceRouteServices {
 }
 
 export interface ConnectionRouteServices {
-  providerReadiness(request: Request, provider: string): Promise<unknown>;
+  providerReadiness(request: Request, provider: string, workspaceId?: string): Promise<unknown>;
   list(request: Request, input: { workspaceId: string; provider?: string }): Promise<unknown>;
   startOAuth(request: Request, input: {
     workspaceId: string;
@@ -86,13 +87,14 @@ export interface ConnectionRouteServices {
 
 export interface ToolRouteServices {
   discover(request: Request, input: {
+    workspaceId: string;
     query?: string;
     providers?: string[];
     effects?: ToolEffect[];
     limit?: number;
     cursor?: string;
   }): Promise<unknown>;
-  manifest(request: Request, toolId: string): Promise<unknown>;
+  manifest(request: Request, toolId: string, workspaceId: string): Promise<unknown>;
 }
 
 export interface ExecutionRouteServices {
@@ -334,6 +336,9 @@ export function createOMRRouter(
       if (error instanceof ConnectionUnavailableError) {
         return Response.json({ error: error.code }, { status: 409 });
       }
+      if (error instanceof ProviderUnavailableError) {
+        return Response.json({ error: error.code, state: error.state }, { status: 409 });
+      }
       if (error instanceof RuntimeUnavailableError) {
         return Response.json({ error: error.code }, { status: 503 });
       }
@@ -457,7 +462,8 @@ export function createOMRRouter(
         handler: async (request) => {
           const provider = new URL(request.url).searchParams.get("provider");
           if (!provider) throw new RequestInputError("provider is required");
-          return Response.json(await connectionServices.providerReadiness(request, provider));
+          const workspaceId = new URL(request.url).searchParams.get("workspaceId") ?? undefined;
+          return Response.json(await connectionServices.providerReadiness(request, provider, workspaceId));
         },
       },
       {
@@ -535,9 +541,12 @@ export function createOMRRouter(
         path: "/api/tools",
         handler: async (request) => {
           const params = new URL(request.url).searchParams;
+          const workspaceId = params.get("workspaceId");
+          if (!workspaceId) throw new RequestInputError("workspaceId is required");
           const limitValue = params.get("limit");
           const effects = params.getAll("effect") as ToolEffect[];
           return Response.json(await toolServices.discover(request, {
+            workspaceId,
             ...(params.get("q") ? { query: params.get("q")! } : {}),
             ...(params.has("provider") ? { providers: params.getAll("provider") } : {}),
             ...(effects.length > 0 ? { effects } : {}),
@@ -552,7 +561,9 @@ export function createOMRRouter(
         handler: async (request) => {
           const toolId = new URL(request.url).searchParams.get("id");
           if (!toolId) throw new RequestInputError("id is required");
-          const manifest = await toolServices.manifest(request, toolId);
+          const workspaceId = new URL(request.url).searchParams.get("workspaceId") ?? "";
+          if (!workspaceId) throw new RequestInputError("workspaceId is required");
+          const manifest = await toolServices.manifest(request, toolId, workspaceId);
           return manifest
             ? Response.json(manifest)
             : Response.json({ error: "TOOL_NOT_FOUND" }, { status: 404 });

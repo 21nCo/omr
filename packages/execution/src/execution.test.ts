@@ -14,7 +14,7 @@ import {
 } from "./execution.js";
 import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "./testing.js";
 
-async function fixture() {
+async function fixture(allowedProviders?: ReadonlySet<string>) {
   let now = 1_700_000_000_000;
   const workspaceStore = new MemoryWorkspaceStore();
   const workspaces = new WorkspaceAuthority(workspaceStore, () => now);
@@ -41,7 +41,7 @@ async function fixture() {
         mystery: action("mystery", "unknown"),
       },
     }] },
-  }, (value) => value as never);
+  }, (value) => value as never, allowedProviders);
   const actionCall = vi.fn(async () => ({ id: "issue_1", title: "Fixed" }));
   const receipts = new MemoryExecutionReceiptStore();
   const approvals = new MemoryExecutionApprovalStore();
@@ -82,6 +82,18 @@ function action(name: string, effect: ToolEffect) {
 }
 
 describe("execution service", () => {
+  it("does not execute or request approval for an unconfigured provider, even with a ready old binding", async () => {
+    const { actionCall, service, workspace } = await fixture(new Set());
+    const input = {
+      principal: { kind: "web" as const, userId: "user_1", workspaceId: workspace.id },
+      toolId: "linear.get_issue", params: {},
+    };
+    await expect(service.execute(input)).rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    await expect(service.requestApproval({ ...input, toolId: "linear.create_issue" }))
+      .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    expect(actionCall).not.toHaveBeenCalled();
+  });
+
   it("executes reads through the selected opaque PlugFn connection and records a receipt", async () => {
     const { actionCall, service, workspace, advance } = await fixture();
     advance(1_000);
