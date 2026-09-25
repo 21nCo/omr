@@ -3,6 +3,7 @@ import { providerStatus, type ProviderStatus } from "@oh-my-router/tools";
 import {
   ConnectionAuthority,
   ConnectionInputError,
+  ConnectionUnavailableError,
   type ConnectionBindingRecord,
   type ConnectionOwnership,
 } from "./connections.js";
@@ -313,6 +314,7 @@ export class PlugFnConnectionOrchestrator {
 
   async checkHealth(actorUserId: string, connectionId: string): Promise<ConnectionBindingRecord> {
     const binding = await this.authority.getAccessible(actorUserId, connectionId);
+    if (binding.status === "revoked") throw new ConnectionUnavailableError();
     const valid = await this.plugfn.connections.isValid(binding.providerConnectionId);
     if (valid) {
       return this.authority.recordHealth({
@@ -321,7 +323,10 @@ export class PlugFnConnectionOrchestrator {
         readiness: "ready",
       });
     }
-    const remote = await this.plugfn.connections.get(binding.providerConnectionId).catch(() => null);
+    const remote = await this.plugfn.connections.get(binding.providerConnectionId).catch((error: unknown) => {
+      if (error instanceof Error && "code" in error && error.code === "CONNECTION_NOT_FOUND") return null;
+      throw error;
+    });
     const status = remote?.status === "error" ? "error" : "needs_reauth";
     return this.authority.recordHealth({
       connectionId,
@@ -333,6 +338,7 @@ export class PlugFnConnectionOrchestrator {
 
   async refresh(actorUserId: string, connectionId: string): Promise<ConnectionBindingRecord> {
     const binding = await this.authority.getManageable(actorUserId, connectionId);
+    if (binding.status === "revoked") throw new ConnectionUnavailableError();
     try {
       const remote = await this.plugfn.connections.refresh(binding.providerConnectionId);
       if (remote.id !== binding.providerConnectionId || remote.provider !== binding.provider) {

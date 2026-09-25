@@ -175,7 +175,7 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     now: number;
   }): Promise<ConnectionBindingRecord> {
     const connection = this.connections.get(input.connectionId);
-    if (!connection) throw new ConnectionUnavailableError();
+    if (!connection || connection.status === "revoked") throw new ConnectionUnavailableError();
     connection.status = input.status;
     connection.readiness = input.readiness;
     connection.healthReason = input.reason ?? null;

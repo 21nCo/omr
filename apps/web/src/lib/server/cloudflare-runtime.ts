@@ -5,8 +5,9 @@ import {
   connectPostgresDeviceLogin,
 } from "@oh-my-router/client-access/postgres";
 import {
-  ConnectionAccessDeniedError, ConnectionSelectionRequiredError, ConnectionUnavailableError,
+  ConnectionAccessDeniedError, ConnectionUnavailableError,
   PlugFnConnectionOrchestrator,
+  type ConnectionBindingRecord,
 } from "@oh-my-router/connections";
 import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
 import { ExecutionService, type ExecutionPrincipal } from "@oh-my-router/execution";
@@ -15,7 +16,6 @@ import { connectPostgresIdentityRuntime } from "@oh-my-router/identity/postgres"
 import { connectPostgresPlugFn } from "@oh-my-router/plugfn-runtime";
 import {
   createPlugFnToolCatalog,
-  usableToolIds,
   v1ProviderCatalog,
   type JsonValue,
   type ProviderBinding,
@@ -32,6 +32,7 @@ import {
   type ToolRouteServices,
   RequestOriginDeniedError,
 } from "./router.js";
+import { resolveScopedCatalog } from "./scoped-catalog.js";
 
 type OMRBindings = Cloudflare.Env & {
   HYPERDRIVE?: { connectionString: string };
@@ -405,21 +406,33 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
     authority: Awaited<ReturnType<typeof connectPostgresConnections>>["connections"],
     principal: ExecutionPrincipal,
     workspaceId: string,
-    bindings: readonly (ProviderBinding & { provider: string })[],
-  ): Promise<Set<string>> {
-    return usableToolIds(catalog, statuses(plugfn, bindings), async (provider) => {
-      try {
-        // Match the effective selection used by execution, not an unrelated healthy binding.
-        const binding = await authority.resolve({
-          actorUserId: principal.userId, workspaceId, provider,
-        });
-        const remote = await plugfn.connections.get(binding.providerConnectionId);
-        return remote.scopes;
-      } catch (error) {
-        if (error instanceof ConnectionSelectionRequiredError || error instanceof ConnectionUnavailableError) return null;
-        throw error;
-      }
-    });
+    bindings: readonly ConnectionBindingRecord[],
+  ): Promise<{ allowedToolIds: Set<string>; providers: ProviderStatus[] }> {
+    const missing = new Set<string>();
+    const allowedToolIds = await resolveScopedCatalog(
+      catalog,
+      statuses(plugfn, bindings),
+      (provider) => authority.resolve({ actorUserId: principal.userId, workspaceId, provider }),
+      async (connectionId) => (await plugfn.connections.get(connectionId)).scopes,
+      async (bindingId) => {
+        missing.add(bindingId);
+        // A locally ready binding whose remote was deleted must not keep advertising readiness.
+        // The conditional store write cannot resurrect an in-flight revocation.
+        try {
+          await authority.recordHealth({
+            connectionId: bindingId, status: "needs_reauth", readiness: "unavailable",
+            reason: "plugfn_connection_missing",
+          });
+        } catch (error) {
+          if (!(error instanceof ConnectionUnavailableError)) throw error;
+        }
+      },
+    );
+    return {
+      allowedToolIds,
+      providers: statuses(plugfn, bindings.map((binding) => missing.has(binding.id)
+        ? { ...binding, status: "needs_reauth", readiness: "unavailable" } : binding)),
+    };
   }
 
   const tools: ToolRouteServices = {
@@ -432,8 +445,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
             actorUserId: principal.userId,
             workspaceId: input.workspaceId,
           });
-          const providers = statuses(plugfn, bindings);
-          const allowedToolIds = await scopedToolIds(
+          const { allowedToolIds, providers } = await scopedToolIds(
             catalog, plugfn, runtime.connections, principal, input.workspaceId, bindings,
           );
           return { ...catalog.discover({ ...input, allowedToolIds }), providers };
@@ -456,8 +468,8 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
             workspaceId,
             provider: manifest.provider,
           });
-          const allowed = await scopedToolIds(catalog, plugfn, runtime.connections, principal, workspaceId, bindings);
-          return allowed.has(manifest.id) ? manifest : null;
+          const { allowedToolIds } = await scopedToolIds(catalog, plugfn, runtime.connections, principal, workspaceId, bindings);
+          return allowedToolIds.has(manifest.id) ? manifest : null;
         } finally {
           await runtime.close();
         }

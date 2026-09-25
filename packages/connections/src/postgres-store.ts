@@ -277,7 +277,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
       `UPDATE omr_control.connection_bindings
        SET status = $1, readiness = $2, health_reason = $3,
            last_checked_at = $4, updated_at = $4
-       WHERE id = $5
+       WHERE id = $5 AND status <> 'revoked'
        RETURNING ${CONNECTION_COLUMNS}`,
       [input.status, input.readiness, input.reason ?? null, input.now, input.connectionId],
     );

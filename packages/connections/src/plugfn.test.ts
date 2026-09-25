@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
 import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
 
-import { ConnectionAccessDeniedError, ConnectionAuthority } from "./connections.js";
+import { ConnectionAccessDeniedError, ConnectionAuthority, ConnectionUnavailableError } from "./connections.js";
 import {
   PlugFnConnectionOrchestrator,
   ProviderUnavailableError,
@@ -247,7 +247,7 @@ describe("PlugFn connection orchestration", () => {
       label: "Personal",
     });
     plugfn.methods.isValid.mockResolvedValueOnce(false);
-    plugfn.methods.get.mockRejectedValueOnce(new Error("missing"));
+    plugfn.methods.get.mockRejectedValueOnce(Object.assign(new Error("missing"), { code: "CONNECTION_NOT_FOUND" }));
 
     await expect(orchestrator.checkHealth("user_admin", personal.id))
       .rejects.toBeInstanceOf(ConnectionAccessDeniedError);
@@ -257,6 +257,41 @@ describe("PlugFn connection orchestration", () => {
       readiness: "unavailable",
       healthReason: "plugfn_connection_missing",
     });
+  });
+
+  it("keeps revocation terminal across in-flight health and refresh operations", async () => {
+    const { authority, orchestrator, plugfn, store, workspaceId } = await fixture();
+    const binding = await authority.attach({
+      actorUserId: "user_owner", workspaceId, provider: "linear",
+      providerConnectionId: "plug_racing", ownership: "personal", label: "Racing",
+    });
+    let finishProbe!: (valid: boolean) => void;
+    plugfn.methods.isValid.mockImplementationOnce(() => new Promise<boolean>((resolve) => { finishProbe = resolve; }));
+    const pending = orchestrator.checkHealth("user_owner", binding.id);
+    await vi.waitFor(() => expect(plugfn.methods.isValid).toHaveBeenCalledTimes(1));
+    await authority.revoke("user_owner", binding.id);
+    finishProbe(true);
+    await expect(pending).rejects.toBeInstanceOf(ConnectionUnavailableError);
+    await expect(orchestrator.checkHealth("user_owner", binding.id))
+      .rejects.toBeInstanceOf(ConnectionUnavailableError);
+    await expect(orchestrator.refresh("user_owner", binding.id))
+      .rejects.toBeInstanceOf(ConnectionUnavailableError);
+    expect(plugfn.methods.refresh).not.toHaveBeenCalled();
+    expect(plugfn.methods.isValid).toHaveBeenCalledTimes(1);
+    expect(store.connections.get(binding.id)).toMatchObject({ status: "revoked", readiness: "unavailable" });
+
+    const other = await authority.attach({
+      actorUserId: "user_owner", workspaceId, provider: "linear",
+      providerConnectionId: "plug_refresh", ownership: "personal", label: "Refresh",
+    });
+    let finishRefresh!: (value: PlugFnConnection) => void;
+    plugfn.methods.refresh.mockImplementationOnce(() => new Promise((resolve) => { finishRefresh = resolve; }));
+    const refreshing = orchestrator.refresh("user_owner", other.id);
+    await vi.waitFor(() => expect(plugfn.methods.refresh).toHaveBeenCalledTimes(1));
+    await authority.revoke("user_owner", other.id);
+    finishRefresh(plugfn.connection({ id: "plug_refresh" }));
+    await expect(refreshing).rejects.toBeInstanceOf(ConnectionUnavailableError);
+    expect(store.connections.get(other.id)).toMatchObject({ status: "revoked", readiness: "unavailable" });
   });
 
   it("records a remote revocation failure while removing local access", async () => {
