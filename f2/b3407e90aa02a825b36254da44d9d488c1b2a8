@@ -1,0 +1,16 @@
+apps/web/src/lib/workspace-catalog.test.ts
+  h_a39f9495f9ec1d 6,9-49
+apps/web/src/lib/workspace-catalog.ts
+  h_a39f9495f9ec1d 16-20,23-24,26-27,31,33-37,40,43-44
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f2b3407e90aa02a825b36254da44d9d488c1b2a8",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
