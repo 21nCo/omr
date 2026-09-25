@@ -1,0 +1,53 @@
+apps/web/src/lib/server/cloudflare-runtime.ts
+  s_bf3d04c49b65ff::t_7f520a550a9ea6 7,13-19,191,286-310,333-342,385,389-392,400-415,417-436,452
+apps/web/src/lib/server/router.ts
+  s_c5d14e950b3ed9::t_c194e0335eb4e4 22,57,90,97,339-341,465-466,544-545,549,564-566
+apps/web/src/routes/app/+page.svelte
+  s_c5d14e950b3ed9::t_21363f451206fc 43-56,59,98-103,142,148,196,255-265,298-300,311,408
+docs/provider-catalog-v1.md
+  s_bf3d04c49b65ff::t_71fca34041924f 1-39
+packages/connections/src/plugfn.ts
+  s_c5d14e950b3ed9::t_617d29052f0f6d 1-2,101-108,180-183,186,188-199,217,250,290
+packages/tools/src/catalog.test.ts
+  s_f3e3277ad1a93b::t_8887e810223eb3 62-88
+packages/tools/src/catalog.ts
+  s_c5d14e950b3ed9::t_c5401b0e986d71 1-2,60-61,96,101
+packages/tools/src/plugfn.local.integration.test.ts
+  s_c5d14e950b3ed9::t_d18c016dcad025 3,6,44-71
+packages/tools/src/providers.ts
+  s_bf3d04c49b65ff::t_d0a0ecff2c9635 1-85
+tests/acceptance/catalog-parity.test.ts
+  s_c5d14e950b3ed9::t_d2bbf82844553f 1-74
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f9d09bb93042bbdd0d80036d303a09b284a8e465",
+  "prompts": {},
+  "sessions": {
+    "s_bf3d04c49b65ff": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0d89d-905e-7980-97dd-21cb2b155096",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    },
+    "s_c5d14e950b3ed9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0b42c-ce2e-7173-9c5a-e6070f3586d5",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    },
+    "s_f3e3277ad1a93b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0d899-9be8-75b3-97ec-832d20bb6dfc",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
