@@ -246,6 +246,10 @@ describe("OMR Worker HTTP boundary", () => {
         calls.push({ operation: "list", input });
         return [];
       },
+      async select(_request, input) {
+        calls.push({ operation: "select", input });
+        return { connectionId: input.connectionId };
+      },
       async startOAuth(_request, input) {
         calls.push({ operation: "oauth-start", input });
         return { authUrl: "https://provider.example/oauth" };
@@ -291,6 +295,12 @@ describe("OMR Worker HTTP boundary", () => {
       label: "Team Linear",
     });
     const health = await request("/api/connections/health", { connectionId: "connection_key" });
+    const selection = await request("/api/connections/select", {
+      workspaceId: "workspace_1", provider: "linear", connectionId: "connection_key",
+    });
+    const invalidSelection = await request("/api/connections/select", {
+      workspaceId: "workspace_1", provider: "linear",
+    });
     const disconnect = await request("/api/connections/disconnect", {
       connectionId: "connection_key",
     });
@@ -301,6 +311,11 @@ describe("OMR Worker HTTP boundary", () => {
     });
     expect(apiKey.status).toBe(201);
     expect(health.status).toBe(200);
+    expect(selection.status).toBe(200);
+    expect(invalidSelection.status).toBe(400);
+    expect(calls).toContainEqual({ operation: "select", input: {
+      workspaceId: "workspace_1", provider: "linear", connectionId: "connection_key",
+    } });
     expect(disconnect.status).toBe(200);
     expect(calls).toContainEqual({
       operation: "api-key",

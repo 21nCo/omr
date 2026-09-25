@@ -157,6 +157,10 @@ export class OMRClient {
     return this.post("/api/connections/list", { workspaceId, ...(provider ? { provider } : {}) });
   }
 
+  selectConnection(input: { workspaceId: string; provider: string; connectionId: string }): Promise<unknown> {
+    return this.post("/api/connections/select", input);
+  }
+
   execute(input: {
     workspaceId: string;
     toolId: string;

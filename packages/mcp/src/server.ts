@@ -10,6 +10,7 @@ import { OMRClient } from "@oh-my-router/client";
 import type { JsonValue, ToolManifest } from "@oh-my-router/tools";
 
 const CONNECTIONS_TOOL = "omr.connections.list";
+const SELECT_CONNECTION_TOOL = "omr.connections.select";
 const EXECUTE_APPROVAL_TOOL = "omr.approvals.execute";
 const REFRESH_CATALOG_TOOL = "omr.catalog.refresh";
 
@@ -67,7 +68,7 @@ export async function createOMRMcpServer(input: {
   }
   const manifests = await discoverManifests();
 
-  const reservedNames = new Set([CONNECTIONS_TOOL, EXECUTE_APPROVAL_TOOL, REFRESH_CATALOG_TOOL]);
+  const reservedNames = new Set([CONNECTIONS_TOOL, SELECT_CONNECTION_TOOL, EXECUTE_APPROVAL_TOOL, REFRESH_CATALOG_TOOL]);
   const collision = manifests.find((manifest) => reservedNames.has(manifest.id));
   if (collision) throw new Error(`OMR catalog tool ${collision.id} conflicts with an MCP control tool`);
 
@@ -105,6 +106,7 @@ export async function createOMRMcpServer(input: {
   const tools: McpFnToolDefinition<ReadonlyMap<string, string>>[] = manifests.map(definition);
 
   const registeredHashes = new Map(manifests.map(({ id, hash }) => [id, hash]));
+  let visibleAtLastRefresh = new Set(manifests.map(({ id }) => id));
   const registry = new McpFnRegistry<ReadonlyMap<string, string>>({ compileSchema: input.schemaCompiler });
 
   tools.push(
@@ -128,7 +130,11 @@ export async function createOMRMcpServer(input: {
           registeredHashes.set(manifest.id, manifest.hash);
           added += 1;
         }
-        if (added) await server.sendToolListChanged();
+        const visible = new Set(fresh.map(({ id }) => id));
+        const visibilityChanged = visible.size !== visibleAtLastRefresh.size ||
+          [...visible].some((id) => !visibleAtLastRefresh.has(id));
+        if (visibilityChanged) await server.sendToolListChanged();
+        visibleAtLastRefresh = visible;
         return structuredResult({ added, tools: fresh.length });
       },
     },
@@ -157,6 +163,30 @@ export async function createOMRMcpServer(input: {
         const provider = typeof args.provider === "string" ? args.provider : undefined;
         const connections = await client.listConnections(input.workspaceId, provider);
         return structuredResult({ connections });
+      },
+    },
+    {
+      name: SELECT_CONNECTION_TOOL,
+      title: "Select an OMR Connection",
+      description: "Choose an accessible ready connection for a provider in this workspace; refresh the catalog afterwards.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          provider: { type: "string", description: "Provider identifier from omr.connections.list." },
+          connectionId: { type: "string", description: "Connection id from omr.connections.list." },
+        },
+        required: ["provider", "connectionId"],
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      metadata: { surface: "omr-control-plane" },
+      async handler(args) {
+        const selection = await client.selectConnection({
+          workspaceId: input.workspaceId,
+          provider: String(args.provider),
+          connectionId: String(args.connectionId),
+        });
+        return structuredResult(structured(selection));
       },
     },
     {
@@ -192,7 +222,7 @@ export async function createOMRMcpServer(input: {
     info: {
       name: "oh-my-router",
       version: "0.0.0",
-      instructions: "Tools are projected from the authenticated OMR catalog. Call omr.catalog.refresh after connecting a provider to add new tools; changed schemas require restarting this session. Revoked tools are hidden on the next list and call. Write, destructive, and unknown-effect calls create an OMR approval instead of executing immediately. After approval in the OMR control plane, call omr.approvals.execute with the returned approvalId.",
+      instructions: "Tools are projected from the authenticated OMR catalog. For multiple ready connections, list and select one with omr.connections.list and omr.connections.select. Call omr.catalog.refresh after connection or selection changes; changed schemas require restarting this session. Revoked tools are hidden on the next list and call. Write, destructive, and unknown-effect calls create an OMR approval instead of executing immediately. After approval in the OMR control plane, call omr.approvals.execute with the returned approvalId.",
     },
     transports: ["stdio", "streamable-http"],
     registry,

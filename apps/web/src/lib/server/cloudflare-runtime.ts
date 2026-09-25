@@ -354,6 +354,14 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
         ...(input.provider ? { provider: input.provider } : {}),
       }));
     },
+    async select(request, input) {
+      if (!bearerCredential(request)) requireSameOrigin(request);
+      const principal = await authenticate(event, request, input.workspaceId, "connections:read");
+      return withConnections((_orchestrator, authority) => authority.select({
+        actorUserId: principal.userId,
+        ...input,
+      }));
+    },
     async startOAuth(request, input) {
       requireSameOrigin(request);
       const actorUserId = await requireWebUser(event, request);

@@ -139,6 +139,11 @@ async function main(): Promise<void> {
   if (command === "connections" && subcommand === "list") {
     return output.json(await api.listConnections(workspaceId, option("--provider")));
   }
+  if (command === "connections" && subcommand === "select" && subject) {
+    return output.json(await api.selectConnection({
+      workspaceId, provider: requiredOption("--provider"), connectionId: subject,
+    }));
+  }
   if (command === "approvals" && subcommand === "request" && subject) {
     return output.json(await api.requestApproval({
       workspaceId,

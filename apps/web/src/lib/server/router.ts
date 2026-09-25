@@ -56,6 +56,7 @@ export interface DeviceRouteServices {
 export interface ConnectionRouteServices {
   providerReadiness(request: Request, provider: string, workspaceId?: string): Promise<unknown>;
   list(request: Request, input: { workspaceId: string; provider?: string }): Promise<unknown>;
+  select(request: Request, input: { workspaceId: string; provider: string; connectionId: string }): Promise<unknown>;
   startOAuth(request: Request, input: {
     workspaceId: string;
     provider: string;
@@ -196,6 +197,7 @@ function unavailableConnectionServices(): ConnectionRouteServices {
   return {
     providerReadiness: unavailable,
     list: unavailable,
+    select: unavailable,
     startOAuth: unavailable,
     completeOAuth: unavailable,
     connectApiKey: unavailable,
@@ -475,6 +477,18 @@ export function createOMRRouter(
           return Response.json(await connectionServices.list(request, {
             workspaceId: requiredString(body, "workspaceId"),
             ...(provider ? { provider } : {}),
+          }));
+        },
+      },
+      {
+        method: "POST",
+        path: "/api/connections/select",
+        handler: async (request, context) => {
+          const body = objectBody(await context.json());
+          return Response.json(await connectionServices.select(request, {
+            workspaceId: requiredString(body, "workspaceId"),
+            provider: requiredString(body, "provider"),
+            connectionId: requiredString(body, "connectionId"),
           }));
         },
       },

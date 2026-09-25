@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { ToolManifest } from "@oh-my-router/tools";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -67,6 +68,9 @@ describe("OMR MCP server", () => {
       if (url.pathname === "/api/connections/list") {
         return Response.json([{ id: "connection-1", provider: "demo" }]);
       }
+      if (url.pathname === "/api/connections/select") {
+        return Response.json({ provider: "demo", connectionId: "connection-1" });
+      }
       if (url.pathname === "/api/approvals") {
         return Response.json({
           id: "approval-1",
@@ -98,6 +102,7 @@ describe("OMR MCP server", () => {
       "omr.approvals.execute",
       "omr.catalog.refresh",
       "omr.connections.list",
+      "omr.connections.select",
     ]);
 
     await expect(client.callTool({
@@ -111,6 +116,15 @@ describe("OMR MCP server", () => {
       arguments: { provider: "demo" },
     })).resolves.toMatchObject({
       structuredContent: { connections: [{ id: "connection-1", provider: "demo" }] },
+    });
+    await expect(client.callTool({
+      name: "omr.connections.select",
+      arguments: { provider: "demo", connectionId: "connection-1" },
+    })).resolves.toMatchObject({
+      structuredContent: { provider: "demo", connectionId: "connection-1" },
+    });
+    expect(requests.find(({ path }) => path === "/api/connections/select")?.body).toEqual({
+      workspaceId: "workspace-1", provider: "demo", connectionId: "connection-1",
     });
     await expect(client.callTool({
       name: "demo.write",
@@ -214,6 +228,36 @@ describe("OMR MCP server", () => {
     expect((await client.listTools()).tools.some(({ name }) => name === "demo.read")).toBe(false);
     const refresh = await client.callTool({ name: "omr.catalog.refresh", arguments: {} });
     expect(refresh.isError).toBe(true);
+  });
+
+  it("notifies a caching client when an already registered tool disappears and reappears", async () => {
+    let current = [manifest("demo.read", "read")];
+    const fetchImpl: typeof fetch = async () => Response.json({
+      catalogSchemaVersion: "1.0.0", revision: "test", tools: current,
+    });
+    const server = await createOMRMcpServer({
+      baseUrl: "https://omr.test", credential: "credential", workspaceId: "workspace-1", fetchImpl,
+    });
+    const client = new Client({ name: "notifications", version: "1.0.0" }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closeables.push(client, server);
+    const notifications: string[] = [];
+    client.setNotificationHandler(ToolListChangedNotificationSchema, () => {
+      notifications.push("changed");
+    });
+    current = [];
+    await client.callTool({ name: "omr.catalog.refresh", arguments: {} });
+    expect((await client.listTools()).tools.some(({ name }) => name === "demo.read")).toBe(false);
+    expect(notifications).toEqual(["changed"]);
+    current = [manifest("demo.read", "read")];
+    const restored = await client.callTool({ name: "omr.catalog.refresh", arguments: {} });
+    expect(restored.structuredContent).toMatchObject({ added: 0, tools: 1 });
+    expect(notifications).toEqual(["changed", "changed"]);
+    expect((await client.listTools()).tools.some(({ name }) => name === "demo.read")).toBe(true);
+    await client.callTool({ name: "omr.catalog.refresh", arguments: {} });
+    expect(notifications).toHaveLength(2);
   });
 
   it("serves the projected catalog over stateless Streamable HTTP", async () => {

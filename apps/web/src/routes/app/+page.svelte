@@ -273,6 +273,15 @@
                     <span>{connection.provider} · {connection.ownership}</span>
                   </div>
                   <span class:ready={connection.readiness === "ready"} class="status">{connection.readiness}</span>
+                  {#if connection.status === "active" && connection.readiness === "ready"}
+                    <button
+                      class="quiet compact"
+                      disabled={Boolean(busy)}
+                      onclick={() => void mutate(`select:${connection.id}`, "/api/connections/select", {
+                        workspaceId: selectedWorkspaceId, provider: connection.provider, connectionId: connection.id,
+                      }, `Using ${connection.label} for ${connection.provider}.`)}
+                    >Use for tools</button>
+                  {/if}
                   <button
                     class="quiet compact"
                     disabled={Boolean(busy)}
