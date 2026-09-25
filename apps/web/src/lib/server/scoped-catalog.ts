@@ -1,5 +1,6 @@
 import {
   ConnectionSelectionRequiredError, ConnectionUnavailableError,
+  isMissingRemoteConnection,
 } from "@oh-my-router/connections";
 import { usableToolIds, type ProviderStatus, type ToolCatalog } from "@oh-my-router/tools";
 
@@ -22,7 +23,7 @@ export async function resolveScopedCatalog(
     try {
       return await remoteScopes(binding.providerConnectionId);
     } catch (error) {
-      if (error instanceof Error && "code" in error && error.code === "CONNECTION_NOT_FOUND") {
+      if (isMissingRemoteConnection(error)) {
         await onRemoteMissing(binding.id);
         return null;
       }

@@ -39,6 +39,14 @@ export function isV1Provider(provider: string): provider is V1Provider {
   return (V1_PROVIDERS as readonly string[]).includes(provider);
 }
 
+export function isProviderConfigured(
+  definition: ProviderDefinition | undefined,
+  provider: string,
+  integrations: Readonly<Record<string, unknown>> | undefined,
+): boolean {
+  return !!definition && (definition.auth.type !== "oauth2" || !!integrations?.[provider]);
+}
+
 export function providerStatus(input: {
   provider: string;
   definition?: ProviderDefinition;

@@ -1,4 +1,4 @@
-import { providerStatus, type ProviderStatus } from "@oh-my-router/tools";
+import { isProviderConfigured, providerStatus, type ProviderStatus } from "@oh-my-router/tools";
 
 import {
   ConnectionAuthority,
@@ -187,8 +187,7 @@ export class PlugFnConnectionOrchestrator {
     return providerStatus({
       provider,
       definition,
-      configured: !!definition &&
-        (definition.auth.type !== "oauth2" || !!this.plugfn.config?.integrations?.[provider]),
+      configured: isProviderConfigured(definition, provider, this.plugfn.config?.integrations),
       connections,
     });
   }

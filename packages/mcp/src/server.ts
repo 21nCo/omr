@@ -243,7 +243,15 @@ export async function createOMRMcpServer(input: {
     transports: ["stdio", "streamable-http"],
     registry,
   }).createServer({
-    context: async () => new Map((await discoverManifests()).map(({ id, hash }) => [id, hash])),
+    context: async () => {
+      try {
+        return new Map((await discoverManifests()).map(({ id, hash }) => [id, hash]));
+      } catch {
+        // Discovery is only the visibility gate for projected actions. Reserved
+        // controls use their own endpoints and report their own structured errors.
+        return new Map<string, string>();
+      }
+    },
     toolVisibility: ({ tool, context }) =>
       reservedNames.has(tool.name) || context.get(tool.name) === registeredHashes.get(tool.name),
   });

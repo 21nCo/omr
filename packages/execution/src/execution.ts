@@ -1,5 +1,8 @@
 import type { ClientCapability } from "@oh-my-router/client-access";
-import type { ConnectionAuthority } from "@oh-my-router/connections";
+import {
+  ConnectionUnavailableError, isMissingRemoteConnection, markMissingRemoteConnection,
+  type ConnectionAuthority, type ConnectionBindingRecord,
+} from "@oh-my-router/connections";
 import { hasRequiredScopes, type JsonValue, type ToolCatalog, type ToolManifest } from "@oh-my-router/tools";
 
 export type ExecutionStatus = "running" | "succeeded" | "failed";
@@ -198,7 +201,7 @@ export class ExecutionService {
       provider: manifest.provider,
       ...(input.connectionId ? { connectionId: input.connectionId } : {}),
     });
-    await this.assertScopes(manifest, connection.providerConnectionId);
+    await this.assertScopes(manifest, connection);
     if (manifest.contract.effect !== "read") {
       throw new ExecutionApprovalRequiredError(manifest);
     }
@@ -246,7 +249,7 @@ export class ExecutionService {
       provider: manifest.provider,
       ...(input.connectionId ? { connectionId: input.connectionId } : {}),
     });
-    await this.assertScopes(manifest, connection.providerConnectionId);
+    await this.assertScopes(manifest, connection);
     const timestamp = this.now();
     return approvals.create({
       id: `approval_${crypto.randomUUID()}`,
@@ -310,7 +313,7 @@ export class ExecutionService {
       if (connection.providerConnectionId !== approval.providerConnectionId) {
         throw new ApprovalUnavailableError();
       }
-      await this.assertScopes(manifest, connection.providerConnectionId);
+      await this.assertScopes(manifest, connection);
       const receipt = await this.runAuthorized({
         principal: effectivePrincipal,
         manifest,
@@ -389,7 +392,16 @@ export class ExecutionService {
       }));
       return await this.receipts.succeed(reservation.receipt.id, result, this.now());
     } catch (error) {
-      await this.receipts.fail(reservation.receipt.id, "provider_execution_failed", this.now());
+      const missingRemote = isMissingRemoteConnection(error);
+      await this.receipts.fail(
+        reservation.receipt.id,
+        missingRemote ? "connection_unavailable" : "provider_execution_failed",
+        this.now(),
+      );
+      if (missingRemote) {
+        await markMissingRemoteConnection(this.connections, input.connection.id);
+        throw new ConnectionUnavailableError();
+      }
       throw error;
     }
   }
@@ -404,8 +416,16 @@ export class ExecutionService {
     }
   }
 
-  private async assertScopes(manifest: ToolManifest, providerConnectionId: string): Promise<void> {
-    if (!hasRequiredScopes(manifest, await this.connectionScopes(providerConnectionId))) {
+  private async assertScopes(manifest: ToolManifest, connection: ConnectionBindingRecord): Promise<void> {
+    let scopes: readonly string[] | undefined;
+    try {
+      scopes = await this.connectionScopes(connection.providerConnectionId);
+    } catch (error) {
+      if (!isMissingRemoteConnection(error)) throw error;
+      await markMissingRemoteConnection(this.connections, connection.id);
+      throw new ConnectionUnavailableError();
+    }
+    if (!hasRequiredScopes(manifest, scopes)) {
       throw new ExecutionInputError("Connection lacks required action scopes");
     }
   }

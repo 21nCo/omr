@@ -25,3 +25,5 @@ export {
   type PlugFnDisconnectResult,
   type ProviderReadiness,
 } from "./plugfn.js";
+
+export { isMissingRemoteConnection, markMissingRemoteConnection } from "./remote.js";

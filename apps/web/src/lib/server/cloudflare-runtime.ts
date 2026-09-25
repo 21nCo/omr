@@ -5,7 +5,7 @@ import {
   connectPostgresDeviceLogin,
 } from "@oh-my-router/client-access/postgres";
 import {
-  ConnectionAccessDeniedError, ConnectionUnavailableError,
+  ConnectionAccessDeniedError, markMissingRemoteConnection,
   PlugFnConnectionOrchestrator,
   type ConnectionBindingRecord,
 } from "@oh-my-router/connections";
@@ -16,6 +16,7 @@ import { connectPostgresIdentityRuntime } from "@oh-my-router/identity/postgres"
 import { connectPostgresPlugFn } from "@oh-my-router/plugfn-runtime";
 import {
   createPlugFnToolCatalog,
+  isProviderConfigured,
   v1ProviderCatalog,
   type JsonValue,
   type ProviderBinding,
@@ -300,11 +301,9 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
     }
     return v1ProviderCatalog({
       get: (provider) => plugfn.providers.get(provider),
-      configured: (provider) => {
-        const definition = plugfn.providers.get(provider);
-        return !!definition && (definition.auth.type !== "oauth2" ||
-          !!plugfn.config?.integrations?.[provider]);
-      },
+      configured: (provider) => isProviderConfigured(
+        plugfn.providers.get(provider), provider, plugfn.config?.integrations,
+      ),
       connections: byProvider,
     });
   }
@@ -424,16 +423,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
       async (connectionId) => (await plugfn.connections.get(connectionId)).scopes,
       async (bindingId) => {
         missing.add(bindingId);
-        // A locally ready binding whose remote was deleted must not keep advertising readiness.
-        // The conditional store write cannot resurrect an in-flight revocation.
-        try {
-          await authority.recordHealth({
-            connectionId: bindingId, status: "needs_reauth", readiness: "unavailable",
-            reason: "plugfn_connection_missing",
-          });
-        } catch (error) {
-          if (!(error instanceof ConnectionUnavailableError)) throw error;
-        }
+        await markMissingRemoteConnection(authority, bindingId);
       },
     );
     return {

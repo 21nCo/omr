@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { oauthCallbackUri, savePendingOAuthConnection } from "$lib/oauth-connection.js";
+  import { createWorkspaceCatalogLoader } from "$lib/workspace-catalog.js";
 
   type WorkspaceAccess = {
     workspace: { id: string; name: string; kind: "personal" | "team" };
@@ -92,24 +93,25 @@
     return body as T;
   }
 
-  async function load(workspaceId = selectedWorkspaceId) {
-    loading = true;
-    error = "";
-    try {
-      const query = workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : "";
-      overview = await request<Overview>(`/api/control-plane${query}`);
-      selectedWorkspaceId = overview.selectedWorkspaceId ?? "";
-      catalog = selectedWorkspaceId ? await request<Catalog>(
-        `/api/tools?workspaceId=${encodeURIComponent(selectedWorkspaceId)}&limit=100`,
-      ) : null;
-      if (!catalog?.providers.some((item) => item.provider === oauthProvider && item.available)) {
-        oauthProvider = catalog?.providers.find((item) => item.available && item.authMode === "oauth")?.provider ?? "";
+  const loadWorkspace = createWorkspaceCatalogLoader<Overview, Catalog>(
+    (workspaceId) => request<Overview>(`/api/control-plane${workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : ""}`),
+    (workspaceId) => request<Catalog>(`/api/tools?workspaceId=${encodeURIComponent(workspaceId)}&limit=100`),
+    (state) => {
+      overview = state.overview;
+      catalog = state.catalog;
+      selectedWorkspaceId = state.selectedWorkspaceId;
+      loading = state.loading;
+      error = state.error;
+      if (!catalog) {
+        oauthProvider = "";
+      } else if (!catalog.providers.some((item) => item.provider === oauthProvider && item.available)) {
+        oauthProvider = catalog.providers.find((item) => item.available && item.authMode === "oauth")?.provider ?? "";
       }
-    } catch (caught) {
-      error = caught instanceof Error ? caught.message : "Could not load the control plane";
-    } finally {
-      loading = false;
-    }
+    },
+  );
+
+  async function load(workspaceId = selectedWorkspaceId) {
+    await loadWorkspace(workspaceId);
   }
 
   async function mutate(name: string, path: string, body: unknown, success: string) {

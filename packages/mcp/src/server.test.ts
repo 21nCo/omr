@@ -199,6 +199,47 @@ describe("OMR MCP server", () => {
     });
   });
 
+  it("keeps control tools callable during discovery failure and fails closed for projected actions", async () => {
+    let catalogFails = false;
+    let executions = 0;
+    const fetchImpl: typeof fetch = async (request) => {
+      const path = requestUrl(request).pathname;
+      if (path === "/api/tools") return catalogFails
+        ? Response.json({ error: "CATALOG_UNAVAILABLE" }, { status: 503 })
+        : Response.json({ catalogSchemaVersion: "1.0.0", revision: "test", tools: [manifest("demo.read", "read")] });
+      if (path === "/api/connections/list") return Response.json([{ id: "binding", provider: "demo" }]);
+      if (path === "/api/approvals/execute") return Response.json({ id: "receipt", status: "succeeded" });
+      if (path === "/api/tools/execute") executions += 1;
+      return Response.json({ status: "succeeded" });
+    };
+    const server = await createOMRMcpServer({
+      baseUrl: "https://omr.test", credential: "credential", workspaceId: "workspace-1", fetchImpl,
+    });
+    const client = new Client({ name: "outage", version: "1.0.0" }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closeables.push(client, server);
+    expect((await client.listTools()).tools.some(({ name }) => name === "demo.read")).toBe(true);
+
+    catalogFails = true;
+    const listed = await client.listTools();
+    expect(listed.tools.map(({ name }) => name)).toContain("omr.connections.list");
+    expect(listed.tools.some(({ name }) => name === "demo.read")).toBe(false);
+    await expect(client.callTool({ name: "omr.connections.list", arguments: {} }))
+      .resolves.toMatchObject({ structuredContent: { connections: [{ id: "binding" }] } });
+    await expect(client.callTool({ name: "omr.approvals.execute", arguments: { approvalId: "approved" } }))
+      .resolves.toMatchObject({ structuredContent: { id: "receipt" } });
+    for (const name of ["omr.catalog.providers", "omr.catalog.refresh"]) {
+      await expect(client.callTool({ name, arguments: {} })).resolves.toMatchObject({
+        isError: true,
+        structuredContent: { ok: false, error: { code: "OMR_HTTP_ERROR" } },
+      });
+    }
+    await expect(client.callTool({ name: "demo.read", arguments: {} })).rejects.toThrow(/not found/);
+    expect(executions).toBe(0);
+  });
+
   it("refreshes newly connected tools and hides revoked or changed tools on the same session", async () => {
     let current: ToolManifest[] = [];
     const fetchImpl: typeof fetch = async (request) =>

@@ -17,6 +17,7 @@ export {
   V1_PROVIDERS,
   isV1Provider,
   providerStatus,
+  isProviderConfigured,
   v1ProviderCatalog,
   type ProviderBinding,
   type ProviderDefinition,
