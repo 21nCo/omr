@@ -4,6 +4,7 @@ import { githubProvider, linearProvider, notionProvider, slackProvider, stripePr
 
 import { createPlugFnToolCatalog } from "./plugfn.js";
 import { v1ProviderCatalog } from "./providers.js";
+import { hasRequiredScopes } from "./scopes.js";
 
 describe("local PlugFn catalog integration", () => {
   it("converts linked PlugFn action schemas into versioned manifests", async () => {
@@ -40,6 +41,11 @@ describe("local PlugFn catalog integration", () => {
       provider: "github",
       action: "issues.createComment",
     });
+    const issueCreate = catalog.get("github.issues.create")!;
+    expect(issueCreate.contract.requiredScopes).toContain("repo");
+    expect(hasRequiredScopes(issueCreate, ["read:user"])).toBe(false);
+    expect(hasRequiredScopes(issueCreate, ["read:user", "repo"])).toBe(true);
+    expect(hasRequiredScopes(issueCreate, [])).toBe(false);
   });
 
   it("uses the four real provider definitions and hides registered experimental tools", async () => {

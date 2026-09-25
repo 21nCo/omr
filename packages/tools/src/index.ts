@@ -12,6 +12,7 @@ export {
 } from "./catalog.js";
 
 export { createPlugFnToolCatalog } from "./plugfn.js";
+export { hasRequiredScopes, usableToolIds } from "./scopes.js";
 export {
   V1_PROVIDERS,
   isV1Provider,

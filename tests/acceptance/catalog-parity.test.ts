@@ -25,14 +25,15 @@ describe("v1 catalog surface parity", () => {
           sensitiveKeys: [], pagination: { kind: "none" }, retry: "safe" },
       } },
     }] } }, (schema) => schema as never);
+    let ready = true;
     const router = createOMRRouter(undefined, undefined, {
       async discover(_request, input) {
         return {
-          ...catalog.discover({ allowedProviders: new Set(["linear"]), limit: input.limit }),
-          providers: [{ provider: "linear", displayName: "Linear", state: "ready", available: true }],
+          ...catalog.discover({ allowedProviders: new Set(ready ? ["linear"] : []), limit: input.limit }),
+          providers: [{ provider: "linear", displayName: "Linear", state: ready ? "ready" : "disconnected", available: true }],
         };
       },
-      async manifest(_request, toolId) { return catalog.get(toolId); },
+      async manifest(_request, toolId) { return ready ? catalog.get(toolId) : null; },
     });
     const server = createServer(async (request, response) => {
       const url = `http://127.0.0.1:${(server.address() as { port: number }).port}${request.url}`;
@@ -65,6 +66,18 @@ describe("v1 catalog surface parity", () => {
       expect(mcpTool?.description).toBe(webManifest.description);
       expect(JSON.stringify(mcpTool)).toContain(webManifest.hash);
       expect(webPage.providers).toMatchObject([{ provider: "linear", state: "ready" }]);
+      ready = false;
+      const disconnected = await api.discoverTools({ workspaceId: "workspace_1" });
+      const { stdout: cliDisconnected } = await execute(process.execPath,
+        ["packages/cli/dist/bin.js", "tools", "list", "--json"], {
+          env: { ...process.env, OMR_BACKEND: baseUrl, OMR_API_KEY: "test", OMR_WORKSPACE_ID: "workspace_1" },
+        });
+      expect(disconnected.tools).toEqual([]);
+      expect(JSON.parse(cliDisconnected)).toEqual(disconnected);
+      expect((await agent.listTools()).tools.some(({ name }) => name === webManifest.id)).toBe(false);
+      ready = true;
+      expect((await agent.listTools()).tools.find(({ name }) => name === webManifest.id)?._meta)
+        .toMatchObject({ manifestHash: webManifest.hash });
     } finally {
       await agent?.close().catch(() => undefined);
       await mcp?.close().catch(() => undefined);

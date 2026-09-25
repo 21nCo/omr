@@ -133,11 +133,16 @@ export class ToolCatalog {
     return manifest ? structuredClone(manifest) : null;
   }
 
+  list(): ToolManifest[] {
+    return structuredClone(this.manifests);
+  }
+
   discover(input: {
     query?: string;
     providers?: string[];
     effects?: ToolEffect[];
     allowedProviders?: ReadonlySet<string>;
+    allowedToolIds?: ReadonlySet<string>;
     limit?: number;
     cursor?: string;
   } = {}): ToolDiscoveryPage {
@@ -156,11 +161,13 @@ export class ToolCatalog {
       providers: providers ? [...providers].sort() : null,
       effects: effects ? [...effects].sort() : null,
       allowedProviders: input.allowedProviders ? [...input.allowedProviders].sort() : null,
+      allowedToolIds: input.allowedToolIds ? [...input.allowedToolIds].sort() : null,
     }, "discovery filter");
     const filtered = this.manifests.filter((manifest) =>
       (!providers || providers.includes(manifest.provider)) &&
       (!effects || effects.includes(manifest.contract.effect)) &&
       (!input.allowedProviders || input.allowedProviders.has(manifest.provider)) &&
+      (!input.allowedToolIds || input.allowedToolIds.has(manifest.id)) &&
       (!query || [manifest.id, manifest.displayName, manifest.description]
         .some((value) => value.toLowerCase().includes(query)))
     );

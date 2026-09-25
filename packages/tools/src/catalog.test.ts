@@ -86,6 +86,17 @@ describe("tool catalog", () => {
       .toThrow(ToolCatalogInputError);
   });
 
+  it("filters granted action IDs without changing manifest hashes and rejects stale grant cursors", async () => {
+    const catalog = await ToolCatalog.create(source(), jsonSchema);
+    const all = new Set(catalog.list().map(({ id }) => id));
+    const first = catalog.discover({ allowedToolIds: all, limit: 1 });
+    const restricted = new Set(["linear.get_issue"]);
+    expect(catalog.discover({ allowedToolIds: restricted }).tools).toEqual([catalog.get("linear.get_issue")]);
+    expect(catalog.revision).toBe(first.revision);
+    expect(() => catalog.discover({ allowedToolIds: restricted, cursor: first.nextCursor }))
+      .toThrow(ToolCatalogInputError);
+  });
+
   it("paginates against one catalog revision and rejects stale or malformed cursors", async () => {
     const catalog = await ToolCatalog.create(source(), jsonSchema);
     const first = catalog.discover({ limit: 1 });

@@ -96,6 +96,7 @@ describe("OMR MCP server", () => {
       "demo.read",
       "demo.write",
       "omr.approvals.execute",
+      "omr.catalog.refresh",
       "omr.connections.list",
     ]);
 
@@ -181,6 +182,38 @@ describe("OMR MCP server", () => {
         },
       },
     });
+  });
+
+  it("refreshes newly connected tools and hides revoked or changed tools on the same session", async () => {
+    let current: ToolManifest[] = [];
+    const fetchImpl: typeof fetch = async (request) =>
+      requestUrl(request).pathname === "/api/tools"
+        ? Response.json({ catalogSchemaVersion: "1.0.0", revision: "test", tools: current })
+        : Response.json({ status: "succeeded" });
+    const server = await createOMRMcpServer({
+      baseUrl: "https://omr.test", credential: "credential", workspaceId: "workspace-1", fetchImpl,
+    });
+    const client = new Client({ name: "transition", version: "1.0.0" }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closeables.push(client, server);
+
+    expect((await client.listTools()).tools.some(({ name }) => name === "demo.read")).toBe(false);
+    current = [manifest("demo.read", "read")];
+    expect((await client.listTools()).tools.some(({ name }) => name === "demo.read")).toBe(false);
+    await client.callTool({ name: "omr.catalog.refresh", arguments: {} });
+    expect((await client.listTools()).tools.find(({ name }) => name === "demo.read")?._meta)
+      .toMatchObject({ manifestHash: "hash-demo.read" });
+
+    current = [];
+    expect((await client.listTools()).tools.some(({ name }) => name === "demo.read")).toBe(false);
+    await expect(client.callTool({ name: "demo.read", arguments: { value: "x" } }))
+      .rejects.toThrow(/not found/);
+    current = [{ ...manifest("demo.read", "read"), hash: "changed-schema" }];
+    expect((await client.listTools()).tools.some(({ name }) => name === "demo.read")).toBe(false);
+    const refresh = await client.callTool({ name: "omr.catalog.refresh", arguments: {} });
+    expect(refresh.isError).toBe(true);
   });
 
   it("serves the projected catalog over stateless Streamable HTTP", async () => {

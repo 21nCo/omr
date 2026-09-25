@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
 import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
-import { ConnectionAuthority } from "@oh-my-router/connections";
+import { ConnectionAuthority, ConnectionSelectionRequiredError } from "@oh-my-router/connections";
 import { MemoryConnectionBindingStore } from "@oh-my-router/connections/testing";
-import { ToolCatalog, type ToolEffect } from "@oh-my-router/tools";
+import { ToolCatalog, usableToolIds, type ToolEffect } from "@oh-my-router/tools";
 
 import {
   ApprovalUnavailableError,
@@ -14,14 +14,15 @@ import {
 } from "./execution.js";
 import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "./testing.js";
 
-async function fixture(allowedProviders?: ReadonlySet<string>) {
+async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes = ["issues:read", "repo"]) {
   let now = 1_700_000_000_000;
+  let grantedScopes = initialScopes;
   const workspaceStore = new MemoryWorkspaceStore();
   const workspaces = new WorkspaceAuthority(workspaceStore, () => now);
   const { workspace } = await workspaces.provisionPersonalWorkspace({ userId: "user_1" });
   const connectionStore = new MemoryConnectionBindingStore(workspaceStore);
   const connections = new ConnectionAuthority(connectionStore, () => now);
-  await connections.attach({
+  const firstBinding = await connections.attach({
     actorUserId: "user_1",
     workspaceId: workspace.id,
     provider: "linear",
@@ -48,13 +49,18 @@ async function fixture(allowedProviders?: ReadonlySet<string>) {
   return {
     actionCall,
     approvals,
+    catalog,
+    connections,
+    firstBinding,
     receipts,
     workspace,
+    setScopes(scopes: string[]) { grantedScopes = scopes; },
     service: new ExecutionService(
       catalog,
       connections,
       { action: actionCall },
       receipts,
+      async () => grantedScopes,
       () => now,
       approvals,
     ),
@@ -72,7 +78,7 @@ function action(name: string, effect: ToolEffect) {
     contract: {
       version: "1.0.0",
       effect,
-      requiredScopes: [],
+      requiredScopes: effect === "read" ? ["issues:read"] : ["repo"],
       resources: [],
       sensitiveKeys: [],
       pagination: { kind: "none" as const },
@@ -82,6 +88,57 @@ function action(name: string, effect: ToolEffect) {
 }
 
 describe("execution service", () => {
+  it("advertises only actions granted by the effective selected binding across selection and revocation", async () => {
+    const { catalog, connections, firstBinding, workspace } = await fixture();
+    const second = await connections.attach({
+      actorUserId: "user_1", workspaceId: workspace.id, provider: "linear",
+      providerConnectionId: "plug_linear_repo", ownership: "personal", label: "Elevated",
+    });
+    const scopes = new Map([["plug_linear", ["read:user"]], ["plug_linear_repo", ["repo"]]]);
+    const visible = () => usableToolIds(catalog, [{ provider: "linear", state: "ready" }], async (provider) => {
+      try {
+        const binding = await connections.resolve({ actorUserId: "user_1", workspaceId: workspace.id, provider });
+        return scopes.get(binding.providerConnectionId);
+      } catch (error) {
+        if (error instanceof ConnectionSelectionRequiredError) return null;
+        throw error;
+      }
+    });
+    expect(await visible()).toEqual(new Set());
+    await connections.select({ actorUserId: "user_1", workspaceId: workspace.id,
+      provider: "linear", connectionId: firstBinding.id });
+    expect((await visible()).has("linear.create_issue")).toBe(false);
+    await connections.select({ actorUserId: "user_1", workspaceId: workspace.id,
+      provider: "linear", connectionId: second.id });
+    expect((await visible()).has("linear.create_issue")).toBe(true);
+    await connections.revoke("user_1", second.id);
+    expect((await visible()).has("linear.create_issue")).toBe(false);
+  });
+
+  it("rejects insufficient grants before reads and approvals, then rechecks revoked grants on approval execution", async () => {
+    const { actionCall, approvals, receipts, service, workspace, setScopes } =
+      await fixture(undefined, ["read:user"]);
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    await expect(service.execute({ principal, toolId: "linear.get_issue", params: {} }))
+      .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    await expect(service.execute({ principal, toolId: "linear.create_issue", params: {} }))
+      .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    await expect(service.requestApproval({ principal, toolId: "linear.create_issue", params: {} }))
+      .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    expect(approvals.approvals.size).toBe(0);
+    expect(receipts.receipts.size).toBe(0);
+    setScopes(["issues:read", "repo"]);
+    await expect(service.execute({ principal, toolId: "linear.get_issue", params: {} }))
+      .resolves.toMatchObject({ status: "succeeded" });
+    const approval = await service.requestApproval({ principal, toolId: "linear.create_issue", params: {} });
+    await service.approve(approval.id, "user_1");
+    setScopes(["issues:read"]);
+    await expect(service.executeApproved(principal, approval.id))
+      .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    expect(approvals.approvals.get(approval.id)?.status).toBe("failed");
+    expect(actionCall).toHaveBeenCalledTimes(1);
+  });
+
   it("does not execute or request approval for an unconfigured provider, even with a ready old binding", async () => {
     const { actionCall, service, workspace } = await fixture(new Set());
     const input = {
