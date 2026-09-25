@@ -1,0 +1,19 @@
+packages/connections/src/testing.ts
+  s_a2bd3276976ac7::t_53e5b1201b7f81 178
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0a1b720d1b19186330fd0026041344f806c87be0",
+  "prompts": {},
+  "sessions": {
+    "s_a2bd3276976ac7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0d8b0-85e2-7702-9013-989547be5d4f",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
