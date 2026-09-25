@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { oauthCallbackUri, savePendingOAuthConnection } from "$lib/oauth-connection.js";
-  import { createWorkspaceCatalogLoader } from "$lib/workspace-catalog.js";
+  import { createWorkspaceCatalogLoader, providerDisplayState } from "$lib/workspace-catalog.js";
 
   type WorkspaceAccess = {
     workspace: { id: string; name: string; kind: "personal" | "team" };
@@ -78,8 +78,8 @@
     return serialized.length > 520 ? `${serialized.slice(0, 520)}\n…` : serialized;
   }
 
-  function providerState(provider: string): Provider["state"] {
-    return catalog?.providers.find((item) => item.provider === provider)?.state ?? "unsupported";
+  function providerState(provider: string): Provider["state"] | "unknown" {
+    return providerDisplayState(catalog, provider);
   }
 
   async function request<T>(path: string, init?: RequestInit): Promise<T> {

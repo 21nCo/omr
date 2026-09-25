@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createWorkspaceCatalogLoader, type WorkspaceCatalogState } from "./workspace-catalog.js";
+import { createWorkspaceCatalogLoader, providerDisplayState, type WorkspaceCatalogState } from "./workspace-catalog.js";
 
 type Overview = { selectedWorkspaceId: string; connections: { provider: string; status: string }[] };
 type Catalog = { providers: { provider: string; state: string; available?: boolean; authMode?: string }[] };
@@ -64,10 +64,14 @@ describe("workspace catalog loading", () => {
     await load("B");
     expect(states.at(-1)).toMatchObject({ selectedWorkspaceId: "B", catalog: null, error: "catalog unavailable" });
     expect(states.at(-1)?.overview?.connections).toEqual([{ provider: "github", status: "active" }]);
+    expect(providerDisplayState(states.at(-1)?.catalog ?? null, "github")).toBe("unknown");
+    expect(providerDisplayState(states.at(-1)?.catalog ?? null, "github") === "ready").toBe(false);
     expect(states.slice(-3).every((state) => state.catalog === null)).toBe(true);
     failB = false;
     await load("B");
     expect(states.at(-1)?.catalog?.providers[0]?.state).toBe("unconfigured");
+    expect(providerDisplayState(states.at(-1)?.catalog ?? null, "github")).toBe("unconfigured");
+    expect(providerDisplayState(states.at(-1)?.catalog ?? null, "stripe")).toBe("unsupported");
   });
 
   it("discards a late catalog response from a previous workspace", async () => {

@@ -180,6 +180,18 @@ function requireSameOrigin(request: Request): void {
   }
 }
 
+/** A saved selection affects later actions from every client of the same user. */
+export async function selectAuthorizedConnection<T>(
+  request: Request,
+  input: { workspaceId: string; provider: string; connectionId: string },
+  authenticateSelection: (request: Request, workspaceId: string, capability: ClientCapability) => Promise<{ userId: string }>,
+  select: (input: { actorUserId: string; workspaceId: string; provider: string; connectionId: string }) => Promise<T>,
+): Promise<T> {
+  if (!bearerCredential(request)) requireSameOrigin(request);
+  const principal = await authenticateSelection(request, input.workspaceId, "tools:write");
+  return select({ actorUserId: principal.userId, ...input });
+}
+
 async function authenticate(
   event: RequestEvent,
   request: Request,
@@ -354,12 +366,9 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
       }));
     },
     async select(request, input) {
-      if (!bearerCredential(request)) requireSameOrigin(request);
-      const principal = await authenticate(event, request, input.workspaceId, "connections:read");
-      return withConnections((orchestrator) => orchestrator.select({
-        actorUserId: principal.userId,
-        ...input,
-      }));
+      return selectAuthorizedConnection(request, input,
+        (selectionRequest, workspaceId, capability) => authenticate(event, selectionRequest, workspaceId, capability),
+        (selection) => withConnections((orchestrator) => orchestrator.select(selection)));
     },
     async startOAuth(request, input) {
       requireSameOrigin(request);

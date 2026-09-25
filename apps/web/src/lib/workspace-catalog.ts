@@ -6,6 +6,15 @@ export interface WorkspaceCatalogState<Overview, Catalog> {
   error: string;
 }
 
+/** Missing discovery is unknown; a known catalog missing a provider is unsupported. */
+export function providerDisplayState<State extends string>(
+  catalog: { providers: readonly { provider: string; state: State }[] } | null,
+  provider: string,
+): State | "unsupported" | "unknown" {
+  if (!catalog) return "unknown";
+  return catalog.providers.find((entry) => entry.provider === provider)?.state ?? "unsupported";
+}
+
 /** Keep a workspace overview and its catalog on the same request generation. */
 export function createWorkspaceCatalogLoader<Overview extends { selectedWorkspaceId: string | null }, Catalog>(
   fetchOverview: (workspaceId: string) => Promise<Overview>,
