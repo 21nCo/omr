@@ -1,0 +1,553 @@
+packages/client-access/migrations/0010_remote_mcp_device_authorization.sql
+  s_dbeaf6beea25e6::t_7919600b3aec6d 1-6
+packages/client-access/migrations/0005_device_authorization.sql
+  s_dbeaf6beea25e6::t_1b64134c2f013a 1-10,13-31
+  s_dbeaf6beea25e6::t_22a9d1f7a678b1 11-12
+packages/plugfn-runtime/src/postgres.integration.test.ts
+  s_dbeaf6beea25e6::t_06dcc9bad60328 1-5,7-72,74-83,86-98
+  s_dbeaf6beea25e6::t_a8141e5fdf09f5 6,84-85
+  s_dbeaf6beea25e6::t_e52da2f1b27ab0 73
+tsconfig.base.json
+  s_dbeaf6beea25e6::t_d3a7cdb0a51dde 1-20
+apps/web/src/app.html
+  s_dbeaf6beea25e6::t_9ad01d2ce1eedc 1-11
+packages/identity/src/runtime.test.ts
+  s_dbeaf6beea25e6::t_7cf20b0dded767 69-74
+  s_dbeaf6beea25e6::t_021836cf4819b7 6-10,39,41,121-236
+  s_dbeaf6beea25e6::t_46c1b8af58b43b 1-5,11-38,40,42-68,75-120,237-238
+packages/mcp/tsconfig.json
+  s_dbeaf6beea25e6::t_bd9aed47d6dc48 1-9
+packages/data/src/postgres-schema.ts
+  s_dbeaf6beea25e6::t_5268ad5b369326 9,18-19,27,36-37
+  s_dbeaf6beea25e6::t_54d87be42a9778 1,29
+  s_dbeaf6beea25e6::t_45bc24c0abaeac 2-8,10-17,20-26,28,30-35,38-78
+packages/tools/src/catalog.ts
+  s_dbeaf6beea25e6::t_da32653219d844 1-69,72-94,96,98-108,111-117,119-141,143-147,154-160,162-168,172-175,177,187-189,191,194-244,247-251,253-256,258-259,266-272
+  s_dbeaf6beea25e6::t_25b563a35b4793 118,148-153,161,169-171,245-246,252,257,260-265
+  s_dbeaf6beea25e6::t_5a3571891657b9 70-71,95,97,142,176,178-186
+  s_dbeaf6beea25e6::t_a8141e5fdf09f5 109-110,190,192-193
+apps/web/src/lib/server/auth-router.ts
+  s_dbeaf6beea25e6::t_eb881758c2a0ad 1-14,22-33
+  s_dbeaf6beea25e6::t_8630eab53bfee3 15-21
+packages/execution/src/postgres.ts
+  s_dbeaf6beea25e6::t_bc074a687c470b 1-3,5-9,11-25,27-31
+  s_dbeaf6beea25e6::t_b27a9c0f85ea4a 4,10,26,32
+packages/data/src/postgres.integration.test.ts
+  s_dbeaf6beea25e6::t_23f3e62005b2e5 1-147
+packages/tools/src/catalog.test.ts
+  s_dbeaf6beea25e6::t_25b563a35b4793 77-78
+  s_dbeaf6beea25e6::t_da32653219d844 1-76,79-113
+packages/identity/tsconfig.json
+  s_dbeaf6beea25e6::t_431ef0d21c47f2 1-10
+packages/client-access/src/postgres-store.ts
+  s_dbeaf6beea25e6::t_b89425271e1c3c 13-14,52-62,202-262
+  s_dbeaf6beea25e6::t_42ec0a65ac9c23 178-181,183-186,188,285-287
+  s_dbeaf6beea25e6::t_1a0bdb78ae203c 1-12,15-51,63-144,146-177,182,187,189-201,263-284,288-291,299-338
+  s_dbeaf6beea25e6::t_82e6426a8ec5aa 145
+  s_dbeaf6beea25e6::t_227124eee42cfd 292-298
+apps/web/vite.config.ts
+  s_dbeaf6beea25e6::t_9ad01d2ce1eedc 1-5,14
+  s_dbeaf6beea25e6::t_ff41006ce023c6 6-8
+  s_dbeaf6beea25e6::t_3529cbdd95bcea 9-13
+packages/connections/src/testing.ts
+  s_dbeaf6beea25e6::t_228d4419ef872f 102
+  s_dbeaf6beea25e6::t_9200ac1d24260f 1-5,7,9-25,36-56,84-101,103-160,162-186
+  s_dbeaf6beea25e6::t_19803653bfdbbe 6,8,26-35,57-83,161
+packages/cli/package.json
+  s_dbeaf6beea25e6::t_bd9aed47d6dc48 1-17
+packages/client-access/tsconfig.json
+  s_dbeaf6beea25e6::t_9f3aa998d56a3a 1-10
+packages/identity/src/index.ts
+  s_dbeaf6beea25e6::t_431ef0d21c47f2 1-9,15-21
+  s_dbeaf6beea25e6::t_7cf20b0dded767 14
+  s_dbeaf6beea25e6::t_3c9c691e7ba784 10-13
+apps/web/src/routes/app/+page.svelte
+  s_dbeaf6beea25e6::t_7c1d3b3a57f9a4 1-2,4-54,58-59,66-137,177-195,203-214,217-297,319-387,389-447
+  s_dbeaf6beea25e6::t_611a128544ffdb 216
+  s_dbeaf6beea25e6::t_483cf6c20473e5 215
+  s_dbeaf6beea25e6::t_b235ce3319d510 3,55-57,60-65,138-176,196-202,298-313,317-318
+  s_dbeaf6beea25e6::t_bf72c6e6640406 388
+  s_dbeaf6beea25e6::t_8e286283b74805 314-316
+packages/cli/src/bin.ts
+  s_dbeaf6beea25e6::t_3b25f9ef0899d2 43-51
+  s_dbeaf6beea25e6::t_f56124cb44075e 89-90
+  s_dbeaf6beea25e6::t_bd9aed47d6dc48 1-42,52-69,76-88,91-160
+  s_dbeaf6beea25e6::t_7919600b3aec6d 70-75
+packages/data/src/index.ts
+  s_dbeaf6beea25e6::t_45bc24c0abaeac 1-15
+packages/execution/tsconfig.json
+  s_dbeaf6beea25e6::t_96de68537c36ea 1-10
+packages/cli/tsconfig.json
+  s_dbeaf6beea25e6::t_bd9aed47d6dc48 1-9
+packages/client-access/src/client-access.ts
+  s_dbeaf6beea25e6::t_3978301a094832 47-65,86,131-142,267-289,291
+  s_dbeaf6beea25e6::t_9f3aa998d56a3a 3-46,66-85,88-129,149,151-153,155-161,165-171,173-178,180-198,202-208,210-224,228-231,233-240,243-259,261-266,294-296,299-302,305-307
+  s_dbeaf6beea25e6::t_950bd2f361bfa9 87,290,292-293
+  s_dbeaf6beea25e6::t_8ed4611675d9d0 1-2,130,143-148,201
+  s_dbeaf6beea25e6::t_7299e2e194c1db 150,154,162-164,172,179,199-200,209,225-227,232,241-242,260,297-298,303-304
+packages/connections/src/index.ts
+  s_dbeaf6beea25e6::t_2c17f7b7547f2d 7,9
+  s_dbeaf6beea25e6::t_4c992052c12441 19-26
+  s_dbeaf6beea25e6::t_e924ca1b55f8db 1-6,8,10-18
+packages/mcp/src/server.test.ts
+  s_dbeaf6beea25e6::t_aa8606b91162b5 99
+  s_dbeaf6beea25e6::t_6ae1c40b5553f8 9-13,54,149
+  s_dbeaf6beea25e6::t_261376d0e8f50c 1-2,4-8,14-53,55-98,100-148,150-183,218-219
+  s_dbeaf6beea25e6::t_c05d30a5a46fb1 3,184-217
+apps/web/src/lib/oauth-connection.ts
+  s_dbeaf6beea25e6::t_ecf9309cfd5fb5 1-64
+packages/connections/migrations/0006_connection_bindings.sql
+  s_dbeaf6beea25e6::t_9200ac1d24260f 1-40
+packages/connections/src/connections.test.ts
+  s_dbeaf6beea25e6::t_c759d84fb60c9b 1-174,176-180
+  s_dbeaf6beea25e6::t_228d4419ef872f 175
+packages/identity/migrations/0003_workspace_invitations.sql
+  s_dbeaf6beea25e6::t_3c9c691e7ba784 1-20
+packages/tools/src/plugfn.local.integration.test.ts
+  s_dbeaf6beea25e6::t_bb4b9aaa1db46a 1-2,4-23,41-43
+  s_dbeaf6beea25e6::t_5a3571891657b9 3,24-40
+packages/plugfn-runtime/src/index.ts
+  s_dbeaf6beea25e6::t_253549f341fe3a 1-78,103-119
+  s_dbeaf6beea25e6::t_6d9a20989192ab 79-102
+packages/mcp/src/bin.ts
+  s_dbeaf6beea25e6::t_bd9aed47d6dc48 1-23
+apps/web/src/lib/server/mcp-oauth-csrf.test.ts
+  s_dbeaf6beea25e6::t_016fb313089b42 1-19
+packages/plugfn-runtime/package.json
+  s_dbeaf6beea25e6::t_253549f341fe3a 1-21,24-28
+  s_dbeaf6beea25e6::t_a8141e5fdf09f5 22
+  s_dbeaf6beea25e6::t_527468b8c08647 23
+apps/web/src/routes/+page.svelte
+  s_dbeaf6beea25e6::t_53f4c8e8e4b264 5,13-14
+  s_dbeaf6beea25e6::t_9ad01d2ce1eedc 1-4,6-12,15,21-66,68-74,78-83
+  s_dbeaf6beea25e6::t_43073130a7a48a 16-20,67,75-77
+apps/web/src/routes/mcp/+server.ts
+  s_dbeaf6beea25e6::t_d88eeb888d5f38 4,10-11,13-16
+  s_dbeaf6beea25e6::t_f71070bf3b0afd 1-3,5
+  s_dbeaf6beea25e6::t_a4bff14b0499f4 6-9,12
+packages/data/src/runtime.test.ts
+  s_dbeaf6beea25e6::t_54d87be42a9778 84,86
+  s_dbeaf6beea25e6::t_45bc24c0abaeac 1-83,85,87-133
+packages/testing/package.json
+  s_dbeaf6beea25e6::t_d3a7cdb0a51dde 1,3-17
+  s_dbeaf6beea25e6::t_f0950e0a2dc2bf 2
+packages/identity/src/workspaces.ts
+  s_dbeaf6beea25e6::t_9c6efd2db2a284 31-58,65-66,84-99,119-126,129-139,220-285
+  s_dbeaf6beea25e6::t_431ef0d21c47f2 1-25,59-63,67-83,100-118,127-128,140-214,286-287
+  s_dbeaf6beea25e6::t_7cf20b0dded767 26-30,64,215-219
+packages/client/src/index.ts
+  s_dbeaf6beea25e6::t_f56124cb44075e 15
+  s_dbeaf6beea25e6::t_4ca2bf514f486e 29,37
+  s_dbeaf6beea25e6::t_bd9aed47d6dc48 1-14,16-28,30-36,38-211
+packages/identity/src/postgres-store.ts
+  s_dbeaf6beea25e6::t_2965c3d931832a 1-3,8-12,17-22,38-41,49-53,65,72-110,242-294
+  s_dbeaf6beea25e6::t_3c9c691e7ba784 4-6,13-16,23-37,54-64,66-71,134-241
+  s_dbeaf6beea25e6::t_7cf20b0dded767 7,42-48,111-133
+apps/web/src/lib/server/mcp-oauth.ts
+  s_dbeaf6beea25e6::t_87c7761304d0b7 3,81,288
+  s_dbeaf6beea25e6::t_32f820c66d74a0 8,14-18,97-98,166,180,292,295-296
+  s_dbeaf6beea25e6::t_0cea683db41d38 5-6
+  s_dbeaf6beea25e6::t_d88eeb888d5f38 1,4,7,9-13,21-27,31-36,45-46,54,56,58-59,62-80,82,86-95,99-125,127-129,131-138,145-152,154-165,167-172,195,205,209-210,271-272,278,280-287,289-291,294,297-304,306,308-313,315-334
+  s_dbeaf6beea25e6::t_758f58034b6814 20,96,173,181-183,185-194,198,202,242-248,250-251,264-265,268,270,273-277
+  s_dbeaf6beea25e6::t_1043654f3dc2a5 153,184,196,206-208
+  s_dbeaf6beea25e6::t_39008bbab0a18e 2,293,305
+  s_dbeaf6beea25e6::t_bc07bc889c7f72 314
+  s_dbeaf6beea25e6::t_1184e9ecceb709 19,28-30,37-44,47-53,55,57,60-61,83-85,126,130,139-144,174-179,197,199-201,203-204,211-241,249,252-263,266-267,269,279,307
+apps/web/src/routes/app/clients/+page.svelte
+  s_dbeaf6beea25e6::t_483cf6c20473e5 1-148
+packages/testing/src/index.ts
+  s_dbeaf6beea25e6::t_d3a7cdb0a51dde 1
+scripts/superfunctions.mjs
+  s_dbeaf6beea25e6::t_d3a7cdb0a51dde 1-100,105-164,191-203,207-209
+  s_dbeaf6beea25e6::t_f1a5087ed8a045 175,177-181,188
+  s_dbeaf6beea25e6::t_fe4bcdbc945d16 165-174,176,182-187,189-190,204-206
+  s_dbeaf6beea25e6::t_27a6541b0e3e9e 101-104
+apps/web/src/lib/server/router.ts
+  s_dbeaf6beea25e6::t_0a26669ca98240 4,121-122,230-235,282-284,393-412
+  s_dbeaf6beea25e6::t_81d266265db83e 6,8,100,107,276-278,280-281,285,570,587
+  s_dbeaf6beea25e6::t_13fe160e6aab07 2-3,5,7,9-15,24-26,41-54,125-128,130-132,137-163,181-187,236-237,242-243,248-250,253-262,287,333,337-343,350-369,371-374,414-420,424-451,506-507,606-610
+  s_dbeaf6beea25e6::t_9465a9d2764ad5 31,87-97,203-208,210,245,289,293,306,533-558,593-594
+  s_dbeaf6beea25e6::t_e23e010da85615 33
+  s_dbeaf6beea25e6::t_3a6d02f88259f2 17-23,55-86,164-180,188-202,209,244,251,275,279,286,288,325-332,334-336,344-349,452-505,508-532
+  s_dbeaf6beea25e6::t_7e4ffcae2d8ef8 129
+  s_dbeaf6beea25e6::t_be665648852a20 1,252
+  s_dbeaf6beea25e6::t_d78c6ec3ec04ac 133-136,269-271
+  s_dbeaf6beea25e6::t_3376470e689ca1 16,370
+  s_dbeaf6beea25e6::t_bcbd6a86b6762f 27-30,116-120,223-228,238-241,247,263-268,272-274,375-392,413
+  s_dbeaf6beea25e6::t_2466cc1b6cb661 32,34-40,98-99,101-105,123-124,211-213,217,229,246,290-292,294-305,307-320,324,559-569,571-575
+  s_dbeaf6beea25e6::t_713da5bfcaf623 106,108-115,214-216,218-222,321-323,576-586,588-592,595-605
+  s_dbeaf6beea25e6::t_7919600b3aec6d 421-423
+apps/web/worker-configuration.d.ts
+  s_dbeaf6beea25e6::t_6ae911acdc5041 1,3,10-11,15-17,23
+  s_dbeaf6beea25e6::t_54d8f77953a325 12-14
+  s_dbeaf6beea25e6::t_00e48fc5ffc1ba 2,4-6,22
+  s_dbeaf6beea25e6::t_43a0dff5aa87e2 7-9,18-21
+.env.example
+  s_dbeaf6beea25e6::t_e52da2f1b27ab0 10
+  s_dbeaf6beea25e6::t_f86e00cbcc22cc 1-5
+  s_dbeaf6beea25e6::t_dfe376bf98e9a5 6-8
+  s_dbeaf6beea25e6::t_cd8428b6c83b6b 9,11-27
+apps/web/src/routes/oauth/[...path]/+server.ts
+  s_dbeaf6beea25e6::t_d88eeb888d5f38 1-5
+packages/tools/src/index.ts
+  s_dbeaf6beea25e6::t_bb4b9aaa1db46a 13-14
+  s_dbeaf6beea25e6::t_da32653219d844 1-12
+README.md
+  s_dbeaf6beea25e6::t_fdff45670ac31c 119-130
+  s_dbeaf6beea25e6::t_3376470e689ca1 36-37,52,59
+  s_dbeaf6beea25e6::t_6391dade374146 47,79-86
+  s_dbeaf6beea25e6::t_56f0ce2aaa9486 46,48
+  s_dbeaf6beea25e6::t_611a128544ffdb 131-135
+  s_dbeaf6beea25e6::t_ed16656ec90766 71-74
+  s_dbeaf6beea25e6::t_fdcaa69eb02a51 27-34,49,53-58,62-66
+  s_dbeaf6beea25e6::t_d3a7cdb0a51dde 1-2,4-20,22-24,26
+  s_dbeaf6beea25e6::t_8611f3fdeb36b5 42-43,50-51,61,68-70,90-93,95-97
+  s_dbeaf6beea25e6::t_bd1850185fe6b8 44-45,104-114
+  s_dbeaf6beea25e6::t_ccf5075a94bbe8 115-118,136
+  s_dbeaf6beea25e6::t_fe4bcdbc945d16 21
+  s_dbeaf6beea25e6::t_53f4c8e8e4b264 3,25
+  s_dbeaf6beea25e6::t_dc8a8559ae64bb 35
+  s_dbeaf6beea25e6::t_2ca435119e23f5 94,98-99
+  s_dbeaf6beea25e6::t_00a7c975798c36 137-138
+  s_dbeaf6beea25e6::t_c366b030b1c615 87-89
+  s_dbeaf6beea25e6::t_dfe376bf98e9a5 38-41,60,75-78
+  s_dbeaf6beea25e6::t_e77cf48a30635d 100-103
+  s_dbeaf6beea25e6::t_f86e00cbcc22cc 67
+apps/web/src/routes/device/+page.svelte
+  s_dbeaf6beea25e6::t_43073130a7a48a 2-8,11-13,18-19,21-41,76,78-80,82-86,96-101,107,141,147,157,159-161
+  s_dbeaf6beea25e6::t_8611f3fdeb36b5 1,9-10,15-17,42-75,77,87-95,102-106,108-140,142-146,148-156,158,162
+  s_dbeaf6beea25e6::t_6dec06237929f6 14,20,81
+packages/client-access/migrations/0011_oauth_mcp_grants.sql
+  s_dbeaf6beea25e6::t_98bb126633ab9a 1-20
+packages/client-access/src/testing.ts
+  s_dbeaf6beea25e6::t_227124eee42cfd 136,140
+  s_dbeaf6beea25e6::t_b842eabd08419f 11-12,27,77-107
+  s_dbeaf6beea25e6::t_f0950e0a2dc2bf 1
+  s_dbeaf6beea25e6::t_1fe6491a8b3924 16-22,142-239
+  s_dbeaf6beea25e6::t_9f3aa998d56a3a 2-10,13-15,23-26,28-76,108-135,137-139,141,240-241
+packages/client-access/src/device-postgres.integration.test.ts
+  s_dbeaf6beea25e6::t_4a99cce0ad0394 1-107,124
+  s_dbeaf6beea25e6::t_8151c803d9f9bb 108-123
+apps/web/src/lib/server/mcp-oauth-grants.ts
+  s_dbeaf6beea25e6::t_46fafd5746a395 6-7
+  s_dbeaf6beea25e6::t_2054ac9d6fef6d 5,8-18
+  s_dbeaf6beea25e6::t_016fb313089b42 2-4,19
+  s_dbeaf6beea25e6::t_48e574c42cc0de 1
+apps/web/src/lib/server/cloudflare-runtime.test.ts
+  s_dbeaf6beea25e6::t_5783ba305456c2 1-25
+packages/data/tsconfig.json
+  s_dbeaf6beea25e6::t_45bc24c0abaeac 1-7,10
+  s_dbeaf6beea25e6::t_4f59021855e4ce 8-9
+packages/client-access/src/postgres.ts
+  s_dbeaf6beea25e6::t_330d06ec1436a4 4-8,20-24,38-61,70
+  s_dbeaf6beea25e6::t_98bb126633ab9a 10,16,37,69
+  s_dbeaf6beea25e6::t_1a0bdb78ae203c 1-3,9,11-15,17-19,25-36,62-68
+packages/execution/src/execution.test.ts
+  s_dbeaf6beea25e6::t_b523343f8060f7 9,15,47,50,53-60,183-242
+  s_dbeaf6beea25e6::t_85f9cfc09c4b2e 244-281
+  s_dbeaf6beea25e6::t_bc639d6423bcef 21
+  s_dbeaf6beea25e6::t_286e8bd16cfc4e 1-8,10-14,16-20,22-46,48-49,51-52,61-182,243,282
+packages/tools/src/plugfn.ts
+  s_dbeaf6beea25e6::t_bb4b9aaa1db46a 1-6,8-10
+  s_dbeaf6beea25e6::t_bdfff33fb89d77 7
+packages/client-access/src/postgres.integration.test.ts
+  s_dbeaf6beea25e6::t_dfc5530459bb2c 118-157,162-168
+  s_dbeaf6beea25e6::t_8a237b8208b201 74-97,158-161,196-198,200
+  s_dbeaf6beea25e6::t_4c537d16ffbdc0 38-44
+  s_dbeaf6beea25e6::t_3ba0afc6f44d8c 98-117
+  s_dbeaf6beea25e6::t_82e6426a8ec5aa 1-37,45-73,169-195,199,201-202
+packages/execution/src/postgres-approval-store.ts
+  s_dbeaf6beea25e6::t_b27a9c0f85ea4a 1-144,161-209
+  s_dbeaf6beea25e6::t_49c8abeb149434 145-160
+packages/identity/package.json
+  s_dbeaf6beea25e6::t_f0950e0a2dc2bf 2,26
+  s_dbeaf6beea25e6::t_431ef0d21c47f2 1,3-25,27-33
+packages/client-access/src/oauth-postgres-store.ts
+  s_dbeaf6beea25e6::t_1043654f3dc2a5 127,133
+  s_dbeaf6beea25e6::t_98bb126633ab9a 1-58,60-126,128-132,134-146
+  s_dbeaf6beea25e6::t_2054ac9d6fef6d 59
+packages/client/tsconfig.json
+  s_dbeaf6beea25e6::t_bd9aed47d6dc48 1-10
+tests/acceptance/phase-00.test.ts
+  s_dbeaf6beea25e6::t_f1a5087ed8a045 60-68
+  s_dbeaf6beea25e6::t_d3a7cdb0a51dde 1-59
+packages/execution/src/index.ts
+  s_dbeaf6beea25e6::t_96de68537c36ea 1,3-9,13-18
+  s_dbeaf6beea25e6::t_fbaeec1aa18c5c 2,10-12
+apps/web/src/lib/server/auth-router.test.ts
+  s_dbeaf6beea25e6::t_eb881758c2a0ad 1-20
+packages/execution/migrations/0008_execution_approvals.sql
+  s_dbeaf6beea25e6::t_b27a9c0f85ea4a 1-25
+packages/connections/tsconfig.json
+  s_dbeaf6beea25e6::t_e924ca1b55f8db 1-10
+packages/connections/src/connections.ts
+  s_dbeaf6beea25e6::t_b45b2903704b35 48,52-62,64,66-67,151-159,209-214,217-222,270-274,277-280
+  s_dbeaf6beea25e6::t_e924ca1b55f8db 1-47,49-51,63,65,68-150,160-208,215-216,223-269,275-276,281-295
+apps/web/src/routes/.well-known/[...path]/+server.ts
+  s_dbeaf6beea25e6::t_d88eeb888d5f38 1-4
+apps/web/wrangler.jsonc
+  s_dbeaf6beea25e6::t_43238d6fa12122 5-8
+  s_dbeaf6beea25e6::t_9ad01d2ce1eedc 1-4,9-10,18-27,56-57
+  s_dbeaf6beea25e6::t_bc07bc889c7f72 32
+  s_dbeaf6beea25e6::t_0c6bba50f84ca6 33-41
+  s_dbeaf6beea25e6::t_cd8428b6c83b6b 11-17
+  s_dbeaf6beea25e6::t_56d26c2e9fc66c 28-31,42-46,55
+  s_dbeaf6beea25e6::t_69956a7d1d5b43 47-54
+packages/execution/src/testing.ts
+  s_dbeaf6beea25e6::t_fbaeec1aa18c5c 3-9,65-141,156-168
+  s_dbeaf6beea25e6::t_96de68537c36ea 1-2,10-46,61-64,169-170
+  s_dbeaf6beea25e6::t_49c8abeb149434 47-60,142-155
+packages/identity/src/testing.ts
+  s_dbeaf6beea25e6::t_431ef0d21c47f2 1,6-9,14-17,19-56,118-125
+  s_dbeaf6beea25e6::t_3c9c691e7ba784 2-4,10-13,18,64-117
+  s_dbeaf6beea25e6::t_7cf20b0dded767 5,57-63
+docs/decisions/dependencies.md
+  s_dbeaf6beea25e6::t_53f4c8e8e4b264 7,12
+  s_dbeaf6beea25e6::t_f1a5087ed8a045 26
+  s_dbeaf6beea25e6::t_fe4bcdbc945d16 21
+  s_dbeaf6beea25e6::t_d3a7cdb0a51dde 1-6,8-11,13-20,22-25
+packages/client-access/src/device-login.ts
+  s_dbeaf6beea25e6::t_f56124cb44075e 216,248-249,254
+  s_dbeaf6beea25e6::t_7919600b3aec6d 14,221-222
+  s_dbeaf6beea25e6::t_19e09b632da96b 1-13,15-128,133-134,143-196,203-215,217-220,223-247,250-253,255-343
+  s_dbeaf6beea25e6::t_c69962b8991ddd 129,135-137,141-142
+  s_dbeaf6beea25e6::t_e9201eb18ecfb8 130-132,138-140
+  s_dbeaf6beea25e6::t_0dbf2690df205f 197-202
+packages/connections/src/plugfn.ts
+  s_dbeaf6beea25e6::t_c366b030b1c615 212-214
+  s_dbeaf6beea25e6::t_7e31d0929e26a6 48-50,187-190
+  s_dbeaf6beea25e6::t_4c992052c12441 1-47,51-186,191-211,215-221,223-404
+  s_dbeaf6beea25e6::t_0dbf0547986555 222
+packages/tools/package.json
+  s_dbeaf6beea25e6::t_0bbf5639c70f40 19
+  s_dbeaf6beea25e6::t_bb4b9aaa1db46a 16-17
+  s_dbeaf6beea25e6::t_da32653219d844 1-15,20-21
+  s_dbeaf6beea25e6::t_b9853cf81f2503 18
+.gitignore
+  s_dbeaf6beea25e6::t_d3a7cdb0a51dde 1-13
+turbo.json
+  s_dbeaf6beea25e6::t_d3a7cdb0a51dde 1-17
+apps/web/src/routes/api/[...path]/+server.ts
+  s_dbeaf6beea25e6::t_81b963c207c0fb 2,6-12,14-15
+  s_dbeaf6beea25e6::t_84b02267fb7f21 13
+  s_dbeaf6beea25e6::t_9ad01d2ce1eedc 1,4
+  s_dbeaf6beea25e6::t_7e4ffcae2d8ef8 3,5,16
+packages/data/package.json
+  s_dbeaf6beea25e6::t_45bc24c0abaeac 1,3-28
+  s_dbeaf6beea25e6::t_f0950e0a2dc2bf 2
+packages/data/src/postgres.ts
+  s_dbeaf6beea25e6::t_45bc24c0abaeac 1-75
+packages/connections/src/plugfn.local.integration.test.ts
+  s_dbeaf6beea25e6::t_8a1c73b9cab22f 2,4-11,14,19,99-141
+  s_dbeaf6beea25e6::t_ee3e1f6c0bb5ce 1,3,13,15-18,21-39,46-53,55-65,67-98
+  s_dbeaf6beea25e6::t_c366b030b1c615 20,66
+  s_dbeaf6beea25e6::t_bae36d15911a9d 12,40-45,54
+packages/execution/src/postgres-store.ts
+  s_dbeaf6beea25e6::t_bc074a687c470b 1-103,120-164
+  s_dbeaf6beea25e6::t_49c8abeb149434 104-119
+apps/web/svelte.config.js
+  s_dbeaf6beea25e6::t_9ad01d2ce1eedc 1-6,11-14
+  s_dbeaf6beea25e6::t_8630eab53bfee3 7-10
+packages/testing/tsconfig.json
+  s_dbeaf6beea25e6::t_d3a7cdb0a51dde 1-9
+apps/web/src/lib/server/mcp-oauth-policy.ts
+  s_dbeaf6beea25e6::t_32f820c66d74a0 1-35
+packages/data/src/runtime.ts
+  s_dbeaf6beea25e6::t_45bc24c0abaeac 1-74
+packages/connections/package.json
+  s_dbeaf6beea25e6::t_e924ca1b55f8db 1-26,28-32
+  s_dbeaf6beea25e6::t_49e933d75a3071 27
+apps/web/src/routes/app/oauth/callback/+page.svelte
+  s_dbeaf6beea25e6::t_192de94dfef7a6 1-78
+packages/tools/tsconfig.json
+  s_dbeaf6beea25e6::t_da32653219d844 1-10
+apps/web/src/lib/oauth-connection.test.ts
+  s_dbeaf6beea25e6::t_ecf9309cfd5fb5 1-46
+packages/client-access/src/device-login.test.ts
+  s_dbeaf6beea25e6::t_4a99cce0ad0394 1-52,56-110,130-158,173
+  s_dbeaf6beea25e6::t_0dbf2690df205f 159-172
+  s_dbeaf6beea25e6::t_8151c803d9f9bb 111-129
+  s_dbeaf6beea25e6::t_f56124cb44075e 53-55
+packages/client-access/migrations/0004_client_access.sql
+  s_dbeaf6beea25e6::t_dc71444608da41 26-27
+  s_dbeaf6beea25e6::t_9f3aa998d56a3a 1-8,11-17,19-25,29-34
+  s_dbeaf6beea25e6::t_9f36d138941d8b 9-10,18,28
+packages/execution/src/postgres.integration.test.ts
+  s_dbeaf6beea25e6::t_17d7f0923c95b8 1-4,6-81,97-107,180-184
+  s_dbeaf6beea25e6::t_83e1e064900407 5,108-137,148-179
+  s_dbeaf6beea25e6::t_64fa265a39f2b7 82-96,138-147
+packages/client/package.json
+  s_dbeaf6beea25e6::t_bd9aed47d6dc48 1-21
+packages/connections/src/postgres.ts
+  s_dbeaf6beea25e6::t_6c75a17130e131 1-30
+packages/data/src/schema.ts
+  s_dbeaf6beea25e6::t_45bc24c0abaeac 1-34
+apps/web/package.json
+  s_dbeaf6beea25e6::t_9ad01d2ce1eedc 1,3-5,18-24
+  s_dbeaf6beea25e6::t_de856805dd5429 7
+  s_dbeaf6beea25e6::t_3376470e689ca1 10
+  s_dbeaf6beea25e6::t_7919600b3aec6d 14
+  s_dbeaf6beea25e6::t_2466cc1b6cb661 12
+  s_dbeaf6beea25e6::t_f0950e0a2dc2bf 2,9,11
+  s_dbeaf6beea25e6::t_483e86c02bcaa3 8
+  s_dbeaf6beea25e6::t_f63061bff2fc2a 13,16
+  s_dbeaf6beea25e6::t_4483bbd030e424 6,17
+  s_dbeaf6beea25e6::t_81b963c207c0fb 15
+packages/plugfn-runtime/migrations/0009_plugfn_runtime.sql
+  s_dbeaf6beea25e6::t_253549f341fe3a 1-29
+packages/mcp/package.json
+  s_dbeaf6beea25e6::t_bd9aed47d6dc48 1-5,12-22,26-27
+  s_dbeaf6beea25e6::t_e3cbe762f8d998 6-11
+  s_dbeaf6beea25e6::t_261376d0e8f50c 23-25
+packages/execution/package.json
+  s_dbeaf6beea25e6::t_96de68537c36ea 1-18,23-27,33-34
+  s_dbeaf6beea25e6::t_bc074a687c470b 19-22,28-32
+packages/identity/src/postgres.ts
+  s_dbeaf6beea25e6::t_2965c3d931832a 1-62
+packages/client-access/package.json
+  s_dbeaf6beea25e6::t_9f3aa998d56a3a 1,3-25,27-32
+  s_dbeaf6beea25e6::t_f0950e0a2dc2bf 2,26
+packages/connections/src/postgres-store.ts
+  s_dbeaf6beea25e6::t_84c35d7b5a2179 6,8,84-90,136-156,251,253,255,300-309
+  s_dbeaf6beea25e6::t_6c75a17130e131 1-5,7,9-83,91-135,157-250,252,254,256-299,310-311
+packages/client-access/src/client-access.test.ts
+  s_dbeaf6beea25e6::t_227124eee42cfd 219-234
+  s_dbeaf6beea25e6::t_4856a4548928fe 105-166
+  s_dbeaf6beea25e6::t_f0950e0a2dc2bf 2-3
+  s_dbeaf6beea25e6::t_82e6426a8ec5aa 1,4-104,167-218,235
+packages/identity/src/postgres.integration.test.ts
+  s_dbeaf6beea25e6::t_021836cf4819b7 118-121,124,126-128,130-137,139-143,145-149,151-167,169-173
+  s_dbeaf6beea25e6::t_64fa265a39f2b7 77-82
+  s_dbeaf6beea25e6::t_c4ba5e3a863568 1-17,37-76,83-117,174
+  s_dbeaf6beea25e6::t_29c8896a14e172 18-36,122-123,125,129,138,144,150,168
+packages/client-access/src/index.ts
+  s_dbeaf6beea25e6::t_9f3aa998d56a3a 1-2,4-13,16-20
+  s_dbeaf6beea25e6::t_3978301a094832 14-15
+  s_dbeaf6beea25e6::t_330d06ec1436a4 3,21-32
+packages/connections/src/plugfn.test.ts
+  s_dbeaf6beea25e6::t_346b8ab7e551dc 1-129,146-258
+  s_dbeaf6beea25e6::t_c366b030b1c615 130,142
+  s_dbeaf6beea25e6::t_0dbf0547986555 131-141,143-145
+apps/web/src/lib/server/router.test.ts
+  s_dbeaf6beea25e6::t_9ad01d2ce1eedc 1-2,5,16-32,440
+  s_dbeaf6beea25e6::t_4483bbd030e424 33,35-41,44,233,439
+  s_dbeaf6beea25e6::t_fdcaa69eb02a51 34,42
+  s_dbeaf6beea25e6::t_f19826a5375058 13,307-344,438
+  s_dbeaf6beea25e6::t_5df8893268a539 10,114-127,136-153,165-169,173-175
+  s_dbeaf6beea25e6::t_643bb012dbdf08 15,45,47-85,97-106,108-111,113,178,197-232,234-235
+  s_dbeaf6beea25e6::t_3376470e689ca1 43
+  s_dbeaf6beea25e6::t_97385495976dc1 46
+  s_dbeaf6beea25e6::t_d00ca82829c1bb 3,128-135,154-164,170-172,176-177,179-196
+  s_dbeaf6beea25e6::t_8151c803d9f9bb 86-96,107,112
+  s_dbeaf6beea25e6::t_ca7fbececa713a 4,12,345-367,380-387,389-397,426-431
+  s_dbeaf6beea25e6::t_a66e9ac6e78e7f 368-379,398-402,408-425,432-437
+  s_dbeaf6beea25e6::t_2ca435119e23f5 388,403-407
+  s_dbeaf6beea25e6::t_c2ab8469ad47e3 6-9,11,14,236-306
+packages/data/migrations/0001_data_isolation.sql
+  s_dbeaf6beea25e6::t_54d87be42a9778 25
+  s_dbeaf6beea25e6::t_45bc24c0abaeac 1-24,26-54
+packages/client-access/src/device-postgres-store.ts
+  s_dbeaf6beea25e6::t_1b64134c2f013a 1-227
+apps/web/src/lib/server/cloudflare-runtime.ts
+  s_dbeaf6beea25e6::t_84b02267fb7f21 19,23,40,165-170,242,315,320,325,334,339,415,420,427-462,470-504,506-508,536
+  s_dbeaf6beea25e6::t_eade0b2330098e 27
+  s_dbeaf6beea25e6::t_152e06e8684c4c 243-249,251,271,463-469
+  s_dbeaf6beea25e6::t_eb881758c2a0ad 28,43,45-53,55-57,218-219
+  s_dbeaf6beea25e6::t_bae36d15911a9d 135
+  s_dbeaf6beea25e6::t_f20d8757b08803 510-533
+  s_dbeaf6beea25e6::t_7e4ffcae2d8ef8 1,11,15-17,20,24-25,29,41-42,44,54,64-65,67-87,198,211-217,220-241,250,252-270,272,405,534,537
+  s_dbeaf6beea25e6::t_81b963c207c0fb 2-10,12,14,18,21-22,26,30-39,58-63,66,88-124,130-134,136-137,142-164,171-197,199-210,273-314,316-319,321-324,326-333,335-338,340-399,406-407,413-414,416-419,421-426,509,535
+  s_dbeaf6beea25e6::t_c77d8e88a3c88f 13,400-404,408-412
+  s_dbeaf6beea25e6::t_5783ba305456c2 125-129,138-141
+  s_dbeaf6beea25e6::t_b48a2da09e47b0 505
+apps/web/src/lib/server/mcp-oauth-grants.test.ts
+  s_dbeaf6beea25e6::t_46fafd5746a395 11-14
+  s_dbeaf6beea25e6::t_021580b0159636 1-10,15-29
+packages/execution/src/execution.ts
+  s_dbeaf6beea25e6::t_49c8abeb149434 42-46,89-93
+  s_dbeaf6beea25e6::t_96de68537c36ea 1-41,47-48,96-155,164-175,177-202,254-255,336-343,349-370,372,374-380,382-400,406,413-454
+  s_dbeaf6beea25e6::t_a2f99cd43c0345 49-88,94-95,156-163,176,203-253,256-292,301,304-310,312-335,344-348,371,373,381,401-405,407-412
+  s_dbeaf6beea25e6::t_81d266265db83e 293-300,302-303,311
+package.json
+  s_dbeaf6beea25e6::t_d3a7cdb0a51dde 1-11,13,16-19,22-26,31,36,39-40,44-45
+  s_dbeaf6beea25e6::t_9ad01d2ce1eedc 32-34,37-38
+  s_dbeaf6beea25e6::t_ced457a05a1618 14-15
+  s_dbeaf6beea25e6::t_43238d6fa12122 42-43
+  s_dbeaf6beea25e6::t_9f36d138941d8b 27,30
+  s_dbeaf6beea25e6::t_e6e34b1c29102f 28-29
+  s_dbeaf6beea25e6::t_fe4bcdbc945d16 20-21
+  s_dbeaf6beea25e6::t_f0950e0a2dc2bf 12
+  s_dbeaf6beea25e6::t_4a88d9d5d1c103 41
+  s_dbeaf6beea25e6::t_70c2127902b2b3 35
+packages/identity/src/runtime.ts
+  s_dbeaf6beea25e6::t_431ef0d21c47f2 1-88
+apps/web/src/lib/server/mcp-oauth-policy.test.ts
+  s_dbeaf6beea25e6::t_32f820c66d74a0 1-32
+packages/identity/src/auth-schema.ts
+  s_dbeaf6beea25e6::t_2965c3d931832a 1-60
+packages/mcp/src/server.ts
+  s_dbeaf6beea25e6::t_de856805dd5429 3,6,54,157-158,166
+  s_dbeaf6beea25e6::t_4ca2bf514f486e 12-14,19-46,64-67,85,88,92-97,100-155,163
+  s_dbeaf6beea25e6::t_7919600b3aec6d 165
+  s_dbeaf6beea25e6::t_1027d1292ba603 10,91
+  s_dbeaf6beea25e6::t_bd9aed47d6dc48 1-2,4-5,7-9,11,15-18,47-53,55-63,68-84,86-87,89-90,98-99,156,159-162,164,167-168
+packages/identity/migrations/0002_identity.sql
+  s_dbeaf6beea25e6::t_2965c3d931832a 1-46
+packages/testing/src/scenarios.ts
+  s_dbeaf6beea25e6::t_27a6541b0e3e9e 5
+  s_dbeaf6beea25e6::t_d3a7cdb0a51dde 1-4,6-8
+apps/web/src/app.d.ts
+  s_dbeaf6beea25e6::t_cd8428b6c83b6b 6,8-9
+  s_dbeaf6beea25e6::t_eade0b2330098e 7
+  s_dbeaf6beea25e6::t_c8c9c6d36ff4dd 1-5,10-16
+packages/plugfn-runtime/tsconfig.json
+  s_dbeaf6beea25e6::t_253549f341fe3a 1-10
+packages/execution/migrations/0007_execution_receipts.sql
+  s_dbeaf6beea25e6::t_bc074a687c470b 1-30
+packages/plugfn-runtime/src/postgres.ts
+  s_dbeaf6beea25e6::t_253549f341fe3a 1-25,32-104,106-116,118-123,126-264,266,268-463
+  s_dbeaf6beea25e6::t_46a7d9aef09782 26-31,105,117,124-125,265,267
+apps/web/src/routes/api/auth/[...authPath]/+server.ts
+  s_dbeaf6beea25e6::t_eb881758c2a0ad 1-7
+apps/web/tsconfig.json
+  s_dbeaf6beea25e6::t_9ad01d2ce1eedc 1-4,6-13
+  s_dbeaf6beea25e6::t_6d9a20989192ab 5
+superfunctions.lock.json
+  s_dbeaf6beea25e6::t_431ef0d21c47f2 11
+  s_dbeaf6beea25e6::t_45bc24c0abaeac 14
+  s_dbeaf6beea25e6::t_d3a7cdb0a51dde 1-5,8-10,12-13,15-32,35-37
+  s_dbeaf6beea25e6::t_53f4c8e8e4b264 6-7
+  s_dbeaf6beea25e6::t_f1a5087ed8a045 33-34
+apps/web/src/lib/server/mcp-http.ts
+  s_dbeaf6beea25e6::t_8151c803d9f9bb 153
+  s_dbeaf6beea25e6::t_f71070bf3b0afd 1,4-15,34-150,152,154-173
+  s_dbeaf6beea25e6::t_de856805dd5429 2-3,16-33,151
+apps/web/src/lib/server/mcp-oauth-csrf.ts
+  s_dbeaf6beea25e6::t_016fb313089b42 1-25
+apps/web/src/routes/login/+page.svelte
+  s_dbeaf6beea25e6::t_abb282b1f98a85 1-133
+packages/connections/src/postgres.integration.test.ts
+  s_dbeaf6beea25e6::t_c759d84fb60c9b 1-102
+.nvmrc
+  s_dbeaf6beea25e6::t_d3a7cdb0a51dde 1
+packages/mcp/src/index.ts
+  s_dbeaf6beea25e6::t_bd9aed47d6dc48 1
+package-lock.json
+  s_dbeaf6beea25e6::t_97563a3b4378cc 1-5126
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "256791ebf0e48eb22f61abb8a557f4da7dd4daa2",
+  "prompts": {},
+  "sessions": {
+    "s_dbeaf6beea25e6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c886-73ef-72c2-b7ee-54bc7cc84533",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
