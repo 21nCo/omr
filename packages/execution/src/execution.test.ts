@@ -242,14 +242,21 @@ describe("execution service", () => {
 
   it("keeps missing-remote responses deterministic when recording health fails", async () => {
     for (const phase of ["scope", "action"] as const) {
-      const { actionCall, connections, receipts, service, workspace, setRemoteError } = await fixture();
+      const { actionCall, connections, firstBinding, receipts, service, workspace, setRemoteError } = await fixture();
       const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
-      vi.spyOn(connections, "recordHealth").mockRejectedValue(new Error("health store unavailable"));
+      const recordHealth = vi.spyOn(connections, "recordHealth")
+        .mockRejectedValue(new Error("health store unavailable"));
       const missing = Object.assign(new Error("remote missing"), { code: "CONNECTION_NOT_FOUND" });
       if (phase === "scope") setRemoteError(missing);
       else actionCall.mockRejectedValueOnce(missing);
       await expect(service.execute({ principal, toolId: "linear.get_issue", params: {} }))
         .rejects.toBeInstanceOf(ConnectionUnavailableError);
+      expect(recordHealth).toHaveBeenCalledExactlyOnceWith({
+        connectionId: firstBinding.id,
+        status: "needs_reauth",
+        readiness: "unavailable",
+        reason: "plugfn_connection_missing",
+      });
       expect([...receipts.receipts.values()]).toEqual(phase === "scope" ? [] : [
         expect.objectContaining({ status: "failed", errorCode: "connection_unavailable" }),
       ]);

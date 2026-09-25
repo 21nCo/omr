@@ -19,6 +19,8 @@ The named v1 providers, in stable order, are GitHub, Linear, Slack, and Notion. 
 
 `GET /api/tools?workspaceId=<id>` requires an authenticated actor with `tools:discover` and membership in the requested workspace. It returns `catalogSchemaVersion: "1.0.0"`, `revision`, `tools`, optional `nextCursor`, and `providers` with one status per named provider. `GET /api/tools/manifest?id=<tool-id>&workspaceId=<id>` requires the same scope and returns 404 unless the actor's effective ready connection grants that action's required scopes. The `providers` array is additive to the previous discovery response. The `workspaceId` query parameter is newly required: older raw HTTP clients must supply their active workspace; the shipped CLI and MCP clients now do so. The web control plane reads this same endpoint. CLI `tools list --json` returns the full discovery page; both stdio and Streamable HTTP MCP project its tool manifests and expose their hashes in tool metadata. Pagination cursors bind the catalog revision and the exact usable action ID set; changing grants or readiness invalidates an old cursor.
 
+Cursor filter sets use code point ordering, independent of host locale. Equivalent grants can continue pagination on another instance; changed grants still require a fresh discovery. This changes only cursor encoding for mixed-case filter IDs, so clients should treat a rejected older cursor as a request to restart discovery.
+
 `GET /api/connections/providers/readiness?provider=<id>&workspaceId=<id>` returns a scoped provider status; without `workspaceId` it returns configuration-only state (never claims a ready connection). The five states are:
 
 - `unsupported`: not in v1, missing adapter, or unknown authentication mode. Never connect or execute.

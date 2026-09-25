@@ -84,6 +84,11 @@ const DEFAULT_CONTRACT: ToolContractSource = {
   retry: "never",
 };
 
+// Cursor keys and catalog revisions must have the same order on every host.
+function compareCodePoints(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 export class ToolCatalog {
   private constructor(
     private readonly manifests: ToolManifest[],
@@ -121,7 +126,7 @@ export class ToolCatalog {
         manifests.push({ ...core, hash: await sha256(core) });
       }
     }
-    manifests.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+    manifests.sort((left, right) => compareCodePoints(left.id, right.id));
     const duplicate = manifests.find((manifest, index) => manifests[index - 1]?.id === manifest.id);
     if (duplicate) throw new ToolCatalogInputError(`Duplicate tool id ${duplicate.id}`);
     const revision = await sha256(manifests.map(({ id, hash }) => ({ id, hash })));
@@ -158,10 +163,10 @@ export class ToolCatalog {
     const query = input.query?.trim().toLowerCase();
     const filterKey = canonicalJson({
       query: query ?? null,
-      providers: providers ? [...providers].sort((a, b) => a.localeCompare(b)) : null,
-      effects: effects ? [...effects].sort((a, b) => a.localeCompare(b)) : null,
-      allowedProviders: input.allowedProviders ? [...input.allowedProviders].sort((a, b) => a.localeCompare(b)) : null,
-      allowedToolIds: input.allowedToolIds ? [...input.allowedToolIds].sort((a, b) => a.localeCompare(b)) : null,
+      providers: providers ? [...providers].sort(compareCodePoints) : null,
+      effects: effects ? [...effects].sort(compareCodePoints) : null,
+      allowedProviders: input.allowedProviders ? [...input.allowedProviders].sort(compareCodePoints) : null,
+      allowedToolIds: input.allowedToolIds ? [...input.allowedToolIds].sort(compareCodePoints) : null,
     }, "discovery filter");
     const filtered = this.manifests.filter((manifest) =>
       (!providers || providers.includes(manifest.provider)) &&
@@ -244,7 +249,7 @@ function canonicalJson(value: unknown, label: string, depth = 0): string {
   }
   if (value && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
     return `{${Object.keys(value as Record<string, unknown>)
-      .sort()
+      .sort(compareCodePoints)
       .map((key) => `${JSON.stringify(key)}:${canonicalJson(
         (value as Record<string, unknown>)[key],
         label,

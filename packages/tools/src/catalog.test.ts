@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { ToolCatalog, ToolCatalogInputError, type ToolCatalogSource } from "./catalog.js";
 
@@ -97,6 +97,40 @@ describe("tool catalog", () => {
       .toThrow(/filters or grants changed/);
     expect(catalog.discover({ allowedToolIds: new Set([...all].reverse()), limit: 1 }).nextCursor)
       .toBe(first.nextCursor);
+  });
+
+  it("continues a mixed-case grant cursor across runtime locales and filter insertion orders", async () => {
+    const option = (reverse = false) => ({
+      providers: reverse ? ["linear", "github"] : ["github", "linear"],
+      effects: reverse ? ["write", "read"] as ("read" | "write")[] : ["read", "write"] as ("read" | "write")[],
+      allowedProviders: new Set(reverse ? ["linear", "github"] : ["github", "linear"]),
+      allowedToolIds: new Set(reverse
+        ? ["linear.m", "linear.i", "linear.I"]
+        : ["linear.I", "linear.i", "linear.m"]),
+      limit: 1,
+    });
+    const localeCompare = vi.spyOn(String.prototype, "localeCompare");
+    try {
+      const english = new Intl.Collator("en");
+      localeCompare.mockImplementation(function (other) { return english.compare(String(this), other); });
+      const englishCatalog = await ToolCatalog.create(source(["I", "i", "m"]), jsonSchema);
+      const first = englishCatalog.discover(option());
+      expect(first.tools.map(({ id }) => id)).toEqual(["linear.I"]);
+      const turkish = new Intl.Collator("tr");
+      localeCompare.mockImplementation(function (other) { return turkish.compare(String(this), other); });
+      const turkishCatalog = await ToolCatalog.create(source(["m", "i", "I"]), jsonSchema);
+      expect(turkishCatalog.revision).toBe(englishCatalog.revision);
+      expect(turkishCatalog.list().map(({ id, hash }) => ({ id, hash })))
+        .toEqual(englishCatalog.list().map(({ id, hash }) => ({ id, hash })));
+      expect(turkishCatalog.discover(option(true)).nextCursor).toBe(first.nextCursor);
+      const second = turkishCatalog.discover({ ...option(true), cursor: first.nextCursor });
+      expect(second.tools.map(({ id }) => id)).toEqual(["linear.i"]);
+      expect(() => turkishCatalog.discover({
+        ...option(true), allowedToolIds: new Set(["linear.I", "linear.m"]), cursor: first.nextCursor,
+      })).toThrow(/filters or grants changed/);
+    } finally {
+      localeCompare.mockRestore();
+    }
   });
 
   it("paginates against one catalog revision and rejects stale or malformed cursors", async () => {
