@@ -1,0 +1,33 @@
+apps/web/src/lib/server/cloudflare-runtime.ts
+  s_bf3d04c49b65ff::t_fc31f269eb8b27 7-10,18,402-424,436-439,459-460,486
+packages/tools/src/catalog.test.ts
+  s_6126673cc0a89e::t_769a4bd3859581 87-97
+packages/tools/src/catalog.ts
+  s_bf3d04c49b65ff::t_c6a69e9e6d0ea1 136-139,145,164,170
+tests/acceptance/catalog-parity.test.ts
+  s_bf3d04c49b65ff::t_5e1f5db7dbded4 28,32-33,36,69-80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6fe3ffdcc91923fa8a53ac7ba0907afebf77894d",
+  "prompts": {},
+  "sessions": {
+    "s_6126673cc0a89e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c2bc-9ed5-72b0-a4bd-e7dcb1d6a6eb",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    },
+    "s_bf3d04c49b65ff": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0d89d-905e-7980-97dd-21cb2b155096",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
