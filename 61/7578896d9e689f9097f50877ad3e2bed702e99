@@ -1,0 +1,43 @@
+apps/web/src/lib/connection-ui.test.ts
+  s_a2bd3276976ac7::t_e7483bb982e6e9 2,34-37,51-66
+apps/web/src/lib/connection-ui.ts
+  s_a2bd3276976ac7::t_ef1289fab87cfd 11,14,16-28,31,39,41,44,48-50,63-70
+apps/web/src/lib/server/connection-view.test.ts
+  s_a2bd3276976ac7::t_4cd429ffabbc62 21-22,24-25,27-33
+apps/web/src/lib/server/connection-view.ts
+  s_a2bd3276976ac7::t_f48575497bd9b7 3,11,22,27,32,52,61,65
+apps/web/src/routes/app/+page.svelte
+  s_a2bd3276976ac7::t_84eb6dfa6dadfa 4,24,337,340,363,371,396
+docs/connection-lifecycle-v1.md
+  s_a2bd3276976ac7::t_4bb861f9dffe4b 7-12,64-70,77-78
+packages/connections/src/connections.test.ts
+  s_a2bd3276976ac7::t_3d5a39e497d5b5 182-201,209-230
+packages/connections/src/connections.ts
+  s_a2bd3276976ac7::t_5bae4dd364971c 73,79-82,163,168,178,216,230-237,244,251-258,275,286,318,332,346,358
+packages/connections/src/plugfn.test.ts
+  s_a2bd3276976ac7::t_6f94a38fd1e2f0 37,99-134
+packages/connections/src/postgres-store.ts
+  s_a2bd3276976ac7::t_e4ecf27512ae8a 152-160,184-201,264,297,354-362
+packages/connections/src/postgres.integration.test.ts
+  s_a2bd3276976ac7::t_331593a543a09a 148-203
+packages/connections/src/testing.ts
+  s_a2bd3276976ac7::t_b4ec723a80cc50 27-35,86-94,117-130,175,188
+tests/acceptance/connection-lifecycle-contract.test.ts
+  s_a2bd3276976ac7::t_f970a9f40b472e 48,86
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "617578896d9e689f9097f50877ad3e2bed702e99",
+  "prompts": {},
+  "sessions": {
+    "s_a2bd3276976ac7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0d8b0-85e2-7702-9013-989547be5d4f",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
