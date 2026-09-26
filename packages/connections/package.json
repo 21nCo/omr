@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@oh-my-router/identity": "0.0.0",
+    "@oh-my-router/tools": "0.0.0",
     "pg": "^8.23.0"
   },
   "devDependencies": {

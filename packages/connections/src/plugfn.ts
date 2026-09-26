@@ -1,6 +1,10 @@
+import { isProviderConfigured, providerStatus, type ProviderStatus } from "@oh-my-router/tools";
+import { isMissingRemoteConnection } from "./remote.js";
+
 import {
   ConnectionAuthority,
   ConnectionInputError,
+  ConnectionUnavailableError,
   type ConnectionBindingRecord,
   type ConnectionOwnership,
 } from "./connections.js";
@@ -96,11 +100,14 @@ export interface PlugFnConnectionPort {
   };
 }
 
-export interface ProviderReadiness {
-  provider: string;
-  available: boolean;
-  authMode: "oauth" | "api_key" | "jwt" | "basic" | "none" | "unknown";
-  actionCount: number;
+export type ProviderReadiness = ProviderStatus;
+
+export class ProviderUnavailableError extends Error {
+  readonly code = "PROVIDER_UNAVAILABLE";
+  constructor(readonly state: ProviderStatus["state"]) {
+    super(`Provider is ${state} or does not support this connection method`);
+    this.name = "ProviderUnavailableError";
+  }
 }
 
 const PROVIDER = /^[a-z0-9][a-z0-9_-]{0,79}$/;
@@ -166,31 +173,56 @@ function assertConnectionOwner(
   }
 }
 
-function authMode(type: string): ProviderReadiness["authMode"] {
-  if (type === "oauth2") return "oauth";
-  if (type === "api-key") return "api_key";
-  if (type === "jwt" || type === "basic" || type === "none") return type;
-  return "unknown";
-}
-
 export class PlugFnConnectionOrchestrator {
   constructor(
     private readonly authority: ConnectionAuthority,
     private readonly plugfn: PlugFnConnectionPort,
   ) {}
 
-  providerReadiness(providerValue: string): ProviderReadiness {
+  providerReadiness(
+    providerValue: string,
+    connections: readonly ConnectionBindingRecord[] = [],
+  ): ProviderReadiness {
     const provider = normalizeProvider(providerValue);
     const definition = this.plugfn.providers.get(provider);
-    return {
+    return providerStatus({
       provider,
-      available: Boolean(
-        definition &&
-        (definition.auth.type !== "oauth2" || this.plugfn.config?.integrations?.[provider]),
-      ),
-      authMode: definition ? authMode(definition.auth.type) : "unknown",
-      actionCount: definition ? Object.keys(definition.actions).length : 0,
-    };
+      definition,
+      configured: isProviderConfigured(definition, provider, this.plugfn.config?.integrations),
+      connections,
+    });
+  }
+
+  private assertConnectable(provider: string, mode: "oauth" | "api_key"): void {
+    const readiness = this.providerReadiness(provider);
+    if (!readiness.available || readiness.authMode !== mode) {
+      throw new ProviderUnavailableError(readiness.state);
+    }
+  }
+
+  /** Apply the same provider policy used by connection setup to public selection. */
+  async select(input: { actorUserId: string; workspaceId: string; provider: string; connectionId: string }) {
+    const readiness = this.providerReadiness(input.provider);
+    if (!readiness.available) throw new ProviderUnavailableError(readiness.state);
+    return this.authority.select(input);
+  }
+
+  async listAvailable(input: { actorUserId: string; workspaceId: string; provider?: string }) {
+    const bindings = await this.authority.listAvailable(input);
+    const byProvider = new Map<string, ConnectionBindingRecord[]>();
+    for (const binding of bindings) {
+      const group = byProvider.get(binding.provider) ?? [];
+      group.push(binding);
+      byProvider.set(binding.provider, group);
+    }
+    const providerStates = new Map([...byProvider].map(([provider, group]) => [provider,
+      this.providerReadiness(provider, group).state,
+    ]));
+    return bindings.map((binding) => {
+      const providerState = providerStates.get(binding.provider)!;
+      return { ...binding, providerState, selectable: providerState === "ready" &&
+        binding.status === "active" && binding.readiness === "ready" };
+    });
   }
 
   async startOAuth(input: {
@@ -208,6 +240,7 @@ export class PlugFnConnectionOrchestrator {
     const provider = normalizeProvider(input.provider);
     const label = normalizeLabel(input.label);
     await this.authority.authorizeInstall(input);
+    this.assertConnectable(provider, "oauth");
     const owner = ownerFor(input);
     // GitHub's PlugFn defaults include write-capable repository scopes. An empty
     // array would fall back to the shared OAuth descriptor's profile/email grant.
@@ -240,6 +273,7 @@ export class PlugFnConnectionOrchestrator {
     const provider = normalizeProvider(input.provider);
     const label = normalizeLabel(input.label);
     await this.authority.authorizeInstall(input);
+    this.assertConnectable(provider, "oauth");
     const owner = ownerFor(input);
     const actor = actorFor(input);
     const result = await this.plugfn.connections.handleCallback({
@@ -279,6 +313,7 @@ export class PlugFnConnectionOrchestrator {
       throw new ConnectionInputError("API key must contain 1 to 16384 characters");
     }
     await this.authority.authorizeInstall(input);
+    this.assertConnectable(provider, "api_key");
     const owner = ownerFor(input);
     const actor = actorFor(input);
     const plugFnConnection = await this.plugfn.connections.connect({
@@ -304,6 +339,7 @@ export class PlugFnConnectionOrchestrator {
 
   async checkHealth(actorUserId: string, connectionId: string): Promise<ConnectionBindingRecord> {
     const binding = await this.authority.getAccessible(actorUserId, connectionId);
+    if (binding.status === "revoked") throw new ConnectionUnavailableError();
     const valid = await this.plugfn.connections.isValid(binding.providerConnectionId);
     if (valid) {
       return this.authority.recordHealth({
@@ -312,7 +348,10 @@ export class PlugFnConnectionOrchestrator {
         readiness: "ready",
       });
     }
-    const remote = await this.plugfn.connections.get(binding.providerConnectionId).catch(() => null);
+    const remote = await this.plugfn.connections.get(binding.providerConnectionId).catch((error: unknown) => {
+      if (isMissingRemoteConnection(error)) return null;
+      throw error;
+    });
     const status = remote?.status === "error" ? "error" : "needs_reauth";
     return this.authority.recordHealth({
       connectionId,
@@ -324,6 +363,7 @@ export class PlugFnConnectionOrchestrator {
 
   async refresh(actorUserId: string, connectionId: string): Promise<ConnectionBindingRecord> {
     const binding = await this.authority.getManageable(actorUserId, connectionId);
+    if (binding.status === "revoked") throw new ConnectionUnavailableError();
     try {
       const remote = await this.plugfn.connections.refresh(binding.providerConnectionId);
       if (remote.id !== binding.providerConnectionId || remote.provider !== binding.provider) {

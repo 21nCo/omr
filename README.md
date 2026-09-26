@@ -47,6 +47,11 @@ The current implementation includes:
   API-key and provider OAuth connections, approval decisions, and actor-scoped execution history;
 - a complete device-login handoff with a pre-filled verification URL and explicit workspace grant.
 
+The v1 user-facing provider catalog is GitHub, Linear, Slack, and Notion. Other registered PlugFn
+adapters are internal and are not discoverable or connectable via OMR v1. Catalog and tool
+readiness are scoped to the selected workspace; see [the v1 catalog contract](docs/provider-catalog-v1.md)
+for states, compatibility notes, and a reproducible response.
+
 Internal packages use the `@oh-my-router/*` npm scope. The current CLI package is
 `@oh-my-router/cli` and exposes the `omr` command; `@oh-my-router/mcp` exposes `omr-mcp`.
 
@@ -95,7 +100,7 @@ npm exec -- omr login --url http://localhost:5173
 ```
 
 The CLI stores credentials under `~/.config/oh-my-router`, outside the repository.
-Run `npm exec -- omr tools list --json` to inspect the catalog. A logged-in profile also powers
+Run `npm exec -- omr tools list --json` to inspect the workspace-scoped catalog. A logged-in profile also powers
 `npm exec -- omr-mcp`; `OMR_BACKEND`, `OMR_API_KEY`, and `OMR_WORKSPACE_ID` provide an explicit
 headless alternative. The MCP server exposes `omr.connections.list` for workspace connection
 discovery. Read tools execute immediately; write, destructive, and unknown-effect tools create a

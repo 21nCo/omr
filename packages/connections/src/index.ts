@@ -19,8 +19,11 @@ export {
 
 export {
   PlugFnConnectionOrchestrator,
+  ProviderUnavailableError,
   type PlugFnConnection,
   type PlugFnConnectionPort,
   type PlugFnDisconnectResult,
   type ProviderReadiness,
 } from "./plugfn.js";
+
+export { isMissingRemoteConnection, markMissingRemoteConnection } from "./remote.js";

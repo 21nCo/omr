@@ -1,6 +1,9 @@
 import type { ClientCapability } from "@oh-my-router/client-access";
-import type { ConnectionAuthority } from "@oh-my-router/connections";
-import type { JsonValue, ToolCatalog, ToolManifest } from "@oh-my-router/tools";
+import {
+  ConnectionUnavailableError, isMissingRemoteConnection, markMissingRemoteConnection,
+  type ConnectionAuthority, type ConnectionBindingRecord,
+} from "@oh-my-router/connections";
+import { hasRequiredScopes, type JsonValue, type ToolCatalog, type ToolManifest } from "@oh-my-router/tools";
 
 export type ExecutionStatus = "running" | "succeeded" | "failed";
 
@@ -172,6 +175,7 @@ export class ExecutionService {
     private readonly connections: ConnectionAuthority,
     private readonly plugfn: PlugFnActionPort,
     private readonly receipts: ExecutionReceiptStore,
+    private readonly connectionScopes: (providerConnectionId: string) => Promise<readonly string[] | undefined>,
     private readonly now: () => number = Date.now,
     private readonly approvals?: ExecutionApprovalStore,
   ) {}
@@ -186,9 +190,6 @@ export class ExecutionService {
     const manifest = this.catalog.get(input.toolId);
     if (!manifest) throw new ExecutionInputError("Unknown tool identifier");
     this.authorizeEffect(input.principal, manifest);
-    if (manifest.contract.effect !== "read") {
-      throw new ExecutionApprovalRequiredError(manifest);
-    }
     assertJson(input.params);
     if (input.idempotencyKey && !IDEMPOTENCY_KEY.test(input.idempotencyKey)) {
       throw new ExecutionInputError("Invalid idempotency key");
@@ -200,6 +201,10 @@ export class ExecutionService {
       provider: manifest.provider,
       ...(input.connectionId ? { connectionId: input.connectionId } : {}),
     });
+    await this.assertScopes(manifest, connection);
+    if (manifest.contract.effect !== "read") {
+      throw new ExecutionApprovalRequiredError(manifest);
+    }
     return this.runAuthorized({
       principal: input.principal,
       manifest,
@@ -244,6 +249,7 @@ export class ExecutionService {
       provider: manifest.provider,
       ...(input.connectionId ? { connectionId: input.connectionId } : {}),
     });
+    await this.assertScopes(manifest, connection);
     const timestamp = this.now();
     return approvals.create({
       id: `approval_${crypto.randomUUID()}`,
@@ -307,6 +313,7 @@ export class ExecutionService {
       if (connection.providerConnectionId !== approval.providerConnectionId) {
         throw new ApprovalUnavailableError();
       }
+      await this.assertScopes(manifest, connection);
       const receipt = await this.runAuthorized({
         principal: effectivePrincipal,
         manifest,
@@ -385,7 +392,16 @@ export class ExecutionService {
       }));
       return await this.receipts.succeed(reservation.receipt.id, result, this.now());
     } catch (error) {
-      await this.receipts.fail(reservation.receipt.id, "provider_execution_failed", this.now());
+      const missingRemote = isMissingRemoteConnection(error);
+      await this.receipts.fail(
+        reservation.receipt.id,
+        missingRemote ? "connection_unavailable" : "provider_execution_failed",
+        this.now(),
+      );
+      if (missingRemote) {
+        await markMissingRemoteConnection(this.connections, input.connection.id);
+        throw new ConnectionUnavailableError();
+      }
       throw error;
     }
   }
@@ -397,6 +413,20 @@ export class ExecutionService {
       : "tools:write";
     if (!principal.capabilities.includes(required)) {
       throw new ExecutionCapabilityDeniedError(required);
+    }
+  }
+
+  private async assertScopes(manifest: ToolManifest, connection: ConnectionBindingRecord): Promise<void> {
+    let scopes: readonly string[] | undefined;
+    try {
+      scopes = await this.connectionScopes(connection.providerConnectionId);
+    } catch (error) {
+      if (!isMissingRemoteConnection(error)) throw error;
+      await markMissingRemoteConnection(this.connections, connection.id);
+      throw new ConnectionUnavailableError();
+    }
+    if (!hasRequiredScopes(manifest, scopes)) {
+      throw new ExecutionInputError("Connection lacks required action scopes");
     }
   }
 

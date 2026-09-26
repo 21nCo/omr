@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
 import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
-import { ConnectionAuthority } from "@oh-my-router/connections";
+import { ConnectionAuthority, ConnectionSelectionRequiredError, ConnectionUnavailableError } from "@oh-my-router/connections";
 import { MemoryConnectionBindingStore } from "@oh-my-router/connections/testing";
-import { ToolCatalog, type ToolEffect } from "@oh-my-router/tools";
+import { ToolCatalog, usableToolIds, type ToolEffect } from "@oh-my-router/tools";
 
 import {
   ApprovalUnavailableError,
@@ -14,20 +14,26 @@ import {
 } from "./execution.js";
 import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "./testing.js";
 
-async function fixture() {
+async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes: string[] | undefined = ["issues:read", "repo"], scopeFree = false) {
   let now = 1_700_000_000_000;
+  let grantedScopes: string[] | undefined = initialScopes;
+  let remoteError: Error | null = null;
   const workspaceStore = new MemoryWorkspaceStore();
   const workspaces = new WorkspaceAuthority(workspaceStore, () => now);
   const { workspace } = await workspaces.provisionPersonalWorkspace({ userId: "user_1" });
   const connectionStore = new MemoryConnectionBindingStore(workspaceStore);
   const connections = new ConnectionAuthority(connectionStore, () => now);
-  await connections.attach({
+  const firstBinding = await connections.attach({
     actorUserId: "user_1",
     workspaceId: workspace.id,
     provider: "linear",
     providerConnectionId: "plug_linear",
     ownership: "personal",
     label: "Linear",
+  });
+  const otherBinding = await connections.attach({
+    actorUserId: "user_1", workspaceId: workspace.id, provider: "github",
+    providerConnectionId: "plug_github", ownership: "personal", label: "GitHub",
   });
   const catalog = await ToolCatalog.create({
     providers: { list: () => [{
@@ -39,22 +45,43 @@ async function fixture() {
         get_issue: action("get_issue", "read"),
         create_issue: action("create_issue", "write"),
         mystery: action("mystery", "unknown"),
+        ...(scopeFree ? {
+          no_scope_read: { ...action("no_scope_read", "read"), contract: {
+            ...action("no_scope_read", "read").contract, requiredScopes: [],
+          } },
+          no_scope_write: { ...action("no_scope_write", "write"), contract: {
+            ...action("no_scope_write", "write").contract, requiredScopes: [],
+          } },
+        } : {}),
       },
+    }, {
+      name: "github", displayName: "GitHub", version: "1.0.0", description: "GitHub",
+      actions: { get_issue: action("get_issue", "read") },
     }] },
-  }, (value) => value as never);
+  }, (value) => value as never, allowedProviders);
   const actionCall = vi.fn(async () => ({ id: "issue_1", title: "Fixed" }));
   const receipts = new MemoryExecutionReceiptStore();
   const approvals = new MemoryExecutionApprovalStore();
   return {
     actionCall,
     approvals,
+    catalog,
+    connections,
+    firstBinding,
+    otherBinding,
     receipts,
     workspace,
+    setScopes(scopes: string[] | undefined) { grantedScopes = scopes; },
+    setRemoteError(error: Error | null) { remoteError = error; },
     service: new ExecutionService(
       catalog,
       connections,
       { action: actionCall },
       receipts,
+      async (connectionId) => {
+        if (connectionId === "plug_linear" && remoteError) throw remoteError;
+        return grantedScopes;
+      },
       () => now,
       approvals,
     ),
@@ -72,7 +99,7 @@ function action(name: string, effect: ToolEffect) {
     contract: {
       version: "1.0.0",
       effect,
-      requiredScopes: [],
+      requiredScopes: effect === "read" ? ["issues:read"] : ["repo"],
       resources: [],
       sensitiveKeys: [],
       pagination: { kind: "none" as const },
@@ -82,6 +109,204 @@ function action(name: string, effect: ToolEffect) {
 }
 
 describe("execution service", () => {
+  it("advertises only actions granted by the effective selected binding across selection and revocation", async () => {
+    const { catalog, connections, firstBinding, workspace } = await fixture();
+    const second = await connections.attach({
+      actorUserId: "user_1", workspaceId: workspace.id, provider: "linear",
+      providerConnectionId: "plug_linear_repo", ownership: "personal", label: "Elevated",
+    });
+    const scopes = new Map([["plug_linear", ["read:user"]], ["plug_linear_repo", ["repo"]]]);
+    const visible = () => usableToolIds(catalog, [{ provider: "linear", state: "ready" }], async (provider) => {
+      try {
+        const binding = await connections.resolve({ actorUserId: "user_1", workspaceId: workspace.id, provider });
+        return scopes.get(binding.providerConnectionId);
+      } catch (error) {
+        if (error instanceof ConnectionSelectionRequiredError) return null;
+        throw error;
+      }
+    });
+    expect(await visible()).toEqual(new Set());
+    await connections.select({ actorUserId: "user_1", workspaceId: workspace.id,
+      provider: "linear", connectionId: firstBinding.id });
+    expect((await visible()).has("linear.create_issue")).toBe(false);
+    await connections.select({ actorUserId: "user_1", workspaceId: workspace.id,
+      provider: "linear", connectionId: second.id });
+    expect((await visible()).has("linear.create_issue")).toBe(true);
+    await connections.revoke("user_1", second.id);
+    expect((await visible()).has("linear.create_issue")).toBe(false);
+  });
+
+  it("rejects insufficient grants before reads and approvals, then rechecks revoked grants on approval execution", async () => {
+    const { actionCall, approvals, receipts, service, workspace, setScopes } =
+      await fixture(undefined, ["read:user"]);
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    await expect(service.execute({ principal, toolId: "linear.get_issue", params: {} }))
+      .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    await expect(service.execute({ principal, toolId: "linear.create_issue", params: {} }))
+      .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    await expect(service.requestApproval({ principal, toolId: "linear.create_issue", params: {} }))
+      .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    expect(approvals.approvals.size).toBe(0);
+    expect(receipts.receipts.size).toBe(0);
+    setScopes(["issues:read", "repo"]);
+    await expect(service.execute({ principal, toolId: "linear.get_issue", params: {} }))
+      .resolves.toMatchObject({ status: "succeeded" });
+    const approval = await service.requestApproval({ principal, toolId: "linear.create_issue", params: {} });
+    await service.approve(approval.id, "user_1");
+    setScopes(["issues:read"]);
+    await expect(service.executeApproved(principal, approval.id))
+      .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    expect(approvals.approvals.get(approval.id)?.status).toBe("failed");
+    expect(actionCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed for an unknown grant even when actions require no scopes", async () => {
+    const { actionCall, approvals, receipts, service, workspace, setScopes } = await fixture(undefined, [], true);
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const approval = await service.requestApproval({ principal, toolId: "linear.no_scope_write", params: {} });
+    await service.approve(approval.id, "user_1");
+    setScopes(undefined);
+    await expect(service.execute({ principal, toolId: "linear.no_scope_read", params: {} }))
+      .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    await expect(service.requestApproval({ principal, toolId: "linear.no_scope_write", params: {} }))
+      .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    await expect(service.executeApproved(principal, approval.id))
+      .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    expect(approvals.approvals.get(approval.id)?.status).toBe("failed");
+    expect(receipts.receipts.size).toBe(0);
+    expect(actionCall).not.toHaveBeenCalled();
+    setScopes([]);
+    await expect(service.execute({ principal, toolId: "linear.no_scope_read", params: {} }))
+      .resolves.toMatchObject({ status: "succeeded" });
+  });
+
+  it("degrades a deleted remote binding across direct, approval request, and approved execution", async () => {
+    for (const entry of ["direct", "request", "approved"] as const) {
+      const { actionCall, approvals, connections, firstBinding, receipts, service, workspace, setRemoteError } = await fixture();
+      const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+      let approvalId: string | undefined;
+      if (entry === "approved") {
+        const approval = await service.requestApproval({ principal, toolId: "linear.create_issue", params: {} });
+        await service.approve(approval.id, "user_1");
+        approvalId = approval.id;
+      }
+      setRemoteError(Object.assign(new Error("remote missing"), { code: "CONNECTION_NOT_FOUND" }));
+      const call = entry === "direct"
+        ? service.execute({ principal, toolId: "linear.get_issue", params: {} })
+        : entry === "request"
+          ? service.requestApproval({ principal, toolId: "linear.create_issue", params: {} })
+          : service.executeApproved(principal, approvalId!);
+      await expect(call).rejects.toBeInstanceOf(ConnectionUnavailableError);
+      expect(await connections.listAvailable({ actorUserId: "user_1", workspaceId: workspace.id, provider: "linear" }))
+        .toContainEqual(expect.objectContaining({
+          id: firstBinding.id, status: "needs_reauth", readiness: "unavailable",
+          healthReason: "plugfn_connection_missing",
+        }));
+      expect(actionCall).not.toHaveBeenCalled();
+      expect(receipts.receipts.size).toBe(0);
+      if (entry === "request") expect(approvals.approvals.size).toBe(0);
+      if (entry === "approved") expect(approvals.approvals.get(approvalId!)?.status).toBe("failed");
+      await expect(service.execute({ principal, toolId: "github.get_issue", params: {} }))
+        .resolves.toMatchObject({ status: "succeeded" });
+    }
+  });
+
+  it("does not translate unrelated remote lookup failures into unavailable connections", async () => {
+    const { connections, firstBinding, service, workspace, setRemoteError } = await fixture();
+    const failure = new Error("PlugFn outage");
+    setRemoteError(failure);
+    await expect(service.execute({
+      principal: { kind: "web", userId: "user_1", workspaceId: workspace.id },
+      toolId: "linear.get_issue", params: {},
+    })).rejects.toBe(failure);
+    expect(await connections.listAvailable({ actorUserId: "user_1", workspaceId: workspace.id }))
+      .toContainEqual(expect.objectContaining({ id: firstBinding.id, status: "active", readiness: "ready" }));
+  });
+
+  it("degrades a remote binding deleted after scopes were checked and records a sanitized receipt", async () => {
+    const { actionCall, connections, firstBinding, receipts, service, workspace } = await fixture();
+    actionCall.mockRejectedValueOnce(Object.assign(new Error("remote connection missing"), {
+      code: "CONNECTION_NOT_FOUND",
+    }));
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    await expect(service.execute({ principal, toolId: "linear.get_issue", params: {} }))
+      .rejects.toBeInstanceOf(ConnectionUnavailableError);
+    expect([...receipts.receipts.values()]).toEqual([
+      expect.objectContaining({ status: "failed", errorCode: "connection_unavailable" }),
+    ]);
+    expect(await connections.listAvailable({ actorUserId: "user_1", workspaceId: workspace.id }))
+      .toContainEqual(expect.objectContaining({ id: firstBinding.id, status: "needs_reauth" }));
+    await expect(service.execute({ principal, toolId: "github.get_issue", params: {} }))
+      .resolves.toMatchObject({ status: "succeeded" });
+  });
+
+  it("keeps missing-remote responses deterministic when recording health fails", async () => {
+    for (const phase of ["scope", "action"] as const) {
+      const { actionCall, connections, firstBinding, receipts, service, workspace, setRemoteError } = await fixture();
+      const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+      const recordHealth = vi.spyOn(connections, "recordHealth")
+        .mockRejectedValue(new Error("health store unavailable"));
+      const missing = Object.assign(new Error("remote missing"), { code: "CONNECTION_NOT_FOUND" });
+      if (phase === "scope") setRemoteError(missing);
+      else actionCall.mockRejectedValueOnce(missing);
+      await expect(service.execute({ principal, toolId: "linear.get_issue", params: {} }))
+        .rejects.toBeInstanceOf(ConnectionUnavailableError);
+      expect(recordHealth).toHaveBeenCalledExactlyOnceWith({
+        connectionId: firstBinding.id,
+        status: "needs_reauth",
+        readiness: "unavailable",
+        reason: "plugfn_connection_missing",
+      });
+      expect([...receipts.receipts.values()]).toEqual(phase === "scope" ? [] : [
+        expect.objectContaining({ status: "failed", errorCode: "connection_unavailable" }),
+      ]);
+    }
+  });
+
+  it("keeps approval paths unavailable when a deleted remote cannot be recorded", async () => {
+    for (const entry of ["request", "approved"] as const) {
+      const { actionCall, approvals, connections, firstBinding, receipts, service, workspace, setRemoteError } = await fixture();
+      const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+      let approvalId: string | undefined;
+      if (entry === "approved") {
+        const approval = await service.requestApproval({ principal, toolId: "linear.create_issue", params: {} });
+        approvalId = approval.id;
+        await service.approve(approvalId, "user_1");
+      }
+      const recordHealth = vi.spyOn(connections, "recordHealth")
+        .mockRejectedValue(new Error("health store unavailable"));
+      setRemoteError(Object.assign(new Error("remote missing"), { code: "CONNECTION_NOT_FOUND" }));
+      const call = entry === "request"
+        ? service.requestApproval({ principal, toolId: "linear.create_issue", params: {} })
+        : service.executeApproved(principal, approvalId!);
+      await expect(call).rejects.toBeInstanceOf(ConnectionUnavailableError);
+      expect(recordHealth).toHaveBeenCalledExactlyOnceWith({
+        connectionId: firstBinding.id,
+        status: "needs_reauth",
+        readiness: "unavailable",
+        reason: "plugfn_connection_missing",
+      });
+      expect(actionCall).not.toHaveBeenCalled();
+      expect(receipts.receipts.size).toBe(0);
+      if (entry === "request") expect(approvals.approvals.size).toBe(0);
+      else expect(approvals.approvals.get(approvalId!)?.status).toBe("failed");
+      await expect(service.execute({ principal, toolId: "github.get_issue", params: {} }))
+        .resolves.toMatchObject({ status: "succeeded" });
+    }
+  });
+
+  it("does not execute or request approval for an unconfigured provider, even with a ready old binding", async () => {
+    const { actionCall, service, workspace } = await fixture(new Set());
+    const input = {
+      principal: { kind: "web" as const, userId: "user_1", workspaceId: workspace.id },
+      toolId: "linear.get_issue", params: {},
+    };
+    await expect(service.execute(input)).rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    await expect(service.requestApproval({ ...input, toolId: "linear.create_issue" }))
+      .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    expect(actionCall).not.toHaveBeenCalled();
+  });
+
   it("executes reads through the selected opaque PlugFn connection and records a receipt", async () => {
     const { actionCall, service, workspace, advance } = await fixture();
     advance(1_000);

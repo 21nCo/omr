@@ -1,3 +1,5 @@
+import type { ProviderStatus } from "./providers.js";
+
 export type ToolEffect = "read" | "write" | "destructive" | "unknown";
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
@@ -55,6 +57,8 @@ export interface ToolDiscoveryPage {
   catalogSchemaVersion: "1.0.0";
   revision: string;
   tools: ToolManifest[];
+  /** Workspace-scoped readiness, present on authenticated HTTP discovery. */
+  providers?: ProviderStatus[];
   nextCursor?: string;
 }
 
@@ -80,6 +84,13 @@ const DEFAULT_CONTRACT: ToolContractSource = {
   retry: "never",
 };
 
+// Cursor keys and catalog revisions must have the same order on every host.
+function compareCodePoints(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
 export class ToolCatalog {
   private constructor(
     private readonly manifests: ToolManifest[],
@@ -89,10 +100,12 @@ export class ToolCatalog {
   static async create(
     source: ToolCatalogSource,
     toJsonSchema: (schema: unknown) => JsonValue,
+    allowedProviders?: ReadonlySet<string>,
   ): Promise<ToolCatalog> {
     const manifests: ToolManifest[] = [];
     for (const provider of source.providers.list()) {
       const providerName = normalizedProviderName(provider.name);
+      if (allowedProviders && !allowedProviders.has(providerName)) continue;
       for (const [actionKey, action] of Object.entries(provider.actions)) {
         const actionName = validatedActionName(action.name || actionKey);
         if (actionKey !== action.name) {
@@ -115,7 +128,7 @@ export class ToolCatalog {
         manifests.push({ ...core, hash: await sha256(core) });
       }
     }
-    manifests.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+    manifests.sort((left, right) => compareCodePoints(left.id, right.id));
     const duplicate = manifests.find((manifest, index) => manifests[index - 1]?.id === manifest.id);
     if (duplicate) throw new ToolCatalogInputError(`Duplicate tool id ${duplicate.id}`);
     const revision = await sha256(manifests.map(({ id, hash }) => ({ id, hash })));
@@ -127,11 +140,16 @@ export class ToolCatalog {
     return manifest ? structuredClone(manifest) : null;
   }
 
+  list(): ToolManifest[] {
+    return structuredClone(this.manifests);
+  }
+
   discover(input: {
     query?: string;
     providers?: string[];
     effects?: ToolEffect[];
     allowedProviders?: ReadonlySet<string>;
+    allowedToolIds?: ReadonlySet<string>;
     limit?: number;
     cursor?: string;
   } = {}): ToolDiscoveryPage {
@@ -147,14 +165,16 @@ export class ToolCatalog {
     const query = input.query?.trim().toLowerCase();
     const filterKey = canonicalJson({
       query: query ?? null,
-      providers: providers ? [...providers].sort() : null,
-      effects: effects ? [...effects].sort() : null,
-      allowedProviders: input.allowedProviders ? [...input.allowedProviders].sort() : null,
+      providers: providers ? [...providers].sort(compareCodePoints) : null,
+      effects: effects ? [...effects].sort(compareCodePoints) : null,
+      allowedProviders: input.allowedProviders ? [...input.allowedProviders].sort(compareCodePoints) : null,
+      allowedToolIds: input.allowedToolIds ? [...input.allowedToolIds].sort(compareCodePoints) : null,
     }, "discovery filter");
     const filtered = this.manifests.filter((manifest) =>
       (!providers || providers.includes(manifest.provider)) &&
       (!effects || effects.includes(manifest.contract.effect)) &&
       (!input.allowedProviders || input.allowedProviders.has(manifest.provider)) &&
+      (!input.allowedToolIds || input.allowedToolIds.has(manifest.id)) &&
       (!query || [manifest.id, manifest.displayName, manifest.description]
         .some((value) => value.toLowerCase().includes(query)))
     );
@@ -231,7 +251,7 @@ function canonicalJson(value: unknown, label: string, depth = 0): string {
   }
   if (value && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
     return `{${Object.keys(value as Record<string, unknown>)
-      .sort()
+      .sort(compareCodePoints)
       .map((key) => `${JSON.stringify(key)}:${canonicalJson(
         (value as Record<string, unknown>)[key],
         label,
@@ -250,23 +270,18 @@ function encodeCursor(revision: string, filterKey: string, offset: number): stri
 }
 
 function decodeCursor(cursor: string, revision: string, filterKey: string): number {
+  let value: { revision?: unknown; filterKey?: unknown; offset?: unknown };
   try {
     const base64 = cursor.replace(/-/g, "+").replace(/_/g, "/");
-    const value = JSON.parse(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, "="))) as {
-      revision?: unknown;
-      filterKey?: unknown;
-      offset?: unknown;
-    };
-    if (
-      value.revision !== revision ||
-      value.filterKey !== filterKey ||
-      !Number.isInteger(value.offset) ||
-      Number(value.offset) < 0
-    ) {
-      throw new Error("invalid");
-    }
-    return Number(value.offset);
+    value = JSON.parse(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, "=")));
   } catch {
-    throw new ToolCatalogInputError("cursor is invalid or belongs to another catalog revision");
+    throw new ToolCatalogInputError("cursor is invalid");
   }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ToolCatalogInputError("cursor is invalid");
+  }
+  if (value.revision !== revision) throw new ToolCatalogInputError("cursor belongs to another catalog revision");
+  if (value.filterKey !== filterKey) throw new ToolCatalogInputError("catalog filters or grants changed; restart discovery");
+  if (!Number.isInteger(value.offset) || Number(value.offset) < 0) throw new ToolCatalogInputError("cursor is invalid");
+  return Number(value.offset);
 }

@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { oauthCallbackUri, savePendingOAuthConnection } from "$lib/oauth-connection.js";
+  import { createWorkspaceCatalogLoader, providerDisplayState } from "$lib/workspace-catalog.js";
+  import { V1_PROVIDERS } from "@oh-my-router/tools";
 
   type WorkspaceAccess = {
     workspace: { id: string; name: string; kind: "personal" | "team" };
@@ -40,29 +42,33 @@
     approvals: Approval[];
     executions: Execution[];
   };
+  type Provider = {
+    provider: string;
+    displayName: string;
+    state: "unsupported" | "unconfigured" | "disconnected" | "expired" | "ready";
+    available: boolean;
+    authMode: string;
+    actionCount: number;
+  };
+  type Catalog = {
+    catalogSchemaVersion: string;
+    revision: string;
+    providers: Provider[];
+    tools: { id: string; hash: string }[];
+  };
 
   let overview: Overview | null = null;
+  let catalog: Catalog | null = null;
   let selectedWorkspaceId = "";
   let loading = true;
   let busy = "";
   let error = "";
   let notice = "";
   let teamName = "";
-  let provider = "stripe";
-  let label = "";
-  let apiKey = "";
-  let ownership: "personal" | "workspace" = "personal";
   let oauthProvider = "github";
   let oauthLabel = "";
   let oauthOwnership: "personal" | "workspace" = "personal";
 
-  const apiKeyProviders = ["stripe", "icloud", "imap-smtp"];
-  const oauthProviders = [
-    ["github", "GitHub"], ["linear", "Linear"], ["notion", "Notion"],
-    ["slack", "Slack"], ["gmail", "Gmail"], ["google-drive", "Google Drive"],
-    ["google-calendar", "Google Calendar"], ["clickup", "ClickUp"],
-    ["jira", "Jira"], ["outlook", "Outlook"], ["onedrive", "OneDrive"],
-  ] as const;
 
   function timestamp(value: number | null): string {
     return value ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(value) : "—";
@@ -71,6 +77,10 @@
   function preview(value: unknown): string {
     const serialized = JSON.stringify(value, null, 2) ?? "—";
     return serialized.length > 520 ? `${serialized.slice(0, 520)}\n…` : serialized;
+  }
+
+  function providerState(provider: string): Provider["state"] | "unknown" {
+    return providerDisplayState(catalog, provider);
   }
 
   async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -84,18 +94,25 @@
     return body as T;
   }
 
+  const loadWorkspace = createWorkspaceCatalogLoader<Overview, Catalog>(
+    (workspaceId) => request<Overview>(`/api/control-plane${workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : ""}`),
+    (workspaceId) => request<Catalog>(`/api/tools?workspaceId=${encodeURIComponent(workspaceId)}&limit=100`),
+    (state) => {
+      overview = state.overview;
+      catalog = state.catalog;
+      selectedWorkspaceId = state.selectedWorkspaceId;
+      loading = state.loading;
+      error = state.error;
+      if (!catalog) {
+        oauthProvider = "";
+      } else if (!catalog.providers.some((item) => item.provider === oauthProvider && item.available)) {
+        oauthProvider = catalog.providers.find((item) => item.available && item.authMode === "oauth")?.provider ?? "";
+      }
+    },
+  );
+
   async function load(workspaceId = selectedWorkspaceId) {
-    loading = true;
-    error = "";
-    try {
-      const query = workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : "";
-      overview = await request<Overview>(`/api/control-plane${query}`);
-      selectedWorkspaceId = overview.selectedWorkspaceId ?? "";
-    } catch (caught) {
-      error = caught instanceof Error ? caught.message : "Could not load the control plane";
-    } finally {
-      loading = false;
-    }
+    await loadWorkspace(workspaceId);
   }
 
   async function mutate(name: string, path: string, body: unknown, success: string) {
@@ -123,31 +140,19 @@
     teamName = "";
   }
 
-  async function connectApiKey() {
-    await mutate("connection", "/api/connections/api-key", {
-      workspaceId: selectedWorkspaceId,
-      provider,
-      ownership,
-      apiKey,
-      label: label || provider,
-    }, `Connected ${provider}.`);
-    apiKey = "";
-    label = "";
-  }
-
   async function connectOAuth() {
     busy = "oauth";
     error = "";
     notice = "";
     try {
       const readiness = await request<{ available: boolean; authMode: string }>(
-        `/api/connections/providers/readiness?provider=${encodeURIComponent(oauthProvider)}`,
+        `/api/connections/providers/readiness?provider=${encodeURIComponent(oauthProvider)}&workspaceId=${encodeURIComponent(selectedWorkspaceId)}`,
       );
       if (!readiness.available || readiness.authMode !== "oauth") {
         throw new Error(`${oauthProvider} OAuth is not configured on this OMR environment.`);
       }
       const redirectUri = oauthCallbackUri(location.origin);
-      const label = oauthLabel.trim() || oauthProviders.find(([id]) => id === oauthProvider)?.[1] || oauthProvider;
+      const label = oauthLabel.trim() || catalog?.providers.find((item) => item.provider === oauthProvider)?.displayName || oauthProvider;
       const { authUrl } = await request<{ authUrl: string }>("/api/connections/oauth/start", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -195,7 +200,7 @@
 
   onMount(() => {
     const connected = new URLSearchParams(location.search).get("connected");
-    if (connected && oauthProviders.some(([id]) => id === connected)) {
+    if (connected && (V1_PROVIDERS as readonly string[]).includes(connected)) {
       notice = `Connected ${connected}.`;
     }
     void load("");
@@ -254,6 +259,17 @@
             <span>{overview.connections.length} active records</span>
           </div>
 
+          <div class="rows" role="region" aria-label="v1 provider catalog">
+            {#each catalog?.providers ?? [] as entry}
+              <article class="row">
+                <div class="provider-mark">{entry.provider.slice(0, 2).toUpperCase()}</div>
+                <div class="grow"><strong>{entry.displayName}</strong><span>{entry.actionCount} registered actions</span></div>
+                <span class:ready={entry.state === "ready"} class="status">{entry.state}</span>
+              </article>
+            {/each}
+          </div>
+          {#if catalog}<p class="catalog-version">Catalog {catalog.catalogSchemaVersion} · {catalog.revision} · {catalog.tools.length} visible tools on this page</p>{/if}
+
           {#if overview.connections.length}
             <div class="rows">
               {#each overview.connections as connection}
@@ -263,7 +279,16 @@
                     <strong>{connection.label}</strong>
                     <span>{connection.provider} · {connection.ownership}</span>
                   </div>
-                  <span class:ready={connection.readiness === "ready"} class="status">{connection.readiness}</span>
+                  <span class:ready={providerState(connection.provider) === "ready" && connection.readiness === "ready"} class="status">{providerState(connection.provider) === "ready" ? connection.readiness : providerState(connection.provider)}</span>
+                  {#if providerState(connection.provider) === "ready" && connection.status === "active" && connection.readiness === "ready"}
+                    <button
+                      class="quiet compact"
+                      disabled={Boolean(busy)}
+                      onclick={() => void mutate(`select:${connection.id}`, "/api/connections/select", {
+                        workspaceId: selectedWorkspaceId, provider: connection.provider, connectionId: connection.id,
+                      }, `Selected ${connection.label} for ${connection.provider}.`)}
+                    >Select connection</button>
+                  {/if}
                   <button
                     class="quiet compact"
                     disabled={Boolean(busy)}
@@ -281,29 +306,14 @@
             <p class="empty">No provider accounts are connected to this workspace yet.</p>
           {/if}
 
-          <form class="inset" onsubmit={(event) => { event.preventDefault(); void connectApiKey(); }}>
-            <div class="form-heading"><strong>Connect an API key</strong><span>Encrypted by PlugFn before storage.</span></div>
-            <div class="form-grid">
-              <label>Provider
-                <select bind:value={provider}>{#each apiKeyProviders as item}<option value={item}>{item}</option>{/each}</select>
-              </label>
-              <label>Ownership
-                <select bind:value={ownership}><option value="personal">Personal</option><option value="workspace">Workspace</option></select>
-              </label>
-              <label>Label<input bind:value={label} placeholder="Finance Stripe" maxlength="120" /></label>
-              <label>API key<input bind:value={apiKey} type="password" autocomplete="off" required /></label>
-            </div>
-            <button class="primary" type="submit" disabled={Boolean(busy) || !selectedWorkspaceId}>
-              {busy === "connection" ? "Connecting…" : "Connect provider"}
-            </button>
-          </form>
-
           <form class="inset" onsubmit={(event) => { event.preventDefault(); void connectOAuth(); }}>
             <div class="form-heading"><strong>Connect with OAuth</strong><span>You'll review access at the provider.</span></div>
             <div class="form-grid">
               <label>Provider
                 <select bind:value={oauthProvider}>
-                  {#each oauthProviders as [id, name]}<option value={id}>{name}</option>{/each}
+                  {#each catalog?.providers.filter((item) => item.available && item.authMode === "oauth") ?? [] as entry}
+                    <option value={entry.provider}>{entry.displayName}</option>
+                  {/each}
                 </select>
               </label>
               <label>Ownership
@@ -314,7 +324,7 @@
             {#if oauthProvider === "github"}
               <p>GitHub starts with read-only profile access. Private repository tools need a broader grant and are unavailable in this flow.</p>
             {/if}
-            <button class="primary" type="submit" disabled={Boolean(busy) || !selectedWorkspaceId}>
+            <button class="primary" type="submit" disabled={Boolean(busy) || !selectedWorkspaceId || !oauthProvider}>
               {busy === "oauth" ? "Opening provider…" : "Continue to provider"}
             </button>
           </form>
@@ -411,6 +421,7 @@
   .grow span, .approval-top span, .timeline span { color: #858b7f; font-size: 0.73rem; }
   .status { padding: 0.25rem 0.45rem; border-radius: 999px; color: #c8a59e; background: #2d201c; font-size: 0.68rem; }
   .status.ready { color: #cfe99a; background: #202918; }
+  .catalog-version { color: #858b7f; font-size: 0.73rem; overflow-wrap: anywhere; }
   .inset { display: grid; gap: 1rem; margin-top: 1rem; padding: 1rem; border-radius: 0.75rem; background: #0f100e; }
   .form-heading { display: flex; justify-content: space-between; gap: 1rem; }
   .form-heading span { color: #73796e; font-size: 0.72rem; }

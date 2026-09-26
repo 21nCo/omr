@@ -2,9 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
 import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
 
-import { ConnectionAccessDeniedError, ConnectionAuthority } from "./connections.js";
+import { ConnectionAccessDeniedError, ConnectionAuthority, ConnectionUnavailableError } from "./connections.js";
 import {
   PlugFnConnectionOrchestrator,
+  ProviderUnavailableError,
   type PlugFnConnection,
   type PlugFnConnectionPort,
 } from "./plugfn.js";
@@ -70,9 +71,17 @@ function fakePlugFn() {
     })),
   };
   const port: PlugFnConnectionPort = {
+    config: { integrations: { github: { type: "oauth2" } } },
     connections: methods,
     providers: {
-      get: (name) => name === "linear"
+      get: (name) => name === "github"
+        ? {
+            name: "github",
+            displayName: "GitHub",
+            auth: { type: "oauth2" },
+            actions: { get_user: {} },
+          }
+        : name === "linear"
         ? {
             name: "linear",
             displayName: "Linear",
@@ -86,19 +95,76 @@ function fakePlugFn() {
 }
 
 describe("PlugFn connection orchestration", () => {
+  it("keeps old healthy bindings visible but ineligible when support or config is removed", async () => {
+    const { authority, orchestrator, plugfn, workspaceId } = await fixture();
+    const github = await authority.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "github", providerConnectionId: "remote_github", ownership: "personal", label: "GitHub" });
+    const expired = await authority.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "github", providerConnectionId: "remote_expired", ownership: "personal", label: "Expired" });
+    await authority.recordHealth({ connectionId: expired.id, status: "needs_reauth",
+      readiness: "unavailable", reason: "expired" });
+    const stripe = await authority.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "stripe", providerConnectionId: "remote_stripe", ownership: "personal", label: "Stripe" });
+    const input = { actorUserId: "user_owner", workspaceId };
+    expect(await orchestrator.listAvailable(input)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: github.id, providerState: "ready", selectable: true }),
+      expect.objectContaining({ id: expired.id, providerState: "ready", selectable: false }),
+      expect.objectContaining({ id: stripe.id, providerState: "unsupported", selectable: false }),
+    ]));
+    await expect(orchestrator.select({ ...input, provider: "stripe", connectionId: stripe.id }))
+      .rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE", state: "unsupported" });
+    plugfn.port.config!.integrations = {};
+    expect(await orchestrator.listAvailable(input)).toContainEqual(expect.objectContaining({
+      id: github.id, status: "active", readiness: "ready", providerState: "unconfigured", selectable: false,
+    }));
+    await expect(orchestrator.select({ ...input, provider: "github", connectionId: github.id }))
+      .rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE", state: "unconfigured" });
+    plugfn.port.config!.integrations = { github: { type: "oauth2" } };
+    await expect(orchestrator.select({ ...input, provider: "github", connectionId: github.id }))
+      .resolves.toMatchObject({ connectionId: github.id });
+  });
   it("reports provider setup readiness without exposing credentials", async () => {
     const { orchestrator } = await fixture();
-    expect(orchestrator.providerReadiness(" Linear ")).toEqual({
+    expect(orchestrator.providerReadiness(" Linear ")).toMatchObject({
       provider: "linear",
       available: true,
       authMode: "api_key",
       actionCount: 1,
+      state: "disconnected",
     });
     expect(orchestrator.providerReadiness("github")).toMatchObject({
       provider: "github",
-      available: false,
-      authMode: "unknown",
+      available: true,
+      authMode: "oauth",
+      state: "disconnected",
     });
+  });
+
+  it("refuses experimental, unconfigured and wrong-mode connection attempts before PlugFn side effects", async () => {
+    const { orchestrator, plugfn, workspaceId } = await fixture();
+    await expect(orchestrator.startOAuth({
+      actorUserId: "user_owner", workspaceId, provider: "stripe", ownership: "personal",
+      redirectUri: "https://omr.example/app/oauth/callback", label: "Stripe",
+    })).rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE", state: "unsupported" });
+    plugfn.port.config!.integrations = {};
+    expect(orchestrator.providerReadiness("github").state).toBe("unconfigured");
+    await expect(orchestrator.startOAuth({
+      actorUserId: "user_owner", workspaceId, provider: "github", ownership: "personal",
+      redirectUri: "https://omr.example/app/oauth/callback", label: "GitHub",
+    })).rejects.toBeInstanceOf(ProviderUnavailableError);
+    await expect(orchestrator.completeOAuth({
+      actorUserId: "user_owner", workspaceId, provider: "github", ownership: "personal",
+      code: "code", state: "state", label: "GitHub",
+    })).rejects.toBeInstanceOf(ProviderUnavailableError);
+    plugfn.port.config!.integrations = { github: { type: "oauth2" } };
+    expect(orchestrator.providerReadiness("github").state).toBe("disconnected");
+    await expect(orchestrator.connectApiKey({
+      actorUserId: "user_owner", workspaceId, provider: "github", ownership: "personal",
+      apiKey: "not-a-real-key", label: "GitHub",
+    })).rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE", state: "disconnected" });
+    expect(plugfn.methods.getAuthUrl).not.toHaveBeenCalled();
+    expect(plugfn.methods.handleCallback).not.toHaveBeenCalled();
+    expect(plugfn.methods.connect).not.toHaveBeenCalled();
   });
 
   it("authorizes installs before starting OAuth or storing API keys", async () => {
@@ -211,7 +277,7 @@ describe("PlugFn connection orchestration", () => {
       label: "Personal",
     });
     plugfn.methods.isValid.mockResolvedValueOnce(false);
-    plugfn.methods.get.mockRejectedValueOnce(new Error("missing"));
+    plugfn.methods.get.mockRejectedValueOnce(Object.assign(new Error("missing"), { code: "CONNECTION_NOT_FOUND" }));
 
     await expect(orchestrator.checkHealth("user_admin", personal.id))
       .rejects.toBeInstanceOf(ConnectionAccessDeniedError);
@@ -221,6 +287,41 @@ describe("PlugFn connection orchestration", () => {
       readiness: "unavailable",
       healthReason: "plugfn_connection_missing",
     });
+  });
+
+  it("keeps revocation terminal across in-flight health and refresh operations", async () => {
+    const { authority, orchestrator, plugfn, store, workspaceId } = await fixture();
+    const binding = await authority.attach({
+      actorUserId: "user_owner", workspaceId, provider: "linear",
+      providerConnectionId: "plug_racing", ownership: "personal", label: "Racing",
+    });
+    let finishProbe!: (valid: boolean) => void;
+    plugfn.methods.isValid.mockImplementationOnce(() => new Promise<boolean>((resolve) => { finishProbe = resolve; }));
+    const pending = orchestrator.checkHealth("user_owner", binding.id);
+    await vi.waitFor(() => expect(plugfn.methods.isValid).toHaveBeenCalledTimes(1));
+    await authority.revoke("user_owner", binding.id);
+    finishProbe(true);
+    await expect(pending).rejects.toBeInstanceOf(ConnectionUnavailableError);
+    await expect(orchestrator.checkHealth("user_owner", binding.id))
+      .rejects.toBeInstanceOf(ConnectionUnavailableError);
+    await expect(orchestrator.refresh("user_owner", binding.id))
+      .rejects.toBeInstanceOf(ConnectionUnavailableError);
+    expect(plugfn.methods.refresh).not.toHaveBeenCalled();
+    expect(plugfn.methods.isValid).toHaveBeenCalledTimes(1);
+    expect(store.connections.get(binding.id)).toMatchObject({ status: "revoked", readiness: "unavailable" });
+
+    const other = await authority.attach({
+      actorUserId: "user_owner", workspaceId, provider: "linear",
+      providerConnectionId: "plug_refresh", ownership: "personal", label: "Refresh",
+    });
+    let finishRefresh!: (value: PlugFnConnection) => void;
+    plugfn.methods.refresh.mockImplementationOnce(() => new Promise((resolve) => { finishRefresh = resolve; }));
+    const refreshing = orchestrator.refresh("user_owner", other.id);
+    await vi.waitFor(() => expect(plugfn.methods.refresh).toHaveBeenCalledTimes(1));
+    await authority.revoke("user_owner", other.id);
+    finishRefresh(plugfn.connection({ id: "plug_refresh" }));
+    await expect(refreshing).rejects.toBeInstanceOf(ConnectionUnavailableError);
+    expect(store.connections.get(other.id)).toMatchObject({ status: "revoked", readiness: "unavailable" });
   });
 
   it("records a remote revocation failure while removing local access", async () => {

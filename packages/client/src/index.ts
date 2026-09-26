@@ -132,13 +132,15 @@ export class OMRClient {
   }
 
   discoverTools(input: {
+    workspaceId: string;
     query?: string;
     provider?: string;
     effect?: ToolEffect;
     limit?: number;
     cursor?: string;
-  } = {}): Promise<ToolDiscoveryPage> {
+  }): Promise<ToolDiscoveryPage> {
     const params = new URLSearchParams();
+    params.set("workspaceId", input.workspaceId);
     if (input.query) params.set("q", input.query);
     if (input.provider) params.set("provider", input.provider);
     if (input.effect) params.set("effect", input.effect);
@@ -147,12 +149,16 @@ export class OMRClient {
     return this.get(`/api/tools${params.size ? `?${params}` : ""}`);
   }
 
-  getTool(toolId: string): Promise<ToolManifest> {
-    return this.get(`/api/tools/manifest?id=${encodeURIComponent(toolId)}`);
+  getTool(toolId: string, workspaceId: string): Promise<ToolManifest> {
+    return this.get(`/api/tools/manifest?id=${encodeURIComponent(toolId)}&workspaceId=${encodeURIComponent(workspaceId)}`);
   }
 
   listConnections(workspaceId: string, provider?: string): Promise<unknown> {
     return this.post("/api/connections/list", { workspaceId, ...(provider ? { provider } : {}) });
+  }
+
+  selectConnection(input: { workspaceId: string; provider: string; connectionId: string }): Promise<unknown> {
+    return this.post("/api/connections/select", input);
   }
 
   execute(input: {

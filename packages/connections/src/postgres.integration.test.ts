@@ -99,4 +99,20 @@ describePostgres("connection authority/PostgreSQL integration", () => {
       }),
     ).rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
   });
+
+  it("does not restore a revoked binding through a late health result", async () => {
+    const binding = await runtime.connections.attach({
+      actorUserId: "connection_owner", workspaceId, provider: "github",
+      providerConnectionId: `plug_${crypto.randomUUID()}`, ownership: "personal", label: "Health race",
+    });
+    await runtime.connections.revoke("connection_owner", binding.id);
+    await expect(runtime.connections.recordHealth({
+      connectionId: binding.id, status: "active", readiness: "ready",
+    })).rejects.toMatchObject({ code: "CONNECTION_UNAVAILABLE" });
+    await expect(runtime.connections.getAccessible("connection_owner", binding.id))
+      .resolves.toMatchObject({ status: "revoked", readiness: "unavailable" });
+    await expect(runtime.connections.resolve({
+      actorUserId: "connection_owner", workspaceId, provider: "github", connectionId: binding.id,
+    })).rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+  });
 });

@@ -238,13 +238,17 @@ describe("OMR Worker HTTP boundary", () => {
   it("exposes connection setup and lifecycle routes without logging API keys", async () => {
     const calls: Array<{ operation: string; input: unknown }> = [];
     const services: ConnectionRouteServices = {
-      async providerReadiness(_request, provider) {
-        calls.push({ operation: "readiness", input: provider });
+      async providerReadiness(_request, provider, workspaceId) {
+        calls.push({ operation: "readiness", input: { provider, workspaceId } });
         return { provider, available: true };
       },
       async list(_request, input) {
         calls.push({ operation: "list", input });
         return [];
+      },
+      async select(_request, input) {
+        calls.push({ operation: "select", input });
+        return { connectionId: input.connectionId };
       },
       async startOAuth(_request, input) {
         calls.push({ operation: "oauth-start", input });
@@ -281,7 +285,7 @@ describe("OMR Worker HTTP boundary", () => {
     );
 
     const readiness = await connectionRouter.handle(
-      new Request("https://omr.invalid/api/connections/providers/readiness?provider=linear"),
+      new Request("https://omr.invalid/api/connections/providers/readiness?provider=linear&workspaceId=workspace_1"),
     );
     const apiKey = await request("/api/connections/api-key", {
       workspaceId: "workspace_1",
@@ -291,13 +295,27 @@ describe("OMR Worker HTTP boundary", () => {
       label: "Team Linear",
     });
     const health = await request("/api/connections/health", { connectionId: "connection_key" });
+    const selection = await request("/api/connections/select", {
+      workspaceId: "workspace_1", provider: "linear", connectionId: "connection_key",
+    });
+    const invalidSelection = await request("/api/connections/select", {
+      workspaceId: "workspace_1", provider: "linear",
+    });
     const disconnect = await request("/api/connections/disconnect", {
       connectionId: "connection_key",
     });
 
     expect(readiness.status).toBe(200);
+    expect(calls).toContainEqual({
+      operation: "readiness", input: { provider: "linear", workspaceId: "workspace_1" },
+    });
     expect(apiKey.status).toBe(201);
     expect(health.status).toBe(200);
+    expect(selection.status).toBe(200);
+    expect(invalidSelection.status).toBe(400);
+    expect(calls).toContainEqual({ operation: "select", input: {
+      workspaceId: "workspace_1", provider: "linear", connectionId: "connection_key",
+    } });
     expect(disconnect.status).toBe(200);
     expect(calls).toContainEqual({
       operation: "api-key",
@@ -317,32 +335,36 @@ describe("OMR Worker HTTP boundary", () => {
           tools: [{ id: "linear.get_issue" }],
         };
       },
-      async manifest(_request, toolId) {
-        calls.push(toolId);
+      async manifest(_request, toolId, workspaceId) {
+        calls.push({ toolId, workspaceId });
         return toolId === "linear.get_issue" ? { id: toolId, hash: "sha256-tool" } : null;
       },
     };
     const toolRouter = createOMRRouter(undefined, undefined, tools);
 
     const discovery = await toolRouter.handle(new Request(
-      "https://omr.invalid/api/tools?q=issue&provider=linear&effect=read&limit=20",
+      "https://omr.invalid/api/tools?workspaceId=workspace_1&q=issue&provider=linear&effect=read&limit=20",
     ));
     const manifest = await toolRouter.handle(new Request(
-      "https://omr.invalid/api/tools/manifest?id=linear.get_issue",
+      "https://omr.invalid/api/tools/manifest?id=linear.get_issue&workspaceId=workspace_1",
     ));
     const missing = await toolRouter.handle(new Request(
-      "https://omr.invalid/api/tools/manifest?id=linear.missing",
+      "https://omr.invalid/api/tools/manifest?id=linear.missing&workspaceId=workspace_1",
     ));
+    const noWorkspace = await toolRouter.handle(new Request("https://omr.invalid/api/tools"));
 
     expect(discovery.status).toBe(200);
     expect(manifest.status).toBe(200);
     expect(missing.status).toBe(404);
+    expect(noWorkspace.status).toBe(400);
     expect(calls[0]).toEqual({
+      workspaceId: "workspace_1",
       query: "issue",
       providers: ["linear"],
       effects: ["read"],
       limit: 20,
     });
+    expect(calls[1]).toEqual({ toolId: "linear.get_issue", workspaceId: "workspace_1" });
   });
 
   it("uses one execution route for every client surface and exposes approval requirements", async () => {

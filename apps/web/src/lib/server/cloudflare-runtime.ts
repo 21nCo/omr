@@ -4,13 +4,24 @@ import {
   connectPostgresClientAccess,
   connectPostgresDeviceLogin,
 } from "@oh-my-router/client-access/postgres";
-import { PlugFnConnectionOrchestrator } from "@oh-my-router/connections";
+import {
+  ConnectionAccessDeniedError, markMissingRemoteConnection,
+  PlugFnConnectionOrchestrator,
+  type ConnectionBindingRecord,
+} from "@oh-my-router/connections";
 import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
 import { ExecutionService, type ExecutionPrincipal } from "@oh-my-router/execution";
 import { connectPostgresExecutionReceipts } from "@oh-my-router/execution/postgres";
 import { connectPostgresIdentityRuntime } from "@oh-my-router/identity/postgres";
 import { connectPostgresPlugFn } from "@oh-my-router/plugfn-runtime";
-import { createPlugFnToolCatalog, type JsonValue } from "@oh-my-router/tools";
+import {
+  createPlugFnToolCatalog,
+  isProviderConfigured,
+  v1ProviderCatalog,
+  type JsonValue,
+  type ProviderBinding,
+  type ProviderStatus,
+} from "@oh-my-router/tools";
 import type { IntegrationConfig } from "plugfn";
 
 import {
@@ -22,6 +33,7 @@ import {
   type ToolRouteServices,
   RequestOriginDeniedError,
 } from "./router.js";
+import { resolveScopedCatalog } from "./scoped-catalog.js";
 
 type OMRBindings = Cloudflare.Env & {
   HYPERDRIVE?: { connectionString: string };
@@ -168,6 +180,18 @@ function requireSameOrigin(request: Request): void {
   }
 }
 
+/** A saved selection affects later actions from every client of the same user. */
+export async function selectAuthorizedConnection<T>(
+  request: Request,
+  input: { workspaceId: string; provider: string; connectionId: string },
+  authenticateSelection: (request: Request, workspaceId: string, capability: ClientCapability) => Promise<{ userId: string }>,
+  select: (input: { actorUserId: string; workspaceId: string; provider: string; connectionId: string }) => Promise<T>,
+): Promise<T> {
+  if (!bearerCredential(request)) requireSameOrigin(request);
+  const principal = await authenticateSelection(request, input.workspaceId, "tools:write");
+  return select({ actorUserId: principal.userId, ...input });
+}
+
 async function authenticate(
   event: RequestEvent,
   request: Request,
@@ -182,7 +206,7 @@ async function authenticate(
     try {
       const principal = await runtime.clients.authenticate(credential, capability);
       if (workspaceId && principal.workspaceId !== workspaceId) {
-        throw new RuntimeUnavailableError("Client workspace does not match the request");
+        throw new ConnectionAccessDeniedError();
       }
       return {
         kind: "client",
@@ -274,6 +298,55 @@ export function createCloudflareDeviceServices(event: RequestEvent): DeviceRoute
   };
 }
 
+function statuses(
+  plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"],
+  bindings: readonly (ProviderBinding & { provider: string })[] = [],
+): ProviderStatus[] {
+  const byProvider = new Map<string, ProviderBinding[]>();
+  for (const binding of bindings) {
+    const entries = byProvider.get(binding.provider) ?? [];
+    entries.push(binding);
+    byProvider.set(binding.provider, entries);
+  }
+  return v1ProviderCatalog({
+    get: (provider) => plugfn.providers.get(provider),
+    configured: (provider) => isProviderConfigured(
+      plugfn.providers.get(provider), provider, plugfn.config?.integrations,
+    ),
+    connections: byProvider,
+  });
+}
+
+function configuredProviders(plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"]): Set<string> {
+  return new Set(statuses(plugfn).filter((status) => status.available).map((status) => status.provider));
+}
+
+export async function scopedToolIds(
+  catalog: Awaited<ReturnType<typeof createPlugFnToolCatalog>>,
+  plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"],
+  authority: Awaited<ReturnType<typeof connectPostgresConnections>>["connections"],
+  principal: ExecutionPrincipal,
+  workspaceId: string,
+  bindings: readonly ConnectionBindingRecord[],
+): Promise<{ allowedToolIds: Set<string>; providers: ProviderStatus[] }> {
+  const missing = new Set<string>();
+  const allowedToolIds = await resolveScopedCatalog(
+    catalog,
+    statuses(plugfn, bindings),
+    (provider) => authority.resolve({ actorUserId: principal.userId, workspaceId, provider }),
+    async (connectionId) => (await plugfn.connections.get(connectionId)).scopes,
+    async (bindingId) => {
+      missing.add(bindingId);
+      await markMissingRemoteConnection(authority, bindingId);
+    },
+  );
+  return {
+    allowedToolIds,
+    providers: statuses(plugfn, bindings.map((binding) => missing.has(binding.id)
+      ? { ...binding, status: "needs_reauth", readiness: "unavailable" } : binding)),
+  };
+}
+
 export function createCloudflareRouteServices(event: RequestEvent): CloudflareRouteServices {
   const device = createCloudflareDeviceServices(event);
 
@@ -299,17 +372,29 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
   }
 
   const connections: ConnectionRouteServices = {
-    async providerReadiness(request, provider) {
-      await authenticate(event, request, undefined, "connections:read");
-      return withConnections(async (orchestrator) => orchestrator.providerReadiness(provider));
+    async providerReadiness(request, provider, workspaceId) {
+      const principal = await authenticate(event, request, workspaceId, "connections:read");
+      return withConnections(async (orchestrator, authority) => orchestrator.providerReadiness(
+        provider,
+        workspaceId ? await authority.listAvailable({
+          actorUserId: principal.userId,
+          workspaceId,
+          provider,
+        }) : [],
+      ));
     },
     async list(request, input) {
       const principal = await authenticate(event, request, input.workspaceId, "connections:read");
-      return withConnections((_orchestrator, authority) => authority.listAvailable({
+      return withConnections((orchestrator) => orchestrator.listAvailable({
         actorUserId: principal.userId,
         workspaceId: input.workspaceId,
         ...(input.provider ? { provider: input.provider } : {}),
       }));
+    },
+    async select(request, input) {
+      return selectAuthorizedConnection(request, input,
+        (selectionRequest, workspaceId, capability) => authenticate(event, selectionRequest, workspaceId, capability),
+        (selection) => withConnections((orchestrator) => orchestrator.select(selection)));
     },
     async startOAuth(request, input) {
       requireSameOrigin(request);
@@ -344,10 +429,14 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
 
   async function withCatalog<T>(callback: (
     catalog: Awaited<ReturnType<typeof createPlugFnToolCatalog>>,
+    plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"],
   ) => Promise<T> | T): Promise<T> {
     const plugfn = await connectPlugFn(event);
     try {
-      return await callback(await createPlugFnToolCatalog(plugfn.plugfn));
+      return await callback(
+        await createPlugFnToolCatalog(plugfn.plugfn, configuredProviders(plugfn.plugfn)),
+        plugfn.plugfn,
+      );
     } finally {
       await plugfn.close();
     }
@@ -355,12 +444,43 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
 
   const tools: ToolRouteServices = {
     async discover(request, input) {
-      await authenticate(event, request, undefined, "tools:discover");
-      return withCatalog((catalog) => catalog.discover(input));
+      const principal = await authenticate(event, request, input.workspaceId, "tools:discover");
+      return withCatalog(async (catalog, plugfn) => {
+        const runtime = await connectPostgresConnections({ connectionString: databaseConnectionString(event) });
+        try {
+          const bindings = await runtime.connections.listAvailable({
+            actorUserId: principal.userId,
+            workspaceId: input.workspaceId,
+          });
+          const { allowedToolIds, providers } = await scopedToolIds(
+            catalog, plugfn, runtime.connections, principal, input.workspaceId, bindings,
+          );
+          return { ...catalog.discover({ ...input, allowedToolIds }), providers };
+        } finally {
+          await runtime.close();
+        }
+      });
     },
-    async manifest(request, toolId) {
-      await authenticate(event, request, undefined, "tools:discover");
-      return withCatalog((catalog) => catalog.get(toolId));
+    async manifest(request, toolId, workspaceId) {
+      const principal = await authenticate(event, request, workspaceId, "tools:discover");
+      return withCatalog(async (catalog, plugfn) => {
+        const manifest = catalog.get(toolId);
+        if (!manifest || !statuses(plugfn).some((entry) => entry.provider === manifest.provider && entry.available)) {
+          return null;
+        }
+        const runtime = await connectPostgresConnections({ connectionString: databaseConnectionString(event) });
+        try {
+          const bindings = await runtime.connections.listAvailable({
+            actorUserId: principal.userId,
+            workspaceId,
+            provider: manifest.provider,
+          });
+          const { allowedToolIds } = await scopedToolIds(catalog, plugfn, runtime.connections, principal, workspaceId, bindings);
+          return allowedToolIds.has(manifest.id) ? manifest : null;
+        } finally {
+          await runtime.close();
+        }
+      });
     },
   };
 
@@ -376,12 +496,13 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
         connectionString: databaseConnectionString(event),
         resultWrappingKey: executionWrappingKey(event),
       });
-      const catalog = await createPlugFnToolCatalog(plugfn.plugfn);
+      const catalog = await createPlugFnToolCatalog(plugfn.plugfn, configuredProviders(plugfn.plugfn));
       return await callback(new ExecutionService(
         catalog,
         connectionRuntime.connections,
         plugfn.plugfn,
         execution.receipts,
+        async (connectionId) => (await plugfn!.plugfn.connections.get(connectionId)).scopes,
         Date.now,
         execution.approvals,
       ));

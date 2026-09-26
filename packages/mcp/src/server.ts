@@ -10,7 +10,11 @@ import { OMRClient } from "@oh-my-router/client";
 import type { JsonValue, ToolManifest } from "@oh-my-router/tools";
 
 const CONNECTIONS_TOOL = "omr.connections.list";
+const SELECT_CONNECTION_TOOL = "omr.connections.select";
 const EXECUTE_APPROVAL_TOOL = "omr.approvals.execute";
+const REFRESH_CATALOG_TOOL = "omr.catalog.refresh";
+const PROVIDERS_TOOL = "omr.catalog.providers";
+type VisibilityContext = { manifests?: Promise<Map<string, string>> };
 
 function objectSchema(value: unknown): McpFnObjectSchema {
   if (value && typeof value === "object" && !Array.isArray(value) &&
@@ -54,19 +58,23 @@ export async function createOMRMcpServer(input: {
   schemaCompiler?: McpFnSchemaCompiler;
 }) {
   const client = new OMRClient(input);
-  const manifests: ToolManifest[] = [];
-  let cursor: string | undefined;
-  do {
-    const page = await client.discoverTools({ limit: 100, ...(cursor ? { cursor } : {}) });
-    manifests.push(...page.tools);
-    cursor = page.nextCursor;
-  } while (cursor);
+  async function discoverManifests(): Promise<ToolManifest[]> {
+    const manifests: ToolManifest[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await client.discoverTools({ workspaceId: input.workspaceId, limit: 100, ...(cursor ? { cursor } : {}) });
+      manifests.push(...page.tools);
+      cursor = page.nextCursor;
+    } while (cursor);
+    return manifests;
+  }
+  const manifests = await discoverManifests();
 
-  const reservedNames = new Set([CONNECTIONS_TOOL, EXECUTE_APPROVAL_TOOL]);
+  const reservedNames = new Set([CONNECTIONS_TOOL, SELECT_CONNECTION_TOOL, EXECUTE_APPROVAL_TOOL, REFRESH_CATALOG_TOOL, PROVIDERS_TOOL]);
   const collision = manifests.find((manifest) => reservedNames.has(manifest.id));
   if (collision) throw new Error(`OMR catalog tool ${collision.id} conflicts with an MCP control tool`);
 
-  const tools: McpFnToolDefinition[] = manifests.map((manifest) => ({
+  const definition = (manifest: ToolManifest): McpFnToolDefinition<VisibilityContext> => ({
     name: manifest.id,
     title: manifest.displayName,
     description: manifest.description,
@@ -96,9 +104,57 @@ export async function createOMRMcpServer(input: {
       }
       return structuredResult(structured(await client.execute(execution)));
     },
-  }));
+  });
+  const tools: McpFnToolDefinition<VisibilityContext>[] = manifests.map(definition);
+
+  const registeredHashes = new Map(manifests.map(({ id, hash }) => [id, hash]));
+  let visibleAtLastRefresh = new Set(manifests.map(({ id }) => id));
+  const registry = new McpFnRegistry<VisibilityContext>({ compileSchema: input.schemaCompiler });
 
   tools.push(
+    {
+      name: PROVIDERS_TOOL,
+      title: "List OMR Provider Readiness",
+      description: "Show the workspace-scoped v1 provider catalog and readiness, including providers with no visible tools or connections.",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      metadata: { surface: "omr-control-plane" },
+      async handler() {
+        const { catalogSchemaVersion, revision, providers } = await client.discoverTools({
+          workspaceId: input.workspaceId, limit: 1,
+        });
+        if (!providers) throw new Error("OMR discovery did not include provider readiness");
+        return structuredResult({ catalogSchemaVersion, revision, providers });
+      },
+    },
+    {
+      name: REFRESH_CATALOG_TOOL,
+      title: "Refresh OMR Tool Catalog",
+      description: "Refresh this MCP session after connecting a provider; changed schemas require restarting the session.",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      metadata: { surface: "omr-control-plane" },
+      async handler() {
+        const fresh = await discoverManifests();
+        if (fresh.some(({ id, hash }) => registeredHashes.has(id) && registeredHashes.get(id) !== hash)) {
+          throw new Error("OMR catalog schema changed; restart this MCP session");
+        }
+        let added = 0;
+        for (const manifest of fresh) {
+          if (reservedNames.has(manifest.id)) throw new Error(`OMR catalog tool ${manifest.id} conflicts with an MCP control tool`);
+          if (registeredHashes.has(manifest.id)) continue;
+          registry.register(definition(manifest));
+          registeredHashes.set(manifest.id, manifest.hash);
+          added += 1;
+        }
+        const visible = new Set(fresh.map(({ id }) => id));
+        const visibilityChanged = visible.size !== visibleAtLastRefresh.size ||
+          [...visible].some((id) => !visibleAtLastRefresh.has(id));
+        if (visibilityChanged) await server.sendToolListChanged();
+        visibleAtLastRefresh = visible;
+        return structuredResult({ added, tools: fresh.length });
+      },
+    },
     {
       name: CONNECTIONS_TOOL,
       title: "List OMR Connections",
@@ -124,6 +180,30 @@ export async function createOMRMcpServer(input: {
         const provider = typeof args.provider === "string" ? args.provider : undefined;
         const connections = await client.listConnections(input.workspaceId, provider);
         return structuredResult({ connections });
+      },
+    },
+    {
+      name: SELECT_CONNECTION_TOOL,
+      title: "Select an OMR Connection",
+      description: "Choose an accessible ready connection for a provider in this workspace; refresh the catalog afterwards.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          provider: { type: "string", description: "Provider identifier from omr.connections.list." },
+          connectionId: { type: "string", description: "Connection id from omr.connections.list." },
+        },
+        required: ["provider", "connectionId"],
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      metadata: { surface: "omr-control-plane" },
+      async handler(args) {
+        const selection = await client.selectConnection({
+          workspaceId: input.workspaceId,
+          provider: String(args.provider),
+          connectionId: String(args.connectionId),
+        });
+        return structuredResult(structured(selection));
       },
     },
     {
@@ -154,15 +234,24 @@ export async function createOMRMcpServer(input: {
     },
   );
 
-  const registry = new McpFnRegistry({ compileSchema: input.schemaCompiler });
   registry.registerAll(tools);
-  return defineMcpFnServer({
+  const server = defineMcpFnServer({
     info: {
       name: "oh-my-router",
       version: "0.0.0",
-      instructions: "Tools are projected from the authenticated OMR catalog. Write, destructive, and unknown-effect calls create an OMR approval instead of executing immediately. After approval in the OMR control plane, call omr.approvals.execute with the returned approvalId.",
+      instructions: "Use omr.catalog.providers to inspect the workspace-scoped v1 provider states, including unavailable providers. Tools are projected from the authenticated OMR catalog. For multiple ready connections, list and select one with omr.connections.list and omr.connections.select. Call omr.catalog.refresh after connection or selection changes; changed schemas require restarting this session. Revoked tools are hidden on the next list and call. Write, destructive, and unknown-effect calls create an OMR approval instead of executing immediately. After approval in the OMR control plane, call omr.approvals.execute with the returned approvalId.",
     },
     transports: ["stdio", "streamable-http"],
     registry,
-  }).createServer();
+  }).createServer({
+    context: () => ({}),
+    toolVisibility: async ({ tool, context }) => {
+      if (reservedNames.has(tool.name)) return true;
+      context.manifests ??= discoverManifests()
+        .then((fresh) => new Map(fresh.map(({ id, hash }) => [id, hash])))
+        .catch(() => new Map<string, string>());
+      return (await context.manifests).get(tool.name) === registeredHashes.get(tool.name);
+    },
+  });
+  return server;
 }

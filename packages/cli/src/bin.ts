@@ -117,6 +117,7 @@ async function main(): Promise<void> {
 
   if (command === "tools" && subcommand === "list") {
     return output.json(await api.discoverTools({
+      workspaceId,
       provider: option("--provider"),
       query: option("--query"),
       effect: option("--effect") as ToolEffect | undefined,
@@ -124,7 +125,7 @@ async function main(): Promise<void> {
     }));
   }
   if (command === "tools" && subcommand === "get" && subject) {
-    return output.json(await api.getTool(subject));
+    return output.json(await api.getTool(subject, workspaceId));
   }
   if (command === "tools" && subcommand === "run" && subject) {
     return output.json(await api.execute({
@@ -138,6 +139,11 @@ async function main(): Promise<void> {
   if (command === "connections" && subcommand === "list") {
     return output.json(await api.listConnections(workspaceId, option("--provider")));
   }
+  if (command === "connections" && subcommand === "select" && subject) {
+    return output.json(await api.selectConnection({
+      workspaceId, provider: requiredOption("--provider"), connectionId: subject,
+    }));
+  }
   if (command === "approvals" && subcommand === "request" && subject) {
     return output.json(await api.requestApproval({
       workspaceId,
@@ -150,7 +156,7 @@ async function main(): Promise<void> {
   if (command === "approvals" && subcommand === "execute" && subject) {
     return output.json(await api.executeApproved(subject));
   }
-  throw new Error("Usage: omr login|tools list|get|run|connections list|approvals request|execute");
+  throw new Error("Usage: omr login|tools list|get|run|connections list|connections select|approvals request|execute");
 }
 
 main().catch((error) => {
