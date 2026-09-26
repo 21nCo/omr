@@ -33,6 +33,7 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     return !await this.workspaces.findMembership(connection.workspaceId, connection.ownerUserId!);
   }
 
+  /** Apply current workspace role rules before provider setup. */
   async authorizeInstall(input: AuthorizeConnectionInstallInput): Promise<void> {
     const membership = await this.workspaces.findMembership(input.workspaceId, input.actorUserId);
     if (
@@ -43,6 +44,7 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     }
   }
 
+  /** Save a binding only when the actor can install its ownership type. */
   async attach(input: AttachConnectionInput): Promise<ConnectionBindingRecord> {
     const membership = await this.workspaces.findMembership(
       input.connection.workspaceId,
@@ -67,6 +69,7 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     return structuredClone(connection);
   }
 
+  /** Return a binding only to an actor permitted to use it. */
   async getAccessible(input: AccessConnectionInput): Promise<ConnectionBindingRecord> {
     const connection = this.connections.get(input.connectionId);
     if (!connection) throw new ConnectionAccessDeniedError();
@@ -80,6 +83,7 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     return structuredClone(connection);
   }
 
+  /** Return a binding to its lifecycle owner or a workspace administrator. */
   async getManageable(input: AccessConnectionInput): Promise<ConnectionBindingRecord> {
     const connection = this.connections.get(input.connectionId);
     if (!connection) throw new ConnectionAccessDeniedError();
@@ -87,6 +91,7 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     return structuredClone(connection);
   }
 
+  /** Include orphan cleanup authority without granting account use. */
   async getRevocable(input: AccessConnectionInput): Promise<ConnectionBindingRecord> {
     const connection = this.connections.get(input.connectionId);
     if (!connection || !await this.canManage(connection, input.actorUserId, true)) {
@@ -95,6 +100,7 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     return structuredClone(connection);
   }
 
+  /** List only bindings visible to this workspace member. */
   async listAvailable(input: {
     actorUserId: string;
     workspaceId: string;
@@ -128,6 +134,7 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     return result.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
   }
 
+  /** Read the member's provider choice after checking current membership. */
   async getSelection(input: {
     actorUserId: string;
     workspaceId: string;
@@ -142,6 +149,7 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     return selection ? structuredClone(selection) : null;
   }
 
+  /** Select a ready binding visible to the actor. */
   async select(input: SelectConnectionInput): Promise<ConnectionSelectionRecord> {
     const available = await this.listAvailable({
       actorUserId: input.actorUserId,
@@ -169,13 +177,14 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     return structuredClone(selection);
   }
 
+  /** Remove local use and selections while retaining an outcome when no new reason is given. */
   async revoke(input: RevokeConnectionInput): Promise<ConnectionBindingRecord> {
     const connection = this.connections.get(input.connectionId);
     if (!connection) throw new ConnectionAccessDeniedError();
     if (!await this.canManage(connection, input.actorUserId, true)) throw new ConnectionAccessDeniedError();
     connection.status = "revoked";
     connection.readiness = "unavailable";
-    connection.healthReason = input.reason ?? null;
+    if (input.reason !== undefined) connection.healthReason = input.reason;
     connection.revokedAt ??= input.now;
     connection.updatedAt = input.now;
     for (const [key, selection] of this.selections) {
@@ -184,6 +193,7 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     return structuredClone(connection);
   }
 
+  /** Change a cleanup claim only when its expected state still matches. */
   async revokeIf(input: ConditionalRevokeInput): Promise<ConnectionBindingRecord | null> {
     await this.getRevocable({ actorUserId: input.actorUserId, connectionId: input.connectionId });
     const connection = this.connections.get(input.connectionId)!;
@@ -202,6 +212,7 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     return structuredClone(connection);
   }
 
+  /** Reject late health updates after local revocation. */
   async recordHealth(input: {
     connectionId: string;
     status: ConnectionBindingRecord["status"];

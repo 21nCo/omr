@@ -102,11 +102,7 @@ describe("PlugFn connection orchestration", () => {
       provider: "linear", providerConnectionId: "remote_orphan", ownership: "personal", label: "Old member" });
     await authority.select({ actorUserId: "user_member", workspaceId,
       provider: "linear", connectionId: binding.id });
-    for (const [id, membership] of workspaceStore.memberships) {
-      if (membership.userId === "user_member" && membership.workspaceId === workspaceId) {
-        workspaceStore.memberships.delete(id);
-      }
-    }
+    expect(workspaceStore.removeMembership(workspaceId, "user_member")).toBe(true);
     await expect(orchestrator.refresh("user_admin", binding.id))
       .rejects.toBeInstanceOf(ConnectionAccessDeniedError);
     await expect(orchestrator.checkHealth("user_admin", binding.id))
@@ -129,6 +125,27 @@ describe("PlugFn connection orchestration", () => {
     await expect(orchestrator.disconnect("user_owner", binding.id)).resolves.toMatchObject({
       connection: { status: "revoked", readiness: "unavailable", healthReason: "provider_cleanup_requires_owner" },
     });
+    expect(plugfn.methods.disconnect).not.toHaveBeenCalled();
+  });
+
+  it("persists owner guidance after an orphan cleanup write retry", async () => {
+    const { authority, orchestrator, plugfn, store, workspaceStore, workspaceId } = await fixture();
+    const binding = await authority.attach({ actorUserId: "user_member", workspaceId,
+      provider: "linear", providerConnectionId: "remote_orphan_retry", ownership: "personal", label: "Former" });
+    expect(workspaceStore.removeMembership(workspaceId, "user_member")).toBe(true);
+    const revokeIf = store.revokeIf.bind(store);
+    let finalizationAttempts = 0;
+    vi.spyOn(store, "revokeIf").mockImplementation(async (input) => {
+      if (input.expectedReason?.startsWith("provider_cleanup_pending:") && ++finalizationAttempts === 1) {
+        throw new Error("fixture transient write failure");
+      }
+      return revokeIf(input);
+    });
+    await expect(orchestrator.disconnect("user_admin", binding.id)).resolves.toMatchObject({
+      connection: { status: "revoked", readiness: "unavailable",
+        healthReason: "provider_cleanup_requires_owner" },
+    });
+    expect(finalizationAttempts).toBe(2);
     expect(plugfn.methods.disconnect).not.toHaveBeenCalled();
   });
 
@@ -426,14 +443,16 @@ describe("PlugFn connection orchestration", () => {
     const binding = await authority.attach({ actorUserId: "user_owner", workspaceId,
       provider: "linear", providerConnectionId: "remote_interleave", ownership: "workspace", label: "Interleave" });
     await authority.select({ actorUserId: "user_member", workspaceId, provider: "linear", connectionId: binding.id });
-    const getManageable = store.getManageable.bind(store);
-    vi.spyOn(store, "getManageable").mockImplementationOnce(async (input) => {
-      const stale = await getManageable(input);
+    const getRevocable = store.getRevocable.bind(store);
+    const recordHealth = vi.spyOn(authority, "recordHealth");
+    vi.spyOn(store, "getRevocable").mockImplementationOnce(async (input) => {
+      const stale = await getRevocable(input);
       await authority.recordHealth({ connectionId: binding.id, status, readiness, reason });
       return stale;
     });
 
     const result = await orchestrator.disconnect("user_owner", binding.id);
+    expect(recordHealth).toHaveBeenCalledWith({ connectionId: binding.id, status, readiness, reason });
     expect(result.connection).toMatchObject({ status: "revoked", readiness: "unavailable" });
     expect(store.selections.size).toBe(0);
     await expect(authority.resolve({ actorUserId: "user_member", workspaceId, provider: "linear" }))
@@ -481,6 +500,90 @@ describe("PlugFn connection orchestration", () => {
       remoteRevokeSucceeded: false, localDeleted: true, connectionDeleted: true });
     await first;
     expect(store.connections.get(binding.id)).toMatchObject({ status: "revoked", healthReason: null });
+    expect(plugfn.methods.disconnect).toHaveBeenCalledTimes(2);
+  });
+
+  it("persists a provider outcome after a transient finalization write failure", async () => {
+    const { authority, orchestrator, plugfn, store, workspaceId } = await fixture();
+    const binding = await authority.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", providerConnectionId: "remote_transient", ownership: "workspace", label: "Transient" });
+    await authority.select({ actorUserId: "user_member", workspaceId,
+      provider: "linear", connectionId: binding.id });
+    plugfn.methods.disconnect.mockResolvedValueOnce({ disconnected: true, remoteRevokeAttempted: true,
+      remoteRevokeSucceeded: false, localDeleted: true, connectionDeleted: true });
+    const revokeIf = store.revokeIf.bind(store);
+    let finalizationAttempts = 0;
+    vi.spyOn(store, "revokeIf").mockImplementation(async (input) => {
+      if (input.expectedReason?.startsWith("provider_cleanup_pending:") && ++finalizationAttempts === 1) {
+        throw new Error("fixture transient write failure");
+      }
+      return revokeIf(input);
+    });
+
+    await expect(orchestrator.disconnect("user_owner", binding.id)).resolves.toMatchObject({
+      connection: { status: "revoked", readiness: "unavailable",
+        healthReason: "remote_revocation_unavailable" },
+    });
+    expect(finalizationAttempts).toBe(2);
+    expect(store.selections.size).toBe(0);
+    expect(plugfn.methods.disconnect).toHaveBeenCalledOnce();
+    await orchestrator.disconnect("user_owner", binding.id);
+    expect(plugfn.methods.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the committed outcome when its first write acknowledgement is lost", async () => {
+    const { authority, orchestrator, plugfn, store, workspaceId } = await fixture();
+    const binding = await authority.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", providerConnectionId: "remote_ack", ownership: "workspace", label: "Ack" });
+    const revokeIf = store.revokeIf.bind(store);
+    let lost = false;
+    vi.spyOn(store, "revokeIf").mockImplementation(async (input) => {
+      const result = await revokeIf(input);
+      if (!lost && input.expectedReason?.startsWith("provider_cleanup_pending:")) {
+        lost = true;
+        throw new Error("fixture acknowledgement lost after commit");
+      }
+      return result;
+    });
+
+    await expect(orchestrator.disconnect("user_owner", binding.id)).resolves.toMatchObject({
+      connection: { status: "revoked", readiness: "unavailable", healthReason: null },
+    });
+    expect(lost).toBe(true);
+    expect(plugfn.methods.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it("surfaces persistent finalization failure while keeping local use revoked for retry", async () => {
+    const { authority, orchestrator, plugfn, store, workspaceId, advance } = await fixture();
+    const binding = await authority.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", providerConnectionId: "remote_persistent", ownership: "workspace", label: "Persistent" });
+    await authority.select({ actorUserId: "user_member", workspaceId,
+      provider: "linear", connectionId: binding.id });
+    const revokeIf = store.revokeIf.bind(store);
+    let finalizationAttempts = 0;
+    const spy = vi.spyOn(store, "revokeIf").mockImplementation(async (input) => {
+      if (input.expectedReason?.startsWith("provider_cleanup_pending:")) {
+        finalizationAttempts += 1;
+        throw new Error("fixture persistent write failure");
+      }
+      return revokeIf(input);
+    });
+
+    await expect(orchestrator.disconnect("user_owner", binding.id))
+      .rejects.toThrow("fixture persistent write failure");
+    expect(finalizationAttempts).toBe(2);
+    expect(store.connections.get(binding.id)).toMatchObject({ status: "revoked", readiness: "unavailable" });
+    expect(store.connections.get(binding.id)?.healthReason).toMatch(/^provider_cleanup_pending:/);
+    expect(store.selections.size).toBe(0);
+    await expect(authority.resolve({ actorUserId: "user_member", workspaceId, provider: "linear" }))
+      .rejects.toBeInstanceOf(ConnectionUnavailableError);
+    await orchestrator.disconnect("user_owner", binding.id);
+    expect(plugfn.methods.disconnect).toHaveBeenCalledOnce();
+    spy.mockRestore();
+    advance(60_001);
+    await expect(orchestrator.disconnect("user_owner", binding.id)).resolves.toMatchObject({
+      connection: { status: "revoked", healthReason: null },
+    });
     expect(plugfn.methods.disconnect).toHaveBeenCalledTimes(2);
   });
 

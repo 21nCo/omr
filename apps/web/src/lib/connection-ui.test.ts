@@ -31,6 +31,14 @@ describe("connection control UI policy", () => {
       .not.toContain("grant");
     expect(providerRevocationGuidance("provider_connection_missing", null))
       .toContain("remaining access");
+    const legacyRevoked = { ...team, status: "revoked", readiness: "unavailable",
+      healthReason: "plugfn_connection_missing" };
+    expect(connectionActions(legacyRevoked, "user_admin", "admin", "ready").canRetryRevoke).toBe(false);
+    expect(connectionStatusLabel(legacyRevoked, "ready")).toBe("disconnected");
+    expect(providerRevocationGuidance(legacyRevoked.healthReason, "oauth"))
+      .toContain("provider grant may still be active");
+    expect(providerRevocationGuidance(legacyRevoked.healthReason, "api_key"))
+      .toContain("Delete or rotate the API key");
     expect(providerRevocationGuidance("provider_cleanup_requires_owner", "oauth"))
       .toContain("former member to revoke the OAuth grant");
     expect(providerRevocationGuidance("provider_cleanup_requires_owner", "api_key"))

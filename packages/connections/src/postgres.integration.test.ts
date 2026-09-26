@@ -116,6 +116,34 @@ describePostgres("connection authority/PostgreSQL integration", () => {
     })).rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
   });
 
+  it("preserves a stored cleanup outcome when a later revoke has no reason", async () => {
+    const binding = await runtime.connections.attach({ actorUserId: "connection_owner", workspaceId,
+      provider: "linear", providerConnectionId: `plug_${crypto.randomUUID()}`,
+      ownership: "workspace", label: "Cleanup outcome" });
+    await runtime.connections.select({ actorUserId: "connection_member", workspaceId,
+      provider: "linear", connectionId: binding.id });
+    await runtime.connections.revoke("connection_owner", binding.id, "remote_revoke_failed");
+    await expect(runtime.connections.revoke("connection_owner", binding.id)).resolves.toMatchObject({
+      status: "revoked", readiness: "unavailable", healthReason: "remote_revoke_failed",
+    });
+    const client = new Client({ connectionString: connectionString! });
+    try {
+      await client.connect();
+      const row = await client.query(
+        `SELECT health_reason FROM omr_control.connection_bindings WHERE id = $1`, [binding.id],
+      );
+      expect(row.rows[0]?.health_reason).toBe("remote_revoke_failed");
+      const selection = await client.query(
+        `SELECT 1 FROM omr_control.connection_selections WHERE connection_id = $1`, [binding.id],
+      );
+      expect(selection.rowCount).toBe(0);
+    } finally {
+      await client.query(`DELETE FROM omr_control.connection_selections WHERE connection_id = $1`, [binding.id]);
+      await client.query(`DELETE FROM omr_control.connection_bindings WHERE id = $1`, [binding.id]);
+      await client.end();
+    }
+  });
+
   it("claims revocation from the current SQL row after health changes and removes selections", async () => {
     const binding = await runtime.connections.attach({
       actorUserId: "connection_owner", workspaceId, provider: "github",

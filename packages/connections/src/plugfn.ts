@@ -469,11 +469,11 @@ export class PlugFnConnectionOrchestrator {
     if (binding.ownership === "personal" && binding.ownerUserId !== actorUserId) {
       // PlugFn's personal disconnect requires the owner as the actual actor.
       // Never impersonate a former member to delete their provider credential.
-      const connection = await this.authority.revokeIf(
-        actorUserId, connectionId, "revoked", pending, "provider_cleanup_requires_owner",
+      const connection = await this.finalizeCleanup(
+        actorUserId, connectionId, pending, "provider_cleanup_requires_owner",
       );
       return {
-        connection: connection ?? await this.authority.getRevocable(actorUserId, connectionId),
+        connection,
         provider: { disconnected: false, remoteRevokeAttempted: false,
           remoteRevokeSucceeded: false, localDeleted: false, connectionDeleted: false },
       };
@@ -506,10 +506,26 @@ export class PlugFnConnectionOrchestrator {
       connectionDeleted: provider.connectionDeleted,
     };
     const reason = cleanupReason(provider, this.plugfn.providers.get(binding.provider)?.auth.type === "oauth2");
-    const connection = await this.authority.revokeIf(
-      actorUserId, connectionId, "revoked", pending, reason,
-    ).catch(() => null);
-    return { connection: connection ?? await this.authority.getRevocable(actorUserId, connectionId), provider: safeProvider };
+    const connection = await this.finalizeCleanup(actorUserId, connectionId, pending, reason);
+    return { connection, provider: safeProvider };
+  }
+
+  /** Retry a failed outcome write under the same claim; a null result means another claim won. */
+  private async finalizeCleanup(
+    actorUserId: string,
+    connectionId: string,
+    pending: string,
+    reason?: string,
+  ): Promise<ConnectionBindingRecord> {
+    let connection: ConnectionBindingRecord | null;
+    try {
+      connection = await this.authority.revokeIf(actorUserId, connectionId, "revoked", pending, reason);
+    } catch {
+      // The first write may have failed before commit, or after commit with a
+      // lost acknowledgement. The same conditional claim is safe in both cases.
+      connection = await this.authority.revokeIf(actorUserId, connectionId, "revoked", pending, reason);
+    }
+    return connection ?? this.authority.getRevocable(actorUserId, connectionId);
   }
 
   /** Delete an upstream result if local binding persistence fails. */

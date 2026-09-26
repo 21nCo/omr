@@ -82,6 +82,7 @@ function toSelection(row: SelectionRow): ConnectionSelectionRecord {
 export class PostgresConnectionBindingStore implements ConnectionBindingStore {
   constructor(private readonly client: Client) {}
 
+  /** Apply workspace role rules before provider setup. */
   async authorizeInstall(input: AuthorizeConnectionInstallInput): Promise<void> {
     const role = await this.membershipRole(input.workspaceId, input.actorUserId);
     if (!role || (input.ownership === "workspace" && role !== "owner" && role !== "admin")) {
@@ -89,6 +90,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     }
   }
 
+  /** Persist a binding after checking install authority in the same transaction. */
   async attach(input: AttachConnectionInput): Promise<ConnectionBindingRecord> {
     await this.client.query("BEGIN");
     try {
@@ -136,6 +138,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     }
   }
 
+  /** Return a binding only to an actor permitted to use it. */
   async getAccessible(input: AccessConnectionInput): Promise<ConnectionBindingRecord> {
     const connection = await this.readConnection(input.connectionId);
     if (!connection) throw new ConnectionAccessDeniedError();
@@ -146,6 +149,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     return toConnection(connection);
   }
 
+  /** Read lifecycle state under current ownership and role rules. */
   async getManageable(input: AccessConnectionInput): Promise<ConnectionBindingRecord> {
     const connection = await this.readConnection(input.connectionId);
     if (!connection) throw new ConnectionAccessDeniedError();
@@ -153,6 +157,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     return toConnection(connection);
   }
 
+  /** Include orphan cleanup authority without granting account use. */
   async getRevocable(input: AccessConnectionInput): Promise<ConnectionBindingRecord> {
     const connection = await this.readConnection(input.connectionId);
     if (!connection || !await this.canManage(connection, input.actorUserId, true)) {
@@ -161,6 +166,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     return toConnection(connection);
   }
 
+  /** List only bindings visible to this workspace member. */
   async listAvailable(input: {
     actorUserId: string;
     workspaceId: string;
@@ -199,6 +205,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     return result.rows.map(toConnection);
   }
 
+  /** Read a member's provider choice only while membership is current. */
   async getSelection(input: {
     actorUserId: string;
     workspaceId: string;
@@ -216,6 +223,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     return result.rows[0] ? toSelection(result.rows[0]) : null;
   }
 
+  /** Persist an eligible account choice under current access rules. */
   async select(input: SelectConnectionInput): Promise<ConnectionSelectionRecord> {
     await this.client.query("BEGIN");
     try {
@@ -249,6 +257,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     }
   }
 
+  /** Revoke and clear selections atomically, preserving an omitted cleanup reason. */
   async revoke(input: RevokeConnectionInput): Promise<ConnectionBindingRecord> {
     await this.client.query("BEGIN");
     try {
@@ -266,7 +275,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
       const updated = await this.client.query<ConnectionRow>(
         `UPDATE omr_control.connection_bindings
          SET status = 'revoked', readiness = 'unavailable',
-             health_reason = $2,
+             health_reason = COALESCE($2, health_reason),
              revoked_at = COALESCE(revoked_at, $1), updated_at = $1
          WHERE id = $3
          RETURNING ${CONNECTION_COLUMNS}`,
@@ -284,6 +293,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     }
   }
 
+  /** Atomically fence a cleanup state change and remove selections. */
   async revokeIf(input: ConditionalRevokeInput): Promise<ConnectionBindingRecord | null> {
     await this.client.query("BEGIN");
     try {
@@ -318,6 +328,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     }
   }
 
+  /** Reject late health updates after a binding has been revoked. */
   async recordHealth(input: {
     connectionId: string;
     status: ConnectionLifecycleStatus;

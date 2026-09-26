@@ -179,6 +179,19 @@ describe("connection authority", () => {
     ).rejects.toBeInstanceOf(ConnectionUnavailableError);
   });
 
+  it("preserves a revoked cleanup reason when a later revoke omits one", async () => {
+    const { connections, store, workspaceId } = await createFixture();
+    const binding = await connections.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", providerConnectionId: "plug_reason", ownership: "workspace", label: "Reason" });
+    await connections.select({ actorUserId: "user_member", workspaceId,
+      provider: "linear", connectionId: binding.id });
+    await connections.revoke("user_owner", binding.id, "remote_revoke_failed");
+    await expect(connections.revoke("user_owner", binding.id))
+      .resolves.toMatchObject({ status: "revoked", readiness: "unavailable",
+        healthReason: "remote_revoke_failed" });
+    expect(store.selections.size).toBe(0);
+  });
+
   it("lets owner/admin clean only orphaned personal bindings without granting use", async () => {
     const { connections, store, workspaceStore, workspaceId } = await createFixture();
     const personal = await connections.attach({
@@ -199,11 +212,7 @@ describe("connection authority", () => {
       .rejects.toBeInstanceOf(ConnectionAccessDeniedError);
     await expect(connections.getRevocable("user_owner", active.id))
       .rejects.toBeInstanceOf(ConnectionAccessDeniedError);
-    for (const [id, membership] of workspaceStore.memberships) {
-      if (membership.userId === "user_member" && membership.workspaceId === workspaceId) {
-        workspaceStore.memberships.delete(id);
-      }
-    }
+    expect(workspaceStore.removeMembership(workspaceId, "user_member")).toBe(true);
     await expect(connections.revoke("user_member", personal.id))
       .rejects.toBeInstanceOf(ConnectionAccessDeniedError);
     await expect(connections.listOrphanedForCleanup({ actorUserId: "user_member", workspaceId }))

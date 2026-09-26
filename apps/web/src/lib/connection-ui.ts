@@ -18,7 +18,8 @@ export function providerRevocationGuidance(reason: string | null, authMode: stri
     if (authMode === "oauth") return "OMR access was removed. Ask the former member to revoke the OAuth grant in their provider account; an admin cannot revoke their personal grant through OMR.";
     return "OMR access was removed. Ask the former member to remove this connection in their provider account.";
   }
-  if (reason !== "remote_revocation_unavailable" && reason !== "provider_connection_missing") return null;
+  if (reason !== "remote_revocation_unavailable" && reason !== "provider_connection_missing" &&
+      reason !== "plugfn_connection_missing") return null;
   if (authMode === "api_key") {
     return "OMR access was removed. Delete or rotate the API key in your provider account; OMR no longer has the key to retry cleanup.";
   }
