@@ -1,0 +1,18 @@
+packages/connections/src/plugfn.test.ts
+  h_a39f9495f9ec1d 13,510,512-514,527-532,534,556,558-561,572-577,579
+packages/connections/src/postgres.integration.test.ts
+  h_a39f9495f9ec1d 8,254,256-258,276-292,294,309-310
+packages/connections/test-support/race-test-barrier.ts
+  h_a39f9495f9ec1d 1-35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "84f40d146f2eed15f2975897712c495656879308",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
