@@ -115,4 +115,34 @@ describePostgres("connection authority/PostgreSQL integration", () => {
       actorUserId: "connection_owner", workspaceId, provider: "github", connectionId: binding.id,
     })).rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
   });
+
+  it("claims revocation from the current SQL row after health changes and removes selections", async () => {
+    const binding = await runtime.connections.attach({
+      actorUserId: "connection_owner", workspaceId, provider: "github",
+      providerConnectionId: `plug_${crypto.randomUUID()}`, ownership: "workspace", label: "Claim race",
+    });
+    await runtime.connections.select({ actorUserId: "connection_member", workspaceId,
+      provider: "github", connectionId: binding.id });
+    const stale = await runtime.connections.getManageable("connection_owner", binding.id);
+    await runtime.connections.recordHealth({ connectionId: binding.id, status: "needs_reauth",
+      readiness: "unavailable", reason: "refresh_failed" });
+    expect(stale.healthReason).toBeNull();
+    const claimed = await runtime.connections.revokeIfNotRevoked("connection_owner", binding.id,
+      "provider_cleanup_pending:fixture");
+    expect(claimed).toMatchObject({ status: "revoked", readiness: "unavailable",
+      healthReason: "provider_cleanup_pending:fixture" });
+    await expect(runtime.connections.resolve({ actorUserId: "connection_member", workspaceId,
+      provider: "github", connectionId: binding.id })).rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+    expect(await runtime.connections.revokeIfNotRevoked("connection_owner", binding.id,
+      "provider_cleanup_pending:second")).toBeNull();
+    const client = new Client({ connectionString: connectionString! });
+    try {
+      await client.connect();
+      const selection = await client.query("SELECT 1 FROM omr_control.connection_selections WHERE connection_id = $1",
+        [binding.id]);
+      expect(selection.rowCount).toBe(0);
+    } finally {
+      await client.end();
+    }
+  });
 });

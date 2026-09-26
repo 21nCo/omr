@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { authorizationScopes, connectionActions } from "./connection-ui.js";
+import { authorizationScopes, connectionActions, providerRevocationGuidance } from "./connection-ui.js";
 
 const team = { id: "connection_1", provider: "slack", ownership: "workspace" as const,
   ownerUserId: null, status: "active", readiness: "ready", selected: false };
@@ -23,6 +23,9 @@ describe("connection control UI policy", () => {
       .toMatchObject({ canSelect: false, canCheck: false, canRetryRevoke: true });
     expect(connectionActions({ ...team, status: "revoked", healthReason: "remote_revocation_unavailable" },
       "user_admin", "admin", "ready").canRetryRevoke).toBe(false);
+    expect(providerRevocationGuidance("remote_revocation_unavailable"))
+      .toContain("Revoke it in your provider account");
+    expect(providerRevocationGuidance("remote_revoke_failed")).toBeNull();
     expect(connectionActions(team, "user_admin", "admin", "unconfigured").canSelect).toBe(false);
   });
 

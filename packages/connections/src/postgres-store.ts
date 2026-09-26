@@ -282,7 +282,10 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
         ? Boolean(role) && connection.owner_user_id === input.actorUserId
         : role === "owner" || role === "admin";
       if (!authorized) throw new ConnectionAccessDeniedError();
-      if (connection.status !== input.expectedStatus || connection.health_reason !== input.expectedReason) {
+      const matches = input.expectedStatus === "not_revoked"
+        ? connection.status !== "revoked"
+        : connection.status === input.expectedStatus && connection.health_reason === input.expectedReason;
+      if (!matches) {
         await this.client.query("COMMIT");
         return null;
       }

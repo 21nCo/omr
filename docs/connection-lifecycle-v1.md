@@ -52,7 +52,8 @@ attempt can be retried after one minute, including a pending row from an older
 Worker version. A failure before upstream deletion remains retryable. If PlugFn
 deleted its token and connection after a failed remote revoke, OMR marks the
 binding `remote_revocation_unavailable` and directs the user to revoke the grant
-at the provider; retrying through OMR cannot work without that token. A missing
+at the provider; the same guidance applies if an OAuth adapter deletes its token
+without attempting remote revocation. Retry through OMR cannot work without that token. A missing
 upstream connection likewise becomes terminal. These states show no raw provider
 details. A
 revoked binding cannot become ready through a concurrent probe or refresh.

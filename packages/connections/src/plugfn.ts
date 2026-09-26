@@ -395,7 +395,7 @@ export class PlugFnConnectionOrchestrator {
         throw new ConnectionInputError("PlugFn refreshed an unexpected connection");
       }
       if (remote.status !== "active") {
-        throw new ConnectionUnavailableError();
+        throw new ConnectionProviderOperationError("refresh");
       }
       return await this.authority.recordHealth({
         connectionId,
@@ -428,9 +428,9 @@ export class PlugFnConnectionOrchestrator {
     const claimable = binding.status !== "revoked" || retryable || stalePending;
     // The conditional transition serializes retries across Worker instances.
     // It also removes local use and selections before any provider call.
-    const claimed = claimable ? await this.authority.revokeIf(
-      actorUserId, connectionId, binding.status, binding.healthReason, pending,
-    ) : null;
+    const claimed = !claimable ? null : binding.status === "revoked"
+      ? await this.authority.revokeIf(actorUserId, connectionId, "revoked", binding.healthReason, pending)
+      : await this.authority.revokeIfNotRevoked(actorUserId, connectionId, pending);
     if (!claimed) {
       return {
         connection: await this.authority.getManageable(actorUserId, connectionId),
@@ -466,8 +466,10 @@ export class PlugFnConnectionOrchestrator {
       connectionDeleted: provider.connectionDeleted,
     };
     const remoteFailure = provider.remoteRevokeAttempted && !provider.remoteRevokeSucceeded;
+    const oauthGrantMayRemain = this.plugfn.providers.get(binding.provider)?.auth.type === "oauth2" &&
+      !provider.remoteRevokeSucceeded;
     const reason = provider.connectionDeleted
-      ? remoteFailure ? "remote_revocation_unavailable" : undefined
+      ? remoteFailure || oauthGrantMayRemain ? "remote_revocation_unavailable" : undefined
       : !provider.disconnected && !provider.remoteRevokeAttempted && !provider.localDeleted
         ? "provider_connection_missing"
         : remoteFailure ? "remote_revoke_failed" : "provider_cleanup_failed";

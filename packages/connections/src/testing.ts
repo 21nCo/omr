@@ -171,7 +171,10 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
   async revokeIf(input: ConditionalRevokeInput): Promise<ConnectionBindingRecord | null> {
     await this.getManageable({ actorUserId: input.actorUserId, connectionId: input.connectionId });
     const connection = this.connections.get(input.connectionId)!;
-    if (connection.status !== input.expectedStatus || connection.healthReason !== input.expectedReason) return null;
+    const matches = input.expectedStatus === "not_revoked"
+      ? connection.status !== "revoked"
+      : connection.status === input.expectedStatus && connection.healthReason === input.expectedReason;
+    if (!matches) return null;
     connection.status = "revoked";
     connection.readiness = "unavailable";
     connection.healthReason = input.reason ?? null;

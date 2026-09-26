@@ -381,6 +381,48 @@ describe("PlugFn connection orchestration", () => {
     expect(plugfn.methods.disconnect).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ["health", "active", "ready", "probe_ok"],
+    ["refresh", "needs_reauth", "unavailable", "refresh_failed"],
+  ] as const)("claims local revocation after an interleaved %s update", async (_operation, status, readiness, reason) => {
+    const { authority, orchestrator, plugfn, store, workspaceId } = await fixture();
+    const binding = await authority.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", providerConnectionId: "remote_interleave", ownership: "workspace", label: "Interleave" });
+    await authority.select({ actorUserId: "user_member", workspaceId, provider: "linear", connectionId: binding.id });
+    const getManageable = store.getManageable.bind(store);
+    vi.spyOn(store, "getManageable").mockImplementationOnce(async (input) => {
+      const stale = await getManageable(input);
+      await authority.recordHealth({ connectionId: binding.id, status, readiness, reason });
+      return stale;
+    });
+
+    const result = await orchestrator.disconnect("user_owner", binding.id);
+    expect(result.connection).toMatchObject({ status: "revoked", readiness: "unavailable" });
+    expect(store.selections.size).toBe(0);
+    await expect(authority.resolve({ actorUserId: "user_member", workspaceId, provider: "linear" }))
+      .rejects.toBeInstanceOf(ConnectionUnavailableError);
+    expect(plugfn.methods.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it("flags an OAuth grant when upstream deletes its token without attempting remote revocation", async () => {
+    const { authority, orchestrator, plugfn, workspaceId } = await fixture();
+    const oauth = await authority.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "github", providerConnectionId: "remote_oauth", ownership: "personal", label: "GitHub" });
+    await expect(orchestrator.disconnect("user_owner", oauth.id)).resolves.toMatchObject({
+      connection: { status: "revoked", healthReason: "remote_revocation_unavailable" },
+      provider: { remoteRevokeAttempted: false, connectionDeleted: true },
+    });
+    await orchestrator.disconnect("user_owner", oauth.id);
+    expect(plugfn.methods.disconnect).toHaveBeenCalledTimes(1);
+
+    const apiKey = await authority.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", providerConnectionId: "remote_api", ownership: "personal", label: "Linear" });
+    await expect(orchestrator.disconnect("user_owner", apiKey.id)).resolves.toMatchObject({
+      connection: { status: "revoked", healthReason: null },
+      provider: { remoteRevokeAttempted: false, connectionDeleted: true },
+    });
+  });
+
   it("does not let an older failed cleanup overwrite a successful retry", async () => {
     const { authority, orchestrator, plugfn, store, workspaceId, advance } = await fixture();
     const binding = await authority.attach({ actorUserId: "user_owner", workspaceId,
@@ -456,7 +498,10 @@ describe("PlugFn connection orchestration", () => {
     const binding = await authority.attach({ actorUserId: "user_owner", workspaceId,
       provider: "linear", providerConnectionId: "plug_expired", ownership: "personal", label: "Expired" });
     plugfn.methods.refresh.mockResolvedValueOnce(plugfn.connection({ id: "plug_expired", status: "expired" }));
-    await expect(orchestrator.refresh("user_owner", binding.id)).rejects.toBeInstanceOf(ConnectionUnavailableError);
+    await expect(orchestrator.refresh("user_owner", binding.id)).rejects.toMatchObject({
+      code: "CONNECTION_PROVIDER_FAILED", operation: "refresh",
+      message: "Could not refresh this account. Reconnect it to restore access.",
+    });
     await expect(authority.getAccessible("user_owner", binding.id)).resolves.toMatchObject({
       status: "needs_reauth", readiness: "unavailable", healthReason: "refresh_failed",
     });

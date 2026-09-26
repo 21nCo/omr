@@ -49,10 +49,10 @@ export interface RevokeConnectionInput {
   now: number;
 }
 
-export interface ConditionalRevokeInput extends RevokeConnectionInput {
-  expectedStatus: ConnectionLifecycleStatus;
-  expectedReason: string | null;
-}
+export type ConditionalRevokeInput = RevokeConnectionInput & (
+  | { expectedStatus: "not_revoked"; expectedReason?: never }
+  | { expectedStatus: ConnectionLifecycleStatus; expectedReason: string | null }
+);
 
 export interface AuthorizeConnectionInstallInput {
   actorUserId: string;
@@ -311,6 +311,17 @@ export class ConnectionAuthority {
     assertId(connectionId);
     if (reason && reason.length > 240) throw new ConnectionInputError("Revocation reason must not exceed 240 characters");
     return this.store.revokeIf({ actorUserId, connectionId, expectedStatus, expectedReason, reason, now: this.now() });
+  }
+
+  async revokeIfNotRevoked(
+    actorUserId: string,
+    connectionId: string,
+    reason: string,
+  ): Promise<ConnectionBindingRecord | null> {
+    assertId(actorUserId);
+    assertId(connectionId);
+    if (reason.length > 240) throw new ConnectionInputError("Revocation reason must not exceed 240 characters");
+    return this.store.revokeIf({ actorUserId, connectionId, expectedStatus: "not_revoked", reason, now: this.now() });
   }
 
   async recordHealth(input: {

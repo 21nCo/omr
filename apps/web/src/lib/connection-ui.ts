@@ -9,6 +9,12 @@ export interface ConnectionDisplay {
   healthReason?: string | null;
 }
 
+export function providerRevocationGuidance(reason: string | null): string | null {
+  return reason === "remote_revocation_unavailable" || reason === "provider_connection_missing"
+    ? "OMR access was removed. The provider grant may still be active. Revoke it in your provider account; OMR no longer has the token to retry."
+    : null;
+}
+
 export function connectionActions(
   connection: ConnectionDisplay,
   actorUserId: string,

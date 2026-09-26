@@ -83,6 +83,12 @@ describe("connection-lifecycle-contract", () => {
     expect((await post("user_member", "select", { workspaceId: team.id,
       provider: "linear", connectionId: binding.id })).status).toBe(409);
     expect((await post("user_member", "refresh", { connectionId: binding.id })).status).toBe(403);
+    remote.refresh.mockResolvedValueOnce({ id: "remote_1", provider: "linear", status: "expired" });
+    const expiredRefresh = await post("user_owner", "refresh", { connectionId: binding.id });
+    expect(expiredRefresh.status).toBe(502);
+    await expect(expiredRefresh.json()).resolves.toMatchObject({ error: "CONNECTION_PROVIDER_FAILED",
+      operation: "refresh", message: "Could not refresh this account. Reconnect it to restore access." });
+    expect((await view("user_member"))[0]).toMatchObject({ readiness: "unavailable" });
     expect((await post("user_owner", "refresh", { connectionId: binding.id })).status).toBe(200);
     expect((await view("user_member"))[0]).toMatchObject({ readiness: "ready" });
 

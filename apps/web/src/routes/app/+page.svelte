@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { createOAuthReviewController } from "$lib/oauth-review.js";
-  import { connectionActions } from "$lib/connection-ui.js";
+  import { connectionActions, providerRevocationGuidance } from "$lib/connection-ui.js";
   import { createWorkspaceCatalogLoader, providerDisplayState } from "$lib/workspace-catalog.js";
   import { V1_PROVIDERS } from "@oh-my-router/tools";
 
@@ -233,13 +233,12 @@
           body: JSON.stringify({ connectionId: connection.id }),
         },
       );
-      notice = result.connection.healthReason === "remote_revocation_unavailable" || result.connection.healthReason === "provider_connection_missing"
-        ? "OMR access was removed. The provider grant may still be active. Revoke it in your provider account; OMR no longer has the token to retry."
-        : result.connection.healthReason === "provider_cleanup_pending" || result.connection.healthReason?.startsWith("provider_cleanup_pending:")
+      notice = providerRevocationGuidance(result.connection.healthReason)
+        ?? (result.connection.healthReason === "provider_cleanup_pending" || result.connection.healthReason?.startsWith("provider_cleanup_pending:")
           ? "OMR access was removed. Provider cleanup is in progress; retry if it does not finish."
           : result.connection.healthReason === "remote_revoke_failed" || result.connection.healthReason === "provider_cleanup_failed"
             ? "OMR access was removed. Provider cleanup failed; retry or revoke the grant at the provider."
-            : `Disconnected ${connection.label}.`;
+            : `Disconnected ${connection.label}.`);
       await load();
     } catch (caught) {
       error = caught instanceof Error ? caught.message : "Could not disconnect the account";
@@ -355,6 +354,9 @@
                       {#if connection.selected} · Selected for your actions{/if}
                     </span>
                     <span>Last checked {timestamp(connection.lastCheckedAt)}{connection.healthReason ? ` · ${connection.healthReason.split(":")[0]?.replaceAll("_", " ")}` : ""}</span>
+                    {#if providerRevocationGuidance(connection.healthReason)}
+                      <span>{providerRevocationGuidance(connection.healthReason)}</span>
+                    {/if}
                   </div>
                   <span class:ready={actions(connection).canSelect} class="status">{connection.status === "revoked" ? "disconnected" : providerState(connection.provider) === "ready" ? connection.readiness : providerState(connection.provider)}</span>
                   {#if actions(connection).canSelect}
