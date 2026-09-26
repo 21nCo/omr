@@ -141,6 +141,7 @@ export class RequestOriginDeniedError extends Error {
 const CAPABILITIES = new Set<string>(CLIENT_CAPABILITIES);
 const PRIVATE_RESPONSE = { "cache-control": "no-store" };
 
+/** Require a JSON object before reading route-specific fields. */
 function objectBody(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new RequestInputError("A JSON object is required");
@@ -148,6 +149,7 @@ function objectBody(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+/** Read a required nonempty string from a validated request body. */
 function requiredString(body: Record<string, unknown>, field: string): string {
   const value = body[field];
   if (typeof value !== "string" || value.length === 0) {
@@ -156,6 +158,7 @@ function requiredString(body: Record<string, unknown>, field: string): string {
   return value;
 }
 
+/** Accept only declared client capabilities from a device request. */
 function requestedCapabilities(body: Record<string, unknown>): ClientCapability[] {
   const value = body.requestedCapabilities;
   if (
@@ -168,6 +171,7 @@ function requestedCapabilities(body: Record<string, unknown>): ClientCapability[
   return value as ClientCapability[];
 }
 
+/** Validate an optional nonempty string when the caller supplies it. */
 function optionalString(body: Record<string, unknown>, field: string): string | undefined {
   const value = body[field];
   if (value === undefined) return undefined;
@@ -177,6 +181,7 @@ function optionalString(body: Record<string, unknown>, field: string): string | 
   return value;
 }
 
+/** Require an explicit personal or workspace connection owner. */
 function ownership(body: Record<string, unknown>): ConnectionOwnership {
   const value = body.ownership;
   if (value !== "personal" && value !== "workspace") {
@@ -245,7 +250,7 @@ function codedError(error: unknown, code: string): error is Error & { code: stri
   return error instanceof Error && "code" in error && error.code === code;
 }
 
-/** Expose validated control-plane routes with private connection responses. */
+/** Mount health, device, connection, tool, execution, and control-plane routes. */
 export function createOMRRouter(
   deviceServices: DeviceRouteServices = unavailableDeviceServices(),
   connectionServices: ConnectionRouteServices = unavailableConnectionServices(),

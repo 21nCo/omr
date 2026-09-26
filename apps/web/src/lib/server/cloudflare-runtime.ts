@@ -54,12 +54,14 @@ export interface CloudflareRouteServices {
   controlPlane: ControlPlaneRouteServices;
 }
 
+/** Require Worker bindings before constructing any server-side runtime. */
 function environment(event: RequestEvent): OMRBindings {
   const env = event.platform?.env as OMRBindings | undefined;
   if (!env) throw new RuntimeUnavailableError("Worker bindings are unavailable");
   return env;
 }
 
+/** Resolve the Worker database binding for a request. */
 export function databaseConnectionString(event: RequestEvent): string {
   const env = environment(event);
   const connectionString = env.HYPERDRIVE?.connectionString ?? env.DATABASE_URL;
@@ -69,6 +71,7 @@ export function databaseConnectionString(event: RequestEvent): string {
   return connectionString;
 }
 
+/** Require a nonempty server-side secret by binding name. */
 function requiredSecret(event: RequestEvent, name: string): string {
   const value = environment(event)[name];
   if (typeof value !== "string" || value.length === 0) {
@@ -77,6 +80,7 @@ function requiredSecret(event: RequestEvent, name: string): string {
   return value;
 }
 
+/** Decode a 32-byte wrapping key from hexadecimal or URL-safe base64. */
 function decodeWrappingKey(value: string, label: string): Uint8Array<ArrayBuffer> {
   if (/^[a-f0-9]{64}$/i.test(value)) {
     const key = new Uint8Array(new ArrayBuffer(32));
@@ -136,6 +140,7 @@ const OAUTH_BINDINGS: Record<string, readonly [string, string]> = {
   yahoo: ["PLUGFN_YAHOO_CLIENT_ID", "PLUGFN_YAHOO_CLIENT_SECRET"],
 };
 
+/** Include OAuth provider apps only when both server-side credentials exist. */
 export function createProviderIntegrationConfig(
   env: Record<string, unknown>,
   origin: string,
@@ -155,6 +160,7 @@ function integrationConfig(event: RequestEvent): Record<string, IntegrationConfi
   return createProviderIntegrationConfig(environment(event), new URL(event.request.url).origin);
 }
 
+/** Parse a single bearer credential, rejecting malformed authorization headers. */
 function bearerCredential(request: Request): string | null {
   const authorization = request.headers.get("authorization");
   if (!authorization) return null;
@@ -163,6 +169,7 @@ function bearerCredential(request: Request): string | null {
   return match[1]!;
 }
 
+/** Resolve a signed-in web user and close the identity runtime after the request. */
 async function requireWebUser(event: RequestEvent, request: Request): Promise<string> {
   const origin = new URL(event.request.url).origin;
   const identity = await connectPostgresIdentityRuntime({
@@ -176,6 +183,7 @@ async function requireWebUser(event: RequestEvent, request: Request): Promise<st
   }
 }
 
+/** Reject browser mutations that do not declare the request's origin. */
 function requireSameOrigin(request: Request): void {
   if (request.headers.get("origin") !== new URL(request.url).origin) {
     throw new RequestOriginDeniedError("A same-origin browser request is required");
@@ -206,6 +214,7 @@ export async function checkAuthorizedConnectionHealth<T>(
   return check(principal, connectionId);
 }
 
+/** Resolve a scoped bearer client or signed-in web principal for a route. */
 async function authenticate(
   event: RequestEvent,
   request: Request,
@@ -245,6 +254,7 @@ export function assertConnectionWorkspace(principal: ExecutionPrincipal, binding
   }
 }
 
+/** Open a provider runtime with request origin and server-only secrets. */
 async function connectPlugFn(event: RequestEvent) {
   const origin = new URL(event.request.url).origin;
   return connectPostgresPlugFn({
@@ -355,6 +365,7 @@ function configuredProviders(plugfn: Awaited<ReturnType<typeof connectPlugFn>>["
   return new Set(statuses(plugfn).filter((status) => status.available).map((status) => status.provider));
 }
 
+/** Restrict the tool catalog to bindings this principal can currently use. */
 export async function scopedToolIds(
   catalog: Awaited<ReturnType<typeof createPlugFnToolCatalog>>,
   plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"],
@@ -408,6 +419,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
   }
 
   const connections: ConnectionRouteServices = {
+    /** Read provider setup availability in the caller's workspace context. */
     async providerReadiness(request, provider, workspaceId) {
       const principal = await authenticate(event, request, workspaceId, "connections:read");
       return withConnections(async (orchestrator, authority) => orchestrator.providerReadiness(
@@ -431,11 +443,13 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
         }),
       ));
     },
+    /** Save a selection after origin, client scope, and ownership checks. */
     async select(request, input) {
       return selectAuthorizedConnection(request, input,
         (selectionRequest, workspaceId, capability) => authenticate(event, selectionRequest, workspaceId, capability),
         (selection) => withConnections((orchestrator) => orchestrator.select(selection)));
     },
+    /** Start provider authorization for a signed-in same-origin web user. */
     async startOAuth(request, input) {
       requireSameOrigin(request);
       const actorUserId = await requireWebUser(event, request);

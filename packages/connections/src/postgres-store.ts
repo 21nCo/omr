@@ -48,6 +48,7 @@ const CONNECTION_COLUMNS = `id, workspace_id, provider, provider_connection_id,
   ownership, owner_user_id, installed_by, label, status, readiness, health_reason,
   last_checked_at, revoked_at, created_at, updated_at`;
 
+/** Normalize database binding fields and timestamps for the authority layer. */
 function toConnection(row: ConnectionRow): ConnectionBindingRecord {
   return {
     id: row.id,
@@ -68,6 +69,7 @@ function toConnection(row: ConnectionRow): ConnectionBindingRecord {
   };
 }
 
+/** Normalize database timestamp fields in a saved account selection. */
 function toSelection(row: SelectionRow): ConnectionSelectionRecord {
   return {
     workspaceId: row.workspace_id,
@@ -160,6 +162,8 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
   /** Include orphan cleanup authority without granting account use. */
   async getRevocable(input: AccessConnectionInput): Promise<ConnectionBindingRecord> {
     const connection = await this.readConnection(input.connectionId);
+    // This read is advisory: revoke and revokeIf repeat authorization while
+    // holding the workspace lock in their mutation transactions.
     if (!connection || !await this.canManage(connection, input.actorUserId, true)) {
       throw new ConnectionAccessDeniedError();
     }
@@ -270,6 +274,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
       );
       const connection = result.rows[0];
       if (!connection) throw new ConnectionAccessDeniedError();
+      await this.lockWorkspaceForOrphanCleanup(connection);
       if (!await this.canManage(connection, input.actorUserId, true)) throw new ConnectionAccessDeniedError();
 
       const updated = await this.client.query<ConnectionRow>(
@@ -304,6 +309,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
       );
       const connection = result.rows[0];
       if (!connection) throw new ConnectionAccessDeniedError();
+      await this.lockWorkspaceForOrphanCleanup(connection);
       if (!await this.canManage(connection, input.actorUserId, true)) throw new ConnectionAccessDeniedError();
       const matches = input.expectedStatus === "not_revoked"
         ? connection.status !== "revoked"
@@ -348,6 +354,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     return toConnection(result.rows[0]);
   }
 
+  /** Read the current workspace role, locking an existing membership row. */
   private async membershipRole(
     workspaceId: string,
     userId: string,
@@ -362,16 +369,17 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     return result.rows[0]?.role ?? null;
   }
 
-  /** Recheck role and owner membership inside each mutation transaction. */
+  /** Serialize orphan cleanup against membership insertion until the mutation commits. */
+  private async lockWorkspaceForOrphanCleanup(connection: ConnectionRow): Promise<void> {
+    if (connection.ownership !== "personal") return;
+    await this.client.query(
+      `SELECT id FROM omr_control.workspaces WHERE id = $1 FOR UPDATE`,
+      [connection.workspace_id],
+    );
+  }
+
+  /** Check current role and personal ownership, including orphan cleanup authority. */
   private async canManage(connection: ConnectionRow, actorUserId: string, allowOrphanCleanup = false): Promise<boolean> {
-    if (allowOrphanCleanup && connection.ownership === "personal") {
-      // A missing membership cannot be row-locked. Serialize the absence check
-      // with invitation acceptance and workspace provisioning through commit.
-      await this.client.query(
-        `SELECT id FROM omr_control.workspaces WHERE id = $1 FOR UPDATE`,
-        [connection.workspace_id],
-      );
-    }
     const role = await this.membershipRole(connection.workspace_id, actorUserId);
     if (connection.ownership === "workspace") return role === "owner" || role === "admin";
     if (role && connection.owner_user_id === actorUserId) return true;
@@ -379,6 +387,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     return !await this.membershipRole(connection.workspace_id, connection.owner_user_id!);
   }
 
+  /** Read a binding for advisory access checks outside mutation transactions. */
   private async readConnection(connectionId: string): Promise<ConnectionRow | null> {
     const result = await this.client.query<ConnectionRow>(
       `SELECT ${CONNECTION_COLUMNS}
