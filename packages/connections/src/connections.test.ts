@@ -10,6 +10,7 @@ import {
 } from "./connections.js";
 import { MemoryConnectionBindingStore } from "./testing.js";
 
+/** Build a workspace with owner, admin, and member roles for lifecycle tests. */
 async function createFixture() {
   let now = 1_700_000_000_000;
   const workspaceStore = new MemoryWorkspaceStore();
@@ -44,6 +45,7 @@ async function createFixture() {
   return {
     connections,
     store,
+    workspaceStore,
     workspaceId: team.workspace.id,
     advance(milliseconds: number) {
       now += milliseconds;
@@ -176,5 +178,65 @@ describe("connection authority", () => {
     await expect(
       connections.resolve({ actorUserId: "user_member", workspaceId, provider: "notion" }),
     ).rejects.toBeInstanceOf(ConnectionUnavailableError);
+  });
+
+  it("preserves a revoked cleanup reason when a later revoke omits one", async () => {
+    const { connections, store, workspaceId } = await createFixture();
+    const binding = await connections.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", providerConnectionId: "plug_reason", ownership: "workspace", label: "Reason" });
+    await connections.select({ actorUserId: "user_member", workspaceId,
+      provider: "linear", connectionId: binding.id });
+    await connections.revoke("user_owner", binding.id, "remote_revoke_failed");
+    await expect(connections.revoke("user_owner", binding.id))
+      .resolves.toMatchObject({ status: "revoked", readiness: "unavailable",
+        healthReason: "remote_revoke_failed" });
+    expect(store.selections.size).toBe(0);
+  });
+
+  it("lets owner/admin clean only orphaned personal bindings without granting use", async () => {
+    const { connections, store, workspaceStore, workspaceId } = await createFixture();
+    const personal = await connections.attach({
+      actorUserId: "user_member",
+      workspaceId,
+      provider: "notion",
+      providerConnectionId: "plug_private",
+      ownership: "personal",
+      label: "Private",
+    });
+    const active = await connections.attach({ actorUserId: "user_admin", workspaceId,
+      provider: "notion", providerConnectionId: "plug_active", ownership: "personal", label: "Active" });
+    await connections.select({ actorUserId: "user_member", workspaceId,
+      provider: "notion", connectionId: personal.id });
+    await expect(connections.listOrphanedForCleanup({ actorUserId: "user_owner", workspaceId }))
+      .resolves.toEqual([]);
+    await expect(connections.getManageable("user_owner", active.id))
+      .rejects.toBeInstanceOf(ConnectionAccessDeniedError);
+    await expect(connections.getRevocable("user_owner", active.id))
+      .rejects.toBeInstanceOf(ConnectionAccessDeniedError);
+    expect(workspaceStore.removeMembership(workspaceId, "user_member")).toBe(true);
+    await expect(connections.revoke("user_member", personal.id))
+      .rejects.toBeInstanceOf(ConnectionAccessDeniedError);
+    await expect(connections.listOrphanedForCleanup({ actorUserId: "user_member", workspaceId }))
+      .rejects.toBeInstanceOf(ConnectionAccessDeniedError);
+    await expect(connections.listOrphanedForCleanup({ actorUserId: "user_owner", workspaceId }))
+      .resolves.toEqual([personal]);
+    await expect(connections.listOrphanedForCleanup({ actorUserId: "user_admin", workspaceId }))
+      .resolves.toEqual([personal]);
+    expect(await connections.listAvailable({ actorUserId: "user_owner", workspaceId, provider: "notion" }))
+      .not.toContainEqual(personal);
+    await expect(connections.getAccessible("user_owner", personal.id))
+      .rejects.toBeInstanceOf(ConnectionAccessDeniedError);
+    await expect(connections.getManageable("user_owner", personal.id))
+      .rejects.toBeInstanceOf(ConnectionAccessDeniedError);
+    await expect(connections.getRevocable("user_owner", personal.id))
+      .resolves.toMatchObject({ id: personal.id });
+    await expect(connections.revokeIfNotRevoked("user_owner", personal.id, "provider_cleanup_pending:test"))
+      .resolves.toMatchObject({ status: "revoked", readiness: "unavailable" });
+    expect(store.selections.size).toBe(0);
+    await expect(connections.recordHealth({ connectionId: personal.id,
+      status: "active", readiness: "ready" })).rejects.toBeInstanceOf(ConnectionUnavailableError);
+    await expect(connections.revokeIf("user_admin", personal.id, "revoked",
+      "provider_cleanup_pending:test", "remote_revoke_failed"))
+      .resolves.toMatchObject({ healthReason: "remote_revoke_failed" });
   });
 });

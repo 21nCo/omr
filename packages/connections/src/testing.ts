@@ -9,6 +9,7 @@ import {
   type ConnectionBindingRecord,
   type ConnectionBindingStore,
   type ConnectionSelectionRecord,
+  type ConditionalRevokeInput,
   type RevokeConnectionInput,
   type SelectConnectionInput,
 } from "./connections.js";
@@ -23,6 +24,16 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
 
   constructor(private readonly workspaces: WorkspaceStore) {}
 
+  /** Permit orphan cleanup without allowing access to an active member's personal binding. */
+  private async canManage(connection: ConnectionBindingRecord, actorUserId: string, allowOrphanCleanup = false): Promise<boolean> {
+    const membership = await this.workspaces.findMembership(connection.workspaceId, actorUserId);
+    if (connection.ownership === "workspace") return membership?.role === "owner" || membership?.role === "admin";
+    if (membership && connection.ownerUserId === actorUserId) return true;
+    if (!allowOrphanCleanup || (membership?.role !== "owner" && membership?.role !== "admin")) return false;
+    return !await this.workspaces.findMembership(connection.workspaceId, connection.ownerUserId!);
+  }
+
+  /** Apply current workspace role rules before provider setup. */
   async authorizeInstall(input: AuthorizeConnectionInstallInput): Promise<void> {
     const membership = await this.workspaces.findMembership(input.workspaceId, input.actorUserId);
     if (
@@ -33,6 +44,7 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     }
   }
 
+  /** Save a binding only when the actor can install its ownership type. */
   async attach(input: AttachConnectionInput): Promise<ConnectionBindingRecord> {
     const membership = await this.workspaces.findMembership(
       input.connection.workspaceId,
@@ -57,6 +69,7 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     return structuredClone(connection);
   }
 
+  /** Return a binding only to an actor permitted to use it. */
   async getAccessible(input: AccessConnectionInput): Promise<ConnectionBindingRecord> {
     const connection = this.connections.get(input.connectionId);
     if (!connection) throw new ConnectionAccessDeniedError();
@@ -70,20 +83,24 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     return structuredClone(connection);
   }
 
+  /** Return a binding to its lifecycle owner or a workspace administrator. */
   async getManageable(input: AccessConnectionInput): Promise<ConnectionBindingRecord> {
     const connection = this.connections.get(input.connectionId);
     if (!connection) throw new ConnectionAccessDeniedError();
-    const membership = await this.workspaces.findMembership(
-      connection.workspaceId,
-      input.actorUserId,
-    );
-    const authorized = connection.ownership === "personal"
-      ? Boolean(membership) && connection.ownerUserId === input.actorUserId
-      : membership?.role === "owner" || membership?.role === "admin";
-    if (!authorized) throw new ConnectionAccessDeniedError();
+    if (!await this.canManage(connection, input.actorUserId)) throw new ConnectionAccessDeniedError();
     return structuredClone(connection);
   }
 
+  /** Include orphan cleanup authority without granting account use. */
+  async getRevocable(input: AccessConnectionInput): Promise<ConnectionBindingRecord> {
+    const connection = this.connections.get(input.connectionId);
+    if (!connection || !await this.canManage(connection, input.actorUserId, true)) {
+      throw new ConnectionAccessDeniedError();
+    }
+    return structuredClone(connection);
+  }
+
+  /** List only bindings visible to this workspace member. */
   async listAvailable(input: {
     actorUserId: string;
     workspaceId: string;
@@ -103,6 +120,21 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
       .map((connection) => structuredClone(connection));
   }
 
+  /** Show only former members' personal bindings to the workspace owner or admin. */
+  async listOrphanedForCleanup(input: { actorUserId: string; workspaceId: string }): Promise<ConnectionBindingRecord[]> {
+    const membership = await this.workspaces.findMembership(input.workspaceId, input.actorUserId);
+    if (membership?.role !== "owner" && membership?.role !== "admin") throw new ConnectionAccessDeniedError();
+    const result: ConnectionBindingRecord[] = [];
+    for (const connection of this.connections.values()) {
+      if (connection.workspaceId === input.workspaceId && connection.ownership === "personal" &&
+          !await this.workspaces.findMembership(input.workspaceId, connection.ownerUserId!)) {
+        result.push(structuredClone(connection));
+      }
+    }
+    return result.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+  }
+
+  /** Read the member's provider choice after checking current membership. */
   async getSelection(input: {
     actorUserId: string;
     workspaceId: string;
@@ -117,6 +149,7 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     return selection ? structuredClone(selection) : null;
   }
 
+  /** Select a ready binding visible to the actor. */
   async select(input: SelectConnectionInput): Promise<ConnectionSelectionRecord> {
     const available = await this.listAvailable({
       actorUserId: input.actorUserId,
@@ -144,21 +177,14 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     return structuredClone(selection);
   }
 
+  /** Remove local use and selections while retaining an outcome when no new reason is given. */
   async revoke(input: RevokeConnectionInput): Promise<ConnectionBindingRecord> {
     const connection = this.connections.get(input.connectionId);
     if (!connection) throw new ConnectionAccessDeniedError();
-    const membership = await this.workspaces.findMembership(
-      connection.workspaceId,
-      input.actorUserId,
-    );
-    const authorized =
-      connection.ownership === "personal"
-        ? connection.ownerUserId === input.actorUserId
-        : membership?.role === "owner" || membership?.role === "admin";
-    if (!authorized) throw new ConnectionAccessDeniedError();
+    if (!await this.canManage(connection, input.actorUserId, true)) throw new ConnectionAccessDeniedError();
     connection.status = "revoked";
     connection.readiness = "unavailable";
-    if (input.reason) connection.healthReason = input.reason;
+    if (input.reason !== undefined) connection.healthReason = input.reason;
     connection.revokedAt ??= input.now;
     connection.updatedAt = input.now;
     for (const [key, selection] of this.selections) {
@@ -167,6 +193,26 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     return structuredClone(connection);
   }
 
+  /** Change a cleanup claim only when its expected state still matches. */
+  async revokeIf(input: ConditionalRevokeInput): Promise<ConnectionBindingRecord | null> {
+    await this.getRevocable({ actorUserId: input.actorUserId, connectionId: input.connectionId });
+    const connection = this.connections.get(input.connectionId)!;
+    const matches = input.expectedStatus === "not_revoked"
+      ? connection.status !== "revoked"
+      : connection.status === input.expectedStatus && connection.healthReason === input.expectedReason;
+    if (!matches) return null;
+    connection.status = "revoked";
+    connection.readiness = "unavailable";
+    connection.healthReason = input.reason ?? null;
+    connection.revokedAt ??= input.now;
+    connection.updatedAt = input.now;
+    for (const [key, selection] of this.selections) {
+      if (selection.connectionId === connection.id) this.selections.delete(key);
+    }
+    return structuredClone(connection);
+  }
+
+  /** Reject late health updates after local revocation. */
   async recordHealth(input: {
     connectionId: string;
     status: ConnectionBindingRecord["status"];

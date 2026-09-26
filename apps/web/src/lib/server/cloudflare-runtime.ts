@@ -7,6 +7,7 @@ import {
 import {
   ConnectionAccessDeniedError, markMissingRemoteConnection,
   PlugFnConnectionOrchestrator,
+  type ConnectionAuthority,
   type ConnectionBindingRecord,
 } from "@oh-my-router/connections";
 import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
@@ -34,6 +35,7 @@ import {
   RequestOriginDeniedError,
 } from "./router.js";
 import { resolveScopedCatalog } from "./scoped-catalog.js";
+import { publicConnections, publicConnectionsAfterMutation } from "./connection-view.js";
 
 type OMRBindings = Cloudflare.Env & {
   HYPERDRIVE?: { connectionString: string };
@@ -52,12 +54,14 @@ export interface CloudflareRouteServices {
   controlPlane: ControlPlaneRouteServices;
 }
 
+/** Require Worker bindings before constructing any server-side runtime. */
 function environment(event: RequestEvent): OMRBindings {
   const env = event.platform?.env as OMRBindings | undefined;
   if (!env) throw new RuntimeUnavailableError("Worker bindings are unavailable");
   return env;
 }
 
+/** Resolve the Worker database binding for a request. */
 export function databaseConnectionString(event: RequestEvent): string {
   const env = environment(event);
   const connectionString = env.HYPERDRIVE?.connectionString ?? env.DATABASE_URL;
@@ -67,6 +71,7 @@ export function databaseConnectionString(event: RequestEvent): string {
   return connectionString;
 }
 
+/** Require a nonempty server-side secret by binding name. */
 function requiredSecret(event: RequestEvent, name: string): string {
   const value = environment(event)[name];
   if (typeof value !== "string" || value.length === 0) {
@@ -75,6 +80,7 @@ function requiredSecret(event: RequestEvent, name: string): string {
   return value;
 }
 
+/** Decode a 32-byte wrapping key from hexadecimal or URL-safe base64. */
 function decodeWrappingKey(value: string, label: string): Uint8Array<ArrayBuffer> {
   if (/^[a-f0-9]{64}$/i.test(value)) {
     const key = new Uint8Array(new ArrayBuffer(32));
@@ -134,6 +140,7 @@ const OAUTH_BINDINGS: Record<string, readonly [string, string]> = {
   yahoo: ["PLUGFN_YAHOO_CLIENT_ID", "PLUGFN_YAHOO_CLIENT_SECRET"],
 };
 
+/** Include OAuth provider apps only when both server-side credentials exist. */
 export function createProviderIntegrationConfig(
   env: Record<string, unknown>,
   origin: string,
@@ -153,6 +160,7 @@ function integrationConfig(event: RequestEvent): Record<string, IntegrationConfi
   return createProviderIntegrationConfig(environment(event), new URL(event.request.url).origin);
 }
 
+/** Parse a single bearer credential, rejecting malformed authorization headers. */
 function bearerCredential(request: Request): string | null {
   const authorization = request.headers.get("authorization");
   if (!authorization) return null;
@@ -161,6 +169,7 @@ function bearerCredential(request: Request): string | null {
   return match[1]!;
 }
 
+/** Resolve a signed-in web user and close the identity runtime after the request. */
 async function requireWebUser(event: RequestEvent, request: Request): Promise<string> {
   const origin = new URL(event.request.url).origin;
   const identity = await connectPostgresIdentityRuntime({
@@ -174,6 +183,7 @@ async function requireWebUser(event: RequestEvent, request: Request): Promise<st
   }
 }
 
+/** Reject browser mutations that do not declare the request's origin. */
 function requireSameOrigin(request: Request): void {
   if (request.headers.get("origin") !== new URL(request.url).origin) {
     throw new RequestOriginDeniedError("A same-origin browser request is required");
@@ -192,6 +202,19 @@ export async function selectAuthorizedConnection<T>(
   return select({ actorUserId: principal.userId, ...input });
 }
 
+/** Check origin or client capability before reading a connection's health. */
+export async function checkAuthorizedConnectionHealth<T>(
+  request: Request,
+  connectionId: string,
+  authenticateHealth: (request: Request, capability: ClientCapability) => Promise<ExecutionPrincipal>,
+  check: (principal: ExecutionPrincipal, connectionId: string) => Promise<T>,
+): Promise<T> {
+  if (!bearerCredential(request)) requireSameOrigin(request);
+  const principal = await authenticateHealth(request, "connections:read");
+  return check(principal, connectionId);
+}
+
+/** Resolve a scoped bearer client or signed-in web principal for a route. */
 async function authenticate(
   event: RequestEvent,
   request: Request,
@@ -224,6 +247,14 @@ async function authenticate(
   return { kind: "web", userId, workspaceId: workspaceId ?? "" };
 }
 
+/** Prevent a client grant from probing a binding in another workspace. */
+export function assertConnectionWorkspace(principal: ExecutionPrincipal, bindingWorkspaceId: string): void {
+  if (principal.kind === "client" && principal.workspaceId !== bindingWorkspaceId) {
+    throw new ConnectionAccessDeniedError();
+  }
+}
+
+/** Open a provider runtime with request origin and server-only secrets. */
 async function connectPlugFn(event: RequestEvent) {
   const origin = new URL(event.request.url).origin;
   return connectPostgresPlugFn({
@@ -232,6 +263,19 @@ async function connectPlugFn(event: RequestEvent) {
     encryptionKey: requiredSecret(event, "PLUGFN_ENCRYPTION_KEY"),
     integrations: integrationConfig(event),
   });
+}
+
+/** Keep committed mutation responses redacted and exclude providers that lost eligibility. */
+async function publicMutationConnection(
+  orchestrator: PlugFnConnectionOrchestrator,
+  authority: ConnectionAuthority,
+  actorUserId: string,
+  binding: ConnectionBindingRecord,
+) {
+  const selectable = orchestrator.providerReadiness(binding.provider, [binding]).state === "ready";
+  const cleanupOnly = binding.ownership === "personal" && binding.ownerUserId !== actorUserId;
+  return (await publicConnectionsAfterMutation(authority, actorUserId, binding.workspaceId,
+    [{ ...binding, selectable, cleanupOnly }]))[0];
 }
 
 export function createCloudflareDeviceServices(event: RequestEvent): DeviceRouteServices {
@@ -321,6 +365,7 @@ function configuredProviders(plugfn: Awaited<ReturnType<typeof connectPlugFn>>["
   return new Set(statuses(plugfn).filter((status) => status.available).map((status) => status.provider));
 }
 
+/** Restrict the tool catalog to bindings this principal can currently use. */
 export async function scopedToolIds(
   catalog: Awaited<ReturnType<typeof createPlugFnToolCatalog>>,
   plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"],
@@ -347,9 +392,11 @@ export async function scopedToolIds(
   };
 }
 
+/** Bind authenticated control-plane routes to disposable server-side runtimes. */
 export function createCloudflareRouteServices(event: RequestEvent): CloudflareRouteServices {
   const device = createCloudflareDeviceServices(event);
 
+  /** Close both connection runtimes after each operation, including failures. */
   async function withConnections<T>(
     callback: (
       orchestrator: PlugFnConnectionOrchestrator,
@@ -372,6 +419,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
   }
 
   const connections: ConnectionRouteServices = {
+    /** Read provider setup availability in the caller's workspace context. */
     async providerReadiness(request, provider, workspaceId) {
       const principal = await authenticate(event, request, workspaceId, "connections:read");
       return withConnections(async (orchestrator, authority) => orchestrator.providerReadiness(
@@ -383,47 +431,78 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
         }) : [],
       ));
     },
+    /** Project only connections available to the authenticated workspace member. */
     async list(request, input) {
       const principal = await authenticate(event, request, input.workspaceId, "connections:read");
-      return withConnections((orchestrator) => orchestrator.listAvailable({
-        actorUserId: principal.userId,
-        workspaceId: input.workspaceId,
-        ...(input.provider ? { provider: input.provider } : {}),
-      }));
+      return withConnections(async (orchestrator, authority) => publicConnections(
+        authority, principal.userId, input.workspaceId,
+        await orchestrator.listAvailable({
+          actorUserId: principal.userId,
+          workspaceId: input.workspaceId,
+          ...(input.provider ? { provider: input.provider } : {}),
+        }),
+      ));
     },
+    /** Save a selection after origin, client scope, and ownership checks. */
     async select(request, input) {
       return selectAuthorizedConnection(request, input,
         (selectionRequest, workspaceId, capability) => authenticate(event, selectionRequest, workspaceId, capability),
         (selection) => withConnections((orchestrator) => orchestrator.select(selection)));
     },
+    /** Start provider authorization for a signed-in same-origin web user. */
     async startOAuth(request, input) {
       requireSameOrigin(request);
       const actorUserId = await requireWebUser(event, request);
       return withConnections((orchestrator) => orchestrator.startOAuth({ actorUserId, ...input }));
     },
+    /** Commit a callback and return a redacted public binding. */
     async completeOAuth(request, input) {
       requireSameOrigin(request);
       const actorUserId = await requireWebUser(event, request);
-      return withConnections((orchestrator) => orchestrator.completeOAuth({ actorUserId, ...input }));
+      return withConnections(async (orchestrator, authority) => {
+        const result = await orchestrator.completeOAuth({ actorUserId, ...input });
+        const connection = await publicMutationConnection(orchestrator, authority, actorUserId, result.connection);
+        return { connection, ...(result.returnTo ? { returnTo: result.returnTo } : {}) };
+      });
     },
+    /** Submit a credential server-side and return its redacted binding. */
     async connectApiKey(request, input) {
       requireSameOrigin(request);
       const actorUserId = await requireWebUser(event, request);
-      return withConnections((orchestrator) => orchestrator.connectApiKey({ actorUserId, ...input }));
+      return withConnections(async (orchestrator, authority) => {
+        const binding = await orchestrator.connectApiKey({ actorUserId, ...input });
+        return publicMutationConnection(orchestrator, authority, actorUserId, binding);
+      });
     },
+    /** Enforce binding and client workspace access before a provider probe. */
     async checkHealth(request, connectionId) {
-      const principal = await authenticate(event, request, undefined, "connections:read");
-      return withConnections((orchestrator) => orchestrator.checkHealth(principal.userId, connectionId));
+      return checkAuthorizedConnectionHealth(request, connectionId,
+        (healthRequest, capability) => authenticate(event, healthRequest, undefined, capability),
+        (principal, id) => withConnections(async (orchestrator, authority) => {
+          const accessible = await authority.getAccessible(principal.userId, id);
+          assertConnectionWorkspace(principal, accessible.workspaceId);
+          const binding = await orchestrator.checkHealth(principal.userId, id);
+          return publicMutationConnection(orchestrator, authority, principal.userId, binding);
+        }));
     },
+    /** Refresh a binding under the signed-in member's authority. */
     async refresh(request, connectionId) {
       requireSameOrigin(request);
       const actorUserId = await requireWebUser(event, request);
-      return withConnections((orchestrator) => orchestrator.refresh(actorUserId, connectionId));
+      return withConnections(async (orchestrator, authority) => {
+        const binding = await orchestrator.refresh(actorUserId, connectionId);
+        return publicMutationConnection(orchestrator, authority, actorUserId, binding);
+      });
     },
+    /** End local use before returning redacted provider cleanup guidance. */
     async disconnect(request, connectionId) {
       requireSameOrigin(request);
       const actorUserId = await requireWebUser(event, request);
-      return withConnections((orchestrator) => orchestrator.disconnect(actorUserId, connectionId));
+      return withConnections(async (orchestrator, authority) => {
+        const result = await orchestrator.disconnect(actorUserId, connectionId);
+        const connection = await publicMutationConnection(orchestrator, authority, actorUserId, result.connection);
+        return { connection, provider: result.provider };
+      });
     },
   };
 
@@ -549,6 +628,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
   };
 
   const controlPlane: ControlPlaneRouteServices = {
+    /** Assemble the private workspace overview for a current member. */
     async overview(request, requestedWorkspaceId) {
       const identity = await connectPostgresIdentityRuntime({
         connectionString: databaseConnectionString(event),
@@ -561,6 +641,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
       });
       let connections: Awaited<ReturnType<typeof connectPostgresConnections>> | undefined;
       let activity: Awaited<ReturnType<typeof connectPostgresExecutionReceipts>> | undefined;
+      let plugfn: Awaited<ReturnType<typeof connectPlugFn>> | undefined;
       try {
         const session = await identity.requireSession(request);
         const workspaces = await identity.workspaces.listWorkspaceAccess(session.actorId);
@@ -584,15 +665,21 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
         connections = await connectPostgresConnections({
           connectionString: databaseConnectionString(event),
         });
+        plugfn = await connectPlugFn(event);
         activity = await connectPostgresExecutionReceipts({
           connectionString: databaseConnectionString(event),
           resultWrappingKey: executionWrappingKey(event),
         });
-        const [availableConnections, approvals, executions] = await Promise.all([
-          connections.connections.listAvailable({
+        const connectionService = new PlugFnConnectionOrchestrator(connections.connections, plugfn.plugfn);
+        const [availableConnections, orphanedConnections, approvals, executions] = await Promise.all([
+          connectionService.listAvailable({
             actorUserId: session.actorId,
             workspaceId: selected.workspace.id,
           }),
+          selected.membership.role === "owner" || selected.membership.role === "admin"
+            ? connections.connections.listOrphanedForCleanup({ actorUserId: session.actorId,
+              workspaceId: selected.workspace.id })
+            : Promise.resolve([]),
           activity.approvals.listForActor({
             actorUserId: session.actorId,
             workspaceId: selected.workspace.id,
@@ -608,12 +695,16 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
           actor: { id: session.actorId, email: session.primaryEmail ?? null },
           workspaces,
           selectedWorkspaceId: selected.workspace.id,
-          connections: availableConnections,
+          connections: await publicConnections(
+            connections.connections, session.actorId, selected.workspace.id,
+            [...availableConnections, ...orphanedConnections.map((binding) => ({ ...binding,
+              cleanupOnly: true, selectable: false }))],
+          ),
           approvals,
           executions,
         };
       } finally {
-        await Promise.allSettled([identity.close(), connections?.close(), activity?.close()]);
+        await Promise.allSettled([identity.close(), connections?.close(), activity?.close(), plugfn?.close()]);
       }
     },
     async createTeam(request, name) {
