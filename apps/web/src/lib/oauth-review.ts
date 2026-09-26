@@ -15,6 +15,7 @@ export interface OAuthReviewState {
   scopes: string[];
 }
 
+/** Fence pending OAuth requests so a late response cannot replace a newer workspace review. */
 export function createOAuthReviewController(deps: {
   storage: () => Pick<Storage, "setItem" | "removeItem">;
   readiness: (provider: string, workspaceId: string) => Promise<{ available: boolean; authMode: string }>;

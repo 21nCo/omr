@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { authorizationScopes, connectionActions, providerRevocationGuidance } from "./connection-ui.js";
+import { authorizationScopes, connectionActions, connectionStatusLabel, providerRevocationGuidance } from "./connection-ui.js";
 
 const team = { id: "connection_1", provider: "slack", ownership: "workspace" as const,
   ownerUserId: null, status: "active", readiness: "ready", selected: false };
@@ -31,6 +31,10 @@ describe("connection control UI policy", () => {
       .not.toContain("grant");
     expect(providerRevocationGuidance("provider_connection_missing", null))
       .toContain("remaining access");
+    expect(providerRevocationGuidance("provider_cleanup_requires_owner", "oauth"))
+      .toContain("former member to revoke the OAuth grant");
+    expect(providerRevocationGuidance("provider_cleanup_requires_owner", "api_key"))
+      .toContain("former member to delete or rotate the API key");
     expect(providerRevocationGuidance("remote_revoke_failed", "oauth")).toBeNull();
     expect(connectionActions(team, "user_admin", "admin", "unconfigured").canSelect).toBe(false);
   });
@@ -42,6 +46,22 @@ describe("connection control UI policy", () => {
     expect(connectionActions({ ...pending, updatedAt: 61_000 }, "user_admin", "admin", "ready", 61_001)
       .canRetryRevoke).toBe(false);
     expect(connectionActions(pending, "user_member", "member", "ready", 61_001).canRetryRevoke).toBe(false);
+  });
+
+  it("limits an orphaned personal account to owner/admin cleanup actions", () => {
+    const orphan = { ...team, ownership: "personal" as const, ownerUserId: "former_member",
+      cleanupOnly: true };
+    expect(connectionActions(orphan, "user_admin", "admin", "ready")).toMatchObject({
+      canSelect: false, canCheck: false, canRefresh: false, canReconnect: false,
+      canDisconnect: true,
+    });
+    expect(connectionActions({ ...orphan, status: "revoked", healthReason: "provider_cleanup_requires_owner" },
+      "user_admin", "admin", "ready").canRetryRevoke).toBe(false);
+    expect(connectionActions(orphan, "user_member", "member", "ready")).toMatchObject({
+      canSelect: false, canDisconnect: false,
+    });
+    expect(connectionStatusLabel(orphan, "ready")).toBe("cleanup required");
+    expect(connectionStatusLabel({ ...orphan, status: "revoked" }, "ready")).toBe("disconnected");
   });
 
   it("shows both bot and user OAuth scopes before navigation", () => {

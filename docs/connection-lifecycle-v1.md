@@ -4,8 +4,12 @@ The `/app` control plane supports GitHub, Linear, Slack, and Notion when their
 PlugFn adapters are registered. A signed-in workspace member may install a
 personal connection. Only a workspace owner or admin may install, refresh,
 reconnect, or disconnect a team connection. Personal accounts remain visible
-and manageable only to their owner. The server checks membership and role for
-every mutation; hiding a button is only guidance.
+and manageable only to their owner while that owner is a member. If a member
+leaves, the workspace owner or admin sees a cleanup-only entry for the orphaned
+personal binding. It cannot be selected, checked, refreshed, or used; cleanup
+revokes its local binding and gives provider-side instructions when needed. Active members'
+personal bindings remain private from other members and admins. The server
+checks membership and role for every mutation; hiding a button is only guidance.
 
 ## Setup and access review
 
@@ -57,12 +61,21 @@ without attempting remote revocation. Retry through OMR cannot work without that
 upstream connection likewise becomes terminal. These states show no raw provider
 details. A
 revoked binding cannot become ready through a concurrent probe or refresh.
+PlugFn's personal disconnect requires the owner as the actor, so a workspace
+admin cannot revoke a former member's upstream grant through the supported
+provider API. Orphan cleanup never impersonates that member. It ends local use
+and selection, marks provider cleanup as owner-required, and tells the admin
+to ask the former member to revoke the OAuth grant or rotate the API key at
+the provider. Normal personal and team disconnects still attempt upstream
+cleanup and retain their retry and terminal guidance paths.
 
 ## Migration and rollback
 
 No database schema migration is needed: the cleanup attempt marker and terminal
 reason use the existing `health_reason` column. This uses the existing
 `connection_bindings` and `connection_selections` tables from migration 0006.
+Orphan discovery uses the existing membership table and does not copy provider
+credentials into OMR or the browser.
 The code rollout is reversible by deploying the previous Worker version;
 existing binding and selection rows stay readable by that version. Revocation
 is intentionally terminal and is never rolled back into a usable credential.

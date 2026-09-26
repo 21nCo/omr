@@ -149,11 +149,15 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
   async getManageable(input: AccessConnectionInput): Promise<ConnectionBindingRecord> {
     const connection = await this.readConnection(input.connectionId);
     if (!connection) throw new ConnectionAccessDeniedError();
-    const role = await this.membershipRole(connection.workspace_id, input.actorUserId);
-    const authorized = connection.ownership === "personal"
-      ? Boolean(role) && connection.owner_user_id === input.actorUserId
-      : role === "owner" || role === "admin";
-    if (!authorized) throw new ConnectionAccessDeniedError();
+    if (!await this.canManage(connection, input.actorUserId)) throw new ConnectionAccessDeniedError();
+    return toConnection(connection);
+  }
+
+  async getRevocable(input: AccessConnectionInput): Promise<ConnectionBindingRecord> {
+    const connection = await this.readConnection(input.connectionId);
+    if (!connection || !await this.canManage(connection, input.actorUserId, true)) {
+      throw new ConnectionAccessDeniedError();
+    }
     return toConnection(connection);
   }
 
@@ -173,6 +177,24 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
          AND (ownership = 'workspace' OR owner_user_id = $3)
        ORDER BY created_at, id`,
       [input.workspaceId, input.provider ?? null, input.actorUserId],
+    );
+    return result.rows.map(toConnection);
+  }
+
+  /** Discover former members' personal bindings after checking the caller's current role. */
+  async listOrphanedForCleanup(input: { actorUserId: string; workspaceId: string }): Promise<ConnectionBindingRecord[]> {
+    const role = await this.membershipRole(input.workspaceId, input.actorUserId);
+    if (role !== "owner" && role !== "admin") throw new ConnectionAccessDeniedError();
+    const result = await this.client.query<ConnectionRow>(
+      `SELECT ${CONNECTION_COLUMNS}
+       FROM omr_control.connection_bindings AS binding
+       WHERE binding.workspace_id = $1 AND binding.ownership = 'personal'
+         AND NOT EXISTS (
+           SELECT 1 FROM omr_control.workspace_memberships AS member
+           WHERE member.workspace_id = binding.workspace_id AND member.user_id = binding.owner_user_id
+         )
+       ORDER BY binding.created_at, binding.id`,
+      [input.workspaceId],
     );
     return result.rows.map(toConnection);
   }
@@ -239,12 +261,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
       );
       const connection = result.rows[0];
       if (!connection) throw new ConnectionAccessDeniedError();
-      const role = await this.membershipRole(connection.workspace_id, input.actorUserId);
-      const authorized =
-        connection.ownership === "personal"
-          ? Boolean(role) && connection.owner_user_id === input.actorUserId
-          : role === "owner" || role === "admin";
-      if (!authorized) throw new ConnectionAccessDeniedError();
+      if (!await this.canManage(connection, input.actorUserId, true)) throw new ConnectionAccessDeniedError();
 
       const updated = await this.client.query<ConnectionRow>(
         `UPDATE omr_control.connection_bindings
@@ -277,11 +294,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
       );
       const connection = result.rows[0];
       if (!connection) throw new ConnectionAccessDeniedError();
-      const role = await this.membershipRole(connection.workspace_id, input.actorUserId);
-      const authorized = connection.ownership === "personal"
-        ? Boolean(role) && connection.owner_user_id === input.actorUserId
-        : role === "owner" || role === "admin";
-      if (!authorized) throw new ConnectionAccessDeniedError();
+      if (!await this.canManage(connection, input.actorUserId, true)) throw new ConnectionAccessDeniedError();
       const matches = input.expectedStatus === "not_revoked"
         ? connection.status !== "revoked"
         : connection.status === input.expectedStatus && connection.health_reason === input.expectedReason;
@@ -336,6 +349,15 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
       [workspaceId, userId],
     );
     return result.rows[0]?.role ?? null;
+  }
+
+  /** Recheck role and owner membership inside each mutation transaction. */
+  private async canManage(connection: ConnectionRow, actorUserId: string, allowOrphanCleanup = false): Promise<boolean> {
+    const role = await this.membershipRole(connection.workspace_id, actorUserId);
+    if (connection.ownership === "workspace") return role === "owner" || role === "admin";
+    if (role && connection.owner_user_id === actorUserId) return true;
+    if (!allowOrphanCleanup || (role !== "owner" && role !== "admin")) return false;
+    return !await this.membershipRole(connection.workspace_id, connection.owner_user_id!);
   }
 
   private async readConnection(connectionId: string): Promise<ConnectionRow | null> {

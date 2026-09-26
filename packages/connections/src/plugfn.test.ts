@@ -34,6 +34,7 @@ async function fixture() {
     orchestrator: new PlugFnConnectionOrchestrator(authority, plugfn.port),
     plugfn,
     store,
+    workspaceStore,
     workspaceId: team.workspace.id,
     advance(milliseconds: number) {
       now += milliseconds;
@@ -95,6 +96,42 @@ function fakePlugFn() {
 }
 
 describe("PlugFn connection orchestration", () => {
+  it("revokes an orphan locally without impersonating its former owner at PlugFn", async () => {
+    const { authority, orchestrator, plugfn, store, workspaceStore, workspaceId } = await fixture();
+    const binding = await authority.attach({ actorUserId: "user_member", workspaceId,
+      provider: "linear", providerConnectionId: "remote_orphan", ownership: "personal", label: "Old member" });
+    await authority.select({ actorUserId: "user_member", workspaceId,
+      provider: "linear", connectionId: binding.id });
+    for (const [id, membership] of workspaceStore.memberships) {
+      if (membership.userId === "user_member" && membership.workspaceId === workspaceId) {
+        workspaceStore.memberships.delete(id);
+      }
+    }
+    await expect(orchestrator.refresh("user_admin", binding.id))
+      .rejects.toBeInstanceOf(ConnectionAccessDeniedError);
+    await expect(orchestrator.checkHealth("user_admin", binding.id))
+      .rejects.toBeInstanceOf(ConnectionAccessDeniedError);
+    await expect(authority.select({ actorUserId: "user_admin", workspaceId,
+      provider: "linear", connectionId: binding.id }))
+      .rejects.toBeInstanceOf(ConnectionUnavailableError);
+    expect(plugfn.methods.refresh).not.toHaveBeenCalled();
+    expect(plugfn.methods.isValid).not.toHaveBeenCalled();
+    const result = await orchestrator.disconnect("user_admin", binding.id);
+    expect(result).toMatchObject({
+      connection: { healthReason: "provider_cleanup_requires_owner" },
+      provider: { remoteRevokeAttempted: false },
+    });
+    expect(plugfn.methods.disconnect).not.toHaveBeenCalled();
+    expect(store.connections.get(binding.id)).toMatchObject({ status: "revoked", readiness: "unavailable" });
+    expect(store.selections.size).toBe(0);
+    await expect(authority.resolve({ actorUserId: "user_owner", workspaceId, provider: "linear",
+      connectionId: binding.id })).rejects.toBeInstanceOf(ConnectionAccessDeniedError);
+    await expect(orchestrator.disconnect("user_owner", binding.id)).resolves.toMatchObject({
+      connection: { status: "revoked", readiness: "unavailable", healthReason: "provider_cleanup_requires_owner" },
+    });
+    expect(plugfn.methods.disconnect).not.toHaveBeenCalled();
+  });
+
   it("keeps old healthy bindings visible but ineligible when support or config is removed", async () => {
     const { authority, orchestrator, plugfn, workspaceId } = await fixture();
     const github = await authority.attach({ actorUserId: "user_owner", workspaceId,

@@ -354,13 +354,18 @@ export function createOMRRouter(
       if (authError?.code === "AUTHFN_UNAUTHENTICATED") {
         return Response.json({ error: "AUTHFN_UNAUTHENTICATED" }, { status: 401 });
       }
+      const connectionRequest = new URL(request.url).pathname.startsWith("/api/connections/");
+      let loggedError: string;
+      if (connectionRequest) {
+        loggedError = error instanceof Error ? error.name : "Unknown connection failure";
+      } else {
+        loggedError = error instanceof Error ? error.message : String(error);
+      }
       console.error(JSON.stringify({
         message: "OMR request failed",
         method: request.method,
         path: new URL(request.url).pathname,
-        error: new URL(request.url).pathname.startsWith("/api/connections/")
-          ? error instanceof Error ? error.name : "Unknown connection failure"
-          : error instanceof Error ? error.message : String(error),
+        error: loggedError,
       }));
       return Response.json({ error: "INTERNAL_ERROR" }, { status: 500 });
     },

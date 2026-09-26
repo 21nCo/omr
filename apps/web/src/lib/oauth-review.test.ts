@@ -37,12 +37,15 @@ describe("OAuth review state", () => {
     start.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     const pending = controller.start(input);
     await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(1));
-    controller.cancel();
+    const switched = controller.start({ ...input, workspaceId: "workspace_b" });
+    await switched;
+    expect(JSON.parse(items.get("omr.provider-oauth.one")!)).toMatchObject({ workspaceId: "workspace_b" });
     finish({ authUrl: "https://provider.example/oauth?state=stale" });
     await pending;
-    expect(items.size).toBe(0);
-    expect(update).toHaveBeenLastCalledWith(null, false);
-    await controller.start({ ...input, workspaceId: "workspace_b" });
+    expect(items.size).toBe(1);
+    expect(update).toHaveBeenLastCalledWith(expect.objectContaining({
+      destination: expect.stringContaining("state=one"),
+    }), false);
     expect(JSON.parse(items.get("omr.provider-oauth.one")!)).toMatchObject({ workspaceId: "workspace_b" });
   });
 });

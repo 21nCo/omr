@@ -18,9 +18,19 @@ describe("connection HTTP projection", () => {
       provider: "github", providerConnectionId: "secret_remote_handle_2", ownership: "personal", label: "Second" });
     await authority.select({ actorUserId: "user_owner", workspaceId: workspace.id,
       provider: "github", connectionId: second.id });
-    const projected = await publicConnections(authority, "user_owner", workspace.id, [first, second]);
+    const projected = await publicConnections(authority, "user_owner", workspace.id,
+      [{ ...first, selectable: true }, { ...second, selectable: true }]);
     expect(projected.map(({ selected }) => selected)).toEqual([false, true]);
+    expect((await publicConnections(authority, "user_owner", workspace.id, [second]))[0]?.selected)
+      .toBe(false);
     expect(JSON.stringify(projected)).not.toContain("secret_remote_handle");
+    expect(JSON.stringify(projected)).not.toContain("installedBy");
+    expect((await publicConnections(authority, "user_owner", workspace.id,
+      [{ ...second, selectable: false, providerState: "unconfigured" }]))[0])
+      .toMatchObject({ selected: false, selectable: false, providerState: "unconfigured" });
+    expect((await publicConnections(authority, "user_owner", workspace.id,
+      [{ ...second, cleanupOnly: true }]))[0])
+      .toMatchObject({ selected: false, cleanupOnly: true, label: "Former member github account" });
     await authority.revoke("user_owner", second.id);
     expect((await publicConnections(authority, "user_owner", workspace.id,
       await authority.listAvailable({ actorUserId: "user_owner", workspaceId: workspace.id })))

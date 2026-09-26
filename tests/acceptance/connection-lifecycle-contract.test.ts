@@ -45,7 +45,7 @@ describe("connection-lifecycle-contract", () => {
     const orchestrator = new PlugFnConnectionOrchestrator(authority, port);
     const actor = (request: Request) => request.headers.get("x-fixture-user") ?? "user_outsider";
     const view = async (user: string) => publicConnections(authority, user, team.id,
-      await authority.listAvailable({ actorUserId: user, workspaceId: team.id }));
+      await orchestrator.listAvailable({ actorUserId: user, workspaceId: team.id }));
     const services: ConnectionRouteServices = {
       providerReadiness: async (_request, provider) => orchestrator.providerReadiness(provider),
       list: async (request) => view(actor(request)),
@@ -83,7 +83,7 @@ describe("connection-lifecycle-contract", () => {
     expect((await post("user_member", "select", { workspaceId: team.id,
       provider: "linear", connectionId: binding.id })).status).toBe(409);
     expect((await post("user_member", "refresh", { connectionId: binding.id })).status).toBe(403);
-    remote.refresh.mockResolvedValueOnce({ id: "remote_1", provider: "linear", status: "expired" });
+    remote.refresh.mockImplementationOnce(async (id: string) => ({ id, provider: "linear", status: "expired" }));
     const expiredRefresh = await post("user_owner", "refresh", { connectionId: binding.id });
     expect(expiredRefresh.status).toBe(502);
     await expect(expiredRefresh.json()).resolves.toMatchObject({ error: "CONNECTION_PROVIDER_FAILED",

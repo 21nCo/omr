@@ -145,4 +145,60 @@ describePostgres("connection authority/PostgreSQL integration", () => {
       await client.end();
     }
   });
+
+  it("allows only owner/admin cleanup of an orphan without exposing it for use", async () => {
+    const formerUserId = `former_${crypto.randomUUID()}`;
+    const membershipId = `membership_${crypto.randomUUID()}`;
+    const client = new Client({ connectionString: connectionString! });
+    await client.connect();
+    let bindingId: string | undefined;
+    try {
+      await client.query(
+        `INSERT INTO omr_control.workspace_memberships
+           (id, workspace_id, user_id, role, created_at, updated_at)
+         VALUES ($1, $2, $3, 'member', $4, $4)`,
+        [membershipId, workspaceId, formerUserId, Date.now()],
+      );
+      const binding = await runtime.connections.attach({ actorUserId: formerUserId, workspaceId,
+        provider: "github", providerConnectionId: `plug_${crypto.randomUUID()}`,
+        ownership: "personal", label: "Former member" });
+      bindingId = binding.id;
+      await runtime.connections.select({ actorUserId: formerUserId, workspaceId,
+        provider: "github", connectionId: binding.id });
+      await expect(runtime.connections.getManageable("connection_owner", binding.id))
+        .rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+      await client.query(`DELETE FROM omr_control.workspace_memberships WHERE id = $1`, [membershipId]);
+      await expect(runtime.connections.listOrphanedForCleanup({ actorUserId: "connection_member", workspaceId }))
+        .rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+      expect(await runtime.connections.listOrphanedForCleanup({ actorUserId: "connection_owner", workspaceId }))
+        .toEqual(expect.arrayContaining([expect.objectContaining({ id: binding.id })]));
+      expect(await runtime.connections.listAvailable({ actorUserId: "connection_owner", workspaceId, provider: "github" }))
+        .not.toContainEqual(binding);
+      await expect(runtime.connections.getAccessible("connection_owner", binding.id))
+        .rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+      await expect(runtime.connections.getManageable("connection_owner", binding.id))
+        .rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+      await expect(runtime.connections.getRevocable("connection_owner", binding.id))
+        .resolves.toMatchObject({ id: binding.id });
+      await expect(runtime.connections.revokeIfNotRevoked("connection_owner", binding.id,
+        "provider_cleanup_pending:test"))
+        .resolves.toMatchObject({ status: "revoked", readiness: "unavailable" });
+      const selections = await client.query(
+        `SELECT 1 FROM omr_control.connection_selections WHERE connection_id = $1`, [binding.id],
+      );
+      expect(selections.rowCount).toBe(0);
+      await expect(runtime.connections.recordHealth({ connectionId: binding.id,
+        status: "active", readiness: "ready" })).rejects.toMatchObject({ code: "CONNECTION_UNAVAILABLE" });
+      await expect(runtime.connections.revokeIf("connection_owner", binding.id, "revoked",
+        "provider_cleanup_pending:test", "provider_cleanup_failed"))
+        .resolves.toMatchObject({ healthReason: "provider_cleanup_failed" });
+    } finally {
+      if (bindingId) {
+        await client.query(`DELETE FROM omr_control.connection_selections WHERE connection_id = $1`, [bindingId]);
+        await client.query(`DELETE FROM omr_control.connection_bindings WHERE id = $1`, [bindingId]);
+      }
+      await client.query(`DELETE FROM omr_control.workspace_memberships WHERE id = $1`, [membershipId]);
+      await client.end();
+    }
+  });
 });

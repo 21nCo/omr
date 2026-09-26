@@ -170,6 +170,28 @@ function actorFor(input: {
     : { userId: input.actorUserId, tenantId: input.workspaceId };
 }
 
+/** A pending cleanup claim is reclaimable only after its server lease expires. */
+function canClaimCleanup(binding: ConnectionBindingRecord, now: number): boolean {
+  if (binding.status !== "revoked") return true;
+  if (binding.healthReason === "remote_revoke_failed" || binding.healthReason === "provider_cleanup_failed") return true;
+  const pending = binding.healthReason === "provider_cleanup_pending" ||
+    binding.healthReason?.startsWith("provider_cleanup_pending:");
+  return Boolean(pending && now - binding.updatedAt > 60_000);
+}
+
+/** Classify remote cleanup without exposing provider error details to clients. */
+function cleanupReason(provider: PlugFnDisconnectResult, oauth: boolean): string | undefined {
+  const remoteFailure = provider.remoteRevokeAttempted && !provider.remoteRevokeSucceeded;
+  if (provider.connectionDeleted) {
+    return remoteFailure || (oauth && !provider.remoteRevokeSucceeded)
+      ? "remote_revocation_unavailable" : undefined;
+  }
+  if (!provider.disconnected && !provider.remoteRevokeAttempted && !provider.localDeleted) {
+    return "provider_connection_missing";
+  }
+  return remoteFailure ? "remote_revoke_failed" : "provider_cleanup_failed";
+}
+
 function assertConnectionOwner(
   connection: PlugFnConnection,
   expected: PlugFnOwner,
@@ -193,6 +215,7 @@ export class PlugFnConnectionOrchestrator {
     private readonly plugfn: PlugFnConnectionPort,
   ) {}
 
+  /** Combine adapter support, server configuration, and binding health for one provider. */
   providerReadiness(
     providerValue: string,
     connections: readonly ConnectionBindingRecord[] = [],
@@ -207,6 +230,7 @@ export class PlugFnConnectionOrchestrator {
     });
   }
 
+  /** Reject setup when the provider or requested authentication mode is unavailable. */
   private assertConnectable(provider: string, mode: "oauth" | "api_key"): void {
     const readiness = this.providerReadiness(provider);
     if (!readiness.available || readiness.authMode !== mode) {
@@ -221,6 +245,7 @@ export class PlugFnConnectionOrchestrator {
     return this.authority.select(input);
   }
 
+  /** Annotate visible bindings with eligibility for public account selection. */
   async listAvailable(input: { actorUserId: string; workspaceId: string; provider?: string }) {
     const bindings = await this.authority.listAvailable(input);
     const byProvider = new Map<string, ConnectionBindingRecord[]>();
@@ -239,6 +264,7 @@ export class PlugFnConnectionOrchestrator {
     });
   }
 
+  /** Authorize setup and return the provider consent URL without storing browser secrets. */
   async startOAuth(input: {
     actorUserId: string;
     workspaceId: string;
@@ -274,6 +300,7 @@ export class PlugFnConnectionOrchestrator {
     return { authUrl };
   }
 
+  /** Bind a validated callback result or discard an unusable provider connection. */
   async completeOAuth(input: {
     actorUserId: string;
     workspaceId: string;
@@ -318,6 +345,7 @@ export class PlugFnConnectionOrchestrator {
     return { connection, ...(result.returnTo ? { returnTo: result.returnTo } : {}) };
   }
 
+  /** Send a credential directly to PlugFn and persist only its remote handle. */
   async connectApiKey(input: {
     actorUserId: string;
     workspaceId: string;
@@ -361,6 +389,7 @@ export class PlugFnConnectionOrchestrator {
     });
   }
 
+  /** Probe an accessible binding and keep failed or missing accounts unavailable. */
   async checkHealth(actorUserId: string, connectionId: string): Promise<ConnectionBindingRecord> {
     const binding = await this.authority.getAccessible(actorUserId, connectionId);
     if (binding.status === "revoked") throw new ConnectionUnavailableError();
@@ -386,6 +415,7 @@ export class PlugFnConnectionOrchestrator {
     });
   }
 
+  /** Refresh a manageable binding only when PlugFn returns the same active account. */
   async refresh(actorUserId: string, connectionId: string): Promise<ConnectionBindingRecord> {
     const binding = await this.authority.getManageable(actorUserId, connectionId);
     if (binding.status === "revoked") throw new ConnectionUnavailableError();
@@ -414,26 +444,36 @@ export class PlugFnConnectionOrchestrator {
     }
   }
 
+  /** Claim local revocation first, then reconcile provider cleanup or owner guidance. */
   async disconnect(
     actorUserId: string,
     connectionId: string,
   ): Promise<{ connection: ConnectionBindingRecord; provider: PlugFnDisconnectResult }> {
-    const binding = await this.authority.getManageable(actorUserId, connectionId);
+    const binding = await this.authority.getRevocable(actorUserId, connectionId);
     const pending = `provider_cleanup_pending:${crypto.randomUUID()}`;
-    const retryable = binding.healthReason === "remote_revoke_failed" || binding.healthReason === "provider_cleanup_failed";
-    const stalePending = binding.status === "revoked" &&
-      (binding.healthReason === "provider_cleanup_pending" ||
-        binding.healthReason?.startsWith("provider_cleanup_pending:")) &&
-      this.authority.currentTime() - binding.updatedAt > 60_000;
-    const claimable = binding.status !== "revoked" || retryable || stalePending;
     // The conditional transition serializes retries across Worker instances.
     // It also removes local use and selections before any provider call.
-    const claimed = !claimable ? null : binding.status === "revoked"
-      ? await this.authority.revokeIf(actorUserId, connectionId, "revoked", binding.healthReason, pending)
-      : await this.authority.revokeIfNotRevoked(actorUserId, connectionId, pending);
+    let claimed: ConnectionBindingRecord | null = null;
+    if (canClaimCleanup(binding, this.authority.currentTime())) {
+      claimed = binding.status === "revoked"
+        ? await this.authority.revokeIf(actorUserId, connectionId, "revoked", binding.healthReason, pending)
+        : await this.authority.revokeIfNotRevoked(actorUserId, connectionId, pending);
+    }
     if (!claimed) {
       return {
-        connection: await this.authority.getManageable(actorUserId, connectionId),
+        connection: await this.authority.getRevocable(actorUserId, connectionId),
+        provider: { disconnected: false, remoteRevokeAttempted: false,
+          remoteRevokeSucceeded: false, localDeleted: false, connectionDeleted: false },
+      };
+    }
+    if (binding.ownership === "personal" && binding.ownerUserId !== actorUserId) {
+      // PlugFn's personal disconnect requires the owner as the actual actor.
+      // Never impersonate a former member to delete their provider credential.
+      const connection = await this.authority.revokeIf(
+        actorUserId, connectionId, "revoked", pending, "provider_cleanup_requires_owner",
+      );
+      return {
+        connection: connection ?? await this.authority.getRevocable(actorUserId, connectionId),
         provider: { disconnected: false, remoteRevokeAttempted: false,
           remoteRevokeSucceeded: false, localDeleted: false, connectionDeleted: false },
       };
@@ -465,20 +505,14 @@ export class PlugFnConnectionOrchestrator {
       localDeleted: provider.localDeleted,
       connectionDeleted: provider.connectionDeleted,
     };
-    const remoteFailure = provider.remoteRevokeAttempted && !provider.remoteRevokeSucceeded;
-    const oauthGrantMayRemain = this.plugfn.providers.get(binding.provider)?.auth.type === "oauth2" &&
-      !provider.remoteRevokeSucceeded;
-    const reason = provider.connectionDeleted
-      ? remoteFailure || oauthGrantMayRemain ? "remote_revocation_unavailable" : undefined
-      : !provider.disconnected && !provider.remoteRevokeAttempted && !provider.localDeleted
-        ? "provider_connection_missing"
-        : remoteFailure ? "remote_revoke_failed" : "provider_cleanup_failed";
+    const reason = cleanupReason(provider, this.plugfn.providers.get(binding.provider)?.auth.type === "oauth2");
     const connection = await this.authority.revokeIf(
       actorUserId, connectionId, "revoked", pending, reason,
     ).catch(() => null);
-    return { connection: connection ?? await this.authority.getManageable(actorUserId, connectionId), provider: safeProvider };
+    return { connection: connection ?? await this.authority.getRevocable(actorUserId, connectionId), provider: safeProvider };
   }
 
+  /** Delete an upstream result if local binding persistence fails. */
   private async attachOrCleanUp(input: {
     actorUserId: string;
     workspaceId: string;

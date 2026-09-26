@@ -24,6 +24,15 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
 
   constructor(private readonly workspaces: WorkspaceStore) {}
 
+  /** Permit orphan cleanup without allowing access to an active member's personal binding. */
+  private async canManage(connection: ConnectionBindingRecord, actorUserId: string, allowOrphanCleanup = false): Promise<boolean> {
+    const membership = await this.workspaces.findMembership(connection.workspaceId, actorUserId);
+    if (connection.ownership === "workspace") return membership?.role === "owner" || membership?.role === "admin";
+    if (membership && connection.ownerUserId === actorUserId) return true;
+    if (!allowOrphanCleanup || (membership?.role !== "owner" && membership?.role !== "admin")) return false;
+    return !await this.workspaces.findMembership(connection.workspaceId, connection.ownerUserId!);
+  }
+
   async authorizeInstall(input: AuthorizeConnectionInstallInput): Promise<void> {
     const membership = await this.workspaces.findMembership(input.workspaceId, input.actorUserId);
     if (
@@ -74,14 +83,15 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
   async getManageable(input: AccessConnectionInput): Promise<ConnectionBindingRecord> {
     const connection = this.connections.get(input.connectionId);
     if (!connection) throw new ConnectionAccessDeniedError();
-    const membership = await this.workspaces.findMembership(
-      connection.workspaceId,
-      input.actorUserId,
-    );
-    const authorized = connection.ownership === "personal"
-      ? Boolean(membership) && connection.ownerUserId === input.actorUserId
-      : membership?.role === "owner" || membership?.role === "admin";
-    if (!authorized) throw new ConnectionAccessDeniedError();
+    if (!await this.canManage(connection, input.actorUserId)) throw new ConnectionAccessDeniedError();
+    return structuredClone(connection);
+  }
+
+  async getRevocable(input: AccessConnectionInput): Promise<ConnectionBindingRecord> {
+    const connection = this.connections.get(input.connectionId);
+    if (!connection || !await this.canManage(connection, input.actorUserId, true)) {
+      throw new ConnectionAccessDeniedError();
+    }
     return structuredClone(connection);
   }
 
@@ -102,6 +112,20 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
       )
       .sort((left, right) => left.createdAt - right.createdAt)
       .map((connection) => structuredClone(connection));
+  }
+
+  /** Show only former members' personal bindings to the workspace owner or admin. */
+  async listOrphanedForCleanup(input: { actorUserId: string; workspaceId: string }): Promise<ConnectionBindingRecord[]> {
+    const membership = await this.workspaces.findMembership(input.workspaceId, input.actorUserId);
+    if (membership?.role !== "owner" && membership?.role !== "admin") throw new ConnectionAccessDeniedError();
+    const result: ConnectionBindingRecord[] = [];
+    for (const connection of this.connections.values()) {
+      if (connection.workspaceId === input.workspaceId && connection.ownership === "personal" &&
+          !await this.workspaces.findMembership(input.workspaceId, connection.ownerUserId!)) {
+        result.push(structuredClone(connection));
+      }
+    }
+    return result.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
   }
 
   async getSelection(input: {
@@ -148,15 +172,7 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
   async revoke(input: RevokeConnectionInput): Promise<ConnectionBindingRecord> {
     const connection = this.connections.get(input.connectionId);
     if (!connection) throw new ConnectionAccessDeniedError();
-    const membership = await this.workspaces.findMembership(
-      connection.workspaceId,
-      input.actorUserId,
-    );
-    const authorized =
-      connection.ownership === "personal"
-        ? Boolean(membership) && connection.ownerUserId === input.actorUserId
-        : membership?.role === "owner" || membership?.role === "admin";
-    if (!authorized) throw new ConnectionAccessDeniedError();
+    if (!await this.canManage(connection, input.actorUserId, true)) throw new ConnectionAccessDeniedError();
     connection.status = "revoked";
     connection.readiness = "unavailable";
     connection.healthReason = input.reason ?? null;
@@ -169,7 +185,7 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
   }
 
   async revokeIf(input: ConditionalRevokeInput): Promise<ConnectionBindingRecord | null> {
-    await this.getManageable({ actorUserId: input.actorUserId, connectionId: input.connectionId });
+    await this.getRevocable({ actorUserId: input.actorUserId, connectionId: input.connectionId });
     const connection = this.connections.get(input.connectionId)!;
     const matches = input.expectedStatus === "not_revoked"
       ? connection.status !== "revoked"

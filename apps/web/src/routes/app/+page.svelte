@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { createOAuthReviewController } from "$lib/oauth-review.js";
-  import { connectionActions, providerRevocationGuidance } from "$lib/connection-ui.js";
+  import { connectionActions, connectionStatusLabel, providerRevocationGuidance } from "$lib/connection-ui.js";
   import { createWorkspaceCatalogLoader, providerDisplayState } from "$lib/workspace-catalog.js";
   import { V1_PROVIDERS } from "@oh-my-router/tools";
 
@@ -21,6 +21,7 @@
     healthReason: string | null;
     lastCheckedAt: number | null;
     updatedAt: number;
+    cleanupOnly?: boolean;
   };
   type Approval = {
     id: string;
@@ -333,10 +334,10 @@
         <section class="panel connections">
           <div class="panel-heading">
             <div><p class="kicker">Providers</p><h2>Connections</h2></div>
-            <span>{overview.connections.filter((item) => item.status !== "revoked").length} connected accounts</span>
+            <span>{overview.connections.filter((item) => item.status !== "revoked" && !item.cleanupOnly).length} connected accounts</span>
           </div>
 
-          <p>Personal accounts are visible only to you. Team accounts are available to workspace members; only owners and admins can connect, refresh, or disconnect them.</p>
+          <p>Personal accounts are visible only to you. Team accounts are available to workspace members; only owners and admins can connect, refresh, or disconnect them. Owners and admins can remove a former member's orphaned personal account.</p>
 
           <div class="rows" role="region" aria-label="v1 provider catalog">
             {#each catalog?.providers ?? [] as entry}
@@ -359,7 +360,7 @@
                   <div class="provider-mark">{connection.provider.slice(0, 2).toUpperCase()}</div>
                   <div class="grow">
                     <strong>{connection.label}</strong>
-                    <span>{connection.provider} · {connection.ownership === "personal" ? "Personal · only you" : "Team · shared with members"}
+                    <span>{connection.provider} · {connection.cleanupOnly ? "Former member’s personal account · cleanup only" : connection.ownership === "personal" ? "Personal · only you" : "Team · shared with members"}
                       {#if connection.selected} · Selected for your actions{/if}
                     </span>
                     <span>Last checked {timestamp(connection.lastCheckedAt)}{connection.healthReason ? ` · ${connection.healthReason.split(":")[0]?.replaceAll("_", " ")}` : ""}</span>
@@ -367,7 +368,7 @@
                       <span>{revocationGuidance(connection)}</span>
                     {/if}
                   </div>
-                  <span class:ready={actions(connection, clockNow).canSelect} class="status">{connection.status === "revoked" ? "disconnected" : providerState(connection.provider) === "ready" ? connection.readiness : providerState(connection.provider)}</span>
+                  <span class:ready={actions(connection, clockNow).canSelect} class="status">{connectionStatusLabel(connection, providerState(connection.provider))}</span>
                   {#if actions(connection, clockNow).canSelect}
                     <button
                       class="quiet compact"
@@ -392,7 +393,7 @@
                     class="danger compact"
                     disabled={Boolean(busy)}
                     onclick={() => void disconnect(connection)}
-                  >{connection.status === "revoked" ? "Retry provider revocation" : "Disconnect"}</button>{/if}
+                  >{connection.status === "revoked" ? "Retry provider revocation" : connection.cleanupOnly ? "Remove orphaned account" : "Disconnect"}</button>{/if}
                 </article>
               {/each}
             </div>

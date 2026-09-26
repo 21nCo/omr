@@ -70,10 +70,15 @@ export interface ConnectionBindingStore {
   attach(input: AttachConnectionInput): Promise<ConnectionBindingRecord>;
   getAccessible(input: AccessConnectionInput): Promise<ConnectionBindingRecord>;
   getManageable(input: AccessConnectionInput): Promise<ConnectionBindingRecord>;
+  getRevocable(input: AccessConnectionInput): Promise<ConnectionBindingRecord>;
   listAvailable(input: {
     actorUserId: string;
     workspaceId: string;
     provider?: string;
+  }): Promise<ConnectionBindingRecord[]>;
+  listOrphanedForCleanup(input: {
+    actorUserId: string;
+    workspaceId: string;
   }): Promise<ConnectionBindingRecord[]>;
   getSelection(input: {
     actorUserId: string;
@@ -155,10 +160,12 @@ export class ConnectionAuthority {
     private readonly now: () => number = Date.now,
   ) {}
 
+  /** Use one clock for cleanup leases and conditional state writes. */
   currentTime(): number {
     return this.now();
   }
 
+  /** Check current workspace membership before creating a provider credential. */
   async authorizeInstall(input: AuthorizeConnectionInstallInput): Promise<void> {
     assertId(input.actorUserId);
     assertId(input.workspaceId);
@@ -168,6 +175,7 @@ export class ConnectionAuthority {
     await this.store.authorizeInstall(input);
   }
 
+  /** Persist a server-side binding after the provider has accepted the account. */
   async attach(input: {
     actorUserId: string;
     workspaceId: string;
@@ -205,6 +213,7 @@ export class ConnectionAuthority {
     });
   }
 
+  /** List bindings usable by this member; other members' personal accounts stay hidden. */
   async listAvailable(input: {
     actorUserId: string;
     workspaceId: string;
@@ -218,18 +227,35 @@ export class ConnectionAuthority {
     });
   }
 
+  /** Return only former members' personal bindings to a workspace owner or admin. */
+  async listOrphanedForCleanup(input: { actorUserId: string; workspaceId: string }): Promise<ConnectionBindingRecord[]> {
+    assertId(input.actorUserId);
+    assertId(input.workspaceId);
+    return this.store.listOrphanedForCleanup(input);
+  }
+
+  /** Read a binding only when the actor may use it. */
   async getAccessible(actorUserId: string, connectionId: string): Promise<ConnectionBindingRecord> {
     assertId(actorUserId);
     assertId(connectionId);
     return this.store.getAccessible({ actorUserId, connectionId });
   }
 
+  /** Read a binding only when the actor may change its lifecycle. */
   async getManageable(actorUserId: string, connectionId: string): Promise<ConnectionBindingRecord> {
     assertId(actorUserId);
     assertId(connectionId);
     return this.store.getManageable({ actorUserId, connectionId });
   }
 
+  /** Permit ordinary lifecycle owners and admins cleaning former members' bindings. */
+  async getRevocable(actorUserId: string, connectionId: string): Promise<ConnectionBindingRecord> {
+    assertId(actorUserId);
+    assertId(connectionId);
+    return this.store.getRevocable({ actorUserId, connectionId });
+  }
+
+  /** Store an explicit account choice for one member and provider. */
   async select(input: {
     actorUserId: string;
     workspaceId: string;
@@ -246,6 +272,7 @@ export class ConnectionAuthority {
     });
   }
 
+  /** Read the member's current account choice. */
   async getSelection(input: {
     actorUserId: string;
     workspaceId: string;
@@ -256,6 +283,7 @@ export class ConnectionAuthority {
     return this.store.getSelection({ ...input, provider: normalizeProvider(input.provider) });
   }
 
+  /** Resolve an eligible binding without exposing another member's account. */
   async resolve(input: {
     actorUserId: string;
     workspaceId: string;
@@ -287,6 +315,7 @@ export class ConnectionAuthority {
     throw new ConnectionSelectionRequiredError(available.map(({ id }) => id).sort());
   }
 
+  /** End local use and clear selections before any provider cleanup. */
   async revoke(
     actorUserId: string,
     connectionId: string,
@@ -300,6 +329,7 @@ export class ConnectionAuthority {
     return this.store.revoke({ actorUserId, connectionId, reason, now: this.now() });
   }
 
+  /** Update a cleanup result only when its expected claim still owns the row. */
   async revokeIf(
     actorUserId: string,
     connectionId: string,
@@ -313,6 +343,7 @@ export class ConnectionAuthority {
     return this.store.revokeIf({ actorUserId, connectionId, expectedStatus, expectedReason, reason, now: this.now() });
   }
 
+  /** Claim local revocation from the current row before contacting the provider. */
   async revokeIfNotRevoked(
     actorUserId: string,
     connectionId: string,
@@ -324,6 +355,7 @@ export class ConnectionAuthority {
     return this.store.revokeIf({ actorUserId, connectionId, expectedStatus: "not_revoked", reason, now: this.now() });
   }
 
+  /** Update a live binding while leaving revocation terminal. */
   async recordHealth(input: {
     connectionId: string;
     status: ConnectionLifecycleStatus;

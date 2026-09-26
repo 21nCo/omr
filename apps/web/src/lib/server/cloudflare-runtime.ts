@@ -7,6 +7,7 @@ import {
 import {
   ConnectionAccessDeniedError, markMissingRemoteConnection,
   PlugFnConnectionOrchestrator,
+  type ConnectionAuthority,
   type ConnectionBindingRecord,
 } from "@oh-my-router/connections";
 import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
@@ -252,6 +253,19 @@ async function connectPlugFn(event: RequestEvent) {
   });
 }
 
+/** Keep committed mutation responses redacted and exclude providers that lost eligibility. */
+async function publicMutationConnection(
+  orchestrator: PlugFnConnectionOrchestrator,
+  authority: ConnectionAuthority,
+  actorUserId: string,
+  binding: ConnectionBindingRecord,
+) {
+  const selectable = orchestrator.providerReadiness(binding.provider, [binding]).state === "ready";
+  const cleanupOnly = binding.ownership === "personal" && binding.ownerUserId !== actorUserId;
+  return (await publicConnectionsAfterMutation(authority, actorUserId, binding.workspaceId,
+    [{ ...binding, selectable, cleanupOnly }]))[0];
+}
+
 export function createCloudflareDeviceServices(event: RequestEvent): DeviceRouteServices {
   const origin = new URL(event.request.url).origin;
 
@@ -427,7 +441,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
       const actorUserId = await requireWebUser(event, request);
       return withConnections(async (orchestrator, authority) => {
         const result = await orchestrator.completeOAuth({ actorUserId, ...input });
-        const [connection] = await publicConnectionsAfterMutation(authority, actorUserId, input.workspaceId, [result.connection]);
+        const connection = await publicMutationConnection(orchestrator, authority, actorUserId, result.connection);
         return { connection, ...(result.returnTo ? { returnTo: result.returnTo } : {}) };
       });
     },
@@ -436,7 +450,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
       const actorUserId = await requireWebUser(event, request);
       return withConnections(async (orchestrator, authority) => {
         const binding = await orchestrator.connectApiKey({ actorUserId, ...input });
-        return (await publicConnectionsAfterMutation(authority, actorUserId, input.workspaceId, [binding]))[0];
+        return publicMutationConnection(orchestrator, authority, actorUserId, binding);
       });
     },
     async checkHealth(request, connectionId) {
@@ -446,7 +460,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
           const accessible = await authority.getAccessible(principal.userId, id);
           assertConnectionWorkspace(principal, accessible.workspaceId);
           const binding = await orchestrator.checkHealth(principal.userId, id);
-          return (await publicConnectionsAfterMutation(authority, principal.userId, binding.workspaceId, [binding]))[0];
+          return publicMutationConnection(orchestrator, authority, principal.userId, binding);
         }));
     },
     async refresh(request, connectionId) {
@@ -454,7 +468,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
       const actorUserId = await requireWebUser(event, request);
       return withConnections(async (orchestrator, authority) => {
         const binding = await orchestrator.refresh(actorUserId, connectionId);
-        return (await publicConnectionsAfterMutation(authority, actorUserId, binding.workspaceId, [binding]))[0];
+        return publicMutationConnection(orchestrator, authority, actorUserId, binding);
       });
     },
     async disconnect(request, connectionId) {
@@ -462,7 +476,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
       const actorUserId = await requireWebUser(event, request);
       return withConnections(async (orchestrator, authority) => {
         const result = await orchestrator.disconnect(actorUserId, connectionId);
-        const [connection] = await publicConnectionsAfterMutation(authority, actorUserId, result.connection.workspaceId, [result.connection]);
+        const connection = await publicMutationConnection(orchestrator, authority, actorUserId, result.connection);
         return { connection, provider: result.provider };
       });
     },
@@ -602,6 +616,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
       });
       let connections: Awaited<ReturnType<typeof connectPostgresConnections>> | undefined;
       let activity: Awaited<ReturnType<typeof connectPostgresExecutionReceipts>> | undefined;
+      let plugfn: Awaited<ReturnType<typeof connectPlugFn>> | undefined;
       try {
         const session = await identity.requireSession(request);
         const workspaces = await identity.workspaces.listWorkspaceAccess(session.actorId);
@@ -625,15 +640,21 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
         connections = await connectPostgresConnections({
           connectionString: databaseConnectionString(event),
         });
+        plugfn = await connectPlugFn(event);
         activity = await connectPostgresExecutionReceipts({
           connectionString: databaseConnectionString(event),
           resultWrappingKey: executionWrappingKey(event),
         });
-        const [availableConnections, approvals, executions] = await Promise.all([
-          connections.connections.listAvailable({
+        const connectionService = new PlugFnConnectionOrchestrator(connections.connections, plugfn.plugfn);
+        const [availableConnections, orphanedConnections, approvals, executions] = await Promise.all([
+          connectionService.listAvailable({
             actorUserId: session.actorId,
             workspaceId: selected.workspace.id,
           }),
+          selected.membership.role === "owner" || selected.membership.role === "admin"
+            ? connections.connections.listOrphanedForCleanup({ actorUserId: session.actorId,
+              workspaceId: selected.workspace.id })
+            : Promise.resolve([]),
           activity.approvals.listForActor({
             actorUserId: session.actorId,
             workspaceId: selected.workspace.id,
@@ -650,13 +671,15 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
           workspaces,
           selectedWorkspaceId: selected.workspace.id,
           connections: await publicConnections(
-            connections.connections, session.actorId, selected.workspace.id, availableConnections,
+            connections.connections, session.actorId, selected.workspace.id,
+            [...availableConnections, ...orphanedConnections.map((binding) => ({ ...binding,
+              cleanupOnly: true, selectable: false }))],
           ),
           approvals,
           executions,
         };
       } finally {
-        await Promise.allSettled([identity.close(), connections?.close(), activity?.close()]);
+        await Promise.allSettled([identity.close(), connections?.close(), activity?.close(), plugfn?.close()]);
       }
     },
     async createTeam(request, name) {
