@@ -10,6 +10,47 @@ import { finishRaceTest, raceStep, settleRaceRequest, waitForRaceBarrier } from 
 const connectionString = process.env.OMR_TEST_DATABASE_URL;
 const describePostgres = connectionString ? describe : describe.skip;
 
+/** Close both race clients if either setup connection fails. */
+async function connectRaceClients(first: Client, second: Client): Promise<void> {
+  try {
+    await first.connect();
+    await second.connect();
+  } catch (error) {
+    await finishRaceTest(error, [async () => { await first.end(); }, async () => { await second.end(); }]);
+    throw error;
+  }
+}
+
+/** Keep the shared member usable even when lookup or the race body fails. */
+async function withConnectionMember<T>(
+  client: Client, workspaceId: string, run: (memberId: string) => Promise<T>,
+): Promise<T> {
+  let memberId: string | undefined;
+  let primaryError: unknown;
+  try {
+    await client.connect();
+    const member = await client.query<{ id: string }>(
+      `SELECT id FROM omr_control.workspace_memberships WHERE workspace_id = $1 AND user_id = $2`,
+      [workspaceId, "connection_member"],
+    );
+    memberId = member.rows[0]?.id;
+    if (!memberId) throw new Error("PostgreSQL race fixture is missing connection_member");
+    return await run(memberId);
+  } catch (error) {
+    primaryError = error;
+    throw error;
+  } finally {
+    await finishRaceTest(primaryError, [
+      async () => { await client.query(`INSERT INTO omr_control.workspace_memberships
+        (id, workspace_id, user_id, role, created_at, updated_at)
+        VALUES ($1, $2, 'connection_member', 'member', $3, $3)
+        ON CONFLICT (workspace_id, user_id) DO UPDATE SET role = 'member'`,
+      [memberId ?? `membership_${crypto.randomUUID()}`, workspaceId, Date.now()]); },
+      async () => { await client.end(); },
+    ]);
+  }
+}
+
 describePostgres("connection authority/PostgreSQL integration", () => {
   let runtime: PostgresConnectionRuntime;
   let workspaceId: string;
@@ -197,8 +238,7 @@ describePostgres("connection authority/PostgreSQL integration", () => {
       const providerConnectionId = `plug_${crypto.randomUUID()}`;
       const firstClient = new Client({ connectionString: connectionString! });
       const secondClient = new Client({ connectionString: connectionString! });
-      await firstClient.connect();
-      await secondClient.connect();
+      await connectRaceClients(firstClient, secondClient);
       const firstStore = new PostgresConnectionBindingStore(firstClient);
       const firstAuthority = new ConnectionAuthority(firstStore);
       const secondAuthority = new ConnectionAuthority(new PostgresConnectionBindingStore(secondClient));
@@ -302,8 +342,9 @@ describePostgres("connection authority/PostgreSQL integration", () => {
       ownership: "personal", label: "Pending cleanup" });
     const contender = await connectPostgresConnections({ connectionString: connectionString! });
     const inspector = new Client({ connectionString: connectionString! });
-    await inspector.connect();
+    let primaryError: unknown;
     try {
+      await inspector.connect();
       await expect(contender.connections.attach({ actorUserId: "connection_owner",
         workspaceId, provider: "linear", providerConnectionId,
         ownership: "personal", label: "Late active result" }))
@@ -318,10 +359,15 @@ describePostgres("connection authority/PostgreSQL integration", () => {
       await expect(contender.connections.resolve({ actorUserId: "connection_owner",
         workspaceId, provider: "linear", connectionId: cleanup.id }))
         .rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+    } catch (error) {
+      primaryError = error;
+      throw error;
     } finally {
-      await inspector.query(`DELETE FROM omr_control.connection_bindings WHERE id = $1`, [cleanup.id]);
-      await inspector.end();
-      await contender.close();
+      await finishRaceTest(primaryError, [
+        async () => { await inspector.query(`DELETE FROM omr_control.connection_bindings WHERE id = $1`, [cleanup.id]); },
+        async () => { await inspector.end(); },
+        async () => { await contender.close(); },
+      ]);
     }
   });
 
@@ -416,98 +462,176 @@ describePostgres("connection authority/PostgreSQL integration", () => {
   ] as const) {
     it(`persists PostgreSQL provider ${remoteSucceeded ? "success" : "failure"} after member ${change}`, async () => {
       const client = new Client({ connectionString: connectionString! });
-      await client.connect();
-      const member = await client.query<{ id: string }>(
-        `SELECT id FROM omr_control.workspace_memberships WHERE workspace_id = $1 AND user_id = $2`,
-        [workspaceId, "connection_member"],
-      );
-      const memberId = member.rows[0]!.id;
-      let bindingId: string | undefined;
-      let release!: () => void;
-      let request: ReturnType<PlugFnConnectionOrchestrator["disconnect"]> | undefined;
-      let primaryError: unknown;
-      try {
-        await client.query(`UPDATE omr_control.workspace_memberships SET role = 'admin'
-          WHERE id = $1`, [memberId]);
-        const binding = await runtime.connections.attach({ actorUserId: "connection_member", workspaceId,
-          provider: "linear", providerConnectionId: `plug_${crypto.randomUUID()}`,
-          ownership: "workspace", label: "Claim-scoped cleanup" });
-        bindingId = binding.id;
-        await runtime.connections.select({ actorUserId: "connection_member", workspaceId,
-          provider: "linear", connectionId: binding.id });
-        const remote: PlugFnConnection = { id: binding.providerConnectionId, userId: "connection_member",
-          provider: "linear", status: "active" };
-        let entered!: () => void;
-        const started = new Promise<void>((resolve) => { entered = resolve; });
-        const paused = new Promise<void>((resolve) => { release = resolve; });
-        const port: PlugFnConnectionPort = {
-          config: { integrations: { linear: { type: "api-key" } } },
-          providers: { get: () => ({ name: "linear", displayName: "Linear",
-            auth: { type: "api-key" }, actions: {} }) },
-          connections: {
-            getAuthUrl: async () => "", handleCallback: async () => ({ connection: remote }),
-            connect: async () => remote, get: async () => remote, isValid: async () => true,
-            refresh: async () => remote,
-            disconnect: async () => {
-              entered();
-              await paused;
-              return { disconnected: remoteSucceeded, remoteRevokeAttempted: true,
-                remoteRevokeSucceeded: remoteSucceeded, localDeleted: remoteSucceeded,
-                connectionDeleted: remoteSucceeded,
-                revokeError: { message: "provider secret" } };
-            },
-          },
-        };
-        const orchestrator = new PlugFnConnectionOrchestrator(runtime.connections, port);
-        request = orchestrator.disconnect("connection_member", binding.id);
-        await waitForRaceBarrier(started, request, "PostgreSQL claim provider call");
-        const pending = await client.query<{ health_reason: string }>(
-          `SELECT health_reason FROM omr_control.connection_bindings WHERE id = $1`, [binding.id]);
-        const claim = pending.rows[0]!.health_reason;
-        expect(claim).toMatch(/^provider_cleanup_pending:/);
-        if (change === "remove") {
-          await client.query(`DELETE FROM omr_control.workspace_memberships WHERE id = $1`, [memberId]);
-        } else {
-          await client.query(`UPDATE omr_control.workspace_memberships SET role = 'member'
+      await withConnectionMember(client, workspaceId, async (memberId) => {
+        let bindingId: string | undefined;
+        let release!: () => void;
+        let request: ReturnType<PlugFnConnectionOrchestrator["disconnect"]> | undefined;
+        let primaryError: unknown;
+        try {
+          await client.query(`UPDATE omr_control.workspace_memberships SET role = 'admin'
             WHERE id = $1`, [memberId]);
+          const binding = await runtime.connections.attach({ actorUserId: "connection_member", workspaceId,
+            provider: "linear", providerConnectionId: `plug_${crypto.randomUUID()}`,
+            ownership: "workspace", label: "Claim-scoped cleanup" });
+          bindingId = binding.id;
+          await runtime.connections.select({ actorUserId: "connection_member", workspaceId,
+            provider: "linear", connectionId: binding.id });
+          const remote: PlugFnConnection = { id: binding.providerConnectionId, userId: "connection_member",
+            provider: "linear", status: "active" };
+          let entered!: () => void;
+          const started = new Promise<void>((resolve) => { entered = resolve; });
+          const paused = new Promise<void>((resolve) => { release = resolve; });
+          const port: PlugFnConnectionPort = {
+            config: { integrations: { linear: { type: "api-key" } } },
+            providers: { get: () => ({ name: "linear", displayName: "Linear",
+              auth: { type: "api-key" }, actions: {} }) },
+            connections: {
+              getAuthUrl: async () => "", handleCallback: async () => ({ connection: remote }),
+              connect: async () => remote, get: async () => remote, isValid: async () => true,
+              refresh: async () => remote,
+              disconnect: async () => {
+                entered();
+                await paused;
+                return { disconnected: remoteSucceeded, remoteRevokeAttempted: true,
+                  remoteRevokeSucceeded: remoteSucceeded, localDeleted: remoteSucceeded,
+                  connectionDeleted: remoteSucceeded,
+                  revokeError: { message: "provider secret" } };
+              },
+            },
+          };
+          const orchestrator = new PlugFnConnectionOrchestrator(runtime.connections, port);
+          request = orchestrator.disconnect("connection_member", binding.id);
+          await waitForRaceBarrier(started, request, "PostgreSQL claim provider call");
+          const pending = await client.query<{ health_reason: string }>(
+            `SELECT health_reason FROM omr_control.connection_bindings WHERE id = $1`, [binding.id]);
+          const claim = pending.rows[0]!.health_reason;
+          expect(claim).toMatch(/^provider_cleanup_pending:/);
+          if (change === "remove") {
+            await client.query(`DELETE FROM omr_control.workspace_memberships WHERE id = $1`, [memberId]);
+          } else {
+            await client.query(`UPDATE omr_control.workspace_memberships SET role = 'member'
+              WHERE id = $1`, [memberId]);
+          }
+          await expect(runtime.connections.revokeIf("connection_member", binding.id, "revoked", claim, "stale"))
+            .rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+          release();
+          await expect(request).rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+          const rows = await client.query<{ status: string; readiness: string; health_reason: string | null }>(
+            `SELECT status, readiness, health_reason FROM omr_control.connection_bindings WHERE id = $1`,
+            [binding.id]);
+          expect(rows.rows).toEqual([{ status: "revoked", readiness: "unavailable",
+            health_reason: expectedReason }]);
+          await expect(runtime.connections.finalizeCleanupClaim(binding.id, claim)).resolves.toBeNull();
+          const selections = await client.query(`SELECT 1 FROM omr_control.connection_selections
+            WHERE connection_id = $1`, [binding.id]);
+          expect(selections.rowCount).toBe(0);
+          await expect(runtime.connections.resolve({ actorUserId: "connection_owner", workspaceId,
+            provider: "linear", connectionId: binding.id }))
+            .rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+          expect(JSON.stringify(rows.rows)).not.toContain("provider secret");
+        } catch (error) {
+          primaryError = error;
+          throw error;
+        } finally {
+          release?.();
+          await finishRaceTest(primaryError, [
+            async () => { if (request) await settleRaceRequest(request, "PostgreSQL cleanup result"); },
+            async () => { if (bindingId) await client.query(`DELETE FROM omr_control.connection_selections
+              WHERE connection_id = $1`, [bindingId]); },
+            async () => { if (bindingId) await client.query(`DELETE FROM omr_control.connection_bindings
+              WHERE id = $1`, [bindingId]); },
+          ]);
         }
-        await expect(runtime.connections.revokeIf("connection_member", binding.id, "revoked", claim, "stale"))
-          .rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
-        release();
-        await expect(request).rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
-        const rows = await client.query<{ status: string; readiness: string; health_reason: string | null }>(
-          `SELECT status, readiness, health_reason FROM omr_control.connection_bindings WHERE id = $1`,
-          [binding.id]);
-        expect(rows.rows).toEqual([{ status: "revoked", readiness: "unavailable",
-          health_reason: expectedReason }]);
-        await expect(runtime.connections.finalizeCleanupClaim(binding.id, claim)).resolves.toBeNull();
-        const selections = await client.query(`SELECT 1 FROM omr_control.connection_selections
-          WHERE connection_id = $1`, [binding.id]);
-        expect(selections.rowCount).toBe(0);
-        await expect(runtime.connections.resolve({ actorUserId: "connection_owner", workspaceId,
-          provider: "linear", connectionId: binding.id }))
-          .rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
-        expect(JSON.stringify(rows.rows)).not.toContain("provider secret");
-      } catch (error) {
-        primaryError = error;
-        throw error;
-      } finally {
-        release?.();
-        await finishRaceTest(primaryError, [
-          async () => { if (request) await settleRaceRequest(request, "PostgreSQL cleanup result"); },
-          async () => { if (bindingId) await client.query(`DELETE FROM omr_control.connection_selections
-            WHERE connection_id = $1`, [bindingId]); },
-          async () => { if (bindingId) await client.query(`DELETE FROM omr_control.connection_bindings
-            WHERE id = $1`, [bindingId]); },
-          async () => { await client.query(`INSERT INTO omr_control.workspace_memberships
-            (id, workspace_id, user_id, role, created_at, updated_at)
-            VALUES ($1, $2, 'connection_member', 'member', $3, $3)
-            ON CONFLICT (id) DO UPDATE SET role = 'member'`, [memberId, workspaceId, Date.now()]); },
-          async () => { await client.end(); },
-        ]);
-      }
+      });
     }, 15_000);
   }
+
+  it("restores and closes the shared member fixture after lookup and race failures", async () => {
+    let primaryError: unknown;
+    try {
+      const verifyUsable = async () => {
+        const binding = await runtime.connections.attach({ actorUserId: "connection_member", workspaceId,
+          provider: "linear", providerConnectionId: `plug_${crypto.randomUUID()}`,
+          ownership: "personal", label: "Restored member" });
+        try {
+          await runtime.connections.select({ actorUserId: "connection_member", workspaceId,
+            provider: "linear", connectionId: binding.id });
+          await expect(runtime.connections.resolve({ actorUserId: "connection_member", workspaceId,
+            provider: "linear" })).resolves.toMatchObject({ id: binding.id });
+        } finally {
+          const cleanup = new Client({ connectionString: connectionString! });
+          try {
+            await cleanup.connect();
+            await cleanup.query(`DELETE FROM omr_control.connection_selections WHERE connection_id = $1`, [binding.id]);
+            await cleanup.query(`DELETE FROM omr_control.connection_bindings WHERE id = $1`, [binding.id]);
+          } finally {
+            await cleanup.end();
+          }
+        }
+      };
+
+      const lookupClient = new Client({ connectionString: connectionString! });
+      const lookupClosed = vi.spyOn(lookupClient, "end");
+      vi.spyOn(lookupClient, "query").mockRejectedValueOnce(new Error("member lookup sentinel"));
+      await expect(withConnectionMember(lookupClient, workspaceId, async () => {
+        throw new Error("body must not run after lookup failure");
+      })).rejects.toThrow("member lookup sentinel");
+      expect(lookupClosed).toHaveBeenCalledOnce();
+      await verifyUsable();
+
+      const remover = new Client({ connectionString: connectionString! });
+      try {
+        await remover.connect();
+        await remover.query(`DELETE FROM omr_control.workspace_memberships
+          WHERE workspace_id = $1 AND user_id = 'connection_member'`, [workspaceId]);
+      } finally {
+        await remover.end();
+      }
+      const missingClient = new Client({ connectionString: connectionString! });
+      const missingClosed = vi.spyOn(missingClient, "end");
+      await expect(withConnectionMember(missingClient, workspaceId, async () => {
+        throw new Error("body must not run with missing member");
+      })).rejects.toThrow("PostgreSQL race fixture is missing connection_member");
+      expect(missingClosed).toHaveBeenCalledOnce();
+      await verifyUsable();
+
+      const raceClient = new Client({ connectionString: connectionString! });
+      const raceClosed = vi.spyOn(raceClient, "end");
+      const primary = new Error("post-removal assertion sentinel");
+      await expect(withConnectionMember(raceClient, workspaceId, async (memberId) => {
+        await raceClient.query(`DELETE FROM omr_control.workspace_memberships WHERE id = $1`, [memberId]);
+        try {
+          throw primary;
+        } catch (error) {
+          await finishRaceTest(error, [() => raceStep(new Promise<void>(() => {}), "forced teardown timeout")]);
+          throw error;
+        }
+      })).rejects.toBe(primary);
+      expect(primary.cause).toBeInstanceOf(AggregateError);
+      expect(String(primary.cause)).toContain("Race test teardown failed");
+      expect((primary.cause as AggregateError).errors[0]).toHaveProperty("message",
+        "forced teardown timeout did not complete within 3000 ms");
+      expect(raceClosed).toHaveBeenCalledOnce();
+      await verifyUsable();
+    } catch (error) {
+      primaryError = error;
+      throw error;
+    } finally {
+      await finishRaceTest(primaryError, [async () => {
+        const rescue = new Client({ connectionString: connectionString! });
+        try {
+          await rescue.connect();
+          await rescue.query(`INSERT INTO omr_control.workspace_memberships
+            (id, workspace_id, user_id, role, created_at, updated_at)
+            VALUES ($1, $2, 'connection_member', 'member', $3, $3)
+            ON CONFLICT (workspace_id, user_id) DO UPDATE SET role = 'member'`,
+          [`membership_${crypto.randomUUID()}`, workspaceId, Date.now()]);
+        } finally {
+          await rescue.end();
+        }
+      }]);
+    }
+  }, 10_000);
 
   it("rejects a stale PostgreSQL cleanup claim after an authorized retry takes ownership", async () => {
     const binding = await runtime.connections.attach({ actorUserId: "connection_owner", workspaceId,

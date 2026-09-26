@@ -256,7 +256,7 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
   /** Complete only the committed cleanup claim; membership changes cannot erase its result. */
   async finalizeCleanupClaim(input: FinalizeCleanupClaimInput): Promise<ConnectionBindingRecord | null> {
     const connection = this.connections.get(input.connectionId);
-    if (!connection || connection.status !== "revoked" || connection.healthReason !== input.claim) return null;
+    if (connection?.status !== "revoked" || connection.healthReason !== input.claim) return null;
     connection.healthReason = input.reason ?? null;
     connection.updatedAt = input.now;
     return structuredClone(connection);
