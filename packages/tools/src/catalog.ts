@@ -86,7 +86,9 @@ const DEFAULT_CONTRACT: ToolContractSource = {
 
 // Cursor keys and catalog revisions must have the same order on every host.
 function compareCodePoints(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
 }
 
 export class ToolCatalog {

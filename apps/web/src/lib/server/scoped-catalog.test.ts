@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ToolCatalog, type ProviderStatus } from "@oh-my-router/tools";
+import { markMissingRemoteConnection, type ConnectionAuthority } from "@oh-my-router/connections";
 
 import { resolveScopedCatalog } from "./scoped-catalog.js";
 
@@ -55,6 +56,39 @@ describe("workspace-scoped discovery and manifest grants", () => {
     expect(visible.has(tools.get("linear.read")!.id)).toBe(true);
     expect(onMissing).toHaveBeenCalledExactlyOnceWith("binding_github");
     expect(resolve).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a deleted remote hidden when health persistence fails, then retries the transition", async () => {
+    const tools = await catalog();
+    const healthError = new Error("health store unavailable");
+    const recordHealth = vi.fn()
+      .mockRejectedValueOnce(healthError)
+      .mockResolvedValue(undefined);
+    const authority = { recordHealth } as unknown as ConnectionAuthority;
+    const missingRemote = Object.assign(new Error("deleted"), { code: "CONNECTION_NOT_FOUND" });
+    const discover = async () => resolveScopedCatalog(tools, providers,
+      async (provider) => ({ id: `binding_${provider}`, providerConnectionId: provider }),
+      async (connectionId) => {
+        if (connectionId === "github") throw missingRemote;
+        return ["read"];
+      },
+      (bindingId) => markMissingRemoteConnection(authority, bindingId),
+    );
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const visible = await discover();
+      expect(tools.discover({ allowedToolIds: visible }).tools.map(({ id }) => id))
+        .toEqual(["linear.read"]);
+      expect(visible.has("github.read")).toBe(false);
+      expect(visible.has("linear.read")).toBe(true);
+      expect(recordHealth).toHaveBeenCalledTimes(attempt);
+      expect(recordHealth).toHaveBeenLastCalledWith({
+        connectionId: "binding_github",
+        status: "needs_reauth",
+        readiness: "unavailable",
+        reason: "plugfn_connection_missing",
+      });
+    }
   });
 
   it("does not disguise remote authorization or transport failures as missing grants", async () => {

@@ -263,6 +263,38 @@ describe("execution service", () => {
     }
   });
 
+  it("keeps approval paths unavailable when a deleted remote cannot be recorded", async () => {
+    for (const entry of ["request", "approved"] as const) {
+      const { actionCall, approvals, connections, firstBinding, receipts, service, workspace, setRemoteError } = await fixture();
+      const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+      let approvalId: string | undefined;
+      if (entry === "approved") {
+        const approval = await service.requestApproval({ principal, toolId: "linear.create_issue", params: {} });
+        approvalId = approval.id;
+        await service.approve(approvalId, "user_1");
+      }
+      const recordHealth = vi.spyOn(connections, "recordHealth")
+        .mockRejectedValue(new Error("health store unavailable"));
+      setRemoteError(Object.assign(new Error("remote missing"), { code: "CONNECTION_NOT_FOUND" }));
+      const call = entry === "request"
+        ? service.requestApproval({ principal, toolId: "linear.create_issue", params: {} })
+        : service.executeApproved(principal, approvalId!);
+      await expect(call).rejects.toBeInstanceOf(ConnectionUnavailableError);
+      expect(recordHealth).toHaveBeenCalledExactlyOnceWith({
+        connectionId: firstBinding.id,
+        status: "needs_reauth",
+        readiness: "unavailable",
+        reason: "plugfn_connection_missing",
+      });
+      expect(actionCall).not.toHaveBeenCalled();
+      expect(receipts.receipts.size).toBe(0);
+      if (entry === "request") expect(approvals.approvals.size).toBe(0);
+      else expect(approvals.approvals.get(approvalId!)?.status).toBe("failed");
+      await expect(service.execute({ principal, toolId: "github.get_issue", params: {} }))
+        .resolves.toMatchObject({ status: "succeeded" });
+    }
+  });
+
   it("does not execute or request approval for an unconfigured provider, even with a ready old binding", async () => {
     const { actionCall, service, workspace } = await fixture(new Set());
     const input = {

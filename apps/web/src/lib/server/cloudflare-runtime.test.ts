@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ClientAccessAuthority } from "@oh-my-router/client-access";
 import { MemoryClientAccessStore } from "@oh-my-router/client-access/testing";
 import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
+import { ToolCatalog } from "@oh-my-router/tools";
 
-import { createProviderIntegrationConfig, selectAuthorizedConnection } from "./cloudflare-runtime.js";
+import { createProviderIntegrationConfig, scopedToolIds, selectAuthorizedConnection } from "./cloudflare-runtime.js";
 import { createOMRRouter, type ConnectionRouteServices } from "./router.js";
 
 describe("Worker provider OAuth configuration", () => {
@@ -26,6 +27,53 @@ describe("Worker provider OAuth configuration", () => {
     expect(createProviderIntegrationConfig({
       PLUGFN_GITHUB_CLIENT_ID: "sandbox-client",
     }, "https://omr-web-staging.example").github).toBeUndefined();
+  });
+});
+
+describe("Worker scoped provider catalog", () => {
+  it("reports a missing remote as expired for this response when its health write fails", async () => {
+    const definitions = new Map(["github", "linear"].map((name) => [name, {
+      name, displayName: name, version: "1.0.0", description: name,
+      auth: { type: "oauth2" },
+      actions: { read: {
+        name: "read", displayName: "Read", description: "Read resource", parameters: {}, returns: {},
+        contract: { version: "1.0.0", effect: "read" as const, requiredScopes: ["read"],
+          resources: [], sensitiveKeys: [], pagination: { kind: "none" as const }, retry: "never" as const },
+      } },
+    }]));
+    const catalog = await ToolCatalog.create({ providers: { list: () => [...definitions.values()] } },
+      (value) => value as Record<string, never>);
+    const bindings = ["github", "linear"].map((provider) => ({
+      id: `binding_${provider}`, provider, providerConnectionId: `remote_${provider}`,
+      status: "active", readiness: "ready",
+    }));
+    const recordHealth = vi.fn().mockRejectedValue(new Error("health store unavailable"));
+    const authority = {
+      resolve: vi.fn(async ({ provider }: { provider: string }) => bindings.find((binding) => binding.provider === provider)!),
+      recordHealth,
+    };
+    const plugfn = {
+      providers: { get: (provider: string) => definitions.get(provider) },
+      config: { integrations: { github: {}, linear: {} } },
+      connections: { get: vi.fn(async (connectionId: string) => {
+        if (connectionId === "remote_github") {
+          throw Object.assign(new Error("deleted"), { code: "CONNECTION_NOT_FOUND" });
+        }
+        return { scopes: ["read"] };
+      }) },
+    };
+
+    const result = await scopedToolIds(catalog, plugfn as never, authority as never,
+      { kind: "web", userId: "user_1", workspaceId: "workspace_1" }, "workspace_1", bindings as never);
+    expect(catalog.discover({ allowedToolIds: result.allowedToolIds }).tools.map(({ id }) => id))
+      .toEqual(["linear.read"]);
+    expect(result.allowedToolIds.has("github.read")).toBe(false);
+    expect(result.providers.find(({ provider }) => provider === "github")?.state).toBe("expired");
+    expect(result.providers.find(({ provider }) => provider === "linear")?.state).toBe("ready");
+    expect(recordHealth).toHaveBeenCalledExactlyOnceWith({
+      connectionId: "binding_github", status: "needs_reauth", readiness: "unavailable",
+      reason: "plugfn_connection_missing",
+    });
   });
 });
 

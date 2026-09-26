@@ -399,8 +399,7 @@ export class ExecutionService {
         this.now(),
       );
       if (missingRemote) {
-        // A failed health write must not replace the unavailable result after the receipt is failed.
-        await markMissingRemoteConnection(this.connections, input.connection.id).catch(() => undefined);
+        await markMissingRemoteConnection(this.connections, input.connection.id);
         throw new ConnectionUnavailableError();
       }
       throw error;
@@ -423,8 +422,7 @@ export class ExecutionService {
       scopes = await this.connectionScopes(connection.providerConnectionId);
     } catch (error) {
       if (!isMissingRemoteConnection(error)) throw error;
-      // The remote grant is unusable even if persisting its health transition fails.
-      await markMissingRemoteConnection(this.connections, connection.id).catch(() => undefined);
+      await markMissingRemoteConnection(this.connections, connection.id);
       throw new ConnectionUnavailableError();
     }
     if (!hasRequiredScopes(manifest, scopes)) {

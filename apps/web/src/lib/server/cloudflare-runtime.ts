@@ -317,12 +317,38 @@ function statuses(
   });
 }
 
+function configuredProviders(plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"]): Set<string> {
+  return new Set(statuses(plugfn).filter((status) => status.available).map((status) => status.provider));
+}
+
+export async function scopedToolIds(
+  catalog: Awaited<ReturnType<typeof createPlugFnToolCatalog>>,
+  plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"],
+  authority: Awaited<ReturnType<typeof connectPostgresConnections>>["connections"],
+  principal: ExecutionPrincipal,
+  workspaceId: string,
+  bindings: readonly ConnectionBindingRecord[],
+): Promise<{ allowedToolIds: Set<string>; providers: ProviderStatus[] }> {
+  const missing = new Set<string>();
+  const allowedToolIds = await resolveScopedCatalog(
+    catalog,
+    statuses(plugfn, bindings),
+    (provider) => authority.resolve({ actorUserId: principal.userId, workspaceId, provider }),
+    async (connectionId) => (await plugfn.connections.get(connectionId)).scopes,
+    async (bindingId) => {
+      missing.add(bindingId);
+      await markMissingRemoteConnection(authority, bindingId);
+    },
+  );
+  return {
+    allowedToolIds,
+    providers: statuses(plugfn, bindings.map((binding) => missing.has(binding.id)
+      ? { ...binding, status: "needs_reauth", readiness: "unavailable" } : binding)),
+  };
+}
+
 export function createCloudflareRouteServices(event: RequestEvent): CloudflareRouteServices {
   const device = createCloudflareDeviceServices(event);
-
-  function configuredProviders(plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"]): Set<string> {
-    return new Set(statuses(plugfn).filter((status) => status.available).map((status) => status.provider));
-  }
 
   async function withConnections<T>(
     callback: (
@@ -414,32 +440,6 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
     } finally {
       await plugfn.close();
     }
-  }
-
-  async function scopedToolIds(
-    catalog: Awaited<ReturnType<typeof createPlugFnToolCatalog>>,
-    plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"],
-    authority: Awaited<ReturnType<typeof connectPostgresConnections>>["connections"],
-    principal: ExecutionPrincipal,
-    workspaceId: string,
-    bindings: readonly ConnectionBindingRecord[],
-  ): Promise<{ allowedToolIds: Set<string>; providers: ProviderStatus[] }> {
-    const missing = new Set<string>();
-    const allowedToolIds = await resolveScopedCatalog(
-      catalog,
-      statuses(plugfn, bindings),
-      (provider) => authority.resolve({ actorUserId: principal.userId, workspaceId, provider }),
-      async (connectionId) => (await plugfn.connections.get(connectionId)).scopes,
-      async (bindingId) => {
-        missing.add(bindingId);
-        await markMissingRemoteConnection(authority, bindingId);
-      },
-    );
-    return {
-      allowedToolIds,
-      providers: statuses(plugfn, bindings.map((binding) => missing.has(binding.id)
-        ? { ...binding, status: "needs_reauth", readiness: "unavailable" } : binding)),
-    };
   }
 
   const tools: ToolRouteServices = {
