@@ -1,0 +1,30 @@
+apps/web/src/lib/server/connection-view.test.ts
+  h_a39f9495f9ec1d 34-41
+apps/web/src/lib/server/connection-view.ts
+  h_a39f9495f9ec1d 55-58
+packages/connections/src/connections.ts
+  h_a39f9495f9ec1d 57-63,109,430-443
+packages/connections/src/plugfn.test.ts
+  h_a39f9495f9ec1d 13,138,140-141,144,511,526-528,531-538,563,577-579,582-589,878,880-881,884,902,904-906,926,928-930,1014-1104
+packages/connections/src/plugfn.ts
+  h_a39f9495f9ec1d 525,533,537,539-541
+packages/connections/src/postgres-store.ts
+  h_a39f9495f9ec1d 16,399-410
+packages/connections/src/postgres.integration.test.ts
+  h_a39f9495f9ec1d 8,255,275-277,280,287-288,290-291,293,413-534
+packages/connections/src/testing.ts
+  h_a39f9495f9ec1d 13,256-264
+packages/connections/test-support/race-test-barrier.ts
+  h_a39f9495f9ec1d 36-55
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e4ce6ae935730046f367852e2426e0ac81edddba",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
