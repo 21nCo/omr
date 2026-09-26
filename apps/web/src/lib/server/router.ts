@@ -245,6 +245,7 @@ function codedError(error: unknown, code: string): error is Error & { code: stri
   return error instanceof Error && "code" in error && error.code === code;
 }
 
+/** Expose validated control-plane routes with private connection responses. */
 export function createOMRRouter(
   deviceServices: DeviceRouteServices = unavailableDeviceServices(),
   connectionServices: ConnectionRouteServices = unavailableConnectionServices(),

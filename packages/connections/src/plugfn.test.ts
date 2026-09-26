@@ -11,6 +11,7 @@ import {
 } from "./plugfn.js";
 import { MemoryConnectionBindingStore } from "./testing.js";
 
+/** Create deterministic provider and workspace state without external accounts. */
 async function fixture() {
   let now = 1_700_000_000_000;
   const workspaceStore = new MemoryWorkspaceStore();

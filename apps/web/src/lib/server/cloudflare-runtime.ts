@@ -194,6 +194,7 @@ export async function selectAuthorizedConnection<T>(
   return select({ actorUserId: principal.userId, ...input });
 }
 
+/** Check origin or client capability before reading a connection's health. */
 export async function checkAuthorizedConnectionHealth<T>(
   request: Request,
   connectionId: string,
@@ -237,6 +238,7 @@ async function authenticate(
   return { kind: "web", userId, workspaceId: workspaceId ?? "" };
 }
 
+/** Prevent a client grant from probing a binding in another workspace. */
 export function assertConnectionWorkspace(principal: ExecutionPrincipal, bindingWorkspaceId: string): void {
   if (principal.kind === "client" && principal.workspaceId !== bindingWorkspaceId) {
     throw new ConnectionAccessDeniedError();
@@ -379,9 +381,11 @@ export async function scopedToolIds(
   };
 }
 
+/** Bind authenticated control-plane routes to disposable server-side runtimes. */
 export function createCloudflareRouteServices(event: RequestEvent): CloudflareRouteServices {
   const device = createCloudflareDeviceServices(event);
 
+  /** Close both connection runtimes after each operation, including failures. */
   async function withConnections<T>(
     callback: (
       orchestrator: PlugFnConnectionOrchestrator,
@@ -415,6 +419,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
         }) : [],
       ));
     },
+    /** Project only connections available to the authenticated workspace member. */
     async list(request, input) {
       const principal = await authenticate(event, request, input.workspaceId, "connections:read");
       return withConnections(async (orchestrator, authority) => publicConnections(
@@ -436,6 +441,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
       const actorUserId = await requireWebUser(event, request);
       return withConnections((orchestrator) => orchestrator.startOAuth({ actorUserId, ...input }));
     },
+    /** Commit a callback and return a redacted public binding. */
     async completeOAuth(request, input) {
       requireSameOrigin(request);
       const actorUserId = await requireWebUser(event, request);
@@ -445,6 +451,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
         return { connection, ...(result.returnTo ? { returnTo: result.returnTo } : {}) };
       });
     },
+    /** Submit a credential server-side and return its redacted binding. */
     async connectApiKey(request, input) {
       requireSameOrigin(request);
       const actorUserId = await requireWebUser(event, request);
@@ -453,6 +460,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
         return publicMutationConnection(orchestrator, authority, actorUserId, binding);
       });
     },
+    /** Enforce binding and client workspace access before a provider probe. */
     async checkHealth(request, connectionId) {
       return checkAuthorizedConnectionHealth(request, connectionId,
         (healthRequest, capability) => authenticate(event, healthRequest, undefined, capability),
@@ -463,6 +471,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
           return publicMutationConnection(orchestrator, authority, principal.userId, binding);
         }));
     },
+    /** Refresh a binding under the signed-in member's authority. */
     async refresh(request, connectionId) {
       requireSameOrigin(request);
       const actorUserId = await requireWebUser(event, request);
@@ -471,6 +480,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
         return publicMutationConnection(orchestrator, authority, actorUserId, binding);
       });
     },
+    /** End local use before returning redacted provider cleanup guidance. */
     async disconnect(request, connectionId) {
       requireSameOrigin(request);
       const actorUserId = await requireWebUser(event, request);
@@ -604,6 +614,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
   };
 
   const controlPlane: ControlPlaneRouteServices = {
+    /** Assemble the private workspace overview for a current member. */
     async overview(request, requestedWorkspaceId) {
       const identity = await connectPostgresIdentityRuntime({
         connectionString: databaseConnectionString(event),

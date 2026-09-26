@@ -4,6 +4,7 @@ import { createOAuthReviewController } from "./oauth-review.js";
 const input = { workspaceId: "workspace_a", provider: "github", ownership: "personal" as const,
   label: "GitHub", origin: "https://omr.example" };
 
+/** Capture OAuth review updates and single-use browser intent in memory. */
 function fixture() {
   const items = new Map<string, string>();
   const storage = { setItem: (key: string, value: string) => items.set(key, value),

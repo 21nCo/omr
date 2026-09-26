@@ -364,6 +364,14 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
 
   /** Recheck role and owner membership inside each mutation transaction. */
   private async canManage(connection: ConnectionRow, actorUserId: string, allowOrphanCleanup = false): Promise<boolean> {
+    if (allowOrphanCleanup && connection.ownership === "personal") {
+      // A missing membership cannot be row-locked. Serialize the absence check
+      // with invitation acceptance and workspace provisioning through commit.
+      await this.client.query(
+        `SELECT id FROM omr_control.workspaces WHERE id = $1 FOR UPDATE`,
+        [connection.workspace_id],
+      );
+    }
     const role = await this.membershipRole(connection.workspace_id, actorUserId);
     if (connection.ownership === "workspace") return role === "owner" || role === "admin";
     if (role && connection.owner_user_id === actorUserId) return true;

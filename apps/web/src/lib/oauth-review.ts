@@ -25,6 +25,7 @@ export function createOAuthReviewController(deps: {
   let generation = 0;
   let destination = "";
 
+  /** Remove the prior review's single-use callback intent. */
   function clearReview() {
     if (destination) {
       const state = new URL(destination).searchParams.get("state");
@@ -34,11 +35,13 @@ export function createOAuthReviewController(deps: {
   }
 
   return {
+    /** Invalidate an in-flight provider response and clear the visible review. */
     cancel() {
       generation++;
       clearReview();
       deps.update(null, false);
     },
+    /** Check availability and publish a review only for the current request. */
     async start(input: OAuthReviewInput): Promise<void> {
       const current = ++generation;
       clearReview();

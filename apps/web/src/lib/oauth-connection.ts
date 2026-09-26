@@ -29,6 +29,7 @@ export function savePendingOAuthConnection(
   return url.toString();
 }
 
+/** Consume one callback intent, rejecting malformed, foreign-origin, or expired state. */
 export function readPendingOAuthConnection(
   storage: Pick<Storage, "getItem" | "removeItem">,
   state: string,

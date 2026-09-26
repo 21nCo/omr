@@ -10,6 +10,7 @@ import {
 } from "./connections.js";
 import { MemoryConnectionBindingStore } from "./testing.js";
 
+/** Build a workspace with owner, admin, and member roles for lifecycle tests. */
 async function createFixture() {
   let now = 1_700_000_000_000;
   const workspaceStore = new MemoryWorkspaceStore();

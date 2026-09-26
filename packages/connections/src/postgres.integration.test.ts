@@ -127,8 +127,8 @@ describePostgres("connection authority/PostgreSQL integration", () => {
       status: "revoked", readiness: "unavailable", healthReason: "remote_revoke_failed",
     });
     const client = new Client({ connectionString: connectionString! });
+    await client.connect();
     try {
-      await client.connect();
       const row = await client.query(
         `SELECT health_reason FROM omr_control.connection_bindings WHERE id = $1`, [binding.id],
       );
