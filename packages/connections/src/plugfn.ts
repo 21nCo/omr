@@ -571,7 +571,6 @@ export class PlugFnConnectionOrchestrator {
         if (reconciled) return reconciled;
         throw new ConnectionProviderOperationError("binding");
       }
-      if (!existing) await this.assertUnboundRemote(input);
       await this.cleanUpUnusableResult(input);
       throw new ConnectionProviderOperationError("binding");
     }
@@ -592,14 +591,7 @@ export class PlugFnConnectionOrchestrator {
       (binding.ownership === "workspace" || binding.ownerUserId === input.actorUserId));
   }
 
-  /** Never delete a handle already bound to another owner or lost from view. */
-  private async assertUnboundRemote(input: { workspaceId: string; plugFnConnection: PlugFnConnection }): Promise<void> {
-    const bound = await this.authority.hasRemoteBinding({ workspaceId: input.workspaceId,
-      providerConnectionId: input.plugFnConnection.id }).catch(() => { throw new ConnectionCleanupUntrackedError(); });
-    if (bound) throw new ConnectionProviderOperationError("binding");
-  }
-
-  /** Persist the remote handle as revoked before attempting cleanup so retries survive interruption. */
+  /** Reserve the remote handle before deleting it; a competing live binding wins unchanged. */
   private async cleanUpUnusableResult(input: {
     actorUserId: string;
     workspaceId: string;
@@ -621,27 +613,12 @@ export class PlugFnConnectionOrchestrator {
         label: input.label,
       });
     } catch {
-      const existing = await this.findVisibleRemoteBinding(input);
-      if (existing) {
-        await this.disconnect(input.actorUserId, existing.id);
-        return;
-      }
-      await this.assertUnboundRemote(input);
-      // Storage may be unavailable or authorization may have changed since the
-      // remote call. Attempt deletion, and never represent failure as success.
-      const outcome = await this.plugfn.connections.disconnect({
-        userId: input.actorUserId, provider: input.provider,
-        connectionId: input.plugFnConnection.id, owner: input.owner, actor: input.actor,
-      }).catch((): PlugFnDisconnectResult => ({
-        disconnected: false, remoteRevokeAttempted: true, remoteRevokeSucceeded: false,
-        localDeleted: false, connectionDeleted: false,
-      }));
-      if (cleanupReason(outcome, this.plugfn.providers.get(input.provider)?.auth.type === "oauth2")) {
-        throw new ConnectionCleanupUntrackedError();
-      }
-      throw new ConnectionProviderOperationError(
-        this.plugfn.providers.get(input.provider)?.auth.type === "oauth2" ? "oauth_callback" : "api_key",
-      );
+      // The uniqueness constraint arbitrates with a concurrent successful attach.
+      // A separate read may classify the error, but must never authorize deletion.
+      const bound = await this.authority.hasRemoteBinding({ workspaceId: input.workspaceId,
+        providerConnectionId: input.plugFnConnection.id }).catch(() => null);
+      if (bound) throw new ConnectionProviderOperationError("binding");
+      throw new ConnectionCleanupUntrackedError();
     }
     // A membership can disappear after PlugFn returns. The committed record is
     // still available for an authorized owner or orphan cleanup retry.

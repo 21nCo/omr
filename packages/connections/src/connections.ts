@@ -219,10 +219,19 @@ export class ConnectionAuthority {
     providerConnectionId: string;
     ownership: ConnectionOwnership;
   }): Promise<ConnectionBindingRecord | null> {
-    return this.store.reconcileActiveDuplicate({ ...input, now: this.now() });
+    assertId(input.actorUserId);
+    assertId(input.connectionId);
+    assertId(input.workspaceId);
+    assertId(input.providerConnectionId);
+    if (input.ownership !== "personal" && input.ownership !== "workspace") {
+      throw new ConnectionInputError("Invalid connection ownership");
+    }
+    return this.store.reconcileActiveDuplicate({
+      ...input, provider: normalizeProvider(input.provider), now: this.now(),
+    });
   }
 
-  /** Check whether a returned handle is already tracked before any deletion fallback. */
+  /** Classify a failed cleanup claim without authorizing provider deletion. */
   async hasRemoteBinding(input: { workspaceId: string; providerConnectionId: string }): Promise<boolean> {
     assertId(input.workspaceId);
     assertId(input.providerConnectionId);

@@ -54,6 +54,31 @@ async function createFixture() {
 }
 
 describe("connection authority", () => {
+  it("validates and normalizes direct duplicate reconciliation", async () => {
+    const { connections, workspaceId, store } = await createFixture();
+    const binding = await connections.attach({ actorUserId: "user_member", workspaceId,
+      provider: "github", providerConnectionId: "plug_direct", ownership: "personal", label: "Direct" });
+    await connections.recordHealth({ connectionId: binding.id, status: "needs_reauth",
+      readiness: "unavailable", reason: "expired" });
+    const input = { actorUserId: "user_member", connectionId: binding.id, workspaceId,
+      provider: " GitHub ", providerConnectionId: "plug_direct", ownership: "personal" as const };
+    await expect(connections.reconcileActiveDuplicate({ ...input, connectionId: "bad/id" }))
+      .rejects.toMatchObject({ code: "CONNECTION_INPUT_INVALID" });
+    await expect(connections.reconcileActiveDuplicate({ ...input, providerConnectionId: "bad/id" }))
+      .rejects.toMatchObject({ code: "CONNECTION_INPUT_INVALID" });
+    await expect(connections.reconcileActiveDuplicate({ ...input, provider: "bad/provider" }))
+      .rejects.toMatchObject({ code: "CONNECTION_INPUT_INVALID" });
+    await expect(connections.reconcileActiveDuplicate({ ...input, ownership: "wrong" as "personal" }))
+      .rejects.toMatchObject({ code: "CONNECTION_INPUT_INVALID" });
+    await expect(connections.reconcileActiveDuplicate({ ...input, actorUserId: "user_owner" }))
+      .resolves.toBeNull();
+    await expect(connections.reconcileActiveDuplicate(input)).resolves.toMatchObject({
+      id: binding.id, provider: "github", status: "active", readiness: "ready",
+    });
+    expect(store.connections.get(binding.id)?.provider).toBe("github");
+    await connections.revoke("user_member", binding.id);
+    await expect(connections.reconcileActiveDuplicate(input)).resolves.toBeNull();
+  });
   it("keeps personal accounts private while exposing workspace accounts", async () => {
     const { connections, workspaceId } = await createFixture();
     const shared = await connections.attach({
