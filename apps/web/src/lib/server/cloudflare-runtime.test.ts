@@ -5,7 +5,7 @@ import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
 import { ToolCatalog } from "@oh-my-router/tools";
 
-import { assertConnectionWorkspace, createProviderIntegrationConfig, scopedToolIds, selectAuthorizedConnection } from "./cloudflare-runtime.js";
+import { assertConnectionWorkspace, checkAuthorizedConnectionHealth, createProviderIntegrationConfig, scopedToolIds, selectAuthorizedConnection } from "./cloudflare-runtime.js";
 import { createOMRRouter, type ConnectionRouteServices } from "./router.js";
 
 describe("Worker provider OAuth configuration", () => {
@@ -139,6 +139,53 @@ describe("connection selection authorization", () => {
 });
 
 describe("connection health workspace scope", () => {
+  it("rejects cross-origin web probes before authentication and lets same-origin web and scoped bearer probes run", async () => {
+    const owner = "user_owner";
+    const workspaceStore = new MemoryWorkspaceStore();
+    const workspaces = new WorkspaceAuthority(workspaceStore);
+    const a = (await workspaces.createTeam({ ownerUserId: owner, name: "A" })).workspace;
+    const b = (await workspaces.createTeam({ ownerUserId: owner, name: "B" })).workspace;
+    const clients = new ClientAccessAuthority(new MemoryClientAccessStore(workspaceStore));
+    const client = await clients.registerClient({ actorUserId: owner, workspaceId: a.id, kind: "cli", name: "Reader" });
+    const credential = (await clients.issueGrant({ actorUserId: owner, clientId: client.id,
+      workspaceId: a.id, capabilities: ["connections:read"] })).credential;
+    const authenticateHealth = vi.fn(async (request: Request) => {
+      const token = request.headers.get("authorization")?.slice("Bearer ".length);
+      if (!token) return { kind: "web" as const, userId: owner, workspaceId: "" };
+      const principal = await clients.authenticate(token, "connections:read");
+      return { kind: "client" as const, userId: principal.userId, workspaceId: principal.workspaceId,
+        clientId: principal.clientId, grantId: principal.grantId, capabilities: principal.capabilities };
+    });
+    const getAccessible = vi.fn(async (id: string) => ({ workspaceId: id === "connection_a" ? a.id : b.id }));
+    const providerProbe = vi.fn(async () => ({ status: "active" }));
+    const routes = {
+      checkHealth: (request: Request, connectionId: string) => checkAuthorizedConnectionHealth(
+        request, connectionId, authenticateHealth,
+        async (principal, id) => {
+          const binding = await getAccessible(id);
+          assertConnectionWorkspace(principal, binding.workspaceId);
+          return providerProbe();
+        }),
+    } as ConnectionRouteServices;
+    const router = createOMRRouter(undefined, routes);
+    const call = (connectionId: string, headers: Record<string, string>) => router.handle(
+      new Request("https://omr.example/api/connections/health", {
+        method: "POST", headers: { "content-type": "application/json", ...headers },
+        body: JSON.stringify({ connectionId }),
+      }),
+    );
+
+    expect((await call("connection_b", { cookie: "session=test", origin: "https://other.example" })).status).toBe(403);
+    expect(authenticateHealth).not.toHaveBeenCalled();
+    expect(getAccessible).not.toHaveBeenCalled();
+    expect(providerProbe).not.toHaveBeenCalled();
+
+    expect((await call("connection_b", { cookie: "session=test", origin: "https://omr.example" })).status).toBe(200);
+    expect((await call("connection_a", { authorization: `Bearer ${credential}`, origin: "https://other.example" })).status).toBe(200);
+    expect((await call("connection_b", { authorization: `Bearer ${credential}`, origin: "https://other.example" })).status).toBe(403);
+    expect(providerProbe).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects a client grant for workspace A probing a binding in B even when its user belongs to both", async () => {
     const owner = "user_owner";
     const workspaceStore = new MemoryWorkspaceStore();

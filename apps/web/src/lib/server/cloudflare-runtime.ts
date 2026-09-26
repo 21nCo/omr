@@ -193,6 +193,17 @@ export async function selectAuthorizedConnection<T>(
   return select({ actorUserId: principal.userId, ...input });
 }
 
+export async function checkAuthorizedConnectionHealth<T>(
+  request: Request,
+  connectionId: string,
+  authenticateHealth: (request: Request, capability: ClientCapability) => Promise<ExecutionPrincipal>,
+  check: (principal: ExecutionPrincipal, connectionId: string) => Promise<T>,
+): Promise<T> {
+  if (!bearerCredential(request)) requireSameOrigin(request);
+  const principal = await authenticateHealth(request, "connections:read");
+  return check(principal, connectionId);
+}
+
 async function authenticate(
   event: RequestEvent,
   request: Request,
@@ -429,13 +440,14 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
       });
     },
     async checkHealth(request, connectionId) {
-      const principal = await authenticate(event, request, undefined, "connections:read");
-      return withConnections(async (orchestrator, authority) => {
-        const accessible = await authority.getAccessible(principal.userId, connectionId);
-        assertConnectionWorkspace(principal, accessible.workspaceId);
-        const binding = await orchestrator.checkHealth(principal.userId, connectionId);
-        return (await publicConnectionsAfterMutation(authority, principal.userId, binding.workspaceId, [binding]))[0];
-      });
+      return checkAuthorizedConnectionHealth(request, connectionId,
+        (healthRequest, capability) => authenticate(event, healthRequest, undefined, capability),
+        (principal, id) => withConnections(async (orchestrator, authority) => {
+          const accessible = await authority.getAccessible(principal.userId, id);
+          assertConnectionWorkspace(principal, accessible.workspaceId);
+          const binding = await orchestrator.checkHealth(principal.userId, id);
+          return (await publicConnectionsAfterMutation(authority, principal.userId, binding.workspaceId, [binding]))[0];
+        }));
     },
     async refresh(request, connectionId) {
       requireSameOrigin(request);
