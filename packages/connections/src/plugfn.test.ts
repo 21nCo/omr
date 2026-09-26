@@ -370,13 +370,54 @@ describe("PlugFn connection orchestration", () => {
       connection: {
         status: "revoked",
         readiness: "unavailable",
-        healthReason: "remote_revoke_failed",
+        healthReason: "remote_revocation_unavailable",
       },
       provider: { remoteRevokeSucceeded: false },
     });
     expect(plugfn.methods.disconnect).toHaveBeenCalledWith(expect.objectContaining({
       actor: expect.objectContaining({ organizationId: workspaceId, roles: ["org:admin"] }),
     }));
+    await orchestrator.disconnect("user_admin", shared.id);
+    expect(plugfn.methods.disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let an older failed cleanup overwrite a successful retry", async () => {
+    const { authority, orchestrator, plugfn, store, workspaceId, advance } = await fixture();
+    const binding = await authority.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", providerConnectionId: "remote_race", ownership: "personal", label: "Race" });
+    let finishFirst!: (value: Awaited<ReturnType<typeof plugfn.methods.disconnect>>) => void;
+    plugfn.methods.disconnect.mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }));
+    const first = orchestrator.disconnect("user_owner", binding.id);
+    await vi.waitFor(() => expect(plugfn.methods.disconnect).toHaveBeenCalledTimes(1));
+    await orchestrator.disconnect("user_owner", binding.id);
+    expect(plugfn.methods.disconnect).toHaveBeenCalledTimes(1);
+    advance(61_000);
+    plugfn.methods.disconnect.mockResolvedValueOnce({ disconnected: true, remoteRevokeAttempted: true,
+      remoteRevokeSucceeded: true, localDeleted: true, connectionDeleted: true });
+    await orchestrator.disconnect("user_owner", binding.id);
+    finishFirst({ disconnected: true, remoteRevokeAttempted: true,
+      remoteRevokeSucceeded: false, localDeleted: true, connectionDeleted: true });
+    await first;
+    expect(store.connections.get(binding.id)).toMatchObject({ status: "revoked", healthReason: null });
+    expect(plugfn.methods.disconnect).toHaveBeenCalledTimes(2);
+  });
+
+  it("marks a deleted upstream connection terminal after an unresolved retry", async () => {
+    const { authority, orchestrator, plugfn, workspaceId } = await fixture();
+    const binding = await authority.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", providerConnectionId: "remote_missing", ownership: "personal", label: "Missing" });
+    plugfn.methods.disconnect.mockResolvedValueOnce({ disconnected: false, remoteRevokeAttempted: true,
+      remoteRevokeSucceeded: false, localDeleted: false, connectionDeleted: false });
+    await expect(orchestrator.disconnect("user_owner", binding.id)).resolves.toMatchObject({
+      connection: { healthReason: "remote_revoke_failed" },
+    });
+    plugfn.methods.disconnect.mockResolvedValueOnce({ disconnected: false, remoteRevokeAttempted: false,
+      remoteRevokeSucceeded: false, localDeleted: false, connectionDeleted: false });
+    await expect(orchestrator.disconnect("user_owner", binding.id)).resolves.toMatchObject({
+      connection: { healthReason: "provider_connection_missing" },
+    });
+    await orchestrator.disconnect("user_owner", binding.id);
+    expect(plugfn.methods.disconnect).toHaveBeenCalledTimes(2);
   });
 
   it("stops local use before waiting for remote revocation and redacts its error", async () => {
@@ -391,8 +432,8 @@ describe("PlugFn connection orchestration", () => {
     }));
     const pending = orchestrator.disconnect("user_owner", binding.id);
     await vi.waitFor(() => expect(plugfn.methods.disconnect).toHaveBeenCalledTimes(1));
-    expect(store.connections.get(binding.id)).toMatchObject({ status: "revoked", readiness: "unavailable",
-      healthReason: "provider_cleanup_pending" });
+    expect(store.connections.get(binding.id)).toMatchObject({ status: "revoked", readiness: "unavailable" });
+    expect(store.connections.get(binding.id)?.healthReason).toMatch(/^provider_cleanup_pending:/);
     expect(store.selections.size).toBe(0);
     await expect(authority.resolve({ actorUserId: "user_owner", workspaceId, provider: "linear" }))
       .rejects.toBeInstanceOf(ConnectionUnavailableError);

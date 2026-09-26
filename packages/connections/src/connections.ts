@@ -49,6 +49,11 @@ export interface RevokeConnectionInput {
   now: number;
 }
 
+export interface ConditionalRevokeInput extends RevokeConnectionInput {
+  expectedStatus: ConnectionLifecycleStatus;
+  expectedReason: string | null;
+}
+
 export interface AuthorizeConnectionInstallInput {
   actorUserId: string;
   workspaceId: string;
@@ -77,6 +82,7 @@ export interface ConnectionBindingStore {
   }): Promise<ConnectionSelectionRecord | null>;
   select(input: SelectConnectionInput): Promise<ConnectionSelectionRecord>;
   revoke(input: RevokeConnectionInput): Promise<ConnectionBindingRecord>;
+  revokeIf(input: ConditionalRevokeInput): Promise<ConnectionBindingRecord | null>;
   recordHealth(input: {
     connectionId: string;
     status: ConnectionLifecycleStatus;
@@ -148,6 +154,10 @@ export class ConnectionAuthority {
     private readonly store: ConnectionBindingStore,
     private readonly now: () => number = Date.now,
   ) {}
+
+  currentTime(): number {
+    return this.now();
+  }
 
   async authorizeInstall(input: AuthorizeConnectionInstallInput): Promise<void> {
     assertId(input.actorUserId);
@@ -288,6 +298,19 @@ export class ConnectionAuthority {
       throw new ConnectionInputError("Revocation reason must not exceed 240 characters");
     }
     return this.store.revoke({ actorUserId, connectionId, reason, now: this.now() });
+  }
+
+  async revokeIf(
+    actorUserId: string,
+    connectionId: string,
+    expectedStatus: ConnectionLifecycleStatus,
+    expectedReason: string | null,
+    reason?: string,
+  ): Promise<ConnectionBindingRecord | null> {
+    assertId(actorUserId);
+    assertId(connectionId);
+    if (reason && reason.length > 240) throw new ConnectionInputError("Revocation reason must not exceed 240 characters");
+    return this.store.revokeIf({ actorUserId, connectionId, expectedStatus, expectedReason, reason, now: this.now() });
   }
 
   async recordHealth(input: {

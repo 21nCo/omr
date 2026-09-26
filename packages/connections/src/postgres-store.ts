@@ -12,6 +12,7 @@ import {
   type ConnectionOwnership,
   type ConnectionReadiness,
   type ConnectionSelectionRecord,
+  type ConditionalRevokeInput,
   type RevokeConnectionInput,
   type SelectConnectionInput,
 } from "./connections.js";
@@ -258,6 +259,41 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
         `DELETE FROM omr_control.connection_selections WHERE connection_id = $1`,
         [input.connectionId],
       );
+      await this.client.query("COMMIT");
+      return toConnection(updated.rows[0]!);
+    } catch (error) {
+      await this.client.query("ROLLBACK");
+      throw error;
+    }
+  }
+
+  async revokeIf(input: ConditionalRevokeInput): Promise<ConnectionBindingRecord | null> {
+    await this.client.query("BEGIN");
+    try {
+      const result = await this.client.query<ConnectionRow>(
+        `SELECT ${CONNECTION_COLUMNS}
+         FROM omr_control.connection_bindings WHERE id = $1 FOR UPDATE`,
+        [input.connectionId],
+      );
+      const connection = result.rows[0];
+      if (!connection) throw new ConnectionAccessDeniedError();
+      const role = await this.membershipRole(connection.workspace_id, input.actorUserId);
+      const authorized = connection.ownership === "personal"
+        ? Boolean(role) && connection.owner_user_id === input.actorUserId
+        : role === "owner" || role === "admin";
+      if (!authorized) throw new ConnectionAccessDeniedError();
+      if (connection.status !== input.expectedStatus || connection.health_reason !== input.expectedReason) {
+        await this.client.query("COMMIT");
+        return null;
+      }
+      const updated = await this.client.query<ConnectionRow>(
+        `UPDATE omr_control.connection_bindings
+         SET status = 'revoked', readiness = 'unavailable', health_reason = $2,
+             revoked_at = COALESCE(revoked_at, $1), updated_at = $1
+         WHERE id = $3 RETURNING ${CONNECTION_COLUMNS}`,
+        [input.now, input.reason ?? null, input.connectionId],
+      );
+      await this.client.query(`DELETE FROM omr_control.connection_selections WHERE connection_id = $1`, [input.connectionId]);
       await this.client.query("COMMIT");
       return toConnection(updated.rows[0]!);
     } catch (error) {

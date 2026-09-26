@@ -419,9 +419,25 @@ export class PlugFnConnectionOrchestrator {
     connectionId: string,
   ): Promise<{ connection: ConnectionBindingRecord; provider: PlugFnDisconnectResult }> {
     const binding = await this.authority.getManageable(actorUserId, connectionId);
-    // Disable OMR use before contacting the provider. A timeout, failed remote
-    // revoke, or interrupted Worker must never leave a usable local binding.
-    let connection = await this.authority.revoke(actorUserId, connectionId, "provider_cleanup_pending");
+    const pending = `provider_cleanup_pending:${crypto.randomUUID()}`;
+    const retryable = binding.healthReason === "remote_revoke_failed" || binding.healthReason === "provider_cleanup_failed";
+    const stalePending = binding.status === "revoked" &&
+      (binding.healthReason === "provider_cleanup_pending" ||
+        binding.healthReason?.startsWith("provider_cleanup_pending:")) &&
+      this.authority.currentTime() - binding.updatedAt > 60_000;
+    const claimable = binding.status !== "revoked" || retryable || stalePending;
+    // The conditional transition serializes retries across Worker instances.
+    // It also removes local use and selections before any provider call.
+    const claimed = claimable ? await this.authority.revokeIf(
+      actorUserId, connectionId, binding.status, binding.healthReason, pending,
+    ) : null;
+    if (!claimed) {
+      return {
+        connection: await this.authority.getManageable(actorUserId, connectionId),
+        provider: { disconnected: false, remoteRevokeAttempted: false,
+          remoteRevokeSucceeded: false, localDeleted: false, connectionDeleted: false },
+      };
+    }
     const ownershipInput = {
       actorUserId,
       workspaceId: binding.workspaceId,
@@ -449,12 +465,16 @@ export class PlugFnConnectionOrchestrator {
       localDeleted: provider.localDeleted,
       connectionDeleted: provider.connectionDeleted,
     };
-    const failed = !provider.disconnected || (provider.remoteRevokeAttempted && !provider.remoteRevokeSucceeded);
-    connection = await this.authority.revoke(actorUserId, connectionId, failed
-      ? provider.remoteRevokeAttempted && !provider.remoteRevokeSucceeded
-        ? "remote_revoke_failed" : "provider_cleanup_failed"
-      : undefined).catch(() => connection);
-    return { connection, provider: safeProvider };
+    const remoteFailure = provider.remoteRevokeAttempted && !provider.remoteRevokeSucceeded;
+    const reason = provider.connectionDeleted
+      ? remoteFailure ? "remote_revocation_unavailable" : undefined
+      : !provider.disconnected && !provider.remoteRevokeAttempted && !provider.localDeleted
+        ? "provider_connection_missing"
+        : remoteFailure ? "remote_revoke_failed" : "provider_cleanup_failed";
+    const connection = await this.authority.revokeIf(
+      actorUserId, connectionId, "revoked", pending, reason,
+    ).catch(() => null);
+    return { connection: connection ?? await this.authority.getManageable(actorUserId, connectionId), provider: safeProvider };
   }
 
   private async attachOrCleanUp(input: {

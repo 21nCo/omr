@@ -19,8 +19,10 @@ describe("connection control UI policy", () => {
   it("hides selection for expired, revoked, and unconfigured bindings", () => {
     expect(connectionActions({ ...team, readiness: "unavailable" }, "user_admin", "admin", "expired"))
       .toMatchObject({ canSelect: false, canReconnect: true });
-    expect(connectionActions({ ...team, status: "revoked" }, "user_admin", "admin", "ready"))
+    expect(connectionActions({ ...team, status: "revoked", healthReason: "remote_revoke_failed" }, "user_admin", "admin", "ready"))
       .toMatchObject({ canSelect: false, canCheck: false, canRetryRevoke: true });
+    expect(connectionActions({ ...team, status: "revoked", healthReason: "remote_revocation_unavailable" },
+      "user_admin", "admin", "ready").canRetryRevoke).toBe(false);
     expect(connectionActions(team, "user_admin", "admin", "unconfigured").canSelect).toBe(false);
   });
 

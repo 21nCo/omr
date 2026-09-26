@@ -5,7 +5,7 @@ import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
 import { ToolCatalog } from "@oh-my-router/tools";
 
-import { createProviderIntegrationConfig, scopedToolIds, selectAuthorizedConnection } from "./cloudflare-runtime.js";
+import { assertConnectionWorkspace, createProviderIntegrationConfig, scopedToolIds, selectAuthorizedConnection } from "./cloudflare-runtime.js";
 import { createOMRRouter, type ConnectionRouteServices } from "./router.js";
 
 describe("Worker provider OAuth configuration", () => {
@@ -135,5 +135,26 @@ describe("connection selection authorization", () => {
     expect(selected).toBe("browser-choice");
     expect((await call({ origin: "https://other.example" }, "cross-origin-choice")).status).toBe(403);
     expect(selected).toBe("browser-choice");
+  });
+});
+
+describe("connection health workspace scope", () => {
+  it("rejects a client grant for workspace A probing a binding in B even when its user belongs to both", async () => {
+    const owner = "user_owner";
+    const workspaceStore = new MemoryWorkspaceStore();
+    const workspaces = new WorkspaceAuthority(workspaceStore);
+    const a = (await workspaces.createTeam({ ownerUserId: owner, name: "A" })).workspace;
+    const b = (await workspaces.createTeam({ ownerUserId: owner, name: "B" })).workspace;
+    const clients = new ClientAccessAuthority(new MemoryClientAccessStore(workspaceStore));
+    const client = await clients.registerClient({ actorUserId: owner, workspaceId: a.id, kind: "cli", name: "Reader" });
+    const credential = (await clients.issueGrant({ actorUserId: owner, clientId: client.id,
+      workspaceId: a.id, capabilities: ["connections:read"] })).credential;
+    const principal = await clients.authenticate(credential, "connections:read");
+    expect(() => assertConnectionWorkspace({ kind: "client", userId: principal.userId,
+      workspaceId: principal.workspaceId, clientId: principal.clientId, grantId: principal.grantId,
+      capabilities: principal.capabilities }, b.id)).toThrowError(/access denied/i);
+    expect(() => assertConnectionWorkspace({ kind: "client", userId: principal.userId,
+      workspaceId: principal.workspaceId, clientId: principal.clientId, grantId: principal.grantId,
+      capabilities: principal.capabilities }, a.id)).not.toThrow();
   });
 });

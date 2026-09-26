@@ -6,6 +6,7 @@ export interface ConnectionDisplay {
   status: string;
   readiness: string;
   selected: boolean;
+  healthReason?: string | null;
 }
 
 export function connectionActions(
@@ -27,7 +28,11 @@ export function connectionActions(
     canReconnect: active && manageable && !ready &&
       providerState !== "unsupported" && providerState !== "unconfigured" && providerState !== "unknown",
     canDisconnect: active && manageable,
-    canRetryRevoke: !active && manageable && connection.status === "revoked",
+    canRetryRevoke: !active && manageable && connection.status === "revoked" &&
+      (connection.healthReason === "remote_revoke_failed" ||
+        connection.healthReason === "provider_cleanup_failed" ||
+        connection.healthReason === "provider_cleanup_pending" ||
+        connection.healthReason?.startsWith("provider_cleanup_pending:") === true),
     manageable,
   };
 }

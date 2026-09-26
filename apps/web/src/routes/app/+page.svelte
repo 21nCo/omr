@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { oauthCallbackUri, savePendingOAuthConnection } from "$lib/oauth-connection.js";
-  import { authorizationScopes, connectionActions } from "$lib/connection-ui.js";
+  import { createOAuthReviewController } from "$lib/oauth-review.js";
+  import { connectionActions } from "$lib/connection-ui.js";
   import { createWorkspaceCatalogLoader, providerDisplayState } from "$lib/workspace-catalog.js";
   import { V1_PROVIDERS } from "@oh-my-router/tools";
 
@@ -79,6 +79,23 @@
   let authorizationDestination = "";
   let authorizationOwnership: "personal" | "workspace" = "personal";
   let requestedScopes: string[] = [];
+  const oauthReview = createOAuthReviewController({
+    storage: () => sessionStorage,
+    readiness: (provider, workspaceId) => request(
+      `/api/connections/providers/readiness?provider=${encodeURIComponent(provider)}&workspaceId=${encodeURIComponent(workspaceId)}`,
+    ),
+    start: async ({ workspaceId, provider, ownership, label, redirectUri }) => request("/api/connections/oauth/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspaceId, provider, ownership, label, redirectUri }),
+    }),
+    update: (review, pending) => {
+      authorizationDestination = review?.destination ?? "";
+      authorizationOwnership = review?.ownership ?? "personal";
+      requestedScopes = review?.scopes ?? [];
+      busy = pending ? "oauth" : busy === "oauth" ? "" : busy;
+    },
+  });
 
   function selectedAccess(): WorkspaceAccess | undefined {
     return overview?.workspaces.find(({ workspace }) => workspace.id === selectedWorkspaceId);
@@ -148,13 +165,7 @@
   }
 
   function cancelAuthorization() {
-    if (authorizationDestination) {
-      const state = new URL(authorizationDestination).searchParams.get("state");
-      if (state) sessionStorage.removeItem(`omr.provider-oauth.${state}`);
-    }
-    authorizationDestination = "";
-    authorizationOwnership = "personal";
-    requestedScopes = [];
+    oauthReview.cancel();
   }
 
   async function switchWorkspace() {
@@ -189,45 +200,15 @@
   }
 
   async function connectOAuth(connection?: Connection) {
-    busy = "oauth";
     error = "";
     notice = "";
     try {
       const provider = connection?.provider ?? oauthProvider;
       const ownership = connection?.ownership ?? oauthOwnership;
-      const readiness = await request<{ available: boolean; authMode: string }>(
-        `/api/connections/providers/readiness?provider=${encodeURIComponent(provider)}&workspaceId=${encodeURIComponent(selectedWorkspaceId)}`,
-      );
-      if (!readiness.available || readiness.authMode !== "oauth") {
-        throw new Error(`${provider} OAuth is not configured on this OMR environment.`);
-      }
-      const redirectUri = oauthCallbackUri(location.origin);
       const label = connection?.label ?? (oauthLabel.trim() || catalog?.providers.find((item) => item.provider === provider)?.displayName || provider);
-      const { authUrl } = await request<{ authUrl: string }>("/api/connections/oauth/start", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          workspaceId: selectedWorkspaceId,
-          provider,
-          ownership,
-          label,
-          redirectUri,
-        }),
-      });
-      cancelAuthorization();
-      authorizationDestination = savePendingOAuthConnection(sessionStorage, authUrl, {
-        provider,
-        workspaceId: selectedWorkspaceId,
-        ownership,
-        label,
-        redirectUri,
-        createdAt: Date.now(),
-      });
-      authorizationOwnership = ownership;
-      requestedScopes = authorizationScopes(authorizationDestination);
+      await oauthReview.start({ workspaceId: selectedWorkspaceId, provider, ownership, label, origin: location.origin });
     } catch (caught) {
       error = caught instanceof Error ? caught.message : "Could not start provider authorization";
-      busy = "";
     }
   }
 
@@ -246,15 +227,19 @@
     error = "";
     notice = "";
     try {
-      const result = await request<{ provider: { disconnected: boolean; remoteRevokeSucceeded: boolean; remoteRevokeAttempted: boolean } }>(
+      const result = await request<{ connection: Connection; provider: { disconnected: boolean; remoteRevokeSucceeded: boolean; remoteRevokeAttempted: boolean } }>(
         "/api/connections/disconnect", {
           method: "POST", headers: { "content-type": "application/json" },
           body: JSON.stringify({ connectionId: connection.id }),
         },
       );
-      notice = !result.provider.disconnected || (result.provider.remoteRevokeAttempted && !result.provider.remoteRevokeSucceeded)
-        ? "OMR access was removed. Provider revocation failed; retry provider cleanup or revoke the grant at the provider."
-        : `Disconnected ${connection.label}.`;
+      notice = result.connection.healthReason === "remote_revocation_unavailable" || result.connection.healthReason === "provider_connection_missing"
+        ? "OMR access was removed. The provider grant may still be active. Revoke it in your provider account; OMR no longer has the token to retry."
+        : result.connection.healthReason === "provider_cleanup_pending" || result.connection.healthReason?.startsWith("provider_cleanup_pending:")
+          ? "OMR access was removed. Provider cleanup is in progress; retry if it does not finish."
+          : result.connection.healthReason === "remote_revoke_failed" || result.connection.healthReason === "provider_cleanup_failed"
+            ? "OMR access was removed. Provider cleanup failed; retry or revoke the grant at the provider."
+            : `Disconnected ${connection.label}.`;
       await load();
     } catch (caught) {
       error = caught instanceof Error ? caught.message : "Could not disconnect the account";
@@ -369,7 +354,7 @@
                     <span>{connection.provider} · {connection.ownership === "personal" ? "Personal · only you" : "Team · shared with members"}
                       {#if connection.selected} · Selected for your actions{/if}
                     </span>
-                    <span>Last checked {timestamp(connection.lastCheckedAt)}{connection.healthReason ? ` · ${connection.healthReason.replaceAll("_", " ")}` : ""}</span>
+                    <span>Last checked {timestamp(connection.lastCheckedAt)}{connection.healthReason ? ` · ${connection.healthReason.split(":")[0]?.replaceAll("_", " ")}` : ""}</span>
                   </div>
                   <span class:ready={actions(connection).canSelect} class="status">{connection.status === "revoked" ? "disconnected" : providerState(connection.provider) === "ready" ? connection.readiness : providerState(connection.provider)}</span>
                   {#if actions(connection).canSelect}
@@ -392,7 +377,7 @@
                     onclick={() => connection.provider && catalog?.providers.find((entry) => entry.provider === connection.provider)?.authMode === "oauth"
                       ? void connectOAuth(connection)
                       : (credentialProvider = connection.provider, credentialOwnership = connection.ownership, credentialLabel = connection.label, notice = "Enter a new API key below to reconnect.")}>Reconnect</button>{/if}
-                  {#if actions(connection).canDisconnect || (actions(connection).canRetryRevoke && (connection.healthReason === "remote_revoke_failed" || connection.healthReason === "provider_cleanup_failed" || connection.healthReason === "provider_cleanup_pending"))}<button
+                  {#if actions(connection).canDisconnect || actions(connection).canRetryRevoke}<button
                     class="danger compact"
                     disabled={Boolean(busy)}
                     onclick={() => void disconnect(connection)}

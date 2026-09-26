@@ -45,15 +45,22 @@ visible for cleanup. Failed or denied callbacks show an error and consume the
 browser's pending intent. A later attempt must start a new authorization.
 
 Disconnect first revokes the local binding, deletes selections, and records
-`provider_cleanup_pending`, then asks PlugFn to revoke/delete the upstream
+`provider_cleanup_pending` with a unique attempt marker, then asks PlugFn to revoke/delete the upstream
 grant. Local use stops even if provider revocation times out or the Worker is
-interrupted. A remote failure is shown without raw provider details;
-the user can retry provider cleanup or revoke the grant at the provider. A
+interrupted. Concurrent requests cannot overwrite a newer cleanup result. A pending
+attempt can be retried after one minute, including a pending row from an older
+Worker version. A failure before upstream deletion remains retryable. If PlugFn
+deleted its token and connection after a failed remote revoke, OMR marks the
+binding `remote_revocation_unavailable` and directs the user to revoke the grant
+at the provider; retrying through OMR cannot work without that token. A missing
+upstream connection likewise becomes terminal. These states show no raw provider
+details. A
 revoked binding cannot become ready through a concurrent probe or refresh.
 
 ## Migration and rollback
 
-No database schema migration is needed: this uses the existing
+No database schema migration is needed: the cleanup attempt marker and terminal
+reason use the existing `health_reason` column. This uses the existing
 `connection_bindings` and `connection_selections` tables from migration 0006.
 The code rollout is reversible by deploying the previous Worker version;
 existing binding and selection rows stay readable by that version. Revocation

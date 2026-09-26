@@ -9,6 +9,7 @@ import {
   type ConnectionBindingRecord,
   type ConnectionBindingStore,
   type ConnectionSelectionRecord,
+  type ConditionalRevokeInput,
   type RevokeConnectionInput,
   type SelectConnectionInput,
 } from "./connections.js";
@@ -156,6 +157,21 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
         ? Boolean(membership) && connection.ownerUserId === input.actorUserId
         : membership?.role === "owner" || membership?.role === "admin";
     if (!authorized) throw new ConnectionAccessDeniedError();
+    connection.status = "revoked";
+    connection.readiness = "unavailable";
+    connection.healthReason = input.reason ?? null;
+    connection.revokedAt ??= input.now;
+    connection.updatedAt = input.now;
+    for (const [key, selection] of this.selections) {
+      if (selection.connectionId === connection.id) this.selections.delete(key);
+    }
+    return structuredClone(connection);
+  }
+
+  async revokeIf(input: ConditionalRevokeInput): Promise<ConnectionBindingRecord | null> {
+    await this.getManageable({ actorUserId: input.actorUserId, connectionId: input.connectionId });
+    const connection = this.connections.get(input.connectionId)!;
+    if (connection.status !== input.expectedStatus || connection.healthReason !== input.expectedReason) return null;
     connection.status = "revoked";
     connection.readiness = "unavailable";
     connection.healthReason = input.reason ?? null;

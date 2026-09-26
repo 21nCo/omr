@@ -225,6 +225,12 @@ async function authenticate(
   return { kind: "web", userId, workspaceId: workspaceId ?? "" };
 }
 
+export function assertConnectionWorkspace(principal: ExecutionPrincipal, bindingWorkspaceId: string): void {
+  if (principal.kind === "client" && principal.workspaceId !== bindingWorkspaceId) {
+    throw new ConnectionAccessDeniedError();
+  }
+}
+
 async function connectPlugFn(event: RequestEvent) {
   const origin = new URL(event.request.url).origin;
   return connectPostgresPlugFn({
@@ -425,6 +431,8 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
     async checkHealth(request, connectionId) {
       const principal = await authenticate(event, request, undefined, "connections:read");
       return withConnections(async (orchestrator, authority) => {
+        const accessible = await authority.getAccessible(principal.userId, connectionId);
+        assertConnectionWorkspace(principal, accessible.workspaceId);
         const binding = await orchestrator.checkHealth(principal.userId, connectionId);
         return (await publicConnections(authority, principal.userId, binding.workspaceId, [binding]))[0];
       });
