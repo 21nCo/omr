@@ -1,0 +1,28 @@
+apps/web/src/lib/connection-ui.test.ts
+  h_a39f9495f9ec1d 26,28-34,38-46
+apps/web/src/lib/connection-ui.ts
+  h_a39f9495f9ec1d 10,13,15-19,28,46-48
+apps/web/src/lib/oauth-connection.test.ts
+  h_a39f9495f9ec1d 43-44
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 37,419,428,437,445,453
+apps/web/src/lib/server/connection-view.test.ts
+  h_a39f9495f9ec1d 1,6,29-60
+apps/web/src/lib/server/connection-view.ts
+  h_a39f9495f9ec1d 12-31,34-42
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 23,70,111-117,243,277,283,366-367,370-371,380,385,387,391
+packages/connections/src/plugfn.test.ts
+  h_a39f9495f9ec1d 436-439
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1782f9207b89e984c2c4ff02a268570063a174a4",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
