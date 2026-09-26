@@ -5,6 +5,7 @@ import { ConnectionAuthority } from "./connections.js";
 import { PlugFnConnectionOrchestrator, type PlugFnConnection, type PlugFnConnectionPort } from "./plugfn.js";
 import { PostgresConnectionBindingStore } from "./postgres-store.js";
 import { connectPostgresConnections, type PostgresConnectionRuntime } from "./postgres.js";
+import { raceStep, settleRaceRequest, waitForRaceBarrier } from "../test-support/race-test-barrier.js";
 
 const connectionString = process.env.OMR_TEST_DATABASE_URL;
 const describePostgres = connectionString ? describe : describe.skip;
@@ -250,9 +251,11 @@ describePostgres("connection authority/PostgreSQL integration", () => {
         : orchestrator.connectApiKey({ actorUserId: "connection_owner", workspaceId,
           provider, ownership: "personal", apiKey: "key-secret", label: "Account" });
       const first = connect(inactive);
+      let secondRequest: ReturnType<typeof connect> | undefined;
       try {
-        await waiting;
-        const second = await connect(active);
+        await waitForRaceBarrier(waiting, first, `${mode} ${firstStatus} PostgreSQL cleanup claim`);
+        secondRequest = connect(active);
+        const second = await raceStep(secondRequest, `${mode} active PostgreSQL competing connect`);
         const binding = "connection" in second ? second.connection : second;
         await secondAuthority.select({ actorUserId: "connection_owner", workspaceId,
           provider, connectionId: binding.id });
@@ -270,15 +273,25 @@ describePostgres("connection authority/PostgreSQL integration", () => {
         expect(activePort.disconnect).not.toHaveBeenCalled();
       } finally {
         release();
-        await first.catch(() => undefined);
-        await secondClient.query(`DELETE FROM omr_control.connection_selections
-          WHERE workspace_id = $1 AND provider = $2`, [workspaceId, provider]);
-        await secondClient.query(`DELETE FROM omr_control.connection_bindings
-          WHERE workspace_id = $1 AND provider_connection_id = $2`, [workspaceId, providerConnectionId]);
-        await firstClient.end();
-        await secondClient.end();
+        try {
+          const outcomes = await Promise.allSettled([
+            settleRaceRequest(first, `${mode} ${firstStatus} PostgreSQL cleanup`),
+            ...(secondRequest ? [settleRaceRequest(secondRequest, `${mode} active PostgreSQL connect`)] : []),
+          ]);
+          const failure = outcomes.find((outcome) => outcome.status === "rejected");
+          if (failure?.status === "rejected") throw failure.reason;
+        } finally {
+          try {
+            await secondClient.query(`DELETE FROM omr_control.connection_selections
+              WHERE workspace_id = $1 AND provider = $2`, [workspaceId, provider]);
+            await secondClient.query(`DELETE FROM omr_control.connection_bindings
+              WHERE workspace_id = $1 AND provider_connection_id = $2`, [workspaceId, providerConnectionId]);
+          } finally {
+            await Promise.all([firstClient.end(), secondClient.end()]);
+          }
+        }
       }
-    });
+    }, 20_000);
   }
 
   it("keeps a cleanup reservation terminal when it claims the PostgreSQL handle first", async () => {
@@ -293,7 +306,8 @@ describePostgres("connection authority/PostgreSQL integration", () => {
       await expect(contender.connections.attach({ actorUserId: "connection_owner",
         workspaceId, provider: "linear", providerConnectionId,
         ownership: "personal", label: "Late active result" }))
-        .rejects.toThrow();
+        .rejects.toMatchObject({ code: "23505",
+          constraint: "connection_bindings_workspace_id_provider_connection_id_key" });
       const rows = await inspector.query(
         `SELECT id, status, readiness FROM omr_control.connection_bindings
          WHERE workspace_id = $1 AND provider_connection_id = $2`,

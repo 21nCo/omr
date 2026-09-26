@@ -10,6 +10,7 @@ import {
   type PlugFnConnectionPort,
 } from "./plugfn.js";
 import { MemoryConnectionBindingStore } from "./testing.js";
+import { raceStep, settleRaceRequest, waitForRaceBarrier } from "../test-support/race-test-barrier.js";
 
 /** Create deterministic provider and workspace state without external accounts. */
 async function fixture() {
@@ -506,9 +507,11 @@ describe("PlugFn connection orchestration", () => {
         : orchestrator.connectApiKey({ actorUserId: "user_owner", workspaceId,
           provider, ownership: "personal", apiKey: "key-secret", label: "Account" });
       const first = connect();
+      let secondRequest: ReturnType<typeof connect> | undefined;
       try {
-        await waiting;
-        const second = await connect();
+        await waitForRaceBarrier(waiting, first, `${mode} ${firstStatus} cleanup claim`);
+        secondRequest = connect();
+        const second = await raceStep(secondRequest, `${mode} active competing connect`);
         const binding = "connection" in second ? second.connection : second;
         await authority.select({ actorUserId: "user_owner", workspaceId,
           provider, connectionId: binding.id });
@@ -521,8 +524,14 @@ describe("PlugFn connection orchestration", () => {
         expect(plugfn.methods.disconnect).not.toHaveBeenCalled();
       } finally {
         release();
+        const outcomes = await Promise.allSettled([
+          settleRaceRequest(first, `${mode} ${firstStatus} cleanup`),
+          ...(secondRequest ? [settleRaceRequest(secondRequest, `${mode} active connect`)] : []),
+        ]);
+        const failure = outcomes.find((outcome) => outcome.status === "rejected");
+        if (failure?.status === "rejected") throw failure.reason;
       }
-    });
+    }, 15_000);
   }
 
   it("keeps a cleanup reservation unavailable when it wins before a later active result", async () => {
@@ -544,9 +553,12 @@ describe("PlugFn connection orchestration", () => {
     const connect = () => orchestrator.connectApiKey({ actorUserId: "user_owner", workspaceId,
       provider: "linear", ownership: "personal", apiKey: "key-secret", label: "Account" });
     const first = connect();
+    let secondRequest: ReturnType<typeof connect> | undefined;
     try {
-      await waiting;
-      await expect(connect()).rejects.toMatchObject({ code: "CONNECTION_PROVIDER_FAILED" });
+      await waitForRaceBarrier(waiting, first, "API-key cleanup reservation disconnect");
+      secondRequest = connect();
+      await expect(raceStep(secondRequest, "API-key active result after cleanup reservation"))
+        .rejects.toMatchObject({ code: "CONNECTION_PROVIDER_FAILED" });
       release();
       await expect(first).rejects.toMatchObject({ code: "CONNECTION_PROVIDER_FAILED" });
       expect([...store.connections.values()]).toEqual([expect.objectContaining({
@@ -557,8 +569,14 @@ describe("PlugFn connection orchestration", () => {
       expect(plugfn.methods.disconnect).toHaveBeenCalledOnce();
     } finally {
       release();
+      const outcomes = await Promise.allSettled([
+        settleRaceRequest(first, "API-key cleanup reservation"),
+        ...(secondRequest ? [settleRaceRequest(secondRequest, "API-key active result")] : []),
+      ]);
+      const failure = outcomes.find((outcome) => outcome.status === "rejected");
+      if (failure?.status === "rejected") throw failure.reason;
     }
-  });
+  }, 15_000);
 
   it("surfaces manual guidance when no cleanup claim can be saved", async () => {
     const { orchestrator, plugfn, store, workspaceId } = await fixture();
