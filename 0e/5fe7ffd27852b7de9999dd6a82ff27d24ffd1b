@@ -1,0 +1,22 @@
+apps/web/src/lib/server/cloudflare-runtime.test.ts
+  h_a39f9495f9ec1d 34,50-53,75-76
+docs/provider-catalog-v1.md
+  h_a39f9495f9ec1d 38
+packages/connections/src/remote.test.ts
+  h_a39f9495f9ec1d 1-46
+packages/connections/src/remote.ts
+  h_a39f9495f9ec1d 1,17,20-32
+tests/acceptance/catalog-parity.test.ts
+  h_a39f9495f9ec1d 30,43,105-120
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0e5fe7ffd27852b7de9999dd6a82ff27d24ffd1b",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
