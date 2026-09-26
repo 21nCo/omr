@@ -31,6 +31,14 @@ describe("connection HTTP projection", () => {
     expect((await publicConnections(authority, "user_owner", workspace.id,
       [{ ...second, cleanupOnly: true }]))[0])
       .toMatchObject({ selected: false, cleanupOnly: true, label: "Former member github account" });
+    const claim = `provider_cleanup_pending:${crypto.randomUUID()}`;
+    const pending = await authority.revokeIfNotRevoked("user_owner", first.id, claim);
+    expect(pending?.healthReason).toBe(claim);
+    for (const project of [publicConnections, publicConnectionsAfterMutation]) {
+      const view = await project(authority, "user_owner", workspace.id, [pending!]);
+      expect(view[0]?.healthReason).toBe("provider_cleanup_pending");
+      expect(JSON.stringify(view)).not.toContain(claim);
+    }
     await authority.revoke("user_owner", second.id);
     expect((await publicConnections(authority, "user_owner", workspace.id,
       await authority.listAvailable({ actorUserId: "user_owner", workspaceId: workspace.id })))

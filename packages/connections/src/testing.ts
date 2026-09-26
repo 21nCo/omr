@@ -10,6 +10,7 @@ import {
   type ConnectionBindingStore,
   type ConnectionSelectionRecord,
   type ConditionalRevokeInput,
+  type FinalizeCleanupClaimInput,
   type RevokeConnectionInput,
   type SelectConnectionInput,
 } from "./connections.js";
@@ -249,6 +250,15 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     for (const [key, selection] of this.selections) {
       if (selection.connectionId === connection.id) this.selections.delete(key);
     }
+    return structuredClone(connection);
+  }
+
+  /** Complete only the committed cleanup claim; membership changes cannot erase its result. */
+  async finalizeCleanupClaim(input: FinalizeCleanupClaimInput): Promise<ConnectionBindingRecord | null> {
+    const connection = this.connections.get(input.connectionId);
+    if (!connection || connection.status !== "revoked" || connection.healthReason !== input.claim) return null;
+    connection.healthReason = input.reason ?? null;
+    connection.updatedAt = input.now;
     return structuredClone(connection);
   }
 

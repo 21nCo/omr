@@ -33,3 +33,23 @@ export async function waitForRaceBarrier(
 export async function settleRaceRequest(request: Promise<unknown>, step: string): Promise<void> {
   await raceStep(request.then(() => undefined, () => undefined), `${step} request after release`);
 }
+
+/** Run every teardown step while retaining a failed assertion as the primary error. */
+export async function finishRaceTest(primary: unknown, steps: Array<() => Promise<unknown>>): Promise<void> {
+  const failures: unknown[] = [];
+  for (const step of steps) {
+    try {
+      await step();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length === 0) return;
+  const teardown = new AggregateError(failures, "Race test teardown failed");
+  if (primary instanceof Error) {
+    primary.cause = primary.cause === undefined
+      ? teardown : new AggregateError([primary.cause, teardown], "Race test secondary failures");
+    return;
+  }
+  throw teardown;
+}

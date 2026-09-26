@@ -52,7 +52,10 @@ async function projectConnections(
     label: binding.cleanupOnly ? `Former member ${binding.provider} account` : binding.label,
     status: binding.status,
     readiness: binding.readiness,
-    healthReason: binding.healthReason,
+    // The claim suffix fences a server-side cleanup write; clients need only
+    // the pending state for guidance and must not receive that claim value.
+    healthReason: binding.healthReason?.startsWith("provider_cleanup_pending:")
+      ? "provider_cleanup_pending" : binding.healthReason,
     lastCheckedAt: binding.lastCheckedAt,
     revokedAt: binding.revokedAt,
     createdAt: binding.createdAt,

@@ -54,6 +54,13 @@ export type ConditionalRevokeInput = RevokeConnectionInput & (
   | { expectedStatus: ConnectionLifecycleStatus; expectedReason: string | null }
 );
 
+export interface FinalizeCleanupClaimInput {
+  connectionId: string;
+  claim: string;
+  reason?: string;
+  now: number;
+}
+
 export interface AuthorizeConnectionInstallInput {
   actorUserId: string;
   workspaceId: string;
@@ -99,6 +106,7 @@ export interface ConnectionBindingStore {
   select(input: SelectConnectionInput): Promise<ConnectionSelectionRecord>;
   revoke(input: RevokeConnectionInput): Promise<ConnectionBindingRecord>;
   revokeIf(input: ConditionalRevokeInput): Promise<ConnectionBindingRecord | null>;
+  finalizeCleanupClaim(input: FinalizeCleanupClaimInput): Promise<ConnectionBindingRecord | null>;
   recordHealth(input: {
     connectionId: string;
     status: ConnectionLifecycleStatus;
@@ -417,6 +425,20 @@ export class ConnectionAuthority {
     assertId(connectionId);
     if (reason.length > 240) throw new ConnectionInputError("Revocation reason must not exceed 240 characters");
     return this.store.revokeIf({ actorUserId, connectionId, expectedStatus: "not_revoked", reason, now: this.now() });
+  }
+
+  /** Persist an outcome for a previously authorized, unguessable cleanup claim. */
+  async finalizeCleanupClaim(
+    connectionId: string,
+    claim: string,
+    reason?: string,
+  ): Promise<ConnectionBindingRecord | null> {
+    assertId(connectionId);
+    if (!/^provider_cleanup_pending:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(claim)) {
+      throw new ConnectionInputError("Invalid cleanup claim");
+    }
+    if (reason && reason.length > 240) throw new ConnectionInputError("Revocation reason must not exceed 240 characters");
+    return this.store.finalizeCleanupClaim({ connectionId, claim, reason, now: this.now() });
   }
 
   /** Update a live binding while leaving revocation terminal. */

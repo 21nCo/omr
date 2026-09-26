@@ -10,7 +10,7 @@ import {
   type PlugFnConnectionPort,
 } from "./plugfn.js";
 import { MemoryConnectionBindingStore } from "./testing.js";
-import { raceStep, settleRaceRequest, waitForRaceBarrier } from "../test-support/race-test-barrier.js";
+import { finishRaceTest, raceStep, settleRaceRequest, waitForRaceBarrier } from "../test-support/race-test-barrier.js";
 
 /** Create deterministic provider and workspace state without external accounts. */
 async function fixture() {
@@ -135,13 +135,13 @@ describe("PlugFn connection orchestration", () => {
     const binding = await authority.attach({ actorUserId: "user_member", workspaceId,
       provider: "linear", providerConnectionId: "remote_orphan_retry", ownership: "personal", label: "Former" });
     expect(workspaceStore.removeMembership(workspaceId, "user_member")).toBe(true);
-    const revokeIf = store.revokeIf.bind(store);
+    const finalize = store.finalizeCleanupClaim.bind(store);
     let finalizationAttempts = 0;
-    vi.spyOn(store, "revokeIf").mockImplementation(async (input) => {
-      if (input.expectedReason?.startsWith("provider_cleanup_pending:") && ++finalizationAttempts === 1) {
+    vi.spyOn(store, "finalizeCleanupClaim").mockImplementation(async (input) => {
+      if (++finalizationAttempts === 1) {
         throw new Error("fixture transient write failure");
       }
-      return revokeIf(input);
+      return finalize(input);
     });
     await expect(orchestrator.disconnect("user_admin", binding.id)).resolves.toMatchObject({
       connection: { status: "revoked", readiness: "unavailable",
@@ -508,6 +508,7 @@ describe("PlugFn connection orchestration", () => {
           provider, ownership: "personal", apiKey: "key-secret", label: "Account" });
       const first = connect();
       let secondRequest: ReturnType<typeof connect> | undefined;
+      let primaryError: unknown;
       try {
         await waitForRaceBarrier(waiting, first, `${mode} ${firstStatus} cleanup claim`);
         secondRequest = connect();
@@ -522,14 +523,19 @@ describe("PlugFn connection orchestration", () => {
           .resolves.toMatchObject({ id: binding.id, providerConnectionId: active.id });
         expect(store.selections.size).toBe(1);
         expect(plugfn.methods.disconnect).not.toHaveBeenCalled();
+      } catch (error) {
+        primaryError = error;
+        throw error;
       } finally {
         release();
-        const outcomes = await Promise.allSettled([
-          settleRaceRequest(first, `${mode} ${firstStatus} cleanup`),
-          ...(secondRequest ? [settleRaceRequest(secondRequest, `${mode} active connect`)] : []),
-        ]);
-        const failure = outcomes.find((outcome) => outcome.status === "rejected");
-        if (failure?.status === "rejected") throw failure.reason;
+        await finishRaceTest(primaryError, [async () => {
+          const outcomes = await Promise.allSettled([
+            settleRaceRequest(first, `${mode} ${firstStatus} cleanup`),
+            ...(secondRequest ? [settleRaceRequest(secondRequest, `${mode} active connect`)] : []),
+          ]);
+          const failure = outcomes.find((outcome) => outcome.status === "rejected");
+          if (failure?.status === "rejected") throw failure.reason;
+        }]);
       }
     }, 15_000);
   }
@@ -554,6 +560,7 @@ describe("PlugFn connection orchestration", () => {
       provider: "linear", ownership: "personal", apiKey: "key-secret", label: "Account" });
     const first = connect();
     let secondRequest: ReturnType<typeof connect> | undefined;
+    let primaryError: unknown;
     try {
       await waitForRaceBarrier(waiting, first, "API-key cleanup reservation disconnect");
       secondRequest = connect();
@@ -567,14 +574,19 @@ describe("PlugFn connection orchestration", () => {
       await expect(authority.resolve({ actorUserId: "user_owner", workspaceId, provider: "linear" }))
         .rejects.toBeInstanceOf(ConnectionUnavailableError);
       expect(plugfn.methods.disconnect).toHaveBeenCalledOnce();
+    } catch (error) {
+      primaryError = error;
+      throw error;
     } finally {
       release();
-      const outcomes = await Promise.allSettled([
-        settleRaceRequest(first, "API-key cleanup reservation"),
-        ...(secondRequest ? [settleRaceRequest(secondRequest, "API-key active result")] : []),
-      ]);
-      const failure = outcomes.find((outcome) => outcome.status === "rejected");
-      if (failure?.status === "rejected") throw failure.reason;
+      await finishRaceTest(primaryError, [async () => {
+        const outcomes = await Promise.allSettled([
+          settleRaceRequest(first, "API-key cleanup reservation"),
+          ...(secondRequest ? [settleRaceRequest(secondRequest, "API-key active result")] : []),
+        ]);
+        const failure = outcomes.find((outcome) => outcome.status === "rejected");
+        if (failure?.status === "rejected") throw failure.reason;
+      }]);
     }
   }, 15_000);
 
@@ -863,13 +875,13 @@ describe("PlugFn connection orchestration", () => {
       provider: "linear", connectionId: binding.id });
     plugfn.methods.disconnect.mockResolvedValueOnce({ disconnected: true, remoteRevokeAttempted: true,
       remoteRevokeSucceeded: false, localDeleted: true, connectionDeleted: true });
-    const revokeIf = store.revokeIf.bind(store);
+    const finalize = store.finalizeCleanupClaim.bind(store);
     let finalizationAttempts = 0;
-    vi.spyOn(store, "revokeIf").mockImplementation(async (input) => {
-      if (input.expectedReason?.startsWith("provider_cleanup_pending:") && ++finalizationAttempts === 1) {
+    vi.spyOn(store, "finalizeCleanupClaim").mockImplementation(async (input) => {
+      if (++finalizationAttempts === 1) {
         throw new Error("fixture transient write failure");
       }
-      return revokeIf(input);
+      return finalize(input);
     });
 
     await expect(orchestrator.disconnect("user_owner", binding.id)).resolves.toMatchObject({
@@ -887,11 +899,11 @@ describe("PlugFn connection orchestration", () => {
     const { authority, orchestrator, plugfn, store, workspaceId } = await fixture();
     const binding = await authority.attach({ actorUserId: "user_owner", workspaceId,
       provider: "linear", providerConnectionId: "remote_ack", ownership: "workspace", label: "Ack" });
-    const revokeIf = store.revokeIf.bind(store);
+    const finalize = store.finalizeCleanupClaim.bind(store);
     let lost = false;
-    vi.spyOn(store, "revokeIf").mockImplementation(async (input) => {
-      const result = await revokeIf(input);
-      if (!lost && input.expectedReason?.startsWith("provider_cleanup_pending:")) {
+    vi.spyOn(store, "finalizeCleanupClaim").mockImplementation(async (input) => {
+      const result = await finalize(input);
+      if (!lost) {
         lost = true;
         throw new Error("fixture acknowledgement lost after commit");
       }
@@ -911,14 +923,11 @@ describe("PlugFn connection orchestration", () => {
       provider: "linear", providerConnectionId: "remote_persistent", ownership: "workspace", label: "Persistent" });
     await authority.select({ actorUserId: "user_member", workspaceId,
       provider: "linear", connectionId: binding.id });
-    const revokeIf = store.revokeIf.bind(store);
+    const finalize = store.finalizeCleanupClaim.bind(store);
     let finalizationAttempts = 0;
-    const spy = vi.spyOn(store, "revokeIf").mockImplementation(async (input) => {
-      if (input.expectedReason?.startsWith("provider_cleanup_pending:")) {
-        finalizationAttempts += 1;
-        throw new Error("fixture persistent write failure");
-      }
-      return revokeIf(input);
+    const spy = vi.spyOn(store, "finalizeCleanupClaim").mockImplementation(async () => {
+      finalizationAttempts += 1;
+      throw new Error("fixture persistent write failure");
     });
 
     await expect(orchestrator.disconnect("user_owner", binding.id))
@@ -1001,4 +1010,95 @@ describe("PlugFn connection orchestration", () => {
       status: "needs_reauth", readiness: "unavailable", healthReason: "refresh_failed",
     });
   });
+});
+
+describe("claim-scoped provider cleanup", () => {
+  for (const scenario of [
+    { name: "team OAuth success after removal", actor: "user_admin", ownership: "workspace",
+      provider: "github", change: "remove", remoteSucceeded: true, connectionDeleted: true, reason: null },
+    { name: "team API-key failure after demotion", actor: "user_admin", ownership: "workspace",
+      provider: "linear", change: "demote", remoteSucceeded: false, connectionDeleted: false,
+      reason: "remote_revoke_failed" },
+    { name: "team OAuth failure after removal", actor: "user_admin", ownership: "workspace",
+      provider: "github", change: "remove", remoteSucceeded: false, connectionDeleted: true,
+      reason: "remote_revocation_unavailable" },
+    { name: "personal API-key success after removal", actor: "user_member", ownership: "personal",
+      provider: "linear", change: "remove", remoteSucceeded: true, connectionDeleted: true, reason: null },
+  ] as const) {
+    it(`persists ${scenario.name} without disclosing the binding`, async () => {
+      const { authority, orchestrator, plugfn, store, workspaceStore, workspaceId } = await fixture();
+      const binding = await authority.attach({ actorUserId: scenario.actor, workspaceId,
+        provider: scenario.provider, providerConnectionId: `remote_${scenario.name.replaceAll(" ", "_")}`,
+        ownership: scenario.ownership, label: "Cleanup" });
+      await authority.select({ actorUserId: scenario.actor, workspaceId,
+        provider: scenario.provider, connectionId: binding.id });
+      let entered!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => { entered = resolve; });
+      const paused = new Promise<void>((resolve) => { release = resolve; });
+      plugfn.methods.disconnect.mockImplementationOnce(async () => {
+        entered();
+        await paused;
+        return { disconnected: scenario.connectionDeleted, remoteRevokeAttempted: true,
+          remoteRevokeSucceeded: scenario.remoteSucceeded, localDeleted: scenario.connectionDeleted,
+          connectionDeleted: scenario.connectionDeleted };
+      });
+      const request = orchestrator.disconnect(scenario.actor, binding.id);
+      let primaryError: unknown;
+      try {
+        await waitForRaceBarrier(started, request, `${scenario.name} provider call`);
+        const pending = store.connections.get(binding.id)?.healthReason;
+        expect(pending).toMatch(/^provider_cleanup_pending:/);
+        expect(store.selections.size).toBe(0);
+        if (scenario.change === "remove") {
+          expect(workspaceStore.removeMembership(workspaceId, scenario.actor)).toBe(true);
+        } else {
+          const membership = [...workspaceStore.memberships.values()].find((row) =>
+            row.workspaceId === workspaceId && row.userId === scenario.actor);
+          expect(membership).toBeDefined();
+          membership!.role = "member";
+        }
+        await expect(authority.revokeIf(scenario.actor, binding.id, "revoked", pending!, "stale"))
+          .rejects.toBeInstanceOf(ConnectionAccessDeniedError);
+        release();
+        await expect(request).rejects.toBeInstanceOf(ConnectionAccessDeniedError);
+        expect(store.connections.get(binding.id)).toMatchObject({ status: "revoked",
+          readiness: "unavailable", healthReason: scenario.reason });
+        await expect(authority.finalizeCleanupClaim(binding.id, pending!)).resolves.toBeNull();
+        await expect(authority.resolve({ actorUserId: "user_owner", workspaceId,
+          provider: scenario.provider, connectionId: binding.id }))
+          .rejects.toBeInstanceOf(ConnectionAccessDeniedError);
+        expect(store.selections.size).toBe(0);
+      } catch (error) {
+        primaryError = error;
+        throw error;
+      } finally {
+        release();
+        await finishRaceTest(primaryError, [() => settleRaceRequest(request, `${scenario.name} disconnect`)]);
+      }
+    });
+  }
+
+  it("keeps a body assertion primary when released work also times out", async () => {
+    const primary = new Error("sentinel body assertion");
+    const closed = vi.fn(async () => undefined);
+    let caught: unknown;
+    try {
+      try {
+        throw primary;
+      } catch (error) {
+        throw error;
+      } finally {
+        await finishRaceTest(primary, [
+          () => raceStep(new Promise<void>(() => undefined), "forced settle"), closed,
+        ]);
+      }
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBe(primary);
+    expect(((primary.cause as AggregateError).errors[0] as Error).message)
+      .toContain("forced settle did not complete");
+    expect(closed).toHaveBeenCalledOnce();
+  }, 5_000);
 });

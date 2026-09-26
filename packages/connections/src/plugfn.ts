@@ -522,22 +522,23 @@ export class PlugFnConnectionOrchestrator {
     return { connection, provider: safeProvider };
   }
 
-  /** Retry a failed outcome write under the same claim; a null result means another claim won. */
+  /** Retry a failed outcome write under the same claim, then recheck response access. */
   private async finalizeCleanup(
     actorUserId: string,
     connectionId: string,
     pending: string,
     reason?: string,
   ): Promise<ConnectionBindingRecord> {
-    let connection: ConnectionBindingRecord | null;
     try {
-      connection = await this.authority.revokeIf(actorUserId, connectionId, "revoked", pending, reason);
+      await this.authority.finalizeCleanupClaim(connectionId, pending, reason);
     } catch {
       // The first write may have failed before commit, or after commit with a
       // lost acknowledgement. The same conditional claim is safe in both cases.
-      connection = await this.authority.revokeIf(actorUserId, connectionId, "revoked", pending, reason);
+      await this.authority.finalizeCleanupClaim(connectionId, pending, reason);
     }
-    return connection ?? this.authority.getRevocable(actorUserId, connectionId);
+    // Membership may have changed during provider I/O. The claim may finish,
+    // but its former actor must not receive a now-inaccessible binding.
+    return this.authority.getRevocable(actorUserId, connectionId);
   }
 
   /** Reuse duplicate results or retain a failed attach as revoked cleanup state. */

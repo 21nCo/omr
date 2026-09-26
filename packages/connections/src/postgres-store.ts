@@ -13,6 +13,7 @@ import {
   type ConnectionReadiness,
   type ConnectionSelectionRecord,
   type ConditionalRevokeInput,
+  type FinalizeCleanupClaimInput,
   type RevokeConnectionInput,
   type SelectConnectionInput,
 } from "./connections.js";
@@ -393,6 +394,18 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
       await this.client.query("ROLLBACK");
       throw error;
     }
+  }
+
+  /** Commit a provider outcome only if its previously authorized claim still owns the row. */
+  async finalizeCleanupClaim(input: FinalizeCleanupClaimInput): Promise<ConnectionBindingRecord | null> {
+    const result = await this.client.query<ConnectionRow>(
+      `UPDATE omr_control.connection_bindings
+       SET health_reason = $3, updated_at = $4
+       WHERE id = $1 AND status = 'revoked' AND health_reason = $2
+       RETURNING ${CONNECTION_COLUMNS}`,
+      [input.connectionId, input.claim, input.reason ?? null, input.now],
+    );
+    return result.rows[0] ? toConnection(result.rows[0]) : null;
   }
 
   /** Reject late health updates after a binding has been revoked. */
