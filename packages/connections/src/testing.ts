@@ -58,6 +58,18 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     ) {
       throw new ConnectionAccessDeniedError();
     }
+    return this.save(input);
+  }
+
+  /** Keep a revoked retry handle even when membership changed after provider setup. */
+  async attachForCleanup(input: AttachConnectionInput): Promise<ConnectionBindingRecord> {
+    if (input.connection.status !== "revoked" || input.connection.readiness !== "unavailable" ||
+        input.connection.installedBy !== input.actorUserId) throw new ConnectionAccessDeniedError();
+    return this.save(input);
+  }
+
+  /** Enforce remote-handle uniqueness for normal and cleanup bindings. */
+  private save(input: AttachConnectionInput): ConnectionBindingRecord {
     const duplicate = [...this.connections.values()].some(
       (connection) =>
         connection.workspaceId === input.connection.workspaceId &&

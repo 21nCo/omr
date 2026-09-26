@@ -150,6 +150,35 @@ describe("PlugFn connection orchestration", () => {
     expect(plugfn.methods.disconnect).not.toHaveBeenCalled();
   });
 
+  it("lets only a returning personal owner retry orphan provider cleanup", async () => {
+    const { authority, orchestrator, plugfn, store, workspaceStore, workspaceId } = await fixture();
+    const binding = await authority.attach({ actorUserId: "user_member", workspaceId,
+      provider: "linear", providerConnectionId: "remote_returning", ownership: "personal", label: "Former" });
+    await authority.select({ actorUserId: "user_member", workspaceId,
+      provider: "linear", connectionId: binding.id });
+    expect(workspaceStore.removeMembership(workspaceId, "user_member")).toBe(true);
+    await orchestrator.disconnect("user_admin", binding.id);
+    const workspaces = new WorkspaceAuthority(workspaceStore);
+    const invite = await workspaces.inviteMember({ actorUserId: "user_owner", workspaceId,
+      email: "user_member@example.com", role: "member" });
+    await workspaces.acceptInvitation({ token: invite.token, userId: "user_member",
+      email: "user_member@example.com", emailVerified: true });
+    await expect(orchestrator.disconnect("user_admin", binding.id))
+      .rejects.toBeInstanceOf(ConnectionAccessDeniedError);
+    plugfn.methods.disconnect.mockRejectedValueOnce(new Error("provider secret"));
+    await expect(orchestrator.disconnect("user_member", binding.id)).resolves.toMatchObject({
+      connection: { status: "revoked", readiness: "unavailable", healthReason: "remote_revoke_failed" },
+    });
+    expect(plugfn.methods.disconnect).toHaveBeenCalledTimes(1);
+    expect(store.selections.size).toBe(0);
+    await expect(authority.resolve({ actorUserId: "user_member", workspaceId, provider: "linear" }))
+      .rejects.toBeInstanceOf(ConnectionUnavailableError);
+    await expect(orchestrator.refresh("user_member", binding.id))
+      .rejects.toBeInstanceOf(ConnectionUnavailableError);
+    await orchestrator.disconnect("user_member", binding.id);
+    expect(store.connections.get(binding.id)).toMatchObject({ status: "revoked", healthReason: null });
+  });
+
   it("keeps old healthy bindings visible but ineligible when support or config is removed", async () => {
     const { authority, orchestrator, plugfn, workspaceId } = await fixture();
     const github = await authority.attach({ actorUserId: "user_owner", workspaceId,
@@ -339,8 +368,123 @@ describe("PlugFn connection orchestration", () => {
     await expect(orchestrator.connectApiKey({ actorUserId: "user_owner", workspaceId,
       provider: "linear", ownership: "workspace", apiKey: "secret", label: "Linear" }))
       .rejects.toMatchObject({ code: "CONNECTION_PROVIDER_FAILED", operation: "api_key" });
-    expect(store.connections.size).toBe(0);
+    expect([...store.connections.values()]).toEqual([expect.objectContaining({
+      status: "revoked", readiness: "unavailable", providerConnectionId: "plug_connection",
+    })]);
     expect(plugfn.methods.disconnect).toHaveBeenCalledOnce();
+  });
+
+  for (const mode of ["oauth", "api_key"] as const) {
+    it(`retains an inactive ${mode} remote handle after failed cleanup for an owner retry`, async () => {
+      const { authority, orchestrator, plugfn, store, workspaceId } = await fixture();
+      const remote = plugfn.connection({ provider: mode === "oauth" ? "github" : "linear",
+        status: "expired", ownerKind: "user", ownerId: "user_owner", tenantId: workspaceId,
+        organizationId: undefined });
+      if (mode === "oauth") plugfn.methods.handleCallback.mockResolvedValueOnce({ connection: remote });
+      else plugfn.methods.connect.mockResolvedValueOnce(remote);
+      plugfn.methods.disconnect.mockRejectedValueOnce(new Error("provider secret"));
+      const attempt = mode === "oauth"
+        ? orchestrator.completeOAuth({ actorUserId: "user_owner", workspaceId,
+          provider: "github", ownership: "personal", code: "code", state: "state", label: "GitHub" })
+        : orchestrator.connectApiKey({ actorUserId: "user_owner", workspaceId,
+          provider: "linear", ownership: "personal", apiKey: "secret", label: "Linear" });
+      await expect(attempt).rejects.toMatchObject({ code: "CONNECTION_PROVIDER_FAILED" });
+      const [record] = [...store.connections.values()];
+      expect(record).toMatchObject({ providerConnectionId: remote.id, status: "revoked",
+        readiness: "unavailable", healthReason: "remote_revoke_failed" });
+      expect(JSON.stringify(record)).not.toContain("secret");
+      await expect(authority.resolve({ actorUserId: "user_owner", workspaceId,
+        provider: remote.provider })).rejects.toBeInstanceOf(ConnectionUnavailableError);
+      await expect(orchestrator.disconnect("user_member", record!.id))
+        .rejects.toBeInstanceOf(ConnectionAccessDeniedError);
+      await orchestrator.disconnect("user_owner", record!.id);
+      expect(store.connections.get(record!.id)?.healthReason)
+        .toBe(mode === "oauth" ? "remote_revocation_unavailable" : null);
+      expect(plugfn.methods.disconnect).toHaveBeenCalledTimes(2);
+    });
+  }
+
+  it("records an attach failure for cleanup before a rejected provider deletion", async () => {
+    const { orchestrator, plugfn, store, workspaceId } = await fixture();
+    plugfn.methods.connect.mockResolvedValueOnce(plugfn.connection({
+      ownerKind: "user", ownerId: "user_owner", tenantId: workspaceId, organizationId: undefined,
+    }));
+    const attach = store.attach.bind(store);
+    let first = true;
+    vi.spyOn(store, "attach").mockImplementation(async (input) => {
+      if (first) { first = false; throw new Error("transient attach failure"); }
+      return attach(input);
+    });
+    plugfn.methods.disconnect.mockRejectedValueOnce(new Error("provider secret"));
+    await expect(orchestrator.connectApiKey({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", ownership: "personal", apiKey: "secret", label: "Linear" }))
+      .rejects.toMatchObject({ code: "CONNECTION_PROVIDER_FAILED", operation: "binding" });
+    expect([...store.connections.values()]).toEqual([expect.objectContaining({
+      status: "revoked", readiness: "unavailable", healthReason: "remote_revoke_failed",
+    })]);
+  });
+
+  it("reuses a duplicate callback binding without deleting its live remote account", async () => {
+    const { authority, orchestrator, plugfn, store, workspaceId } = await fixture();
+    const existing = await authority.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "github", providerConnectionId: "plug_connection", ownership: "personal", label: "Existing" });
+    plugfn.methods.handleCallback.mockResolvedValueOnce({ connection: plugfn.connection({
+      provider: "github", ownerKind: "user", ownerId: "user_owner",
+      tenantId: workspaceId, organizationId: undefined,
+    }) });
+    await expect(orchestrator.completeOAuth({ actorUserId: "user_owner", workspaceId,
+      provider: "github", ownership: "personal", code: "duplicate", state: "state", label: "GitHub" }))
+      .resolves.toMatchObject({ connection: { id: existing.id, status: "active" } });
+    expect(store.connections.size).toBe(1);
+    expect(plugfn.methods.disconnect).not.toHaveBeenCalled();
+  });
+
+  it("revokes an existing binding when a repeated result reports that remote account inactive", async () => {
+    const { authority, orchestrator, plugfn, store, workspaceId } = await fixture();
+    const existing = await authority.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", providerConnectionId: "plug_connection", ownership: "personal", label: "Existing" });
+    await authority.select({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", connectionId: existing.id });
+    plugfn.methods.connect.mockResolvedValueOnce(plugfn.connection({ status: "expired",
+      ownerKind: "user", ownerId: "user_owner", tenantId: workspaceId, organizationId: undefined }));
+    await expect(orchestrator.connectApiKey({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", ownership: "personal", apiKey: "secret", label: "Linear" }))
+      .rejects.toMatchObject({ code: "CONNECTION_PROVIDER_FAILED" });
+    expect(store.connections.get(existing.id)).toMatchObject({ status: "revoked", readiness: "unavailable" });
+    expect(store.selections.size).toBe(0);
+    expect(plugfn.methods.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it("surfaces an untracked cleanup failure when durable storage and provider deletion both fail", async () => {
+    const { orchestrator, plugfn, store, workspaceId } = await fixture();
+    plugfn.methods.connect.mockResolvedValueOnce(plugfn.connection({ status: "expired",
+      ownerKind: "user", ownerId: "user_owner", tenantId: workspaceId, organizationId: undefined }));
+    vi.spyOn(store, "attach").mockRejectedValue(new Error("database secret"));
+    vi.spyOn(store, "attachForCleanup").mockRejectedValue(new Error("database secret"));
+    plugfn.methods.disconnect.mockRejectedValueOnce(new Error("provider secret"));
+    await expect(orchestrator.connectApiKey({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", ownership: "personal", apiKey: "secret", label: "Linear" }))
+      .rejects.toMatchObject({ code: "CONNECTION_CLEANUP_UNTRACKED",
+        message: "Provider cleanup could not be confirmed or saved. Revoke this connection in the provider account." });
+    expect(plugfn.methods.disconnect).toHaveBeenCalledOnce();
+    expect(store.connections.size).toBe(0);
+  });
+
+  it("retains cleanup state if a member leaves after PlugFn accepts the credential", async () => {
+    const { orchestrator, plugfn, store, workspaceStore, workspaceId } = await fixture();
+    plugfn.methods.connect.mockImplementationOnce(async () => {
+      expect(workspaceStore.removeMembership(workspaceId, "user_member")).toBe(true);
+      return plugfn.connection({ status: "expired", userId: "user_member", ownerKind: "user",
+        ownerId: "user_member", tenantId: workspaceId, organizationId: undefined });
+    });
+    await expect(orchestrator.connectApiKey({ actorUserId: "user_member", workspaceId,
+      provider: "linear", ownership: "personal", apiKey: "secret", label: "Member" }))
+      .rejects.toMatchObject({ code: "CONNECTION_PROVIDER_FAILED" });
+    expect([...store.connections.values()]).toEqual([expect.objectContaining({
+      status: "revoked", readiness: "unavailable", providerConnectionId: "plug_connection",
+      healthReason: "provider_cleanup_failed",
+    })]);
+    expect(plugfn.methods.disconnect).not.toHaveBeenCalled();
   });
 
   it("updates health and never lets another member probe a personal connection", async () => {

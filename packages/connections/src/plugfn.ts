@@ -112,15 +112,24 @@ export class ProviderUnavailableError extends Error {
 
 export class ConnectionProviderOperationError extends Error {
   readonly code = "CONNECTION_PROVIDER_FAILED";
-  constructor(readonly operation: "oauth_start" | "oauth_callback" | "api_key" | "health" | "refresh") {
+  constructor(readonly operation: "oauth_start" | "oauth_callback" | "api_key" | "binding" | "health" | "refresh") {
     super({
       oauth_start: "Could not start provider authorization. Check provider setup and try again.",
       oauth_callback: "Provider authorization failed. Start a new connection.",
       api_key: "The provider rejected this API key. Check the key and its permissions.",
+      binding: "Could not save this account. Check the disconnected account for provider cleanup retry.",
       health: "Could not check provider health. Try again later.",
       refresh: "Could not refresh this account. Reconnect it to restore access.",
     }[operation]);
     this.name = "ConnectionProviderOperationError";
+  }
+}
+
+export class ConnectionCleanupUntrackedError extends Error {
+  readonly code = "CONNECTION_CLEANUP_UNTRACKED";
+  constructor() {
+    super("Provider cleanup could not be confirmed or saved. Revoke this connection in the provider account.");
+    this.name = "ConnectionCleanupUntrackedError";
   }
 }
 
@@ -170,9 +179,12 @@ function actorFor(input: {
     : { userId: input.actorUserId, tenantId: input.workspaceId };
 }
 
-/** A pending cleanup claim is reclaimable only after its server lease expires. */
-function canClaimCleanup(binding: ConnectionBindingRecord, now: number): boolean {
+/** Allow failed cleanup retries, stale claims, and a returning personal owner's first claim. */
+function canClaimCleanup(binding: ConnectionBindingRecord, actorUserId: string, now: number): boolean {
   if (binding.status !== "revoked") return true;
+  if (binding.healthReason === "provider_cleanup_requires_owner") {
+    return binding.ownership === "personal" && binding.ownerUserId === actorUserId;
+  }
   if (binding.healthReason === "remote_revoke_failed" || binding.healthReason === "provider_cleanup_failed") return true;
   const pending = binding.healthReason === "provider_cleanup_pending" ||
     binding.healthReason?.startsWith("provider_cleanup_pending:");
@@ -328,8 +340,8 @@ export class PlugFnConnectionOrchestrator {
     }).catch(() => { throw new ConnectionProviderOperationError("oauth_callback"); });
     assertConnectionOwner(result.connection, owner, provider);
     if (result.connection.status !== "active") {
-      await this.plugfn.connections.disconnect({ userId: input.actorUserId, provider,
-        connectionId: result.connection.id, owner, actor }).catch(() => undefined);
+      await this.cleanUpUnusableResult({ ...input, provider, label,
+        plugFnConnection: result.connection, owner, actor });
       throw new ConnectionProviderOperationError("oauth_callback");
     }
     const connection = await this.attachOrCleanUp({
@@ -373,8 +385,8 @@ export class PlugFnConnectionOrchestrator {
     }).catch(() => { throw new ConnectionProviderOperationError("api_key"); });
     assertConnectionOwner(plugFnConnection, owner, provider);
     if (plugFnConnection.status !== "active") {
-      await this.plugfn.connections.disconnect({ userId: input.actorUserId, provider,
-        connectionId: plugFnConnection.id, owner, actor }).catch(() => undefined);
+      await this.cleanUpUnusableResult({ ...input, provider, label,
+        plugFnConnection, owner, actor });
       throw new ConnectionProviderOperationError("api_key");
     }
     return this.attachOrCleanUp({
@@ -454,7 +466,7 @@ export class PlugFnConnectionOrchestrator {
     // The conditional transition serializes retries across Worker instances.
     // It also removes local use and selections before any provider call.
     let claimed: ConnectionBindingRecord | null = null;
-    if (canClaimCleanup(binding, this.authority.currentTime())) {
+    if (canClaimCleanup(binding, actorUserId, this.authority.currentTime())) {
       claimed = binding.status === "revoked"
         ? await this.authority.revokeIf(actorUserId, connectionId, "revoked", binding.healthReason, pending)
         : await this.authority.revokeIfNotRevoked(actorUserId, connectionId, pending);
@@ -528,7 +540,7 @@ export class PlugFnConnectionOrchestrator {
     return connection ?? this.authority.getRevocable(actorUserId, connectionId);
   }
 
-  /** Delete an upstream result if local binding persistence fails. */
+  /** Reuse duplicate results or retain a failed attach as revoked cleanup state. */
   private async attachOrCleanUp(input: {
     actorUserId: string;
     workspaceId: string;
@@ -548,15 +560,66 @@ export class PlugFnConnectionOrchestrator {
         ownership: input.ownership,
         label: input.label,
       });
-    } catch (error) {
-      await this.plugfn.connections.disconnect({
-        userId: input.actorUserId,
-        provider: input.provider,
-        connectionId: input.plugFnConnection.id,
-        owner: input.owner,
-        actor: input.actor,
-      }).catch(() => undefined);
-      throw error;
+    } catch {
+      const existing = await this.findVisibleRemoteBinding(input);
+      if (existing && existing.status !== "revoked") return existing;
+      await this.cleanUpUnusableResult(input);
+      throw new ConnectionProviderOperationError("binding");
     }
+  }
+
+  /** Reuse an existing visible binding when a repeated callback returns the same remote account. */
+  private async findVisibleRemoteBinding(input: {
+    actorUserId: string;
+    workspaceId: string;
+    provider: string;
+    plugFnConnection: PlugFnConnection;
+  }): Promise<ConnectionBindingRecord | undefined> {
+    const visible = await this.authority.listAvailable({ actorUserId: input.actorUserId,
+      workspaceId: input.workspaceId, provider: input.provider }).catch(() => []);
+    return visible.find((binding) => binding.providerConnectionId === input.plugFnConnection.id);
+  }
+
+  /** Persist the remote handle as revoked before attempting cleanup so retries survive interruption. */
+  private async cleanUpUnusableResult(input: {
+    actorUserId: string;
+    workspaceId: string;
+    provider: string;
+    ownership: ConnectionOwnership;
+    label: string;
+    plugFnConnection: PlugFnConnection;
+    owner: PlugFnOwner;
+    actor: PlugFnActor;
+  }): Promise<void> {
+    let record: ConnectionBindingRecord;
+    try {
+      record = await this.authority.attachForCleanup({
+        actorUserId: input.actorUserId,
+        workspaceId: input.workspaceId,
+        provider: input.provider,
+        providerConnectionId: input.plugFnConnection.id,
+        ownership: input.ownership,
+        label: input.label,
+      });
+    } catch {
+      const existing = await this.findVisibleRemoteBinding(input);
+      if (existing) {
+        await this.disconnect(input.actorUserId, existing.id);
+        return;
+      }
+      // Storage may be unavailable or authorization may have changed since the
+      // remote call. Attempt deletion, and never represent failure as success.
+      const deleted = await this.plugfn.connections.disconnect({
+        userId: input.actorUserId, provider: input.provider,
+        connectionId: input.plugFnConnection.id, owner: input.owner, actor: input.actor,
+      }).then((result) => result.connectionDeleted, () => false);
+      if (!deleted) throw new ConnectionCleanupUntrackedError();
+      throw new ConnectionProviderOperationError(
+        this.plugfn.providers.get(input.provider)?.auth.type === "oauth2" ? "oauth_callback" : "api_key",
+      );
+    }
+    // A membership can disappear after PlugFn returns. The committed record is
+    // still available for an authorized owner or orphan cleanup retry.
+    await this.disconnect(input.actorUserId, record.id).catch(() => undefined);
   }
 }

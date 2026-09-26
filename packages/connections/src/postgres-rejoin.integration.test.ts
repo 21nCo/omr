@@ -1,8 +1,9 @@
 import { Client } from "pg";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { PostgresWorkspaceStore } from "@oh-my-router/identity/postgres";
 
 import { PostgresConnectionBindingStore } from "./postgres-store.js";
+import { ConnectionAuthority } from "./connections.js";
 
 const connectionString = process.env.OMR_TEST_DATABASE_URL;
 const describePostgres = connectionString ? describe : describe.skip;
@@ -66,31 +67,97 @@ function pauseAfterQuery(client: Client, matches: (sql: string, params: unknown[
   return { atBarrier, release };
 }
 
-/** Distinguish a blocked transaction from one that completed before lock release. */
-async function remainsPending(operation: Promise<unknown>): Promise<boolean> {
-  return Promise.race([
-    operation.then(() => false, () => false),
-    new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 100)),
-  ]);
+/** Observe PostgreSQL's lock wait instead of assuming a fixed runner speed. */
+async function expectLockWait(observer: Client, blockedPid: number): Promise<void> {
+  await vi.waitFor(async () => {
+    const result = await observer.query<{ wait_event_type: string | null }>(
+      `SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1`, [blockedPid],
+    );
+    expect(result.rows[0]?.wait_event_type).toBe("Lock");
+  }, { timeout: 5_000, interval: 20 });
 }
 
 describePostgres("orphan cleanup and membership rejoin serialization", () => {
+  it("durably records an inactive remote handle after the initiating member departs", async () => {
+    const seed = new Client({ connectionString: connectionString! });
+    const cleanupClient = new Client({ connectionString: connectionString! });
+    await Promise.all([seed.connect(), cleanupClient.connect()]);
+    const state = await fixture(seed);
+    const authority = new ConnectionAuthority(new PostgresConnectionBindingStore(cleanupClient), () => state.now);
+    try {
+      const record = await authority.attachForCleanup({ actorUserId: "returning_member",
+        workspaceId: state.workspaceId, provider: "linear", ownership: "personal",
+        providerConnectionId: `inactive_${state.suffix}`, label: "Inactive" });
+      expect(record).toMatchObject({ status: "revoked", readiness: "unavailable",
+        healthReason: "provider_cleanup_failed" });
+      const persisted = await seed.query(
+        `SELECT provider_connection_id, status, readiness, health_reason FROM omr_control.connection_bindings WHERE id = $1`,
+        [record.id],
+      );
+      expect(persisted.rows[0]).toMatchObject({ provider_connection_id: `inactive_${state.suffix}`,
+        status: "revoked", readiness: "unavailable", health_reason: "provider_cleanup_failed" });
+    } finally {
+      await seed.query(`DELETE FROM omr_control.workspaces WHERE id = $1`, [state.workspaceId]);
+      await Promise.all([seed.end(), cleanupClient.end()]);
+    }
+  }, 15_000);
+
+  it("lets a rejoined owner claim cleanup while keeping admins and selections out", async () => {
+    const seed = new Client({ connectionString: connectionString! });
+    const cleanupClient = new Client({ connectionString: connectionString! });
+    const invitationClient = new Client({ connectionString: connectionString! });
+    await Promise.all([seed.connect(), cleanupClient.connect(), invitationClient.connect()]);
+    const state = await fixture(seed);
+    const connections = new PostgresConnectionBindingStore(cleanupClient);
+    const workspaces = new PostgresWorkspaceStore(invitationClient);
+    try {
+      await expect(connections.revokeIf({ actorUserId: "workspace_admin", connectionId: state.connectionId,
+        expectedStatus: "not_revoked", reason: "provider_cleanup_requires_owner", now: state.now }))
+        .resolves.toMatchObject({ status: "revoked", readiness: "unavailable" });
+      await workspaces.acceptInvitation({ tokenHash: state.tokenHash,
+        userId: "returning_member", email: "returning@example.com",
+        membershipId: `membership_returning_${state.suffix}`, now: state.now });
+      await expect(connections.revokeIf({ actorUserId: "workspace_admin", connectionId: state.connectionId,
+        expectedStatus: "revoked", expectedReason: "provider_cleanup_requires_owner",
+        reason: "provider_cleanup_pending:admin", now: state.now }))
+        .rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+      await expect(connections.revokeIf({ actorUserId: "returning_member", connectionId: state.connectionId,
+        expectedStatus: "revoked", expectedReason: "provider_cleanup_requires_owner",
+        reason: "provider_cleanup_pending:owner", now: state.now }))
+        .resolves.toMatchObject({ status: "revoked", readiness: "unavailable",
+          healthReason: "provider_cleanup_pending:owner" });
+      await expect(connections.revokeIf({ actorUserId: "returning_member", connectionId: state.connectionId,
+        expectedStatus: "revoked", expectedReason: "provider_cleanup_requires_owner",
+        reason: "provider_cleanup_pending:second", now: state.now }))
+        .resolves.toBeNull();
+      const stateAfter = await seed.query(
+        `SELECT status, readiness,
+           (SELECT count(*) FROM omr_control.connection_selections WHERE connection_id = $1) AS selections
+         FROM omr_control.connection_bindings WHERE id = $1`, [state.connectionId],
+      );
+      expect(stateAfter.rows[0]).toMatchObject({ status: "revoked", readiness: "unavailable", selections: "0" });
+    } finally {
+      await seed.query(`DELETE FROM omr_control.workspaces WHERE id = $1`, [state.workspaceId]);
+      await Promise.all([seed.end(), cleanupClient.end(), invitationClient.end()]);
+    }
+  }, 15_000);
+
   it("keeps the revocation preflight advisory while the mutation waits for the workspace lock", async () => {
     const seed = new Client({ connectionString: connectionString! });
     const lockClient = new Client({ connectionString: connectionString! });
     const cleanupClient = new Client({ connectionString: connectionString! });
     await Promise.all([seed.connect(), lockClient.connect(), cleanupClient.connect()]);
     const state = await fixture(seed);
+    const cleanupPid = (await cleanupClient.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
     const connections = new PostgresConnectionBindingStore(cleanupClient);
     await lockClient.query("BEGIN");
     await lockClient.query(`SELECT id FROM omr_control.workspaces WHERE id = $1 FOR UPDATE`, [state.workspaceId]);
     const preflight = connections.getRevocable({ actorUserId: "workspace_admin", connectionId: state.connectionId });
     let cleanup: Promise<unknown> | undefined;
     try {
-      expect(await remainsPending(preflight)).toBe(false);
       await expect(preflight).resolves.toMatchObject({ status: "active" });
       cleanup = connections.revoke({ actorUserId: "workspace_admin", connectionId: state.connectionId, now: state.now });
-      expect(await remainsPending(cleanup)).toBe(true);
+      await expectLockWait(seed, cleanupPid);
       await lockClient.query("COMMIT");
       await expect(cleanup).resolves.toMatchObject({ status: "revoked", readiness: "unavailable" });
     } finally {
@@ -109,6 +176,7 @@ describePostgres("orphan cleanup and membership rejoin serialization", () => {
       const invitationClient = new Client({ connectionString: connectionString! });
       await Promise.all([seed.connect(), cleanupClient.connect(), invitationClient.connect()]);
       const state = await fixture(seed);
+      const invitationPid = (await invitationClient.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
       const barrier = pauseAfterQuery(cleanupClient, (sql, params) =>
         sql.includes("FROM omr_control.workspace_memberships") && params[1] === "returning_member");
       const connections = new PostgresConnectionBindingStore(cleanupClient);
@@ -124,7 +192,7 @@ describePostgres("orphan cleanup and membership rejoin serialization", () => {
           userId: "returning_member", email: "returning@example.com",
           membershipId: `membership_returning_${state.suffix}`, now: state.now });
         try {
-          expect(await remainsPending(rejoin)).toBe(true);
+          await expectLockWait(seed, invitationPid);
         } finally {
           barrier.release();
         }
@@ -152,6 +220,7 @@ describePostgres("orphan cleanup and membership rejoin serialization", () => {
       const invitationClient = new Client({ connectionString: connectionString! });
       await Promise.all([seed.connect(), cleanupClient.connect(), invitationClient.connect()]);
       const state = await fixture(seed);
+      const cleanupPid = (await cleanupClient.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
       const barrier = pauseAfterQuery(invitationClient, (sql) =>
         sql.includes("INSERT INTO omr_control.workspace_memberships"));
       const connections = new PostgresConnectionBindingStore(cleanupClient);
@@ -167,7 +236,7 @@ describePostgres("orphan cleanup and membership rejoin serialization", () => {
           : connections.revokeIf({ actorUserId: "workspace_admin", connectionId: state.connectionId,
             expectedStatus: "not_revoked", reason: "provider_cleanup_pending:test", now: state.now });
         try {
-          expect(await remainsPending(cleanup)).toBe(true);
+          await expectLockWait(seed, cleanupPid);
         } finally {
           barrier.release();
         }

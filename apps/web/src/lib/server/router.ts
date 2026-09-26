@@ -20,6 +20,7 @@ import {
   ConnectionSelectionRequiredError,
   ConnectionUnavailableError,
   ConnectionProviderOperationError,
+  ConnectionCleanupUntrackedError,
   ProviderUnavailableError,
   type ConnectionOwnership,
 } from "@oh-my-router/connections";
@@ -352,6 +353,10 @@ export function createOMRRouter(
       if (error instanceof ConnectionProviderOperationError) {
         return Response.json({ error: error.code, message: error.message, operation: error.operation },
           { status: 502, headers: PRIVATE_RESPONSE });
+      }
+      if (error instanceof ConnectionCleanupUntrackedError) {
+        return Response.json({ error: error.code, message: error.message },
+          { status: 503, headers: PRIVATE_RESPONSE });
       }
       if (error instanceof RuntimeUnavailableError) {
         return Response.json({ error: error.code }, { status: 503 });

@@ -94,17 +94,25 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
 
   /** Persist a binding after checking install authority in the same transaction. */
   async attach(input: AttachConnectionInput): Promise<ConnectionBindingRecord> {
+    return this.insertBinding(input, false);
+  }
+
+  /** Retain a revoked remote handle even if the initiating membership has since ended. */
+  async attachForCleanup(input: AttachConnectionInput): Promise<ConnectionBindingRecord> {
+    if (input.connection.status !== "revoked" || input.connection.readiness !== "unavailable" ||
+        input.connection.installedBy !== input.actorUserId) throw new ConnectionAccessDeniedError();
+    return this.insertBinding(input, true);
+  }
+
+  /** Persist either a live binding or a cleanup-only record atomically. */
+  private async insertBinding(input: AttachConnectionInput, cleanupOnly: boolean): Promise<ConnectionBindingRecord> {
     await this.client.query("BEGIN");
     try {
-      const role = await this.membershipRole(
-        input.connection.workspaceId,
-        input.actorUserId,
-      );
-      if (
-        !role ||
-        (input.connection.ownership === "workspace" && role !== "owner" && role !== "admin")
-      ) {
-        throw new ConnectionAccessDeniedError();
+      if (!cleanupOnly) {
+        const role = await this.membershipRole(input.connection.workspaceId, input.actorUserId);
+        if (!role || (input.connection.ownership === "workspace" && role !== "owner" && role !== "admin")) {
+          throw new ConnectionAccessDeniedError();
+        }
       }
       const c = input.connection;
       const result = await this.client.query<ConnectionRow>(

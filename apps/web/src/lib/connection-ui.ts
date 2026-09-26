@@ -12,8 +12,9 @@ export interface ConnectionDisplay {
 }
 
 /** Explain terminal provider cleanup using the provider's authentication mode. */
-export function providerRevocationGuidance(reason: string | null, authMode: string | null): string | null {
+export function providerRevocationGuidance(reason: string | null, authMode: string | null, ownerCanRetry = false): string | null {
   if (reason === "provider_cleanup_requires_owner") {
+    if (ownerCanRetry) return "OMR access was removed. You can retry provider cleanup now; this account will remain unavailable.";
     if (authMode === "api_key") return "OMR access was removed. Ask the former member to delete or rotate the API key in their provider account; an admin cannot revoke their personal key through OMR.";
     if (authMode === "oauth") return "OMR access was removed. Ask the former member to revoke the OAuth grant in their provider account; an admin cannot revoke their personal grant through OMR.";
     return "OMR access was removed. Ask the former member to remove this connection in their provider account.";
@@ -54,6 +55,8 @@ export function connectionActions(
     canRetryRevoke: !active && manageable && connection.status === "revoked" &&
       (connection.healthReason === "remote_revoke_failed" ||
         connection.healthReason === "provider_cleanup_failed" ||
+        (connection.healthReason === "provider_cleanup_requires_owner" &&
+          connection.ownership === "personal" && connection.ownerUserId === actorUserId) ||
         ((connection.healthReason === "provider_cleanup_pending" ||
           connection.healthReason?.startsWith("provider_cleanup_pending:") === true) &&
           connection.updatedAt !== undefined && now - connection.updatedAt > 60_000)),

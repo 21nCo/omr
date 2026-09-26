@@ -115,7 +115,9 @@
 
   function revocationGuidance(connection: Connection): string | null {
     return providerRevocationGuidance(connection.healthReason,
-      catalog?.providers.find((entry) => entry.provider === connection.provider)?.authMode ?? null);
+      catalog?.providers.find((entry) => entry.provider === connection.provider)?.authMode ?? null,
+      connection.healthReason === "provider_cleanup_requires_owner" &&
+        connection.ownerUserId === overview?.actor.id && actions(connection, clockNow).canRetryRevoke);
   }
 
 

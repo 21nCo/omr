@@ -68,6 +68,7 @@ export interface AccessConnectionInput {
 export interface ConnectionBindingStore {
   authorizeInstall(input: AuthorizeConnectionInstallInput): Promise<void>;
   attach(input: AttachConnectionInput): Promise<ConnectionBindingRecord>;
+  attachForCleanup(input: AttachConnectionInput): Promise<ConnectionBindingRecord>;
   getAccessible(input: AccessConnectionInput): Promise<ConnectionBindingRecord>;
   getManageable(input: AccessConnectionInput): Promise<ConnectionBindingRecord>;
   getRevocable(input: AccessConnectionInput): Promise<ConnectionBindingRecord>;
@@ -184,6 +185,30 @@ export class ConnectionAuthority {
     ownership: ConnectionOwnership;
     label: string;
   }): Promise<ConnectionBindingRecord> {
+    return this.createBinding(input, false);
+  }
+
+  /** Retain a remote handle for cleanup without ever making it usable. */
+  async attachForCleanup(input: {
+    actorUserId: string;
+    workspaceId: string;
+    provider: string;
+    providerConnectionId: string;
+    ownership: ConnectionOwnership;
+    label: string;
+  }): Promise<ConnectionBindingRecord> {
+    return this.createBinding(input, true);
+  }
+
+  /** Build either a usable binding or a revoked cleanup-only record. */
+  private async createBinding(input: {
+    actorUserId: string;
+    workspaceId: string;
+    provider: string;
+    providerConnectionId: string;
+    ownership: ConnectionOwnership;
+    label: string;
+  }, cleanupOnly: boolean): Promise<ConnectionBindingRecord> {
     assertId(input.actorUserId);
     assertId(input.workspaceId);
     assertId(input.providerConnectionId);
@@ -191,7 +216,8 @@ export class ConnectionAuthority {
       throw new ConnectionInputError("Invalid connection ownership");
     }
     const timestamp = this.now();
-    return this.store.attach({
+    const attach = cleanupOnly ? this.store.attachForCleanup.bind(this.store) : this.store.attach.bind(this.store);
+    return attach({
       actorUserId: input.actorUserId,
       connection: {
         id: `connection_${crypto.randomUUID()}`,
@@ -202,11 +228,11 @@ export class ConnectionAuthority {
         ownerUserId: input.ownership === "personal" ? input.actorUserId : null,
         installedBy: input.actorUserId,
         label: normalizeLabel(input.label),
-        status: "active",
-        readiness: "ready",
-        healthReason: null,
-        lastCheckedAt: timestamp,
-        revokedAt: null,
+        status: cleanupOnly ? "revoked" : "active",
+        readiness: cleanupOnly ? "unavailable" : "ready",
+        healthReason: cleanupOnly ? "provider_cleanup_failed" : null,
+        lastCheckedAt: cleanupOnly ? null : timestamp,
+        revokedAt: cleanupOnly ? timestamp : null,
         createdAt: timestamp,
         updatedAt: timestamp,
       },

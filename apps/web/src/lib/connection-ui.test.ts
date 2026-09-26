@@ -65,6 +65,10 @@ describe("connection control UI policy", () => {
     });
     expect(connectionActions({ ...orphan, status: "revoked", healthReason: "provider_cleanup_requires_owner" },
       "user_admin", "admin", "ready").canRetryRevoke).toBe(false);
+    expect(connectionActions({ ...orphan, status: "revoked", healthReason: "provider_cleanup_requires_owner",
+      cleanupOnly: false }, "former_member", "member", "ready").canRetryRevoke).toBe(true);
+    expect(providerRevocationGuidance("provider_cleanup_requires_owner", "api_key", true))
+      .toContain("retry provider cleanup");
     expect(connectionActions(orphan, "user_member", "member", "ready")).toMatchObject({
       canSelect: false, canDisconnect: false,
     });

@@ -66,13 +66,18 @@ admin cannot revoke a former member's upstream grant through the supported
 provider API. Orphan cleanup never impersonates that member. It ends local use
 and selection, marks provider cleanup as owner-required, and tells the admin
 to ask the former member to revoke the OAuth grant or rotate the API key at
-the provider. Normal personal and team disconnects still attempt upstream
+the provider. If that member rejoins, they can retry cleanup as the actual
+personal owner; the revoked binding and removed selection remain unavailable.
+An inactive OAuth or API-key result is retained as a revoked cleanup record
+before remote deletion. Failed remote deletion remains retryable by its owner.
+Normal personal and team disconnects still attempt upstream
 cleanup and retain their retry and terminal guidance paths.
 
 ## Migration and rollback
 
-No database schema migration is needed: the cleanup attempt marker and terminal
-reason use the existing `health_reason` column. This uses the existing
+No database schema migration is needed: the cleanup attempt marker, inactive
+result record, and terminal reason use existing binding state and the
+`health_reason` column. This uses the existing
 `connection_bindings` and `connection_selections` tables from migration 0006.
 Orphan discovery uses the existing membership table and does not copy provider
 credentials into OMR or the browser.
