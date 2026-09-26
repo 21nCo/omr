@@ -1,0 +1,30 @@
+apps/web/src/lib/connection-ui.test.ts
+  h_a39f9495f9ec1d 34-41
+apps/web/src/lib/connection-ui.ts
+  h_a39f9495f9ec1d 21-22
+packages/connections/src/connections.test.ts
+  h_a39f9495f9ec1d 182-194,215
+packages/connections/src/plugfn.test.ts
+  h_a39f9495f9ec1d 105,131-151,446-449,455,504-587
+packages/connections/src/plugfn.ts
+  h_a39f9495f9ec1d 472-473,476,509-528
+packages/connections/src/postgres-store.ts
+  h_a39f9495f9ec1d 85,93,141,152,160,169,208,226,260,278,296,331
+packages/connections/src/postgres.integration.test.ts
+  h_a39f9495f9ec1d 119-146
+packages/connections/src/testing.ts
+  h_a39f9495f9ec1d 36,47,72,86,94,103,137,152,180,187,196,215
+packages/identity/src/testing.ts
+  h_a39f9495f9ec1d 20-30
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "af73599baf0adb9c58b2d5dbbf116256db37f693",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
