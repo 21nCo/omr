@@ -236,6 +236,16 @@ export class ConnectionAuthority {
     });
   }
 
+  async getSelection(input: {
+    actorUserId: string;
+    workspaceId: string;
+    provider: string;
+  }): Promise<ConnectionSelectionRecord | null> {
+    assertId(input.actorUserId);
+    assertId(input.workspaceId);
+    return this.store.getSelection({ ...input, provider: normalizeProvider(input.provider) });
+  }
+
   async resolve(input: {
     actorUserId: string;
     workspaceId: string;

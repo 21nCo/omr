@@ -53,6 +53,9 @@ export function readPendingOAuthConnection(
     return pending as PendingOAuthConnection;
   } catch {
     return null;
+  } finally {
+    // Callback intent is single use even when the provider or server fails.
+    storage.removeItem(key);
   }
 }
 

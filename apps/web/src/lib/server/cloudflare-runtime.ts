@@ -34,6 +34,7 @@ import {
   RequestOriginDeniedError,
 } from "./router.js";
 import { resolveScopedCatalog } from "./scoped-catalog.js";
+import { publicConnections } from "./connection-view.js";
 
 type OMRBindings = Cloudflare.Env & {
   HYPERDRIVE?: { connectionString: string };
@@ -385,11 +386,14 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
     },
     async list(request, input) {
       const principal = await authenticate(event, request, input.workspaceId, "connections:read");
-      return withConnections((orchestrator) => orchestrator.listAvailable({
-        actorUserId: principal.userId,
-        workspaceId: input.workspaceId,
-        ...(input.provider ? { provider: input.provider } : {}),
-      }));
+      return withConnections(async (orchestrator, authority) => publicConnections(
+        authority, principal.userId, input.workspaceId,
+        await orchestrator.listAvailable({
+          actorUserId: principal.userId,
+          workspaceId: input.workspaceId,
+          ...(input.provider ? { provider: input.provider } : {}),
+        }),
+      ));
     },
     async select(request, input) {
       return selectAuthorizedConnection(request, input,
@@ -404,26 +408,43 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
     async completeOAuth(request, input) {
       requireSameOrigin(request);
       const actorUserId = await requireWebUser(event, request);
-      return withConnections((orchestrator) => orchestrator.completeOAuth({ actorUserId, ...input }));
+      return withConnections(async (orchestrator, authority) => {
+        const result = await orchestrator.completeOAuth({ actorUserId, ...input });
+        const [connection] = await publicConnections(authority, actorUserId, input.workspaceId, [result.connection]);
+        return { connection, ...(result.returnTo ? { returnTo: result.returnTo } : {}) };
+      });
     },
     async connectApiKey(request, input) {
       requireSameOrigin(request);
       const actorUserId = await requireWebUser(event, request);
-      return withConnections((orchestrator) => orchestrator.connectApiKey({ actorUserId, ...input }));
+      return withConnections(async (orchestrator, authority) => {
+        const binding = await orchestrator.connectApiKey({ actorUserId, ...input });
+        return (await publicConnections(authority, actorUserId, input.workspaceId, [binding]))[0];
+      });
     },
     async checkHealth(request, connectionId) {
       const principal = await authenticate(event, request, undefined, "connections:read");
-      return withConnections((orchestrator) => orchestrator.checkHealth(principal.userId, connectionId));
+      return withConnections(async (orchestrator, authority) => {
+        const binding = await orchestrator.checkHealth(principal.userId, connectionId);
+        return (await publicConnections(authority, principal.userId, binding.workspaceId, [binding]))[0];
+      });
     },
     async refresh(request, connectionId) {
       requireSameOrigin(request);
       const actorUserId = await requireWebUser(event, request);
-      return withConnections((orchestrator) => orchestrator.refresh(actorUserId, connectionId));
+      return withConnections(async (orchestrator, authority) => {
+        const binding = await orchestrator.refresh(actorUserId, connectionId);
+        return (await publicConnections(authority, actorUserId, binding.workspaceId, [binding]))[0];
+      });
     },
     async disconnect(request, connectionId) {
       requireSameOrigin(request);
       const actorUserId = await requireWebUser(event, request);
-      return withConnections((orchestrator) => orchestrator.disconnect(actorUserId, connectionId));
+      return withConnections(async (orchestrator, authority) => {
+        const result = await orchestrator.disconnect(actorUserId, connectionId);
+        const [connection] = await publicConnections(authority, actorUserId, result.connection.workspaceId, [result.connection]);
+        return { connection, provider: result.provider };
+      });
     },
   };
 
@@ -608,7 +629,9 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
           actor: { id: session.actorId, email: session.primaryEmail ?? null },
           workspaces,
           selectedWorkspaceId: selected.workspace.id,
-          connections: availableConnections,
+          connections: await publicConnections(
+            connections.connections, session.actorId, selected.workspace.id, availableConnections,
+          ),
           approvals,
           executions,
         };

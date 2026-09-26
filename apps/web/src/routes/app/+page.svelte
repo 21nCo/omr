@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { oauthCallbackUri, savePendingOAuthConnection } from "$lib/oauth-connection.js";
+  import { authorizationScopes, connectionActions } from "$lib/connection-ui.js";
   import { createWorkspaceCatalogLoader, providerDisplayState } from "$lib/workspace-catalog.js";
   import { V1_PROVIDERS } from "@oh-my-router/tools";
 
@@ -13,8 +14,11 @@
     provider: string;
     label: string;
     ownership: "personal" | "workspace";
+    ownerUserId: string | null;
     status: string;
     readiness: string;
+    selected: boolean;
+    healthReason: string | null;
     lastCheckedAt: number | null;
   };
   type Approval = {
@@ -68,6 +72,26 @@
   let oauthProvider = "github";
   let oauthLabel = "";
   let oauthOwnership: "personal" | "workspace" = "personal";
+  let credentialProvider = "";
+  let credentialLabel = "";
+  let credentialOwnership: "personal" | "workspace" = "personal";
+  let apiKey = "";
+  let authorizationDestination = "";
+  let authorizationOwnership: "personal" | "workspace" = "personal";
+  let requestedScopes: string[] = [];
+
+  function selectedAccess(): WorkspaceAccess | undefined {
+    return overview?.workspaces.find(({ workspace }) => workspace.id === selectedWorkspaceId);
+  }
+
+  function canInstallShared(): boolean {
+    const role = selectedAccess()?.membership.role;
+    return role === "owner" || role === "admin";
+  }
+
+  function actions(connection: Connection) {
+    return connectionActions(connection, overview?.actor.id ?? "", selectedAccess()?.membership.role ?? "member", providerState(connection.provider));
+  }
 
 
   function timestamp(value: number | null): string {
@@ -105,14 +129,38 @@
       error = state.error;
       if (!catalog) {
         oauthProvider = "";
-      } else if (!catalog.providers.some((item) => item.provider === oauthProvider && item.available)) {
+        credentialProvider = "";
+      } else if (!catalog.providers.some((item) => item.provider === oauthProvider && item.available && item.authMode === "oauth")) {
         oauthProvider = catalog.providers.find((item) => item.available && item.authMode === "oauth")?.provider ?? "";
+      }
+      if (catalog && !catalog.providers.some((item) => item.provider === credentialProvider && item.available && item.authMode === "api_key")) {
+        credentialProvider = catalog.providers.find((item) => item.available && item.authMode === "api_key")?.provider ?? "";
+      }
+      if (!canInstallShared()) {
+        oauthOwnership = "personal";
+        credentialOwnership = "personal";
       }
     },
   );
 
   async function load(workspaceId = selectedWorkspaceId) {
     await loadWorkspace(workspaceId);
+  }
+
+  function cancelAuthorization() {
+    if (authorizationDestination) {
+      const state = new URL(authorizationDestination).searchParams.get("state");
+      if (state) sessionStorage.removeItem(`omr.provider-oauth.${state}`);
+    }
+    authorizationDestination = "";
+    authorizationOwnership = "personal";
+    requestedScopes = [];
+  }
+
+  async function switchWorkspace() {
+    cancelAuthorization();
+    apiKey = "";
+    await load();
   }
 
   async function mutate(name: string, path: string, body: unknown, success: string) {
@@ -140,41 +188,77 @@
     teamName = "";
   }
 
-  async function connectOAuth() {
+  async function connectOAuth(connection?: Connection) {
     busy = "oauth";
     error = "";
     notice = "";
     try {
+      const provider = connection?.provider ?? oauthProvider;
+      const ownership = connection?.ownership ?? oauthOwnership;
       const readiness = await request<{ available: boolean; authMode: string }>(
-        `/api/connections/providers/readiness?provider=${encodeURIComponent(oauthProvider)}&workspaceId=${encodeURIComponent(selectedWorkspaceId)}`,
+        `/api/connections/providers/readiness?provider=${encodeURIComponent(provider)}&workspaceId=${encodeURIComponent(selectedWorkspaceId)}`,
       );
       if (!readiness.available || readiness.authMode !== "oauth") {
-        throw new Error(`${oauthProvider} OAuth is not configured on this OMR environment.`);
+        throw new Error(`${provider} OAuth is not configured on this OMR environment.`);
       }
       const redirectUri = oauthCallbackUri(location.origin);
-      const label = oauthLabel.trim() || catalog?.providers.find((item) => item.provider === oauthProvider)?.displayName || oauthProvider;
+      const label = connection?.label ?? (oauthLabel.trim() || catalog?.providers.find((item) => item.provider === provider)?.displayName || provider);
       const { authUrl } = await request<{ authUrl: string }>("/api/connections/oauth/start", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           workspaceId: selectedWorkspaceId,
-          provider: oauthProvider,
-          ownership: oauthOwnership,
+          provider,
+          ownership,
           label,
           redirectUri,
         }),
       });
-      const destination = savePendingOAuthConnection(sessionStorage, authUrl, {
-        provider: oauthProvider,
+      cancelAuthorization();
+      authorizationDestination = savePendingOAuthConnection(sessionStorage, authUrl, {
+        provider,
         workspaceId: selectedWorkspaceId,
-        ownership: oauthOwnership,
+        ownership,
         label,
         redirectUri,
         createdAt: Date.now(),
       });
-      location.assign(destination);
+      authorizationOwnership = ownership;
+      requestedScopes = authorizationScopes(authorizationDestination);
     } catch (caught) {
       error = caught instanceof Error ? caught.message : "Could not start provider authorization";
+      busy = "";
+    }
+  }
+
+  async function connectCredential() {
+    const key = apiKey;
+    apiKey = "";
+    await mutate("credential", "/api/connections/api-key", {
+      workspaceId: selectedWorkspaceId, provider: credentialProvider,
+      ownership: credentialOwnership, label: credentialLabel.trim() || credentialProvider,
+      apiKey: key,
+    }, `Connected ${credentialProvider}.`);
+  }
+
+  async function disconnect(connection: Connection) {
+    busy = `disconnect:${connection.id}`;
+    error = "";
+    notice = "";
+    try {
+      const result = await request<{ provider: { disconnected: boolean; remoteRevokeSucceeded: boolean; remoteRevokeAttempted: boolean } }>(
+        "/api/connections/disconnect", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ connectionId: connection.id }),
+        },
+      );
+      notice = !result.provider.disconnected || (result.provider.remoteRevokeAttempted && !result.provider.remoteRevokeSucceeded)
+        ? "OMR access was removed. Provider revocation failed; retry provider cleanup or revoke the grant at the provider."
+        : `Disconnected ${connection.label}.`;
+      await load();
+    } catch (caught) {
+      error = caught instanceof Error ? caught.message : "Could not disconnect the account";
+    } finally {
       busy = "";
     }
   }
@@ -232,7 +316,7 @@
       </div>
       <div class="workspace-picker">
         <label for="workspace">Workspace</label>
-        <select id="workspace" bind:value={selectedWorkspaceId} onchange={() => void load()} disabled={loading}>
+        <select id="workspace" bind:value={selectedWorkspaceId} onchange={() => void switchWorkspace()} disabled={loading}>
           {#each overview?.workspaces ?? [] as access}
             <option value={access.workspace.id}>{access.workspace.name} · {access.membership.role}</option>
           {/each}
@@ -256,14 +340,19 @@
         <section class="panel connections">
           <div class="panel-heading">
             <div><p class="kicker">Providers</p><h2>Connections</h2></div>
-            <span>{overview.connections.length} active records</span>
+            <span>{overview.connections.filter((item) => item.status !== "revoked").length} connected accounts</span>
           </div>
+
+          <p>Personal accounts are visible only to you. Team accounts are available to workspace members; only owners and admins can connect, refresh, or disconnect them.</p>
 
           <div class="rows" role="region" aria-label="v1 provider catalog">
             {#each catalog?.providers ?? [] as entry}
               <article class="row">
                 <div class="provider-mark">{entry.provider.slice(0, 2).toUpperCase()}</div>
-                <div class="grow"><strong>{entry.displayName}</strong><span>{entry.actionCount} registered actions</span></div>
+                <div class="grow"><strong>{entry.displayName}</strong><span>{entry.actionCount} registered actions · {entry.authMode === "oauth" ? "OAuth" : entry.authMode === "api_key" ? "API key" : entry.authMode}</span>
+                  {#if entry.state === "unconfigured"}<span>Setup required: configure this provider’s client ID, client secret, and callback URL on the server.</span>{/if}
+                  {#if entry.state === "expired"}<span>One or more accounts need a health check, refresh, or reconnect.</span>{/if}
+                </div>
                 <span class:ready={entry.state === "ready"} class="status">{entry.state}</span>
               </article>
             {/each}
@@ -277,28 +366,37 @@
                   <div class="provider-mark">{connection.provider.slice(0, 2).toUpperCase()}</div>
                   <div class="grow">
                     <strong>{connection.label}</strong>
-                    <span>{connection.provider} · {connection.ownership}</span>
+                    <span>{connection.provider} · {connection.ownership === "personal" ? "Personal · only you" : "Team · shared with members"}
+                      {#if connection.selected} · Selected for your actions{/if}
+                    </span>
+                    <span>Last checked {timestamp(connection.lastCheckedAt)}{connection.healthReason ? ` · ${connection.healthReason.replaceAll("_", " ")}` : ""}</span>
                   </div>
-                  <span class:ready={providerState(connection.provider) === "ready" && connection.readiness === "ready"} class="status">{providerState(connection.provider) === "ready" ? connection.readiness : providerState(connection.provider)}</span>
-                  {#if providerState(connection.provider) === "ready" && connection.status === "active" && connection.readiness === "ready"}
+                  <span class:ready={actions(connection).canSelect} class="status">{connection.status === "revoked" ? "disconnected" : providerState(connection.provider) === "ready" ? connection.readiness : providerState(connection.provider)}</span>
+                  {#if actions(connection).canSelect}
                     <button
                       class="quiet compact"
-                      disabled={Boolean(busy)}
+                      disabled={Boolean(busy) || connection.selected}
                       onclick={() => void mutate(`select:${connection.id}`, "/api/connections/select", {
                         workspaceId: selectedWorkspaceId, provider: connection.provider, connectionId: connection.id,
                       }, `Selected ${connection.label} for ${connection.provider}.`)}
-                    >Select connection</button>
+                    >{connection.selected ? "Selected" : "Select account"}</button>
                   {/if}
-                  <button
+                  {#if actions(connection).canCheck}<button
                     class="quiet compact"
                     disabled={Boolean(busy)}
                     onclick={() => void mutate(`health:${connection.id}`, "/api/connections/health", { connectionId: connection.id }, `Checked ${connection.label}.`)}
-                  >Check</button>
-                  <button
+                  >Check health</button>{/if}
+                  {#if actions(connection).canRefresh}<button class="quiet compact" disabled={Boolean(busy)}
+                    onclick={() => void mutate(`refresh:${connection.id}`, "/api/connections/refresh", { connectionId: connection.id }, `Refreshed ${connection.label}.`)}>Refresh</button>{/if}
+                  {#if actions(connection).canReconnect}<button class="quiet compact" disabled={Boolean(busy)}
+                    onclick={() => connection.provider && catalog?.providers.find((entry) => entry.provider === connection.provider)?.authMode === "oauth"
+                      ? void connectOAuth(connection)
+                      : (credentialProvider = connection.provider, credentialOwnership = connection.ownership, credentialLabel = connection.label, notice = "Enter a new API key below to reconnect.")}>Reconnect</button>{/if}
+                  {#if actions(connection).canDisconnect || (actions(connection).canRetryRevoke && (connection.healthReason === "remote_revoke_failed" || connection.healthReason === "provider_cleanup_failed" || connection.healthReason === "provider_cleanup_pending"))}<button
                     class="danger compact"
                     disabled={Boolean(busy)}
-                    onclick={() => void mutate(`disconnect:${connection.id}`, "/api/connections/disconnect", { connectionId: connection.id }, `Disconnected ${connection.label}.`)}
-                  >Disconnect</button>
+                    onclick={() => void disconnect(connection)}
+                  >{connection.status === "revoked" ? "Retry provider revocation" : "Disconnect"}</button>{/if}
                 </article>
               {/each}
             </div>
@@ -317,17 +415,37 @@
                 </select>
               </label>
               <label>Ownership
-                <select bind:value={oauthOwnership}><option value="personal">Personal</option><option value="workspace">Workspace</option></select>
+                <select bind:value={oauthOwnership}><option value="personal">Personal · only me</option>{#if canInstallShared()}<option value="workspace">Team · all members</option>{/if}</select>
               </label>
               <label>Label<input bind:value={oauthLabel} placeholder="Engineering GitHub" maxlength="120" /></label>
             </div>
-            {#if oauthProvider === "github"}
-              <p>GitHub starts with read-only profile access. Private repository tools need a broader grant and are unavailable in this flow.</p>
-            {/if}
+            <p>OMR shows the exact scopes from the provider authorization URL before you leave. Review the provider consent screen before granting access. GitHub starts with <code>read:user</code>; repository tools require a separate broader grant.</p>
             <button class="primary" type="submit" disabled={Boolean(busy) || !selectedWorkspaceId || !oauthProvider}>
               {busy === "oauth" ? "Opening provider…" : "Continue to provider"}
             </button>
           </form>
+          {#if authorizationDestination}
+            <div class="inset" role="region" aria-label="Review provider access">
+              <strong>Review requested access</strong>
+              <p>{new URL(authorizationDestination).hostname} will receive a {authorizationOwnership === "personal" ? "personal" : "team"} connection.</p>
+              {#if requestedScopes.length}<p>Requested scopes: {requestedScopes.join(", ")}</p>
+              {:else}<p>No named scopes appear in this authorization URL. Confirm the permissions on the provider consent screen.</p>{/if}
+              <button class="primary compact" onclick={() => location.assign(authorizationDestination)}>Continue to provider</button>
+              <button class="quiet compact" onclick={cancelAuthorization}>Cancel</button>
+            </div>
+          {/if}
+          {#if catalog?.providers.some((item) => item.available && item.authMode === "api_key")}
+            <form class="inset" onsubmit={(event) => { event.preventDefault(); void connectCredential(); }}>
+              <div class="form-heading"><strong>Connect with API key</strong><span>Sent directly to the server; the key is cleared from this form after submission.</span></div>
+              <div class="form-grid">
+                <label>Provider<select bind:value={credentialProvider}>{#each catalog.providers.filter((item) => item.available && item.authMode === "api_key") as entry}<option value={entry.provider}>{entry.displayName}</option>{/each}</select></label>
+                <label>Ownership<select bind:value={credentialOwnership}><option value="personal">Personal · only me</option>{#if canInstallShared()}<option value="workspace">Team · all members</option>{/if}</select></label>
+                <label>Label<input bind:value={credentialLabel} maxlength="120" /></label>
+                <label>API key<input type="password" bind:value={apiKey} autocomplete="off" required /></label>
+              </div>
+              <button class="primary" type="submit" disabled={Boolean(busy) || !credentialProvider || !apiKey}>Connect key</button>
+            </form>
+          {/if}
         </section>
 
         <section class="panel approvals">

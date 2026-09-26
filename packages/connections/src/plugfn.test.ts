@@ -266,6 +266,28 @@ describe("PlugFn connection orchestration", () => {
     }));
   });
 
+  it("rejects failed callbacks without binding a remote account or exposing provider text", async () => {
+    const { orchestrator, plugfn, store, workspaceId } = await fixture();
+    plugfn.methods.handleCallback.mockRejectedValueOnce(new Error("token=secret-from-provider"));
+    await expect(orchestrator.completeOAuth({ actorUserId: "user_owner", workspaceId,
+      provider: "github", ownership: "personal", code: "failed", state: "state", label: "GitHub" }))
+      .rejects.toMatchObject({ code: "CONNECTION_PROVIDER_FAILED", operation: "oauth_callback",
+        message: "Provider authorization failed. Start a new connection." });
+    expect(store.connections.size).toBe(0);
+  });
+
+  it("cleans up an inactive credential result instead of exposing it as ready", async () => {
+    const { orchestrator, plugfn, store, workspaceId } = await fixture();
+    plugfn.methods.connect.mockResolvedValueOnce(plugfn.connection({
+      status: "expired", ownerId: workspaceId, organizationId: workspaceId, tenantId: workspaceId,
+    }));
+    await expect(orchestrator.connectApiKey({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", ownership: "workspace", apiKey: "secret", label: "Linear" }))
+      .rejects.toMatchObject({ code: "CONNECTION_PROVIDER_FAILED", operation: "api_key" });
+    expect(store.connections.size).toBe(0);
+    expect(plugfn.methods.disconnect).toHaveBeenCalledOnce();
+  });
+
   it("updates health and never lets another member probe a personal connection", async () => {
     const { authority, orchestrator, plugfn, workspaceId } = await fixture();
     const personal = await authority.attach({
@@ -355,5 +377,47 @@ describe("PlugFn connection orchestration", () => {
     expect(plugfn.methods.disconnect).toHaveBeenCalledWith(expect.objectContaining({
       actor: expect.objectContaining({ organizationId: workspaceId, roles: ["org:admin"] }),
     }));
+  });
+
+  it("stops local use before waiting for remote revocation and redacts its error", async () => {
+    const { authority, orchestrator, plugfn, store, workspaceId } = await fixture();
+    const binding = await authority.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", providerConnectionId: "remote_interrupt", ownership: "personal", label: "Interrupt" });
+    await authority.select({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", connectionId: binding.id });
+    let failRemote!: (error: Error) => void;
+    plugfn.methods.disconnect.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      failRemote = reject;
+    }));
+    const pending = orchestrator.disconnect("user_owner", binding.id);
+    await vi.waitFor(() => expect(plugfn.methods.disconnect).toHaveBeenCalledTimes(1));
+    expect(store.connections.get(binding.id)).toMatchObject({ status: "revoked", readiness: "unavailable",
+      healthReason: "provider_cleanup_pending" });
+    expect(store.selections.size).toBe(0);
+    await expect(authority.resolve({ actorUserId: "user_owner", workspaceId, provider: "linear" }))
+      .rejects.toBeInstanceOf(ConnectionUnavailableError);
+    failRemote(new Error("secret provider response"));
+    const result = await pending;
+    expect(result.connection).toMatchObject({ status: "revoked", healthReason: "remote_revoke_failed" });
+    expect(JSON.stringify(result)).not.toContain("secret provider response");
+    plugfn.methods.disconnect.mockResolvedValueOnce({
+      disconnected: true, remoteRevokeAttempted: true, remoteRevokeSucceeded: true,
+      localDeleted: true, connectionDeleted: true,
+    });
+    await expect(orchestrator.disconnect("user_owner", binding.id)).resolves.toMatchObject({
+      connection: { status: "revoked", healthReason: null },
+      provider: { remoteRevokeSucceeded: true },
+    });
+  });
+
+  it("does not mark an expired refresh result ready", async () => {
+    const { authority, orchestrator, plugfn, workspaceId } = await fixture();
+    const binding = await authority.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", providerConnectionId: "plug_expired", ownership: "personal", label: "Expired" });
+    plugfn.methods.refresh.mockResolvedValueOnce(plugfn.connection({ id: "plug_expired", status: "expired" }));
+    await expect(orchestrator.refresh("user_owner", binding.id)).rejects.toBeInstanceOf(ConnectionUnavailableError);
+    await expect(authority.getAccessible("user_owner", binding.id)).resolves.toMatchObject({
+      status: "needs_reauth", readiness: "unavailable", healthReason: "refresh_failed",
+    });
   });
 });

@@ -241,14 +241,14 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
       const role = await this.membershipRole(connection.workspace_id, input.actorUserId);
       const authorized =
         connection.ownership === "personal"
-          ? connection.owner_user_id === input.actorUserId
+          ? Boolean(role) && connection.owner_user_id === input.actorUserId
           : role === "owner" || role === "admin";
       if (!authorized) throw new ConnectionAccessDeniedError();
 
       const updated = await this.client.query<ConnectionRow>(
         `UPDATE omr_control.connection_bindings
          SET status = 'revoked', readiness = 'unavailable',
-             health_reason = COALESCE($2, health_reason),
+             health_reason = $2,
              revoked_at = COALESCE(revoked_at, $1), updated_at = $1
          WHERE id = $3
          RETURNING ${CONNECTION_COLUMNS}`,

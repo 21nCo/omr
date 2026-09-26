@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { ClientAccessDeniedError, DeviceAuthorizationError } from "@oh-my-router/client-access";
+import { ConnectionProviderOperationError } from "@oh-my-router/connections";
 import { ExecutionApprovalRequiredError } from "@oh-my-router/execution";
 
 import {
@@ -166,6 +167,7 @@ describe("OMR Worker HTTP boundary", () => {
     ));
 
     expect(overview.status).toBe(200);
+    expect(overview.headers.get("cache-control")).toBe("no-store");
     expect(created.status).toBe(201);
     expect(grants.status).toBe(200);
     expect(grants.headers.get("cache-control")).toBe("no-store");
@@ -310,6 +312,7 @@ describe("OMR Worker HTTP boundary", () => {
       operation: "readiness", input: { provider: "linear", workspaceId: "workspace_1" },
     });
     expect(apiKey.status).toBe(201);
+    expect(apiKey.headers.get("cache-control")).toBe("no-store");
     expect(health.status).toBe(200);
     expect(selection.status).toBe(200);
     expect(invalidSelection.status).toBe(400);
@@ -322,6 +325,25 @@ describe("OMR Worker HTTP boundary", () => {
       input: expect.objectContaining({ apiKey: "[redacted]" }),
     });
     expect(JSON.stringify(calls)).not.toContain("lin_secret");
+  });
+
+  it("returns a safe action for callback failure and keeps provider text out of the response", async () => {
+    const services = {
+      async completeOAuth() {
+        throw new ConnectionProviderOperationError("oauth_callback");
+      },
+    } as unknown as ConnectionRouteServices;
+    const response = await createOMRRouter(undefined, services).handle(new Request(
+      "https://omr.invalid/api/connections/oauth/callback", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId: "workspace_1", provider: "github", ownership: "personal",
+          code: "secret-code", state: "state", label: "GitHub" }),
+      },
+    ));
+    expect(response.status).toBe(502);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    await expect(response.json()).resolves.toEqual({ error: "CONNECTION_PROVIDER_FAILED",
+      operation: "oauth_callback", message: "Provider authorization failed. Start a new connection." });
   });
 
   it("projects versioned tool discovery and manifest routes", async () => {

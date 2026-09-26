@@ -110,6 +110,20 @@ export class ProviderUnavailableError extends Error {
   }
 }
 
+export class ConnectionProviderOperationError extends Error {
+  readonly code = "CONNECTION_PROVIDER_FAILED";
+  constructor(readonly operation: "oauth_start" | "oauth_callback" | "api_key" | "health" | "refresh") {
+    super({
+      oauth_start: "Could not start provider authorization. Check provider setup and try again.",
+      oauth_callback: "Provider authorization failed. Start a new connection.",
+      api_key: "The provider rejected this API key. Check the key and its permissions.",
+      health: "Could not check provider health. Try again later.",
+      refresh: "Could not refresh this account. Reconnect it to restore access.",
+    }[operation]);
+    this.name = "ConnectionProviderOperationError";
+  }
+}
+
 const PROVIDER = /^[a-z0-9][a-z0-9_-]{0,79}$/;
 
 function normalizeProvider(value: string): string {
@@ -256,7 +270,7 @@ export class PlugFnConnectionOrchestrator {
       ...(input.returnTo ? { returnTo: input.returnTo } : {}),
       ...(input.prompt ? { prompt: input.prompt } : {}),
       ...(input.loginHint ? { loginHint: input.loginHint } : {}),
-    });
+    }).catch(() => { throw new ConnectionProviderOperationError("oauth_start"); });
     return { authUrl };
   }
 
@@ -284,8 +298,13 @@ export class PlugFnConnectionOrchestrator {
       expectedOwner: owner,
       actor,
       ...(input.redirectUri ? { redirectUri: input.redirectUri } : {}),
-    });
+    }).catch(() => { throw new ConnectionProviderOperationError("oauth_callback"); });
     assertConnectionOwner(result.connection, owner, provider);
+    if (result.connection.status !== "active") {
+      await this.plugfn.connections.disconnect({ userId: input.actorUserId, provider,
+        connectionId: result.connection.id, owner, actor }).catch(() => undefined);
+      throw new ConnectionProviderOperationError("oauth_callback");
+    }
     const connection = await this.attachOrCleanUp({
       actorUserId: input.actorUserId,
       workspaceId: input.workspaceId,
@@ -323,8 +342,13 @@ export class PlugFnConnectionOrchestrator {
       connectionName: label,
       owner,
       actor,
-    });
+    }).catch(() => { throw new ConnectionProviderOperationError("api_key"); });
     assertConnectionOwner(plugFnConnection, owner, provider);
+    if (plugFnConnection.status !== "active") {
+      await this.plugfn.connections.disconnect({ userId: input.actorUserId, provider,
+        connectionId: plugFnConnection.id, owner, actor }).catch(() => undefined);
+      throw new ConnectionProviderOperationError("api_key");
+    }
     return this.attachOrCleanUp({
       actorUserId: input.actorUserId,
       workspaceId: input.workspaceId,
@@ -340,7 +364,8 @@ export class PlugFnConnectionOrchestrator {
   async checkHealth(actorUserId: string, connectionId: string): Promise<ConnectionBindingRecord> {
     const binding = await this.authority.getAccessible(actorUserId, connectionId);
     if (binding.status === "revoked") throw new ConnectionUnavailableError();
-    const valid = await this.plugfn.connections.isValid(binding.providerConnectionId);
+    const valid = await this.plugfn.connections.isValid(binding.providerConnectionId)
+      .catch(() => { throw new ConnectionProviderOperationError("health"); });
     if (valid) {
       return this.authority.recordHealth({
         connectionId,
@@ -350,7 +375,7 @@ export class PlugFnConnectionOrchestrator {
     }
     const remote = await this.plugfn.connections.get(binding.providerConnectionId).catch((error: unknown) => {
       if (isMissingRemoteConnection(error)) return null;
-      throw error;
+      throw new ConnectionProviderOperationError("health");
     });
     const status = remote?.status === "error" ? "error" : "needs_reauth";
     return this.authority.recordHealth({
@@ -369,6 +394,9 @@ export class PlugFnConnectionOrchestrator {
       if (remote.id !== binding.providerConnectionId || remote.provider !== binding.provider) {
         throw new ConnectionInputError("PlugFn refreshed an unexpected connection");
       }
+      if (remote.status !== "active") {
+        throw new ConnectionUnavailableError();
+      }
       return await this.authority.recordHealth({
         connectionId,
         status: "active",
@@ -381,7 +409,8 @@ export class PlugFnConnectionOrchestrator {
         readiness: "unavailable",
         reason: "refresh_failed",
       });
-      throw error;
+      if (error instanceof ConnectionUnavailableError) throw error;
+      throw new ConnectionProviderOperationError("refresh");
     }
   }
 
@@ -390,6 +419,9 @@ export class PlugFnConnectionOrchestrator {
     connectionId: string,
   ): Promise<{ connection: ConnectionBindingRecord; provider: PlugFnDisconnectResult }> {
     const binding = await this.authority.getManageable(actorUserId, connectionId);
+    // Disable OMR use before contacting the provider. A timeout, failed remote
+    // revoke, or interrupted Worker must never leave a usable local binding.
+    let connection = await this.authority.revoke(actorUserId, connectionId, "provider_cleanup_pending");
     const ownershipInput = {
       actorUserId,
       workspaceId: binding.workspaceId,
@@ -401,14 +433,28 @@ export class PlugFnConnectionOrchestrator {
       connectionId: binding.providerConnectionId,
       owner: ownerFor(ownershipInput),
       actor: actorFor(ownershipInput),
-    });
-    const reason = provider.remoteRevokeAttempted && !provider.remoteRevokeSucceeded
-      ? "remote_revoke_failed"
-      : !provider.disconnected
-        ? "plugfn_connection_missing"
-        : undefined;
-    const connection = await this.authority.revoke(actorUserId, connectionId, reason);
-    return { connection, provider };
+    }).catch((): PlugFnDisconnectResult => ({
+      disconnected: false,
+      remoteRevokeAttempted: true,
+      remoteRevokeSucceeded: false,
+      localDeleted: false,
+      connectionDeleted: false,
+    }));
+    // The upstream result may contain a provider error message. Return only
+    // status fields; callers can safely tell users that remote cleanup failed.
+    const safeProvider = {
+      disconnected: provider.disconnected,
+      remoteRevokeAttempted: provider.remoteRevokeAttempted,
+      remoteRevokeSucceeded: provider.remoteRevokeSucceeded,
+      localDeleted: provider.localDeleted,
+      connectionDeleted: provider.connectionDeleted,
+    };
+    const failed = !provider.disconnected || (provider.remoteRevokeAttempted && !provider.remoteRevokeSucceeded);
+    connection = await this.authority.revoke(actorUserId, connectionId, failed
+      ? provider.remoteRevokeAttempted && !provider.remoteRevokeSucceeded
+        ? "remote_revoke_failed" : "provider_cleanup_failed"
+      : undefined).catch(() => connection);
+    return { connection, provider: safeProvider };
   }
 
   private async attachOrCleanUp(input: {

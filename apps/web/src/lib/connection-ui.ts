@@ -1,0 +1,41 @@
+export interface ConnectionDisplay {
+  id: string;
+  provider: string;
+  ownership: "personal" | "workspace";
+  ownerUserId: string | null;
+  status: string;
+  readiness: string;
+  selected: boolean;
+}
+
+export function connectionActions(
+  connection: ConnectionDisplay,
+  actorUserId: string,
+  role: "owner" | "admin" | "member",
+  providerState: string,
+) {
+  const manageable = connection.ownership === "personal"
+    ? connection.ownerUserId === actorUserId
+    : role === "owner" || role === "admin";
+  const active = connection.status !== "revoked";
+  const ready = active && connection.status === "active" &&
+    connection.readiness === "ready" && providerState === "ready";
+  return {
+    canSelect: ready,
+    canCheck: active,
+    canRefresh: active && manageable,
+    canReconnect: active && manageable && !ready &&
+      providerState !== "unsupported" && providerState !== "unconfigured" && providerState !== "unknown",
+    canDisconnect: active && manageable,
+    canRetryRevoke: !active && manageable && connection.status === "revoked",
+    manageable,
+  };
+}
+
+export function authorizationScopes(authUrl: string): string[] {
+  const url = new URL(authUrl);
+  const scopes = ["scope", "scopes", "user_scope"].flatMap((field) =>
+    (url.searchParams.get(field) ?? "").split(/[\s,]+/).filter(Boolean),
+  );
+  return [...new Set(scopes)];
+}

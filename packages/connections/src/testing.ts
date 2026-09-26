@@ -153,12 +153,12 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     );
     const authorized =
       connection.ownership === "personal"
-        ? connection.ownerUserId === input.actorUserId
+        ? Boolean(membership) && connection.ownerUserId === input.actorUserId
         : membership?.role === "owner" || membership?.role === "admin";
     if (!authorized) throw new ConnectionAccessDeniedError();
     connection.status = "revoked";
     connection.readiness = "unavailable";
-    if (input.reason) connection.healthReason = input.reason;
+    connection.healthReason = input.reason ?? null;
     connection.revokedAt ??= input.now;
     connection.updatedAt = input.now;
     for (const [key, selection] of this.selections) {

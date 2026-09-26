@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  clearPendingOAuthConnection,
   oauthCallbackUri,
   readPendingOAuthConnection,
   savePendingOAuthConnection,
@@ -32,7 +31,6 @@ describe("browser provider OAuth handoff", () => {
     expect(savePendingOAuthConnection(session, "https://github.com/login/oauth/authorize?state=abc_123", pending))
       .toContain("state=abc_123");
     expect(readPendingOAuthConnection(session, "abc_123", origin, 1_001)).toEqual(pending);
-    clearPendingOAuthConnection(session, "abc_123");
     expect(readPendingOAuthConnection(session, "abc_123", origin, 1_001)).toBeNull();
   });
 
@@ -41,6 +39,7 @@ describe("browser provider OAuth handoff", () => {
     expect(() => savePendingOAuthConnection(session, "http://github.com/?state=abc", pending)).toThrow();
     savePendingOAuthConnection(session, "https://github.com/?state=abc", pending);
     expect(readPendingOAuthConnection(session, "abc", "https://other.example", 1_001)).toBeNull();
+    expect(readPendingOAuthConnection(session, "abc", origin, 1_001)).toBeNull();
     expect(readPendingOAuthConnection(session, "abc", origin, 1_000 + 10 * 60 * 1000 + 1)).toBeNull();
   });
 });

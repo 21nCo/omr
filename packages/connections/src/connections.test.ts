@@ -44,6 +44,7 @@ async function createFixture() {
   return {
     connections,
     store,
+    workspaceStore,
     workspaceId: team.workspace.id,
     advance(milliseconds: number) {
       now += milliseconds;
@@ -176,5 +177,18 @@ describe("connection authority", () => {
     await expect(
       connections.resolve({ actorUserId: "user_member", workspaceId, provider: "notion" }),
     ).rejects.toBeInstanceOf(ConnectionUnavailableError);
+  });
+
+  it("rejects a former member's personal disconnect after workspace access is removed", async () => {
+    const { connections, workspaceStore, workspaceId } = await createFixture();
+    const personal = await connections.attach({ actorUserId: "user_member", workspaceId,
+      provider: "notion", providerConnectionId: "plug_private", ownership: "personal", label: "Private" });
+    for (const [id, membership] of workspaceStore.memberships) {
+      if (membership.userId === "user_member" && membership.workspaceId === workspaceId) {
+        workspaceStore.memberships.delete(id);
+      }
+    }
+    await expect(connections.revoke("user_member", personal.id))
+      .rejects.toBeInstanceOf(ConnectionAccessDeniedError);
   });
 });

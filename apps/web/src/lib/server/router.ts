@@ -19,6 +19,7 @@ import {
   ConnectionInputError,
   ConnectionSelectionRequiredError,
   ConnectionUnavailableError,
+  ConnectionProviderOperationError,
   ProviderUnavailableError,
   type ConnectionOwnership,
 } from "@oh-my-router/connections";
@@ -138,6 +139,7 @@ export class RequestOriginDeniedError extends Error {
 }
 
 const CAPABILITIES = new Set<string>(CLIENT_CAPABILITIES);
+const PRIVATE_RESPONSE = { "cache-control": "no-store" };
 
 function objectBody(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -341,6 +343,10 @@ export function createOMRRouter(
       if (error instanceof ProviderUnavailableError) {
         return Response.json({ error: error.code, state: error.state }, { status: 409 });
       }
+      if (error instanceof ConnectionProviderOperationError) {
+        return Response.json({ error: error.code, message: error.message, operation: error.operation },
+          { status: 502, headers: PRIVATE_RESPONSE });
+      }
       if (error instanceof RuntimeUnavailableError) {
         return Response.json({ error: error.code }, { status: 503 });
       }
@@ -352,7 +358,9 @@ export function createOMRRouter(
         message: "OMR request failed",
         method: request.method,
         path: new URL(request.url).pathname,
-        error: error instanceof Error ? error.message : String(error),
+        error: new URL(request.url).pathname.startsWith("/api/connections/")
+          ? error instanceof Error ? error.name : "Unknown connection failure"
+          : error instanceof Error ? error.message : String(error),
       }));
       return Response.json({ error: "INTERNAL_ERROR" }, { status: 500 });
     },
@@ -385,7 +393,9 @@ export function createOMRRouter(
         path: "/api/control-plane",
         handler: async (request) => {
           const workspaceId = new URL(request.url).searchParams.get("workspaceId") ?? undefined;
-          return Response.json(await controlPlaneServices.overview(request, workspaceId));
+          return Response.json(await controlPlaneServices.overview(request, workspaceId), {
+            headers: PRIVATE_RESPONSE,
+          });
         },
       },
       {
@@ -465,7 +475,9 @@ export function createOMRRouter(
           const provider = new URL(request.url).searchParams.get("provider");
           if (!provider) throw new RequestInputError("provider is required");
           const workspaceId = new URL(request.url).searchParams.get("workspaceId") ?? undefined;
-          return Response.json(await connectionServices.providerReadiness(request, provider, workspaceId));
+          return Response.json(await connectionServices.providerReadiness(request, provider, workspaceId), {
+            headers: PRIVATE_RESPONSE,
+          });
         },
       },
       {
@@ -477,7 +489,7 @@ export function createOMRRouter(
           return Response.json(await connectionServices.list(request, {
             workspaceId: requiredString(body, "workspaceId"),
             ...(provider ? { provider } : {}),
-          }));
+          }), { headers: PRIVATE_RESPONSE });
         },
       },
       {
@@ -489,7 +501,7 @@ export function createOMRRouter(
             workspaceId: requiredString(body, "workspaceId"),
             provider: requiredString(body, "provider"),
             connectionId: requiredString(body, "connectionId"),
-          }));
+          }), { headers: PRIVATE_RESPONSE });
         },
       },
       {
@@ -505,7 +517,7 @@ export function createOMRRouter(
             redirectUri: requiredString(body, "redirectUri"),
             label: requiredString(body, "label"),
             ...(returnTo ? { returnTo } : {}),
-          }), { status: 201 });
+          }), { status: 201, headers: PRIVATE_RESPONSE });
         },
       },
       {
@@ -522,7 +534,7 @@ export function createOMRRouter(
             state: requiredString(body, "state"),
             label: requiredString(body, "label"),
             ...(redirectUri ? { redirectUri } : {}),
-          }), { status: 201 });
+          }), { status: 201, headers: PRIVATE_RESPONSE });
         },
       },
       {
@@ -536,7 +548,7 @@ export function createOMRRouter(
             ownership: ownership(body),
             apiKey: requiredString(body, "apiKey"),
             label: requiredString(body, "label"),
-          }), { status: 201 });
+          }), { status: 201, headers: PRIVATE_RESPONSE });
         },
       },
       ...(["health", "refresh", "disconnect"] as const).map((operation) => ({
@@ -547,7 +559,7 @@ export function createOMRRouter(
           const connectionId = requiredString(body, "connectionId");
           return Response.json(await connectionServices[operation === "health"
             ? "checkHealth"
-            : operation](request, connectionId));
+            : operation](request, connectionId), { headers: PRIVATE_RESPONSE });
         },
       })),
       {
