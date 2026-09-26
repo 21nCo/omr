@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { ClientAccessDeniedError, DeviceAuthorizationError } from "@oh-my-router/client-access";
-import { ConnectionProviderOperationError } from "@oh-my-router/connections";
+import { ConnectionCleanupUntrackedError, ConnectionProviderOperationError } from "@oh-my-router/connections";
 import { ExecutionApprovalRequiredError } from "@oh-my-router/execution";
 
 import {
@@ -344,6 +344,24 @@ describe("OMR Worker HTTP boundary", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     await expect(response.json()).resolves.toEqual({ error: "CONNECTION_PROVIDER_FAILED",
       operation: "oauth_callback", message: "Provider authorization failed. Start a new connection." });
+  });
+
+  it("returns terminal manual-revocation guidance without caching provider details", async () => {
+    const services = { async completeOAuth() { throw new ConnectionCleanupUntrackedError(); } } as
+      unknown as ConnectionRouteServices;
+    const response = await createOMRRouter(undefined, services).handle(new Request(
+      "https://omr.invalid/api/connections/oauth/callback", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId: "workspace_1", provider: "github", ownership: "personal",
+          code: "code-secret", state: "state", label: "GitHub" }),
+      },
+    ));
+    expect(response.status).toBe(409);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const body = await response.json();
+    expect(body).toEqual({ error: "CONNECTION_CLEANUP_UNTRACKED",
+      message: "Provider cleanup could not be confirmed or saved. Revoke this connection in the provider account." });
+    expect(JSON.stringify(body)).not.toContain("code-secret");
   });
 
   it("projects versioned tool discovery and manifest routes", async () => {

@@ -356,7 +356,7 @@ export function createOMRRouter(
       }
       if (error instanceof ConnectionCleanupUntrackedError) {
         return Response.json({ error: error.code, message: error.message },
-          { status: 503, headers: PRIVATE_RESPONSE });
+          { status: 409, headers: PRIVATE_RESPONSE });
       }
       if (error instanceof RuntimeUnavailableError) {
         return Response.json({ error: error.code }, { status: 503 });

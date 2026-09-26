@@ -68,6 +68,34 @@ export class MemoryConnectionBindingStore implements ConnectionBindingStore {
     return this.save(input);
   }
 
+  /** Recheck installer authority and keep revoked duplicates terminal. */
+  async reconcileActiveDuplicate(input: {
+    actorUserId: string; connectionId: string; workspaceId: string; provider: string;
+    providerConnectionId: string; ownership: ConnectionBindingRecord["ownership"]; now: number;
+  }): Promise<ConnectionBindingRecord | null> {
+    await this.authorizeInstall({ actorUserId: input.actorUserId, workspaceId: input.workspaceId,
+      ownership: input.ownership });
+    const connection = this.connections.get(input.connectionId);
+    if (!connection || connection.status === "revoked" || connection.workspaceId !== input.workspaceId ||
+        connection.provider !== input.provider || connection.providerConnectionId !== input.providerConnectionId ||
+        connection.ownership !== input.ownership ||
+        (connection.ownership === "personal" && connection.ownerUserId !== input.actorUserId)) return null;
+    if (connection.status !== "active" || connection.readiness !== "ready") {
+      connection.status = "active";
+      connection.readiness = "ready";
+      connection.healthReason = null;
+      connection.lastCheckedAt = input.now;
+      connection.updatedAt = input.now;
+    }
+    return structuredClone(connection);
+  }
+
+  /** Protect a previously bound handle from fallback provider deletion. */
+  async hasRemoteBinding(input: { workspaceId: string; providerConnectionId: string }): Promise<boolean> {
+    return [...this.connections.values()].some((connection) =>
+      connection.workspaceId === input.workspaceId && connection.providerConnectionId === input.providerConnectionId);
+  }
+
   /** Enforce remote-handle uniqueness for normal and cleanup bindings. */
   private save(input: AttachConnectionInput): ConnectionBindingRecord {
     const duplicate = [...this.connections.values()].some(

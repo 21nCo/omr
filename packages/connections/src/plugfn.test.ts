@@ -404,6 +404,22 @@ describe("PlugFn connection orchestration", () => {
     });
   }
 
+  it("does not hide a failed remote revocation after an active-result attach and cleanup-store outage", async () => {
+    const { orchestrator, plugfn, store, workspaceId } = await fixture();
+    plugfn.methods.connect.mockResolvedValueOnce(plugfn.connection({ ownerKind: "user",
+      ownerId: "user_owner", organizationId: undefined, tenantId: workspaceId }));
+    vi.spyOn(store, "attach").mockRejectedValueOnce(new Error("database secret"));
+    vi.spyOn(store, "attachForCleanup").mockRejectedValueOnce(new Error("database secret"));
+    plugfn.methods.disconnect.mockResolvedValueOnce({ disconnected: false,
+      remoteRevokeAttempted: true, remoteRevokeSucceeded: false, localDeleted: true,
+      connectionDeleted: true, providerError: "provider secret" });
+    await expect(orchestrator.connectApiKey({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", ownership: "personal", apiKey: "key-secret", label: "Linear" }))
+      .rejects.toMatchObject({ code: "CONNECTION_CLEANUP_UNTRACKED",
+        message: "Provider cleanup could not be confirmed or saved. Revoke this connection in the provider account." });
+    expect(store.connections.size).toBe(0);
+  });
+
   it("records an attach failure for cleanup before a rejected provider deletion", async () => {
     const { orchestrator, plugfn, store, workspaceId } = await fixture();
     plugfn.methods.connect.mockResolvedValueOnce(plugfn.connection({
@@ -468,6 +484,101 @@ describe("PlugFn connection orchestration", () => {
         message: "Provider cleanup could not be confirmed or saved. Revoke this connection in the provider account." });
     expect(plugfn.methods.disconnect).toHaveBeenCalledOnce();
     expect(store.connections.size).toBe(0);
+  });
+
+  for (const mode of ["oauth", "api_key"] as const) {
+    for (const connectionDeleted of [false, true]) {
+      for (const remoteRevokeSucceeded of [false, true]) {
+        it(`${mode}: classifies deletion ${connectionDeleted} and remote revoke ${remoteRevokeSucceeded}`, async () => {
+          const { orchestrator, plugfn, store, workspaceId } = await fixture();
+          const provider = mode === "oauth" ? "github" : "linear";
+          const returned = plugfn.connection({ provider, status: "expired", ownerKind: "user",
+            ownerId: "user_owner", organizationId: undefined, tenantId: workspaceId });
+          if (mode === "oauth") plugfn.methods.handleCallback.mockResolvedValueOnce({ connection: returned });
+          else plugfn.methods.connect.mockResolvedValueOnce(returned);
+          vi.spyOn(store, "attachForCleanup").mockRejectedValueOnce(new Error("database secret"));
+          plugfn.methods.disconnect.mockResolvedValueOnce({ disconnected: connectionDeleted && remoteRevokeSucceeded,
+            remoteRevokeAttempted: true, remoteRevokeSucceeded, localDeleted: connectionDeleted,
+            connectionDeleted, providerError: "provider secret" });
+          const attempt = mode === "oauth"
+            ? orchestrator.completeOAuth({ actorUserId: "user_owner", workspaceId, provider,
+                ownership: "personal", code: "code-secret", state: "state", label: "GitHub" })
+            : orchestrator.connectApiKey({ actorUserId: "user_owner", workspaceId, provider,
+                ownership: "personal", apiKey: "key-secret", label: "Linear" });
+          await expect(attempt).rejects.toMatchObject({
+            code: connectionDeleted && remoteRevokeSucceeded
+              ? "CONNECTION_PROVIDER_FAILED" : "CONNECTION_CLEANUP_UNTRACKED",
+          });
+          expect(store.connections.size).toBe(0);
+          expect(plugfn.methods.disconnect).toHaveBeenCalledOnce();
+        });
+      }
+    }
+  }
+
+  it("restores a degraded same-owner duplicate after a validated reconnect", async () => {
+    const { authority, orchestrator, plugfn, store, workspaceId } = await fixture();
+    const binding = await authority.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", providerConnectionId: "plug_connection", ownership: "personal", label: "Old" });
+    await authority.recordHealth({ connectionId: binding.id, status: "needs_reauth",
+      readiness: "unavailable", reason: "expired" });
+    await expect(authority.resolve({ actorUserId: "user_owner", workspaceId, provider: "linear" }))
+      .rejects.toBeInstanceOf(ConnectionUnavailableError);
+    plugfn.methods.connect.mockResolvedValueOnce(plugfn.connection({ ownerKind: "user",
+      ownerId: "user_owner", organizationId: undefined, tenantId: workspaceId }));
+    await expect(orchestrator.connectApiKey({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", ownership: "personal", apiKey: "key-secret", label: "New" }))
+      .resolves.toMatchObject({ id: binding.id, status: "active", readiness: "ready", healthReason: null });
+    await expect(authority.resolve({ actorUserId: "user_owner", workspaceId, provider: "linear" }))
+      .resolves.toMatchObject({ id: binding.id });
+    expect(store.connections.size).toBe(1);
+    expect(plugfn.methods.disconnect).not.toHaveBeenCalled();
+  });
+
+  it("does not delete another owner's bound handle after a duplicate provider result", async () => {
+    const { authority, orchestrator, plugfn, store, workspaceId } = await fixture();
+    const member = await authority.attach({ actorUserId: "user_member", workspaceId,
+      provider: "linear", providerConnectionId: "plug_connection", ownership: "personal", label: "Member" });
+    plugfn.methods.connect.mockResolvedValueOnce(plugfn.connection({ ownerKind: "user",
+      ownerId: "user_owner", organizationId: undefined, tenantId: workspaceId }));
+    await expect(orchestrator.connectApiKey({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", ownership: "personal", apiKey: "key-secret", label: "Owner" }))
+      .rejects.toMatchObject({ code: "CONNECTION_PROVIDER_FAILED", operation: "binding" });
+    expect(store.connections.get(member.id)).toMatchObject({ status: "active", readiness: "ready" });
+    expect(plugfn.methods.disconnect).not.toHaveBeenCalled();
+  });
+
+  it("preserves a bound handle when installer membership ends during reconnect", async () => {
+    const { authority, orchestrator, plugfn, store, workspaceStore, workspaceId } = await fixture();
+    const binding = await authority.attach({ actorUserId: "user_member", workspaceId,
+      provider: "linear", providerConnectionId: "plug_connection", ownership: "personal", label: "Member" });
+    plugfn.methods.connect.mockImplementationOnce(async () => {
+      workspaceStore.removeMembership(workspaceId, "user_member");
+      return plugfn.connection({ userId: "user_member", ownerKind: "user", ownerId: "user_member",
+        organizationId: undefined, tenantId: workspaceId });
+    });
+    await expect(orchestrator.connectApiKey({ actorUserId: "user_member", workspaceId,
+      provider: "linear", ownership: "personal", apiKey: "key-secret", label: "Member" }))
+      .rejects.toMatchObject({ code: "CONNECTION_PROVIDER_FAILED", operation: "binding" });
+    expect(store.connections.get(binding.id)).toMatchObject({ status: "active", readiness: "ready" });
+    expect(plugfn.methods.disconnect).not.toHaveBeenCalled();
+    await expect(authority.resolve({ actorUserId: "user_member", workspaceId, provider: "linear" }))
+      .rejects.toBeInstanceOf(ConnectionAccessDeniedError);
+  });
+
+  it("keeps revoked duplicate handles terminal after a validated reconnect", async () => {
+    const { authority, orchestrator, plugfn, store, workspaceId } = await fixture();
+    const binding = await authority.attach({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", providerConnectionId: "plug_connection", ownership: "personal", label: "Old" });
+    await authority.revoke("user_owner", binding.id, "provider_cleanup_failed");
+    plugfn.methods.connect.mockResolvedValueOnce(plugfn.connection({ ownerKind: "user",
+      ownerId: "user_owner", organizationId: undefined, tenantId: workspaceId }));
+    await expect(orchestrator.connectApiKey({ actorUserId: "user_owner", workspaceId,
+      provider: "linear", ownership: "personal", apiKey: "key-secret", label: "New" }))
+      .rejects.toMatchObject({ code: "CONNECTION_PROVIDER_FAILED" });
+    expect(store.connections.get(binding.id)).toMatchObject({ status: "revoked", readiness: "unavailable" });
+    await expect(authority.resolve({ actorUserId: "user_owner", workspaceId, provider: "linear" }))
+      .rejects.toBeInstanceOf(ConnectionUnavailableError);
   });
 
   it("retains cleanup state if a member leaves after PlugFn accepts the credential", async () => {

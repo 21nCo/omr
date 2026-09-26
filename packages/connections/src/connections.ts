@@ -69,6 +69,16 @@ export interface ConnectionBindingStore {
   authorizeInstall(input: AuthorizeConnectionInstallInput): Promise<void>;
   attach(input: AttachConnectionInput): Promise<ConnectionBindingRecord>;
   attachForCleanup(input: AttachConnectionInput): Promise<ConnectionBindingRecord>;
+  hasRemoteBinding(input: { workspaceId: string; providerConnectionId: string }): Promise<boolean>;
+  reconcileActiveDuplicate(input: {
+    actorUserId: string;
+    connectionId: string;
+    workspaceId: string;
+    provider: string;
+    providerConnectionId: string;
+    ownership: ConnectionOwnership;
+    now: number;
+  }): Promise<ConnectionBindingRecord | null>;
   getAccessible(input: AccessConnectionInput): Promise<ConnectionBindingRecord>;
   getManageable(input: AccessConnectionInput): Promise<ConnectionBindingRecord>;
   getRevocable(input: AccessConnectionInput): Promise<ConnectionBindingRecord>;
@@ -198,6 +208,25 @@ export class ConnectionAuthority {
     label: string;
   }): Promise<ConnectionBindingRecord> {
     return this.createBinding(input, true);
+  }
+
+  /** Restore a validated duplicate only while its owner can still install it. */
+  async reconcileActiveDuplicate(input: {
+    actorUserId: string;
+    connectionId: string;
+    workspaceId: string;
+    provider: string;
+    providerConnectionId: string;
+    ownership: ConnectionOwnership;
+  }): Promise<ConnectionBindingRecord | null> {
+    return this.store.reconcileActiveDuplicate({ ...input, now: this.now() });
+  }
+
+  /** Check whether a returned handle is already tracked before any deletion fallback. */
+  async hasRemoteBinding(input: { workspaceId: string; providerConnectionId: string }): Promise<boolean> {
+    assertId(input.workspaceId);
+    assertId(input.providerConnectionId);
+    return this.store.hasRemoteBinding(input);
   }
 
   /** Build either a usable binding or a revoked cleanup-only record. */

@@ -104,6 +104,59 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     return this.insertBinding(input, true);
   }
 
+  /** Restore a matching live handle under a row lock and current installer role. */
+  async reconcileActiveDuplicate(input: {
+    actorUserId: string; connectionId: string; workspaceId: string; provider: string;
+    providerConnectionId: string; ownership: ConnectionOwnership; now: number;
+  }): Promise<ConnectionBindingRecord | null> {
+    await this.client.query("BEGIN");
+    try {
+      const result = await this.client.query<ConnectionRow>(
+        `SELECT ${CONNECTION_COLUMNS} FROM omr_control.connection_bindings WHERE id = $1 FOR UPDATE`,
+        [input.connectionId],
+      );
+      const connection = result.rows[0];
+      if (!connection || connection.status === "revoked" || connection.workspace_id !== input.workspaceId ||
+          connection.provider !== input.provider || connection.provider_connection_id !== input.providerConnectionId ||
+          connection.ownership !== input.ownership ||
+          (connection.ownership === "personal" && connection.owner_user_id !== input.actorUserId)) {
+        await this.client.query("COMMIT");
+        return null;
+      }
+      const role = await this.membershipRole(input.workspaceId, input.actorUserId);
+      if (!role || (input.ownership === "workspace" && role !== "owner" && role !== "admin")) {
+        throw new ConnectionAccessDeniedError();
+      }
+      if (connection.status === "active" && connection.readiness === "ready") {
+        await this.client.query("COMMIT");
+        return toConnection(connection);
+      }
+      const updated = await this.client.query<ConnectionRow>(
+        `UPDATE omr_control.connection_bindings
+         SET status = 'active', readiness = 'ready', health_reason = NULL,
+             last_checked_at = $2, updated_at = $2
+         WHERE id = $1 AND status <> 'revoked'
+         RETURNING ${CONNECTION_COLUMNS}`,
+        [input.connectionId, input.now],
+      );
+      await this.client.query("COMMIT");
+      return updated.rows[0] ? toConnection(updated.rows[0]) : null;
+    } catch (error) {
+      await this.client.query("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** Detect an existing local owner even when the callback actor lost access. */
+  async hasRemoteBinding(input: { workspaceId: string; providerConnectionId: string }): Promise<boolean> {
+    const result = await this.client.query(
+      `SELECT 1 FROM omr_control.connection_bindings
+       WHERE workspace_id = $1 AND provider_connection_id = $2`,
+      [input.workspaceId, input.providerConnectionId],
+    );
+    return result.rowCount === 1;
+  }
+
   /** Persist either a live binding or a cleanup-only record atomically. */
   private async insertBinding(input: AttachConnectionInput, cleanupOnly: boolean): Promise<ConnectionBindingRecord> {
     await this.client.query("BEGIN");
