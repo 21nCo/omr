@@ -1,0 +1,35 @@
+apps/web/src/lib/connection-ui.test.ts
+  s_ee6f287c08acb3::t_a1034d2e7bd090 22,24-25
+apps/web/src/lib/connection-ui.ts
+  s_ee6f287c08acb3::t_915278ebf12e66 9,31-35
+apps/web/src/lib/oauth-review.test.ts
+  s_ee6f287c08acb3::t_bfcf45b4a89766 1-48
+apps/web/src/routes/app/+page.svelte
+  s_ee6f287c08acb3::t_44511d64816634 3-4,82-98,168,209,230,236-242,357,380
+docs/connection-lifecycle-v1.md
+  s_ee6f287c08acb3::t_316a71b47288c6 48,50-57,62-63
+packages/connections/src/connections.ts
+  s_ee6f287c08acb3::t_aa919068dcd8bb 52-56,85,158-161,303-315
+packages/connections/src/plugfn.ts
+  s_ee6f287c08acb3::t_16c333180596ca 422-440,468-477
+packages/connections/src/postgres-store.ts
+  s_ee6f287c08acb3::t_dcf92f4aee4387 15,270-304
+packages/connections/src/testing.ts
+  s_ee6f287c08acb3::t_95d51abab6c583 12,161-175
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "87c59e734bd50901655f6e870c80e61605345092",
+  "prompts": {},
+  "sessions": {
+    "s_ee6f287c08acb3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0dbe8-d479-71a1-9012-f08e8b29a7ff",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
