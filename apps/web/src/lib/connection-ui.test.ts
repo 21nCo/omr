@@ -23,10 +23,25 @@ describe("connection control UI policy", () => {
       .toMatchObject({ canSelect: false, canCheck: false, canRetryRevoke: true });
     expect(connectionActions({ ...team, status: "revoked", healthReason: "remote_revocation_unavailable" },
       "user_admin", "admin", "ready").canRetryRevoke).toBe(false);
-    expect(providerRevocationGuidance("remote_revocation_unavailable"))
+    expect(providerRevocationGuidance("remote_revocation_unavailable", "oauth"))
       .toContain("Revoke it in your provider account");
-    expect(providerRevocationGuidance("remote_revoke_failed")).toBeNull();
+    expect(providerRevocationGuidance("remote_revocation_unavailable", "api_key"))
+      .toContain("Delete or rotate the API key");
+    expect(providerRevocationGuidance("remote_revocation_unavailable", "api_key"))
+      .not.toContain("grant");
+    expect(providerRevocationGuidance("provider_connection_missing", null))
+      .toContain("remaining access");
+    expect(providerRevocationGuidance("remote_revoke_failed", "oauth")).toBeNull();
     expect(connectionActions(team, "user_admin", "admin", "unconfigured").canSelect).toBe(false);
+  });
+
+  it("only offers a pending cleanup retry once the server claim is stale", () => {
+    const pending = { ...team, status: "revoked", healthReason: "provider_cleanup_pending:claim", updatedAt: 1_000 };
+    expect(connectionActions(pending, "user_admin", "admin", "ready", 61_000).canRetryRevoke).toBe(false);
+    expect(connectionActions(pending, "user_admin", "admin", "ready", 61_001).canRetryRevoke).toBe(true);
+    expect(connectionActions({ ...pending, updatedAt: 61_000 }, "user_admin", "admin", "ready", 61_001)
+      .canRetryRevoke).toBe(false);
+    expect(connectionActions(pending, "user_member", "member", "ready", 61_001).canRetryRevoke).toBe(false);
   });
 
   it("shows both bot and user OAuth scopes before navigation", () => {

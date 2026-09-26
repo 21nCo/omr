@@ -40,6 +40,7 @@ describe("browser provider OAuth handoff", () => {
     savePendingOAuthConnection(session, "https://github.com/?state=abc", pending);
     expect(readPendingOAuthConnection(session, "abc", "https://other.example", 1_001)).toBeNull();
     expect(readPendingOAuthConnection(session, "abc", origin, 1_001)).toBeNull();
-    expect(readPendingOAuthConnection(session, "abc", origin, 1_000 + 10 * 60 * 1000 + 1)).toBeNull();
+    savePendingOAuthConnection(session, "https://github.com/?state=fresh-expiry", pending);
+    expect(readPendingOAuthConnection(session, "fresh-expiry", origin, 1_000 + 10 * 60 * 1000 + 1)).toBeNull();
   });
 });

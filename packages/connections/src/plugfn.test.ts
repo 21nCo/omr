@@ -433,7 +433,10 @@ describe("PlugFn connection orchestration", () => {
     await vi.waitFor(() => expect(plugfn.methods.disconnect).toHaveBeenCalledTimes(1));
     await orchestrator.disconnect("user_owner", binding.id);
     expect(plugfn.methods.disconnect).toHaveBeenCalledTimes(1);
-    advance(61_000);
+    advance(60_000);
+    await orchestrator.disconnect("user_owner", binding.id);
+    expect(plugfn.methods.disconnect).toHaveBeenCalledTimes(1);
+    advance(1);
     plugfn.methods.disconnect.mockResolvedValueOnce({ disconnected: true, remoteRevokeAttempted: true,
       remoteRevokeSucceeded: true, localDeleted: true, connectionDeleted: true });
     await orchestrator.disconnect("user_owner", binding.id);

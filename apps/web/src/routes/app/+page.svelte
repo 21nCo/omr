@@ -20,6 +20,7 @@
     selected: boolean;
     healthReason: string | null;
     lastCheckedAt: number | null;
+    updatedAt: number;
   };
   type Approval = {
     id: string;
@@ -66,6 +67,7 @@
   let selectedWorkspaceId = "";
   let loading = true;
   let busy = "";
+  let clockNow = Date.now();
   let error = "";
   let notice = "";
   let teamName = "";
@@ -106,8 +108,13 @@
     return role === "owner" || role === "admin";
   }
 
-  function actions(connection: Connection) {
-    return connectionActions(connection, overview?.actor.id ?? "", selectedAccess()?.membership.role ?? "member", providerState(connection.provider));
+  function actions(connection: Connection, now: number) {
+    return connectionActions(connection, overview?.actor.id ?? "", selectedAccess()?.membership.role ?? "member", providerState(connection.provider), now);
+  }
+
+  function revocationGuidance(connection: Connection): string | null {
+    return providerRevocationGuidance(connection.healthReason,
+      catalog?.providers.find((entry) => entry.provider === connection.provider)?.authMode ?? null);
   }
 
 
@@ -233,7 +240,7 @@
           body: JSON.stringify({ connectionId: connection.id }),
         },
       );
-      notice = providerRevocationGuidance(result.connection.healthReason)
+      notice = revocationGuidance(result.connection)
         ?? (result.connection.healthReason === "provider_cleanup_pending" || result.connection.healthReason?.startsWith("provider_cleanup_pending:")
           ? "OMR access was removed. Provider cleanup is in progress; retry if it does not finish."
           : result.connection.healthReason === "remote_revoke_failed" || result.connection.healthReason === "provider_cleanup_failed"
@@ -267,11 +274,13 @@
   }
 
   onMount(() => {
+    const clock = setInterval(() => { clockNow = Date.now(); }, 1_000);
     const connected = new URLSearchParams(location.search).get("connected");
     if (connected && (V1_PROVIDERS as readonly string[]).includes(connected)) {
       notice = `Connected ${connected}.`;
     }
     void load("");
+    return () => clearInterval(clock);
   });
 </script>
 
@@ -354,12 +363,12 @@
                       {#if connection.selected} · Selected for your actions{/if}
                     </span>
                     <span>Last checked {timestamp(connection.lastCheckedAt)}{connection.healthReason ? ` · ${connection.healthReason.split(":")[0]?.replaceAll("_", " ")}` : ""}</span>
-                    {#if providerRevocationGuidance(connection.healthReason)}
-                      <span>{providerRevocationGuidance(connection.healthReason)}</span>
+                    {#if revocationGuidance(connection)}
+                      <span>{revocationGuidance(connection)}</span>
                     {/if}
                   </div>
-                  <span class:ready={actions(connection).canSelect} class="status">{connection.status === "revoked" ? "disconnected" : providerState(connection.provider) === "ready" ? connection.readiness : providerState(connection.provider)}</span>
-                  {#if actions(connection).canSelect}
+                  <span class:ready={actions(connection, clockNow).canSelect} class="status">{connection.status === "revoked" ? "disconnected" : providerState(connection.provider) === "ready" ? connection.readiness : providerState(connection.provider)}</span>
+                  {#if actions(connection, clockNow).canSelect}
                     <button
                       class="quiet compact"
                       disabled={Boolean(busy) || connection.selected}
@@ -368,18 +377,18 @@
                       }, `Selected ${connection.label} for ${connection.provider}.`)}
                     >{connection.selected ? "Selected" : "Select account"}</button>
                   {/if}
-                  {#if actions(connection).canCheck}<button
+                  {#if actions(connection, clockNow).canCheck}<button
                     class="quiet compact"
                     disabled={Boolean(busy)}
                     onclick={() => void mutate(`health:${connection.id}`, "/api/connections/health", { connectionId: connection.id }, `Checked ${connection.label}.`)}
                   >Check health</button>{/if}
-                  {#if actions(connection).canRefresh}<button class="quiet compact" disabled={Boolean(busy)}
+                  {#if actions(connection, clockNow).canRefresh}<button class="quiet compact" disabled={Boolean(busy)}
                     onclick={() => void mutate(`refresh:${connection.id}`, "/api/connections/refresh", { connectionId: connection.id }, `Refreshed ${connection.label}.`)}>Refresh</button>{/if}
-                  {#if actions(connection).canReconnect}<button class="quiet compact" disabled={Boolean(busy)}
+                  {#if actions(connection, clockNow).canReconnect}<button class="quiet compact" disabled={Boolean(busy)}
                     onclick={() => connection.provider && catalog?.providers.find((entry) => entry.provider === connection.provider)?.authMode === "oauth"
                       ? void connectOAuth(connection)
                       : (credentialProvider = connection.provider, credentialOwnership = connection.ownership, credentialLabel = connection.label, notice = "Enter a new API key below to reconnect.")}>Reconnect</button>{/if}
-                  {#if actions(connection).canDisconnect || actions(connection).canRetryRevoke}<button
+                  {#if actions(connection, clockNow).canDisconnect || actions(connection, clockNow).canRetryRevoke}<button
                     class="danger compact"
                     disabled={Boolean(busy)}
                     onclick={() => void disconnect(connection)}

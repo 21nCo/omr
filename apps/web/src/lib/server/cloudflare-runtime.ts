@@ -34,7 +34,7 @@ import {
   RequestOriginDeniedError,
 } from "./router.js";
 import { resolveScopedCatalog } from "./scoped-catalog.js";
-import { publicConnections } from "./connection-view.js";
+import { publicConnections, publicConnectionsAfterMutation } from "./connection-view.js";
 
 type OMRBindings = Cloudflare.Env & {
   HYPERDRIVE?: { connectionString: string };
@@ -416,7 +416,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
       const actorUserId = await requireWebUser(event, request);
       return withConnections(async (orchestrator, authority) => {
         const result = await orchestrator.completeOAuth({ actorUserId, ...input });
-        const [connection] = await publicConnections(authority, actorUserId, input.workspaceId, [result.connection]);
+        const [connection] = await publicConnectionsAfterMutation(authority, actorUserId, input.workspaceId, [result.connection]);
         return { connection, ...(result.returnTo ? { returnTo: result.returnTo } : {}) };
       });
     },
@@ -425,7 +425,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
       const actorUserId = await requireWebUser(event, request);
       return withConnections(async (orchestrator, authority) => {
         const binding = await orchestrator.connectApiKey({ actorUserId, ...input });
-        return (await publicConnections(authority, actorUserId, input.workspaceId, [binding]))[0];
+        return (await publicConnectionsAfterMutation(authority, actorUserId, input.workspaceId, [binding]))[0];
       });
     },
     async checkHealth(request, connectionId) {
@@ -434,7 +434,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
         const accessible = await authority.getAccessible(principal.userId, connectionId);
         assertConnectionWorkspace(principal, accessible.workspaceId);
         const binding = await orchestrator.checkHealth(principal.userId, connectionId);
-        return (await publicConnections(authority, principal.userId, binding.workspaceId, [binding]))[0];
+        return (await publicConnectionsAfterMutation(authority, principal.userId, binding.workspaceId, [binding]))[0];
       });
     },
     async refresh(request, connectionId) {
@@ -442,7 +442,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
       const actorUserId = await requireWebUser(event, request);
       return withConnections(async (orchestrator, authority) => {
         const binding = await orchestrator.refresh(actorUserId, connectionId);
-        return (await publicConnections(authority, actorUserId, binding.workspaceId, [binding]))[0];
+        return (await publicConnectionsAfterMutation(authority, actorUserId, binding.workspaceId, [binding]))[0];
       });
     },
     async disconnect(request, connectionId) {
@@ -450,7 +450,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
       const actorUserId = await requireWebUser(event, request);
       return withConnections(async (orchestrator, authority) => {
         const result = await orchestrator.disconnect(actorUserId, connectionId);
-        const [connection] = await publicConnections(authority, actorUserId, result.connection.workspaceId, [result.connection]);
+        const [connection] = await publicConnectionsAfterMutation(authority, actorUserId, result.connection.workspaceId, [result.connection]);
         return { connection, provider: result.provider };
       });
     },
