@@ -1,0 +1,18 @@
+apps/web/src/lib/server/cloudflare-runtime.test.ts
+  h_a39f9495f9ec1d 8,142-188
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 196-206,443-450
+tests/acceptance/phase-00.test.ts
+  h_a39f9495f9ec1d 61-62,67
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e094e179d7ca3bf8111dbb26a4fd02dfef5eda33",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
