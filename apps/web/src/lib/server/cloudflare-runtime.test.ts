@@ -31,7 +31,7 @@ describe("Worker provider OAuth configuration", () => {
 });
 
 describe("Worker scoped provider catalog", () => {
-  it("reports a missing remote as expired for this response when its health write fails", async () => {
+  it.each([false, true])("omits a missing selected binding with alternate ready=%s", async (alternateReady) => {
     const definitions = new Map(["github", "linear"].map((name) => [name, {
       name, displayName: name, version: "1.0.0", description: name,
       auth: { type: "oauth2" },
@@ -47,6 +47,10 @@ describe("Worker scoped provider catalog", () => {
       id: `binding_${provider}`, provider, providerConnectionId: `remote_${provider}`,
       status: "active", readiness: "ready",
     }));
+    if (alternateReady) bindings.push({
+      id: "binding_github_alternate", provider: "github", providerConnectionId: "remote_github_alternate",
+      status: "active", readiness: "ready",
+    });
     const recordHealth = vi.fn().mockRejectedValue(new Error("health store unavailable"));
     const authority = {
       resolve: vi.fn(async ({ provider }: { provider: string }) => bindings.find((binding) => binding.provider === provider)!),
@@ -68,7 +72,8 @@ describe("Worker scoped provider catalog", () => {
     expect(catalog.discover({ allowedToolIds: result.allowedToolIds }).tools.map(({ id }) => id))
       .toEqual(["linear.read"]);
     expect(result.allowedToolIds.has("github.read")).toBe(false);
-    expect(result.providers.find(({ provider }) => provider === "github")?.state).toBe("expired");
+    expect(result.providers.find(({ provider }) => provider === "github")?.state)
+      .toBe(alternateReady ? "ready" : "expired");
     expect(result.providers.find(({ provider }) => provider === "linear")?.state).toBe("ready");
     expect(recordHealth).toHaveBeenCalledExactlyOnceWith({
       connectionId: "binding_github", status: "needs_reauth", readiness: "unavailable",

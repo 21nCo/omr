@@ -27,6 +27,7 @@ describe("v1 catalog surface parity", () => {
     }] } }, (schema) => schema as never);
     let ready = true;
     let configured = true;
+    let selectedMissing = false;
     const linear = {
       name: "linear", displayName: "Linear", version: "1.0.0", description: "Issues",
       auth: { type: "oauth2" }, actions: { get_issue: {} },
@@ -39,7 +40,7 @@ describe("v1 catalog surface parity", () => {
     const router = createOMRRouter(undefined, undefined, {
       async discover(_request, input) {
         return {
-          ...catalog.discover({ allowedProviders: new Set(ready && configured ? ["linear"] : []), limit: input.limit }),
+          ...catalog.discover({ allowedProviders: new Set(ready && configured && !selectedMissing ? ["linear"] : []), limit: input.limit }),
           providers: providers(),
         };
       },
@@ -101,6 +102,22 @@ describe("v1 catalog surface parity", () => {
       ready = true;
       expect((await agent.listTools()).tools.find(({ name }) => name === webManifest.id)?._meta)
         .toMatchObject({ manifestHash: webManifest.hash });
+      // The effective binding can be missing while another binding keeps provider readiness ready.
+      selectedMissing = true;
+      const missingPage = await api.discoverTools({ workspaceId: "workspace_1" });
+      const { stdout: cliMissing } = await execute(process.execPath,
+        ["packages/cli/dist/bin.js", "tools", "list", "--json"], {
+          env: { ...process.env, OMR_BACKEND: baseUrl, OMR_API_KEY: "test", OMR_WORKSPACE_ID: "workspace_1" },
+        });
+      expect(missingPage.tools).toEqual([]);
+      expect(missingPage.providers?.[1]?.state).toBe("ready");
+      expect(JSON.parse(cliMissing)).toEqual(missingPage);
+      expect(await mcpProviders()).toMatchObject({ providers: missingPage.providers });
+      expect((await agent.listTools()).tools.some(({ name }) => name === webManifest.id)).toBe(false);
+      selectedMissing = false;
+      expect((await api.discoverTools({ workspaceId: "workspace_1" })).tools.map(({ id }) => id))
+        .toEqual([webManifest.id]);
+      expect((await agent.listTools()).tools.some(({ name }) => name === webManifest.id)).toBe(true);
     } finally {
       await agent?.close().catch(() => undefined);
       await mcp?.close().catch(() => undefined);
