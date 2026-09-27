@@ -1,0 +1,40 @@
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 14,606
+apps/web/src/lib/server/router.test.ts
+  h_a39f9495f9ec1d 469
+apps/web/src/lib/server/router.ts
+  h_a39f9495f9ec1d 117,646,653
+docs/execution-policy-v1.md
+  h_a39f9495f9ec1d 11-14,25-26,28-30,41,44
+packages/cli/src/bin.ts
+  h_a39f9495f9ec1d 153
+packages/client/src/index.ts
+  h_a39f9495f9ec1d 179
+packages/execution/src/execution.test.ts
+  h_a39f9495f9ec1d 18,97-101,122-129,165,172,184,189,207,215,290,298,323,410-412,422,424-425,433,443,452-453,455-464,473,489,523,525-526,566,598,627,659,688,694,713
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 224-225,254,271,287
+packages/execution/src/fingerprint-key.ts
+  h_a39f9495f9ec1d 1-14
+packages/execution/src/index.ts
+  h_a39f9495f9ec1d 22
+packages/execution/src/projection.ts
+  h_a39f9495f9ec1d 5,28
+packages/mcp/src/server.test.ts
+  h_a39f9495f9ec1d 108-109,136,161
+packages/mcp/src/server.ts
+  h_a39f9495f9ec1d 17,26-44,101,116,120,123-124
+tests/acceptance/execution-policy-contract.test.ts
+  h_a39f9495f9ec1d 43,46,82-83,124-126,130-134,136,160-164,167-168,196-204,206-209
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7293e820fce4c03069a88eb0a2bfd983842854b1",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
