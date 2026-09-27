@@ -3,10 +3,9 @@ import { ConnectionAccessDeniedError, ConnectionUnavailableError } from "@oh-my-
 
 import {
   ExecutionCapabilityDeniedError,
+  EXECUTION_INVOCATION_DEADLINE_MS,
   type ExecutionInvocationGuard,
 } from "./execution.js";
-
-const DEFAULT_INVOCATION_DEADLINE_MS = 60_000;
 
 function expirationTime(value: unknown): number {
   if (value instanceof Date) return value.getTime();
@@ -30,7 +29,7 @@ export class ExecutionInvocationDeadlineError extends Error {
 
 /** Serialize an invocation with membership, client/grant, and binding revocation. */
 export class PostgresExecutionInvocationGuard implements ExecutionInvocationGuard {
-  constructor(private readonly client: Client, private readonly deadlineMs = DEFAULT_INVOCATION_DEADLINE_MS) {
+  constructor(private readonly client: Client, private readonly deadlineMs = EXECUTION_INVOCATION_DEADLINE_MS) {
     if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= 0) throw new Error("Invalid invocation deadline");
   }
 

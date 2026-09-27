@@ -17,8 +17,9 @@ On execution, the service atomically claims the approval and rechecks the curren
 connection, and scopes. A PostgreSQL transaction then locks the binding, membership, web session or client, and grant
 rows through the provider call. A revocation that commits first denies the invocation; a revocation
 that starts after these locks waits for the authorized invocation to finish. The receipt reservation
-commits on a separate connection **before** calling the provider. A crash after reservation leaves a
-`running` receipt, so retry cannot cause a second provider call. An ambiguous provider error or a
+commits on a separate connection **before** calling the provider. It starts as `reserved` and
+transitions durably to `running` just before dispatch. A crash after either write leaves a
+non-replayable receipt. An ambiguous provider error or a
 receipt persistence failure is `uncertain`, with a stable receipt ID and no automatic replay.
 The guard has a 60-second end-to-end deadline. It refreshes PostgreSQL's statement timeout with
 the remaining invocation time before each authorization query and commit. At the deadline it closes
@@ -29,7 +30,9 @@ transaction timeout releases revocation locks if the Worker stops while waiting 
 Pre-dispatch work checks a deadline-bound dispatch callback after fingerprinting
 and receipt reservation, so a late continuation cannot call the provider after rollback. The callback
 also checks the web session or client grant expiry at dispatch. A pre-dispatch timeout or expiry
-fails a newly reserved receipt without an upstream effect. A provider call that outlives the deadline may still finish upstream; its receipt
+attempts to fail a newly reserved receipt without an upstream effect. If the receipt connection
+closes first, same-key replay reconciles the durable state after the guard window. A provider call
+that outlives the deadline may still finish upstream; its receipt
 and approval are marked uncertain and cannot be replayed automatically. Approval and rejection
 decisions also require a current workspace membership in the database statement, with a row lock
 that serializes concurrent membership removal. Safe reads can use the manifest's retry policy
@@ -86,6 +89,7 @@ approval-request calls keep their shorter client timeout.
 | Workspace, grant, connection | Cross-workspace use or use after revocation | Service denial and PostgreSQL guard fixture tests |
 | Provider and receipt | Second effect after timeout, crash, or ambiguous error | Uncertain replay and reservation tests |
 | Invocation liveness | A near-deadline query or queued rollback holds locks beyond the client timeout; late reservation dispatches after expiry | Queued-client query and rollback deadline fixtures, pre-dispatch cancellation, and uncertain non-replay tests |
+| Reservation response loss | INSERT commits but its response is lost as the guard deadline closes the request | Delayed-INSERT fixture, stale reserved replay and no-provider-call checks |
 | Client execution deadline | CLI or MCP aborts before a structured timeout or uncertain receipt arrives | Delayed protocol responses beyond the former 30-second client timeout |
 | Timeout response | Predispatch timeout becomes a generic 500 or loses its distinction from an uncertain effect | Router, CLI JSON, and MCP protocol tests for read and approved execution |
 | Storage | Plaintext parameters or results | PostgreSQL encryption integration test when a disposable database is available |
@@ -107,6 +111,16 @@ markers, and the approval index becomes unconditional. Apply `0014` before deplo
 Worker. Roll back the Worker without reversing this additive schema; a downgrade that writes new
 NULL fingerprints still cannot reuse an existing key. Do not reverse `0014` while uncertain
 approvals or duplicate legacy history exist.
+Migration `0015` permits the `reserved` receipt state. Apply it before deploying the
+new Worker. A reservation stays `reserved` until the durable transition to
+`running` has returned and the guard rechecks the dispatch deadline. After 65
+seconds, a same-key replay atomically fails a stale `reserved` receipt or marks
+a stale `running` receipt `uncertain`. Neither state can dispatch a second
+effect. A lost reservation response may leave a `reserved` row until that
+replay; list and reconcile it using the original key. Keep `0015` when rolling
+back the Worker. The old Worker can read and fail a `reserved` receipt as a
+non-replayable state, but rollback must not remove the constraint while these
+rows exist. Drain them first if a schema rollback is required.
 Do not reset a `running` or `uncertain` receipt without reconciling the provider outcome. Rollback
 does not restore a revoked connection or an expired grant.
 

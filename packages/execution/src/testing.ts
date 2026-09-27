@@ -2,6 +2,7 @@ import type { JsonValue } from "@oh-my-router/tools";
 
 import {
   ApprovalUnavailableError,
+  EXECUTION_STALE_AFTER_MS,
   ExecutionIdempotencyConflictError,
   type ExecutionApproval,
   type ExecutionApprovalStore,
@@ -20,15 +21,32 @@ export class MemoryExecutionReceiptStore implements ExecutionReceiptStore {
   async reserve(receipt: ExecutionReceipt): Promise<{ receipt: ExecutionReceipt; created: boolean }> {
     const existingId = this.idempotency.get(key(receipt));
     if (existingId) {
-      return { receipt: structuredClone(this.receipts.get(existingId)!), created: false };
+      const existing = this.receipts.get(existingId)!;
+      if ((existing.status === "reserved" || existing.status === "running") &&
+          existing.startedAt <= receipt.startedAt - EXECUTION_STALE_AFTER_MS) {
+        existing.errorCode = existing.status === "reserved"
+          ? "reservation_expired" : "invocation_outcome_unknown";
+        existing.status = existing.status === "reserved" ? "failed" : "uncertain";
+        existing.completedAt = receipt.startedAt;
+        existing.updatedAt = existing.completedAt;
+      }
+      return { receipt: structuredClone(existing), created: false };
     }
     this.receipts.set(receipt.id, structuredClone(receipt));
     this.idempotency.set(key(receipt), receipt.id);
     return { receipt: structuredClone(receipt), created: true };
   }
 
+  async beginDispatch(receiptId: string, now: number): Promise<void> {
+    const receipt = this.required(receiptId);
+    if (receipt.status !== "reserved") throw new Error("Execution reservation is unavailable");
+    receipt.status = "running";
+    receipt.updatedAt = now;
+  }
+
   async succeed(receiptId: string, result: JsonValue, now: number): Promise<ExecutionReceipt> {
     const receipt = this.required(receiptId);
+    if (receipt.status !== "running") throw new Error("Execution receipt is not running");
     receipt.status = "succeeded";
     receipt.result = structuredClone(result);
     receipt.completedAt = now;
@@ -38,6 +56,9 @@ export class MemoryExecutionReceiptStore implements ExecutionReceiptStore {
 
   async fail(receiptId: string, errorCode: string, now: number): Promise<ExecutionReceipt> {
     const receipt = this.required(receiptId);
+    if (receipt.status !== "reserved" && receipt.status !== "running") {
+      throw new Error("Execution receipt is not active");
+    }
     receipt.status = "failed";
     receipt.errorCode = errorCode;
     receipt.completedAt = now;

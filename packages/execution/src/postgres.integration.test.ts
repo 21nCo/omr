@@ -65,7 +65,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       providerConnectionId: `plug_${crypto.randomUUID()}`,
       idempotencyKey: `request_${crypto.randomUUID()}`,
       requestHash: `sha256-${"b".repeat(64)}`,
-      status: "running",
+      status: "reserved",
       result: null,
       errorCode: null,
       startedAt: now,
@@ -76,7 +76,8 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
 
     await expect(runtime.receipts.reserve(receipt)).resolves.toMatchObject({ created: true });
     await expect(runtime.receipts.reserve({ ...receipt, id: `execution_${crypto.randomUUID()}` }))
-      .resolves.toMatchObject({ created: false, receipt: { id: receipt.id } });
+      .resolves.toMatchObject({ created: false, receipt: { id: receipt.id, status: "reserved" } });
+    await runtime.receipts.beginDispatch(receipt.id, now);
     await expect(runtime.receipts.succeed(receipt.id, {
       id: "issue_secret",
       title: "Sensitive provider result",

@@ -6,7 +6,11 @@ import {
 import { hasRequiredScopes, type JsonValue, type ToolCatalog, type ToolManifest } from "@oh-my-router/tools";
 import { approvalPreviewReady } from "./projection.js";
 
-export type ExecutionStatus = "running" | "succeeded" | "failed" | "uncertain";
+export type ExecutionStatus = "reserved" | "running" | "succeeded" | "failed" | "uncertain";
+
+export const EXECUTION_INVOCATION_DEADLINE_MS = 60_000;
+// Allow guard cleanup five seconds before reconciling an abandoned receipt.
+export const EXECUTION_STALE_AFTER_MS = EXECUTION_INVOCATION_DEADLINE_MS + 5_000;
 
 export type ExecutionPrincipal =
   | { kind: "web"; userId: string; workspaceId: string; sessionId?: string }
@@ -41,6 +45,7 @@ export interface ExecutionReceipt {
 
 export interface ExecutionReceiptStore {
   reserve(receipt: ExecutionReceipt): Promise<{ receipt: ExecutionReceipt; created: boolean }>;
+  beginDispatch(receiptId: string, now: number): Promise<void>;
   succeed(receiptId: string, result: JsonValue, now: number): Promise<ExecutionReceipt>;
   fail(receiptId: string, errorCode: string, now: number): Promise<ExecutionReceipt>;
   uncertain(receiptId: string, errorCode: string, now: number): Promise<ExecutionReceipt>;
@@ -420,7 +425,7 @@ export class ExecutionService {
         providerConnectionId: input.connection.providerConnectionId,
         idempotencyKey,
         requestHash,
-        status: "running",
+        status: "reserved",
         result: null,
         errorCode: null,
         startedAt: timestamp,
@@ -436,7 +441,7 @@ export class ExecutionService {
           assertCanDispatch();
           return reservation.receipt;
         }
-        if (reservation.receipt.status === "running") {
+        if (reservation.receipt.status === "reserved" || reservation.receipt.status === "running") {
           throw new ExecutionInProgressError(reservation.receipt.id);
         }
         if (reservation.receipt.status === "uncertain") {
@@ -450,6 +455,16 @@ export class ExecutionService {
         assertCanDispatch();
       } catch (error) {
         // Reservation is durable, but the provider was never called.
+        await this.receipts.fail(reservation.receipt.id, "authorization_window_closed", this.now())
+          .catch(() => undefined);
+        throw error;
+      }
+      try {
+        await this.receipts.beginDispatch(reservation.receipt.id, this.now());
+        assertCanDispatch();
+      } catch (error) {
+        // The provider has not been entered. A late database response may have
+        // committed the transition, so settle either predispatch state if possible.
         await this.receipts.fail(reservation.receipt.id, "authorization_window_closed", this.now())
           .catch(() => undefined);
         throw error;

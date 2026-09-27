@@ -1035,6 +1035,98 @@ describe("execution service", () => {
     }
   });
 
+  it.each([
+    ["web", "read"], ["web", "approved effect"],
+    ["client", "read"], ["client", "approved effect"],
+  ] as const)("reconciles a committed %s %s reservation whose INSERT response is lost", async (kind, operation) => {
+    let workspaceId = "";
+    let closed = false;
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("connection_bindings")) return { rows: [{ workspace_id: workspaceId,
+        provider_connection_id: "plug_linear", ownership: "personal", owner_user_id: "user_1",
+        status: "active", readiness: "ready" }] };
+      if (sql.includes("workspace_memberships")) return { rows: [{ id: "membership_1" }] };
+      if (sql.includes("omr_identity.sessions")) return { rows: [{ id: "session_1",
+        expires_at: new Date(Date.now() + 60_000) }] };
+      if (sql.includes("omr_control.clients")) return { rows: [{ workspace_id: workspaceId, revoked_at: null }] };
+      if (sql.includes("client_grants")) return { rows: [{ client_id: "client_1",
+        workspace_id: workspaceId, user_id: "user_1", capabilities: ["tools:read", "tools:write"],
+        revoked_at: null, expires_at: new Date(Date.now() + 60_000) }] };
+      return { rows: [] };
+    });
+    const end = vi.fn(async () => { closed = true; });
+    const guard = new PostgresExecutionInvocationGuard({ query, end } as never, 40);
+    const { actionCall, approvals, receipts, service, workspace } = await fixture(undefined, undefined, false, guard);
+    workspaceId = workspace.id;
+    const principal = kind === "web"
+      ? { kind, userId: "user_1", workspaceId, sessionId: "session_1" } as const
+      : { kind, userId: "user_1", workspaceId, clientId: "client_1", grantId: "grant_1",
+        capabilities: ["tools:read", "tools:write", "approvals:create"] as const };
+    const approval = operation === "approved effect"
+      ? await requestApproval(service, { principal, toolId: "linear.create_issue", params: {},
+        idempotencyKey: `lost-insert-${kind}` })
+      : null;
+    if (approval) await service.approve(approval.id, principal.userId);
+    let release!: () => void;
+    let inserted!: () => void;
+    const heldResponse = new Promise<void>((resolve) => { release = resolve; });
+    const committed = new Promise<void>((resolve) => { inserted = resolve; });
+    const reserve = receipts.reserve.bind(receipts);
+    vi.spyOn(receipts, "reserve").mockImplementation(async (receipt) => {
+      const result = await reserve(receipt); // Commit before the response reaches the service.
+      inserted();
+      await heldResponse;
+      return result;
+    });
+    const fail = receipts.fail.bind(receipts);
+    vi.spyOn(receipts, "fail").mockImplementation((...args) => closed
+      ? Promise.reject(new Error("receipt client closed")) : fail(...args));
+    const pending = approval
+      ? service.executeApproved(principal, approval.id)
+      : service.execute({ principal, toolId: "linear.get_issue", params: {},
+        idempotencyKey: `lost-insert-${kind}` });
+    await committed;
+    await expect(pending).rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
+    expect(closed).toBe(true);
+    expect(actionCall).not.toHaveBeenCalled();
+    const stored = [...receipts.receipts.values()][0]!;
+    expect(stored.status).toBe("reserved");
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(actionCall).not.toHaveBeenCalled();
+    const replay = await reserve({ ...stored, id: `execution_replay_${kind}_${operation}`,
+      startedAt: stored.startedAt + 65_001 });
+    expect(replay).toMatchObject({ created: false, receipt: { id: stored.id,
+      status: "failed", errorCode: "reservation_expired" } });
+    if (approval) {
+      expect(approvals.approvals.get(approval.id)?.status).toBe("failed");
+      await expect(service.executeApproved(principal, approval.id))
+        .rejects.toBeInstanceOf(ApprovalUnavailableError);
+    }
+    expect(actionCall).not.toHaveBeenCalled();
+  });
+
+  it("treats a stale dispatch transition as uncertain instead of replayable", async () => {
+    const store = new MemoryExecutionReceiptStore();
+    const { receipts, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const first = await service.execute({ principal, toolId: "linear.get_issue", params: {},
+      idempotencyKey: "stale-dispatch-control" });
+    const receipt = receipts.receipts.get(first.id)!;
+    const reserved = { ...receipt, id: "execution_stale_dispatch", status: "reserved" as const,
+      result: null, errorCode: null, completedAt: null, startedAt: 1_700_000_000_000,
+      createdAt: 1_700_000_000_000, updatedAt: 1_700_000_000_000,
+      idempotencyKey: "stale-dispatch" };
+    await store.reserve(reserved);
+    await store.beginDispatch(reserved.id, reserved.startedAt + 1);
+    const replay = await store.reserve({ ...reserved, id: "execution_retry",
+      startedAt: reserved.startedAt + 65_001 });
+    expect(replay).toMatchObject({ created: false, receipt: { id: reserved.id,
+      status: "uncertain", errorCode: "invocation_outcome_unknown" } });
+    await expect(store.beginDispatch(reserved.id, reserved.startedAt + 65_002))
+      .rejects.toThrow("Execution reservation is unavailable");
+  });
+
   it.each(["web", "client"] as const)("rechecks %s credential expiry at the actual dispatch boundary", async (kind) => {
     let workspaceId = "";
     const query = vi.fn(async (sql: string) => {

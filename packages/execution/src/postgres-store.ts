@@ -1,7 +1,8 @@
 import type { Client } from "pg";
 import type { JsonValue } from "@oh-my-router/tools";
 
-import type { ExecutionReceipt, ExecutionReceiptStore, ExecutionStatus } from "./execution.js";
+import { EXECUTION_STALE_AFTER_MS,
+  type ExecutionReceipt, type ExecutionReceiptStore, type ExecutionStatus } from "./execution.js";
 
 interface ReceiptRow {
   id: string;
@@ -66,13 +67,34 @@ export class PostgresExecutionReceiptStore implements ExecutionReceiptStore {
     );
     if (result.rows[0]) return { receipt: await this.toReceipt(result.rows[0]), created: true };
     const existing = await this.client.query<ReceiptRow>(
-      `SELECT ${COLUMNS}
-       FROM omr_control.execution_receipts
+      `UPDATE omr_control.execution_receipts
+       SET status = CASE WHEN status = 'reserved' THEN 'failed' ELSE 'uncertain' END,
+           error_code = CASE WHEN status = 'reserved' THEN 'reservation_expired'
+                             ELSE 'invocation_outcome_unknown' END,
+           completed_at = $4, updated_at = $4
+       WHERE workspace_id = $1 AND principal_key = $2 AND idempotency_key = $3
+         AND status IN ('reserved', 'running') AND started_at <= $5
+       RETURNING ${COLUMNS}`,
+      [receipt.workspaceId, receipt.principalKey, receipt.idempotencyKey,
+        receipt.startedAt, receipt.startedAt - EXECUTION_STALE_AFTER_MS],
+    );
+    if (existing.rows[0]) return { receipt: await this.toReceipt(existing.rows[0]), created: false };
+    const current = await this.client.query<ReceiptRow>(
+      `SELECT ${COLUMNS} FROM omr_control.execution_receipts
        WHERE workspace_id = $1 AND principal_key = $2 AND idempotency_key = $3`,
       [receipt.workspaceId, receipt.principalKey, receipt.idempotencyKey],
     );
-    if (!existing.rows[0]) throw new Error("Idempotency reservation disappeared");
-    return { receipt: await this.toReceipt(existing.rows[0]), created: false };
+    if (!current.rows[0]) throw new Error("Idempotency reservation disappeared");
+    return { receipt: await this.toReceipt(current.rows[0]), created: false };
+  }
+
+  async beginDispatch(receiptId: string, now: number): Promise<void> {
+    const updated = await this.client.query(
+      `UPDATE omr_control.execution_receipts SET status = 'running', updated_at = $2
+       WHERE id = $1 AND status = 'reserved' RETURNING id`,
+      [receiptId, now],
+    );
+    if (!updated.rows[0]) throw new Error("Execution reservation is unavailable");
   }
 
   async succeed(receiptId: string, result: JsonValue, now: number): Promise<ExecutionReceipt> {
@@ -93,7 +115,7 @@ export class PostgresExecutionReceiptStore implements ExecutionReceiptStore {
     const updated = await this.client.query<ReceiptRow>(
       `UPDATE omr_control.execution_receipts
        SET status = 'failed', error_code = $1, completed_at = $2, updated_at = $2
-       WHERE id = $3 AND status = 'running'
+       WHERE id = $3 AND status IN ('reserved', 'running')
        RETURNING ${COLUMNS}`,
       [errorCode, now, receiptId],
     );
