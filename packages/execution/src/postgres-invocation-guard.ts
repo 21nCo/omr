@@ -21,7 +21,7 @@ function isStatementTimeout(error: unknown): boolean {
 }
 
 type GuardInput = Parameters<ExecutionInvocationGuard["run"]>[0];
-type IdentityInput = Pick<GuardInput, "principal" | "capability" | "deadlineAt">;
+type IdentityInput = Pick<GuardInput, "principal" | "capability"> & { deadlineAt: number };
 type GuardQuery = <R extends Record<string, unknown>>(
   sql: string, values?: unknown[],
 ) => Promise<{ rows: R[] }>;
@@ -113,7 +113,8 @@ export { ExecutionInvocationDeadlineError } from "./execution.js";
 
 /** Serialize an invocation with membership, client/grant, and binding revocation. */
 export class PostgresExecutionInvocationGuard implements ExecutionInvocationGuard {
-  constructor(private readonly client: Client, private readonly deadlineMs = EXECUTION_INVOCATION_DEADLINE_MS) {
+  constructor(private readonly client: Client, private readonly deadlineMs = EXECUTION_INVOCATION_DEADLINE_MS,
+    private readonly shutdownSignal?: AbortSignal) {
     if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= 0) throw new Error("Invalid invocation deadline");
   }
 
@@ -123,6 +124,7 @@ export class PostgresExecutionInvocationGuard implements ExecutionInvocationGuar
   }
 
   async runIdentity<T>(input: IdentityInput, invoke: () => Promise<T>): Promise<T> {
+    if (!Number.isFinite(input.deadlineAt)) throw new ExecutionInvocationDeadlineError();
     return this.runAuthorized(input, invoke);
   }
 
@@ -140,13 +142,18 @@ export class PostgresExecutionInvocationGuard implements ExecutionInvocationGuar
     };
     let credentialExpiresAt = Infinity;
     const assertCanDispatch = () => {
-      if (controller.signal.aborted || Date.now() >= deadline) throw new ExecutionInvocationDeadlineError();
+      if (controller.signal.aborted || this.shutdownSignal?.aborted || Date.now() >= deadline) {
+        throw new ExecutionInvocationDeadlineError();
+      }
       if (Date.now() >= credentialExpiresAt) throw new ConnectionAccessDeniedError();
     };
     const withinDeadline = async <R>(operation: () => Promise<R>): Promise<R> => {
       const remaining = deadline - Date.now();
-      if (remaining <= 0 || controller.signal.aborted) throw new ExecutionInvocationDeadlineError();
+      if (remaining <= 0 || controller.signal.aborted || this.shutdownSignal?.aborted) {
+        throw new ExecutionInvocationDeadlineError();
+      }
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let shutdownListener: (() => void) | undefined;
       try {
         return await Promise.race([
           operation(),
@@ -157,9 +164,19 @@ export class PostgresExecutionInvocationGuard implements ExecutionInvocationGuar
               reject(new ExecutionInvocationDeadlineError());
             }, remaining);
           }),
+          new Promise<never>((_resolve, reject) => {
+            shutdownListener = () => {
+              controller.abort();
+              clientClosed = true;
+              reject(new ExecutionInvocationDeadlineError());
+            };
+            this.shutdownSignal?.addEventListener("abort", shutdownListener, { once: true });
+            if (this.shutdownSignal?.aborted) shutdownListener();
+          }),
         ]);
       } finally {
         if (timer) clearTimeout(timer);
+        if (shutdownListener) this.shutdownSignal?.removeEventListener("abort", shutdownListener);
       }
     };
     const queryWithinDeadline = async <R extends Record<string, unknown>>(

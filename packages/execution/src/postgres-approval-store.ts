@@ -54,12 +54,16 @@ const EXACT_RECEIPT = `receipt.approval_id = approval.id
   AND receipt.idempotency_key = approval.idempotency_key`;
 const { Client: PostgresClient } = pg;
 
+export type RunOwnedApprovalClient = <T>(deadlineAt: number,
+  invoke: (client: Client, shutdownSignal: AbortSignal) => Promise<T>) => Promise<T>;
+
 export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
   constructor(
     private readonly client: Client | null,
     private readonly wrappingKey: Uint8Array<ArrayBuffer>,
     private readonly claimConnectionString?: string,
     private readonly ownedQueries?: PostgresOwnedQueries,
+    private readonly runOwnedClient?: RunOwnedApprovalClient,
   ) {
     if (wrappingKey.byteLength !== 32) throw new Error("Execution approval wrapping key must be 32 bytes");
     if (!client && !ownedQueries) throw new Error("An execution approval query connection is required");
@@ -178,18 +182,34 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     if (!this.claimConnectionString && (!this.client || this.client instanceof PostgresClient)) {
       throw new Error("Approval claims require a dedicated PostgreSQL connection");
     }
+    if (this.runOwnedClient) {
+      return this.runOwnedClient(input.deadlineAt,
+        (client) => this.claimWithClient(input, client, true));
+    }
     const client = this.claimConnectionString
       ? new PostgresClient({ connectionString: this.claimConnectionString,
         connectionTimeoutMillis: Math.max(1, input.deadlineAt - Date.now()) }) : this.client!;
+    try {
+      return await this.claimWithClient(input, client, false);
+    } finally {
+      await this.closeClaimClient(client);
+    }
+  }
+
+  private async claimWithClient(input: { approvalId: string; actorUserId: string;
+    principalKey: string; now: number; deadlineAt: number }, client: Client,
+  connected: boolean): Promise<ExecutionApproval> {
     const query = <R extends object>(sql: string, values?: unknown[]) =>
       withinInvocationDeadline(input.deadlineAt, () => client.query<R>(sql, values));
-    if (client !== this.client) {
+    if (client !== this.client && !connected) {
       client.on("error", () => undefined);
     }
     let claimTransactionOpen = false;
     try {
-      if (client !== this.client) {
+      if (client !== this.client && !connected) {
         await withinInvocationDeadline(input.deadlineAt, () => client.connect());
+      }
+      if (client !== this.client) {
         await query("SELECT set_config('statement_timeout', $1, false)",
           [`${Math.max(1, input.deadlineAt - Date.now())}ms`]);
       }
@@ -223,8 +243,6 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
       return await this.reconcileStaleClaim(input, client);
     } catch (error) {
       return await this.rethrowClaimError(error, claimTransactionOpen, client, input.deadlineAt);
-    } finally {
-      await this.closeClaimClient(client);
     }
   }
 
@@ -272,33 +290,61 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     if (prior.rows[0]?.execution_receipt_id) {
       throw new ExecutionOutcomeUnknownError(prior.rows[0].execution_receipt_id);
     }
-    // A timed-out claim can commit before its response is lost. Once the
-    // invocation and cleanup budgets are past, reconcile its original key
-    // without ever making that approval executable a second time.
-    const stale = await query<{ status: ApprovalStatus; execution_receipt_id: string | null }>(
-      `UPDATE omr_control.execution_approvals AS approval
-       SET status = CASE WHEN EXISTS (
-         SELECT 1 FROM omr_control.execution_receipts AS receipt
-         WHERE ${EXACT_RECEIPT}
-           AND receipt.status IN ('running', 'succeeded', 'uncertain')
-       ) THEN 'uncertain' ELSE 'failed' END,
-         execution_receipt_id = (
-           SELECT id FROM omr_control.execution_receipts AS receipt
-           WHERE ${EXACT_RECEIPT}
-             AND receipt.status IN ('running', 'succeeded', 'uncertain') LIMIT 1
-         ), updated_at = $4
-        WHERE approval.id = $1 AND approval.actor_user_id = $2 AND approval.principal_key = $3
-         AND approval.status = 'executing' AND approval.execution_receipt_id IS NULL
-         AND approval.updated_at <= $5
-         AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
-           WHERE workspace_id = approval.workspace_id AND user_id = $2)
-       RETURNING approval.status, approval.execution_receipt_id`,
-      [input.approvalId, input.actorUserId, input.principalKey, Date.now(),
-        Date.now() - EXECUTION_STALE_AFTER_MS],
-    );
-    if (stale.rows[0]?.execution_receipt_id) {
-      throw new ExecutionOutcomeUnknownError(stale.rows[0].execution_receipt_id);
+    // Lock the approval and its exact receipt together. A reserved receipt has
+    // no external effect and must become terminal in the same transaction as
+    // the stale approval; an effect-bearing receipt retains its original ID.
+    let transactionOpen = false;
+    let effectReceiptId: string | null = null;
+    try {
+      await query("BEGIN");
+      transactionOpen = true;
+      const stale = await query<{ id: string }>(
+        `SELECT approval.id FROM omr_control.execution_approvals AS approval
+         WHERE approval.id = $1 AND approval.actor_user_id = $2 AND approval.principal_key = $3
+           AND approval.status = 'executing' AND approval.execution_receipt_id IS NULL
+           AND approval.updated_at <= $4
+           AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
+             WHERE workspace_id = approval.workspace_id AND user_id = $2)
+         FOR UPDATE OF approval`,
+        [input.approvalId, input.actorUserId, input.principalKey,
+          Date.now() - EXECUTION_STALE_AFTER_MS],
+      );
+      if (stale.rows[0]) {
+        const exact = await query<{ id: string; status: ExecutionReceipt["status"] }>(
+          `SELECT receipt.id, receipt.status FROM omr_control.execution_receipts AS receipt
+           JOIN omr_control.execution_approvals AS approval ON ${EXACT_RECEIPT}
+           WHERE approval.id = $1 FOR UPDATE OF receipt`,
+          [input.approvalId],
+        );
+        const receipt = exact.rows[0];
+        const now = Date.now();
+        if (receipt?.status === "reserved") {
+          await query(
+            `UPDATE omr_control.execution_receipts
+             SET status = 'failed', error_code = 'reservation_expired',
+               completed_at = $2, updated_at = $2
+             WHERE id = $1 AND status = 'reserved'`,
+            [receipt.id, now],
+          );
+        } else if (receipt && ["running", "succeeded", "uncertain"].includes(receipt.status)) {
+          effectReceiptId = receipt.id;
+        }
+        await query(
+          `UPDATE omr_control.execution_approvals
+           SET status = $2, execution_receipt_id = $3, updated_at = $4
+           WHERE id = $1 AND status = 'executing'`,
+          [input.approvalId, effectReceiptId ? "uncertain" : "failed", effectReceiptId, now],
+        );
+      }
+      await query("COMMIT");
+      transactionOpen = false;
+    } catch (error) {
+      if (transactionOpen && Date.now() < input.deadlineAt) {
+        await query("ROLLBACK").catch(() => undefined);
+      }
+      throw error;
     }
+    if (effectReceiptId) throw new ExecutionOutcomeUnknownError(effectReceiptId);
     throw new ApprovalUnavailableError();
   }
 
@@ -325,45 +371,16 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     if (!this.claimConnectionString) {
       throw new Error("Approved completion requires a dedicated PostgreSQL connection");
     }
+    if (this.runOwnedClient) {
+      return this.runOwnedClient(input.deadlineAt,
+        (client) => this.completeWithClient(input, client, true));
+    }
     const deadlineAt = input.deadlineAt;
     const client = new PostgresClient({ connectionString: this.claimConnectionString,
       connectionTimeoutMillis: Math.max(1, deadlineAt - Date.now()) });
     client.on("error", () => undefined);
-    const query = <R extends object>(sql: string, values?: unknown[]) =>
-      withinInvocationDeadline(deadlineAt, () => client.query<R>(sql, values));
     try {
-      await withinInvocationDeadline(deadlineAt, () => client.connect());
-      await query("BEGIN");
-      await query("SELECT set_config('statement_timeout', $1, true)",
-        [`${Math.max(1, deadlineAt - Date.now())}ms`]);
-      const locked = await query<{ workspace_id: string }>(
-        `SELECT receipt.workspace_id FROM omr_control.execution_receipts AS receipt
-         JOIN omr_control.execution_approvals AS approval ON ${EXACT_RECEIPT}
-         WHERE receipt.id = $1 AND approval.id = $2 AND receipt.status = 'running'
-           AND approval.status = 'executing'
-         FOR UPDATE OF receipt, approval`,
-        [input.receipt.id, input.approvalId],
-      );
-      if (locked.rows[0]?.workspace_id !== input.receipt.workspaceId) {
-        throw new ApprovalUnavailableError();
-      }
-      const encrypted = await withinInvocationDeadline(deadlineAt, () =>
-        encryptJson(input.result, this.wrappingKey,
-          { kind: "receipt-result", workspaceId: input.receipt.workspaceId, id: input.receipt.id }));
-      await query(
-        `UPDATE omr_control.execution_receipts
-         SET status = 'succeeded', result_ciphertext = $2, result_iv = $3,
-             result_crypto_version = 1, completed_at = $4, updated_at = $4 WHERE id = $1`,
-        [input.receipt.id, encrypted.ciphertext, encrypted.iv, input.now],
-      );
-      await query(
-        `UPDATE omr_control.execution_approvals
-         SET status = 'consumed', execution_receipt_id = $2, updated_at = $3 WHERE id = $1`,
-        [input.approvalId, input.receipt.id, input.now],
-      );
-      await query("COMMIT");
-      return { ...input.receipt, status: "succeeded", result: input.result,
-        completedAt: input.now, updatedAt: input.now };
+      return await this.completeWithClient(input, client, false);
     } finally {
       const closing = client.end();
       try {
@@ -373,6 +390,56 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
         void closing.catch(() => undefined);
       }
     }
+  }
+
+  private async completeWithClient(input: { approvalId: string; receipt: ExecutionReceipt;
+    result: JsonValue; now: number; deadlineAt: number }, client: Client,
+  connected: boolean): Promise<ExecutionReceipt> {
+    const deadlineAt = input.deadlineAt;
+    const query = <R extends object>(sql: string, values?: unknown[]) =>
+      withinInvocationDeadline(deadlineAt, () => client.query<R>(sql, values));
+    if (!connected) await withinInvocationDeadline(deadlineAt, () => client.connect());
+    await query("BEGIN");
+    await query("SELECT set_config('statement_timeout', $1, true)",
+      [`${Math.max(1, deadlineAt - Date.now())}ms`]);
+    // Reconciliation takes the approval lock before the receipt lock. Use
+    // the same order here so stale recovery and completion cannot deadlock.
+    const currentApproval = await query<{ workspace_id: string }>(
+      `SELECT workspace_id FROM omr_control.execution_approvals
+       WHERE id = $1 AND status = 'executing' FOR UPDATE`,
+      [input.approvalId],
+    );
+    if (currentApproval.rows[0]?.workspace_id !== input.receipt.workspaceId) {
+      throw new ApprovalUnavailableError();
+    }
+    const locked = await query<{ workspace_id: string }>(
+      `SELECT receipt.workspace_id FROM omr_control.execution_receipts AS receipt
+       JOIN omr_control.execution_approvals AS approval ON ${EXACT_RECEIPT}
+       WHERE receipt.id = $1 AND approval.id = $2 AND receipt.status = 'running'
+         AND approval.status = 'executing'
+       FOR UPDATE OF receipt`,
+      [input.receipt.id, input.approvalId],
+    );
+    if (locked.rows[0]?.workspace_id !== input.receipt.workspaceId) {
+      throw new ApprovalUnavailableError();
+    }
+    const encrypted = await withinInvocationDeadline(deadlineAt, () =>
+      encryptJson(input.result, this.wrappingKey,
+        { kind: "receipt-result", workspaceId: input.receipt.workspaceId, id: input.receipt.id }));
+    await query(
+      `UPDATE omr_control.execution_receipts
+       SET status = 'succeeded', result_ciphertext = $2, result_iv = $3,
+           result_crypto_version = 1, completed_at = $4, updated_at = $4 WHERE id = $1`,
+      [input.receipt.id, encrypted.ciphertext, encrypted.iv, input.now],
+    );
+    await query(
+      `UPDATE omr_control.execution_approvals
+       SET status = 'consumed', execution_receipt_id = $2, updated_at = $3 WHERE id = $1`,
+      [input.approvalId, input.receipt.id, input.now],
+    );
+    await query("COMMIT");
+    return { ...input.receipt, status: "succeeded", result: input.result,
+      completedAt: input.now, updatedAt: input.now };
   }
 
   async fail(input: { approvalId: string; now: number; deadlineAt?: number }): Promise<ExecutionApproval> {

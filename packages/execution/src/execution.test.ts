@@ -1206,6 +1206,11 @@ describe("execution service", () => {
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
       expect(stored.status).toBe("failed");
       expect(stored.executionReceiptId).toBeNull();
+      if (state === "reserved") {
+        const receipt = [...receipts.receipts.values()].find((candidate) => candidate.approvalId === approval.id)!;
+        expect(receipt).toMatchObject({ status: "failed", errorCode: "reservation_expired" });
+        expect(receipt.completedAt).not.toBeNull();
+      }
       expect(actionCall).not.toHaveBeenCalled();
     },
   );

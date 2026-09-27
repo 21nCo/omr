@@ -4,6 +4,7 @@ const mockState = vi.hoisted(() => ({
   clients: [] as Array<{ connected: boolean; ended: boolean; queries: string[]; blocked: boolean }>,
   connectHoldMs: 0,
   endHoldMs: 0,
+  endHoldAll: false,
   peakConnections: 0,
   stallConnectAt: -1,
   stallClaimAt: -1,
@@ -30,7 +31,7 @@ vi.mock("pg", () => {
       return undefined;
     }
     async end() {
-      if (this.state.blocked && mockState.endHoldMs) {
+      if ((this.state.blocked || mockState.endHoldAll) && mockState.endHoldMs) {
         await new Promise((resolve) => setTimeout(resolve, mockState.endHoldMs));
       }
       this.state.ended = true;
@@ -43,6 +44,11 @@ vi.mock("pg", () => {
         mockState.stallReceiptWrite = false;
         return new Promise<{ rows: never[] }>(() => undefined);
       }
+      if (sql === "MOCK_STALL") {
+        this.state.blocked = true;
+        return new Promise<{ rows: never[] }>(() => undefined);
+      }
+      if (sql === "MOCK_ERROR") throw new Error("SQL failed before teardown");
       if (mockState.uncertainOnClaim && sql.includes("status = 'uncertain'")) {
         mockState.advanceClock();
         return { rows: [{ execution_receipt_id: "execution_known_uncertain" }] };
@@ -78,8 +84,95 @@ vi.mock("pg", () => {
 });
 
 import { connectPostgresExecutionReceipts } from "./postgres.js";
+import { PostgresOwnedQueries } from "./postgres-owned-query.js";
 
 describe("PostgreSQL execution runtime", () => {
+  it("preserves completed read, write, SQL error and deadline outcomes through slow socket end", async () => {
+    mockState.clients.length = 0;
+    mockState.endHoldAll = true;
+    mockState.endHoldMs = 1_100;
+    const owned = new PostgresOwnedQueries("postgresql://localhost:5432/fixture");
+    try {
+      await expect(owned.query("SELECT fixture", [], Date.now() + 3_000))
+        .resolves.toMatchObject({ rows: [] });
+      await expect(owned.query("UPDATE fixture", [], Date.now() + 3_000))
+        .resolves.toMatchObject({ rows: [] });
+      await expect(owned.query("MOCK_ERROR", [], Date.now() + 3_000))
+        .rejects.toThrow("SQL failed before teardown");
+      await expect(owned.query("MOCK_STALL", [], Date.now() + 40))
+        .rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
+      await expect(owned.query("SELECT next", [], Date.now() + 3_000))
+        .resolves.toMatchObject({ rows: [] });
+    } finally {
+      mockState.endHoldAll = false;
+      mockState.endHoldMs = 0;
+      await owned.close();
+    }
+  }, 15_000);
+
+  it.each(["run", "runIdentity"] as const)("fences an active %s guard during runtime close", async (operation) => {
+    mockState.clients.length = 0;
+    mockState.stallConnectAt = 0;
+    mockState.endHoldAll = true;
+    mockState.endHoldMs = 50;
+    const runtime = await connectPostgresExecutionReceipts({
+      connectionString: "postgresql://localhost:5432/fixture",
+      resultWrappingKey: new Uint8Array(32).fill(1),
+    });
+    const invoke = vi.fn(async () => "effect");
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: "workspace_1",
+      sessionId: "session_1" };
+    try {
+      const pending = operation === "run"
+        ? runtime.invocationGuard.run({ principal,
+          connection: { id: "binding_1", providerConnectionId: "remote_1" } as never,
+          capability: "tools:read", deadlineAt: Date.now() + 2_000 }, invoke)
+        : runtime.invocationGuard.runIdentity!({ principal, capability: "tools:read",
+          deadlineAt: Date.now() + 2_000 }, invoke);
+      await vi.waitFor(() => expect(mockState.clients).toHaveLength(1));
+      await runtime.close();
+      expect(mockState.clients[0]?.ended).toBe(true);
+      await expect(pending).rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
+      await expect(runtime.invocationGuard.runIdentity!({ principal, capability: "tools:read",
+        deadlineAt: Date.now() + 2_000 }, invoke)).rejects.toThrow(/closed/);
+      expect(mockState.clients).toHaveLength(1);
+      expect(invoke).not.toHaveBeenCalled();
+    } finally {
+      mockState.stallConnectAt = -1;
+      mockState.endHoldAll = false;
+      mockState.endHoldMs = 0;
+    }
+  });
+
+  it("owns an active approval claim socket during runtime close", async () => {
+    mockState.clients.length = 0;
+    mockState.stallClaimAt = 0;
+    mockState.endHoldAll = true;
+    mockState.endHoldMs = 50;
+    const runtime = await connectPostgresExecutionReceipts({
+      connectionString: "postgresql://localhost:5432/fixture",
+      resultWrappingKey: new Uint8Array(32).fill(1),
+    });
+    try {
+      const pending = runtime.approvals.claim({ approvalId: "approval_1",
+        actorUserId: "user_1", principalKey: "web:user_1", now: Date.now(),
+        deadlineAt: Date.now() + 2_000 }).catch((error: unknown) => error);
+      await vi.waitFor(() => expect(mockState.clients[0]?.queries.some((sql) =>
+        sql.includes("UPDATE omr_control.execution_approvals"))).toBe(true));
+      await runtime.close();
+      expect(mockState.clients[0]?.ended).toBe(true);
+      expect(await pending).toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
+      await expect(runtime.approvals.claim({ approvalId: "approval_1",
+        actorUserId: "user_1", principalKey: "web:user_1", now: Date.now(),
+        deadlineAt: Date.now() + 2_000 })).rejects.toThrow(/closed/);
+      expect(mockState.clients).toHaveLength(1);
+    } finally {
+      mockState.stallClaimAt = -1;
+      mockState.endHoldAll = false;
+      mockState.endHoldMs = 0;
+    }
+  });
+
   it("starts without an idle socket and bounds concurrent receipt query sockets", async () => {
     mockState.clients.length = 0;
     mockState.peakConnections = 0;

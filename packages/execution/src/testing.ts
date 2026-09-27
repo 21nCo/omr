@@ -194,7 +194,7 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
         approval.executionReceiptId === null &&
         this.isMember(approval.workspaceId, input.actorUserId) &&
         input.now - approval.updatedAt >= EXECUTION_STALE_AFTER_MS) {
-      const receipt = [...this.receipts.receipts.values()].find((candidate) =>
+      const exactReceipt = [...this.receipts.receipts.values()].find((candidate) =>
         candidate.approvalId === approval.id &&
         candidate.workspaceId === approval.workspaceId &&
         candidate.actorUserId === approval.actorUserId &&
@@ -203,8 +203,15 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
         candidate.manifestHash === approval.manifestHash &&
         candidate.connectionId === approval.connectionId &&
         candidate.providerConnectionId === approval.providerConnectionId &&
-        candidate.idempotencyKey === approval.idempotencyKey &&
-        ["running", "succeeded", "uncertain"].includes(candidate.status));
+        candidate.idempotencyKey === approval.idempotencyKey);
+      const receipt = exactReceipt && ["running", "succeeded", "uncertain"].includes(exactReceipt.status)
+        ? exactReceipt : undefined;
+      if (exactReceipt?.status === "reserved") {
+        exactReceipt.status = "failed";
+        exactReceipt.errorCode = "reservation_expired";
+        exactReceipt.completedAt = input.now;
+        exactReceipt.updatedAt = input.now;
+      }
       approval.status = receipt ? "uncertain" : "failed";
       approval.executionReceiptId = receipt?.id ?? null;
       approval.updatedAt = input.now;

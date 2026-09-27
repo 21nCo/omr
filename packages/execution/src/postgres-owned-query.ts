@@ -62,8 +62,8 @@ export class PostgresOwnedQueries {
     try {
       await Promise.race([
         client.end().catch(() => undefined),
-        new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error("PostgreSQL socket close timed out")), SOCKET_CLOSE_MS);
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, SOCKET_CLOSE_MS);
         }),
       ]);
     } finally {

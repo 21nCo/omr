@@ -510,12 +510,169 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
           expect(state.rows[0]).toMatchObject(exactEffect
             ? { status: "uncertain", execution_receipt_id: receipt.id }
             : { status: "failed", execution_receipt_id: null });
+          const receiptState = await observer.query<{ status: string; error_code: string | null;
+            completed_at: string | null }>(
+            `SELECT status, error_code, completed_at FROM omr_control.execution_receipts WHERE id = $1`,
+            [receipt.id]);
+          expect(receiptState.rows[0]).toMatchObject(association === "exact" && status === "reserved"
+            ? { status: "failed", error_code: "reservation_expired",
+              completed_at: expect.anything() }
+            : { status, error_code: status === "failed" ? "predispatch" :
+              status === "uncertain" ? "provider_outcome_unknown" : null });
         }
       }
     } finally {
       await observer.end();
     }
   });
+
+  it("rolls back a locked stale reservation and settles both rows on retry", async () => {
+    const now = Date.now();
+    const approval = approvalFixture(now);
+    await runtime.approvals.create(approval);
+    await runtime.approvals.approve({ approvalId: approval.id,
+      actorUserId: "execution_owner", now: now + 1 });
+    await runtime.approvals.claim({ approvalId: approval.id,
+      actorUserId: "execution_owner", principalKey: approval.principalKey,
+      now: now + 2, deadlineAt: Date.now() + 2_000 });
+    const receipt = receiptFixture(approval, now);
+    await runtime.receipts.reserve(receipt);
+    const observer = new Client({ connectionString: connectionString! });
+    await observer.connect();
+    const monitor = new Client({ connectionString: connectionString! });
+    await monitor.connect();
+    const appName = `omr_stale_${crypto.randomUUID().replaceAll("-", "")}`;
+    const url = new URL(connectionString!);
+    url.searchParams.set("application_name", appName);
+    const isolated = await connectPostgresExecutionReceipts({
+      connectionString: url.toString(), resultWrappingKey: new Uint8Array(WRAPPING_KEY),
+    });
+    try {
+      await observer.query(`UPDATE omr_control.execution_approvals SET updated_at = $2 WHERE id = $1`,
+        [approval.id, now - EXECUTION_STALE_AFTER_MS - 5_000]);
+      await observer.query("BEGIN");
+      await observer.query("SELECT id FROM omr_control.execution_receipts WHERE id = $1 FOR UPDATE",
+        [receipt.id]);
+      const pending = isolated.approvals.claim({ approvalId: approval.id,
+        actorUserId: "execution_owner", principalKey: approval.principalKey,
+        now: Date.now(), deadlineAt: Date.now() + 1_000 }).catch((error: unknown) => error);
+      await vi.waitFor(async () => {
+        const state = await monitor.query<{ count: string }>(
+          `SELECT count(*)::text AS count FROM pg_stat_activity
+           WHERE left(application_name, length($1) + 1) = $1 || ':' AND wait_event_type = 'Lock'
+             AND query LIKE '%FROM omr_control.execution_receipts AS receipt%'`, [appName]);
+        expect(Number(state.rows[0]?.count)).toBeGreaterThan(0);
+      }, { timeout: 2_000 });
+      expect(await pending).toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
+      await observer.query("ROLLBACK");
+      const before = await observer.query<{ approval_status: string; receipt_status: string }>(
+        `SELECT approval.status AS approval_status, receipt.status AS receipt_status
+         FROM omr_control.execution_approvals AS approval
+         JOIN omr_control.execution_receipts AS receipt ON receipt.approval_id = approval.id
+         WHERE approval.id = $1`, [approval.id]);
+      expect(before.rows[0]).toEqual({ approval_status: "executing", receipt_status: "reserved" });
+      await observer.query("BEGIN");
+      await observer.query("SELECT id FROM omr_control.execution_receipts WHERE id = $1 FOR UPDATE",
+        [receipt.id]);
+      const closingClaim = isolated.approvals.claim({ approvalId: approval.id,
+        actorUserId: "execution_owner", principalKey: approval.principalKey,
+        now: Date.now(), deadlineAt: Date.now() + 5_000 }).catch((error: unknown) => error);
+      await vi.waitFor(async () => {
+        const state = await monitor.query<{ count: string }>(
+          `SELECT count(*)::text AS count FROM pg_stat_activity
+           WHERE left(application_name, length($1) + 1) = $1 || ':' AND wait_event_type = 'Lock'
+             AND query LIKE '%FROM omr_control.execution_receipts AS receipt%'`, [appName]);
+        expect(Number(state.rows[0]?.count)).toBeGreaterThan(0);
+      }, { timeout: 2_000 });
+      await isolated.close();
+      expect(await closingClaim).toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
+      await vi.waitFor(async () => {
+        const state = await monitor.query<{ count: string }>(
+          `SELECT count(*)::text AS count FROM pg_stat_activity
+           WHERE left(application_name, length($1) + 1) = $1 || ':'`,
+          [appName]);
+        expect(Number(state.rows[0]?.count)).toBe(0);
+      }, { timeout: 2_000 });
+      await observer.query("ROLLBACK");
+      await expect(runtime.approvals.claim({ approvalId: approval.id,
+        actorUserId: "execution_owner", principalKey: approval.principalKey,
+        now: Date.now(), deadlineAt: Date.now() + 2_000 }))
+        .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      const after = await observer.query<{ approval_status: string; receipt_status: string;
+        error_code: string }>(
+        `SELECT approval.status AS approval_status, receipt.status AS receipt_status,
+           receipt.error_code FROM omr_control.execution_approvals AS approval
+         JOIN omr_control.execution_receipts AS receipt ON receipt.approval_id = approval.id
+         WHERE approval.id = $1`, [approval.id]);
+      expect(after.rows[0]).toEqual({ approval_status: "failed", receipt_status: "failed",
+        error_code: "reservation_expired" });
+    } finally {
+      await observer.query("ROLLBACK").catch(() => undefined);
+      await isolated.close();
+      await monitor.end();
+      await observer.end();
+    }
+  }, 15_000);
+
+  it("closes a guard waiting on a real membership lock and leaves no backend", async () => {
+    const appName = `omr_guard_${crypto.randomUUID().replaceAll("-", "")}`;
+    const url = new URL(connectionString!);
+    url.searchParams.set("application_name", appName);
+    const isolated = await connectPostgresExecutionReceipts({
+      connectionString: url.toString(), resultWrappingKey: new Uint8Array(WRAPPING_KEY),
+    });
+    const observer = new Client({ connectionString: connectionString! });
+    await observer.connect();
+    const monitor = new Client({ connectionString: connectionString! });
+    await monitor.connect();
+    const invoke = vi.fn(async () => "effect");
+    try {
+      await observer.query("BEGIN");
+      await observer.query(`UPDATE omr_control.workspace_memberships SET role = role
+        WHERE workspace_id = $1 AND user_id = 'execution_owner'`, [workspaceId]);
+      const pending = isolated.invocationGuard.runIdentity!({
+        principal: { kind: "web", userId: "execution_owner", workspaceId,
+          sessionId: "unused_session" }, capability: "tools:write",
+        deadlineAt: Date.now() + 5_000,
+      }, invoke).catch((error: unknown) => error);
+      await vi.waitFor(async () => {
+        const state = await monitor.query<{ count: string }>(
+          `SELECT count(*)::text AS count FROM pg_stat_activity
+           WHERE left(application_name, length($1) + 1) = $1 || ':'
+             AND wait_event_type = 'Lock'`, [appName]);
+        expect(Number(state.rows[0]?.count)).toBeGreaterThan(0);
+      }, { timeout: 2_000 });
+      await isolated.close();
+      expect(await pending).toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
+      await expect(isolated.invocationGuard.runIdentity!({
+        principal: { kind: "web", userId: "execution_owner", workspaceId },
+        capability: "tools:write", deadlineAt: Date.now() + 2_000,
+      }, invoke)).rejects.toThrow(/closed/);
+      await vi.waitFor(async () => {
+        const state = await monitor.query<{ count: string }>(
+          `SELECT count(*)::text AS count FROM pg_stat_activity
+           WHERE left(application_name, length($1) + 1) = $1 || ':'`,
+          [appName]);
+        expect(Number(state.rows[0]?.count)).toBe(0);
+      }, { timeout: 2_000 });
+      expect(invoke).not.toHaveBeenCalled();
+      const healthy = await connectPostgresExecutionReceipts({
+        connectionString: connectionString!, resultWrappingKey: new Uint8Array(WRAPPING_KEY),
+      });
+      try {
+        await expect(healthy.receipts.findByIdempotency({ workspaceId,
+          principalKey: "web:execution_owner", idempotencyKey: "after-guard-close" }))
+          .resolves.toBeNull();
+      } finally {
+        await healthy.close();
+      }
+    } finally {
+      await observer.query("ROLLBACK").catch(() => undefined);
+      await isolated.close();
+      await monitor.end();
+      await observer.end();
+    }
+  }, 15_000);
 
   it("releases dedicated PostgreSQL sockets after concurrent failed claims", async () => {
     const applicationName = `omr_claim_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -528,7 +685,8 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     await observer.connect();
     try {
       const count = async () => Number((await observer.query<{ count: string }>(
-        "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1", [applicationName])).rows[0]?.count);
+        `SELECT count(*) FROM pg_stat_activity
+         WHERE left(application_name, length($1) + 1) = $1 || ':'`, [applicationName])).rows[0]?.count);
       expect(await count()).toBe(0);
       const results = await Promise.allSettled(Array.from({ length: 20 }, (_, index) =>
         isolated.approvals.claim({ approvalId: `missing_${index}`, actorUserId: "execution_owner",
@@ -550,7 +708,8 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     const observer = new Client({ connectionString: connectionString! });
     await observer.connect();
     const count = async () => Number((await observer.query<{ count: string }>(
-      "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1", [applicationName])).rows[0]?.count);
+      "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1",
+      [applicationName])).rows[0]?.count);
     try {
       expect(await count()).toBe(0);
       let settled = false;

@@ -39,6 +39,17 @@ function authorizedQuery(timeline: string[], options: {
 }
 
 describe("PostgreSQL invocation transaction contract", () => {
+  it("requires a caller deadline for direct identity guards before any SQL", async () => {
+    const timeline: string[] = [];
+    const query = authorizedQuery(timeline);
+    const guard = new PostgresExecutionInvocationGuard({ query } as unknown as Client);
+    const report = vi.fn(async () => "receipt_1");
+    await expect(guard.runIdentity({ principal, capability: "tools:write" } as never, report))
+      .rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
+    expect(timeline).toEqual([]);
+    expect(report).not.toHaveBeenCalled();
+  });
+
   it("rechecks membership and grant before reporting an uncertain receipt without binding health", async () => {
     for (const grantState of [undefined, "revoked"] as const) {
       const timeline: string[] = [];
