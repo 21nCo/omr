@@ -20,6 +20,7 @@ interface ReceiptRow {
   status: ExecutionStatus;
   result_ciphertext: Buffer | null;
   result_iv: Buffer | null;
+  result_crypto_version: number;
   error_code: string | null;
   started_at: string;
   completed_at: string | null;
@@ -29,7 +30,8 @@ interface ReceiptRow {
 
 const COLUMNS = `id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash,
   connection_id, provider_connection_id, idempotency_key, request_hash, approval_id, status,
-  result_ciphertext, result_iv, error_code, started_at, completed_at, created_at, updated_at`;
+  result_ciphertext, result_iv, result_crypto_version, error_code, started_at, completed_at,
+  created_at, updated_at`;
 
 export class PostgresExecutionReceiptStore implements ExecutionReceiptStore {
   constructor(
@@ -117,10 +119,17 @@ export class PostgresExecutionReceiptStore implements ExecutionReceiptStore {
   }
 
   async succeed(receiptId: string, result: JsonValue, now: number): Promise<ExecutionReceipt> {
-    const encrypted = await encryptJson(result, this.wrappingKey);
+    const context = await this.client.query<{ workspace_id: string }>(
+      `SELECT workspace_id FROM omr_control.execution_receipts WHERE id = $1 AND status = 'running'`,
+      [receiptId],
+    );
+    if (!context.rows[0]) throw new Error("Execution receipt is not running");
+    const encrypted = await encryptJson(result, this.wrappingKey,
+      { kind: "receipt-result", workspaceId: context.rows[0].workspace_id, id: receiptId });
     const updated = await this.client.query<ReceiptRow>(
       `UPDATE omr_control.execution_receipts
        SET status = 'succeeded', result_ciphertext = $1, result_iv = $2,
+           result_crypto_version = 1,
            completed_at = $3, updated_at = $3
        WHERE id = $4 AND status = 'running'
        RETURNING ${COLUMNS}`,
@@ -185,7 +194,9 @@ export class PostgresExecutionReceiptStore implements ExecutionReceiptStore {
       approvalId: row.approval_id,
       status: row.status,
       result: row.result_ciphertext && row.result_iv
-        ? await decryptJson(row.result_ciphertext, row.result_iv, this.wrappingKey)
+        ? await decryptJson(row.result_ciphertext, row.result_iv, this.wrappingKey,
+          { kind: "receipt-result", workspaceId: row.workspace_id, id: row.id },
+          row.result_crypto_version)
         : null,
       errorCode: row.error_code,
       startedAt: Number(row.started_at),

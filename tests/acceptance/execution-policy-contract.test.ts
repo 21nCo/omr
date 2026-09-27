@@ -9,7 +9,8 @@ import { OMRHttpError } from "@oh-my-router/client";
 import { ConnectionAuthority } from "@oh-my-router/connections";
 import { MemoryConnectionBindingStore } from "@oh-my-router/connections/testing";
 import { ExecutionService, ExecutionInvocationDeadlineError, ExecutionOutcomeUnknownError,
-  publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
+  publicApproval, publicReceipt, type ExecutionInvocationGuard,
+  type ExecutionPrincipal } from "@oh-my-router/execution";
 import { PostgresExecutionInvocationGuard } from "@oh-my-router/execution/postgres";
 import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "@oh-my-router/execution/testing";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
@@ -26,6 +27,31 @@ function action(name: string, effect: ToolEffect) {
       requiredScopes: [], resources: [], sensitiveKeys: ["secretField", "items[*].pin", "metadata.*.pin",
         "wholeItems[*]", "nested.rows[*][*]"],
       pagination: { kind: "none" as const }, retry: "never" as const } };
+}
+
+async function protocolHarness(server: ReturnType<typeof createServer>, name: string,
+  cliTimeout: number) {
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Protocol fixture listener is unavailable");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const mcp = await createOMRMcpServer({ baseUrl, credential: "mcp-fixture", workspaceId: "workspace_1" });
+  const client = new McpClient({ name, version: "1.0.0" }, { capabilities: {} });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await mcp.connect(serverTransport);
+  await client.connect(clientTransport);
+  return { baseUrl, client,
+    runCli: (args: string[]) => execFileAsync(process.execPath,
+      [join(process.cwd(), "packages/cli/dist/bin.js"), ...args, "--json"], {
+        env: { ...process.env, OMR_BACKEND: baseUrl, OMR_API_KEY: "cli-fixture",
+          OMR_WORKSPACE_ID: "workspace_1" }, timeout: cliTimeout,
+      }).then(() => { throw new Error("CLI unexpectedly succeeded"); },
+        (error: { code: number; stdout: string; stderr: string }) => error),
+    close: async () => {
+      await Promise.all([client.close(), mcp.close()]);
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    },
+  };
 }
 
 describe("execution-policy-contract", () => {
@@ -99,24 +125,9 @@ describe("execution-policy-contract", () => {
       outgoing.writeHead(response.status, Object.fromEntries(response.headers));
       outgoing.end(Buffer.from(await response.arrayBuffer()));
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const address = server.address();
-    if (!address || typeof address === "string") throw new Error("Protocol fixture listener is unavailable");
-    const baseUrl = `http://127.0.0.1:${address.port}`;
-    let mcp: Awaited<ReturnType<typeof createOMRMcpServer>> | undefined;
-    let client: McpClient | undefined;
+    const harness = await protocolHarness(server, "queued-sql", 5_000);
+    const { baseUrl, client, runCli } = harness;
     try {
-      mcp = await createOMRMcpServer({ baseUrl, credential: "mcp-fixture", workspaceId: "workspace_1" });
-      client = new McpClient({ name: "queued-sql", version: "1.0.0" }, { capabilities: {} });
-      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-      await mcp.connect(serverTransport);
-      await client.connect(clientTransport);
-      const runCli = (args: string[]) => execFileAsync(process.execPath,
-        [join(process.cwd(), "packages/cli/dist/bin.js"), ...args, "--json"], {
-          env: { ...process.env, OMR_BACKEND: baseUrl, OMR_API_KEY: "cli-fixture",
-            OMR_WORKSPACE_ID: "workspace_1" }, timeout: 5_000,
-        }).then(() => { throw new Error("CLI unexpectedly succeeded"); },
-          (error: { code: number; stdout: string; stderr: string }) => error);
       const [web, cliRead, cliBefore, cliAfter, mcpRead, mcpBefore, mcpAfter] = await Promise.all([
         fetch(`${baseUrl}/api/tools/execute`, { method: "POST", headers: { "content-type": "application/json" },
           body: JSON.stringify({ workspaceId: "workspace_1", toolId: "linear.read", params: {} }) }),
@@ -145,8 +156,7 @@ describe("execution-policy-contract", () => {
       expect(timeline).not.toContain("ROLLBACK");
       expect(provider).toHaveBeenCalledTimes(2);
     } finally {
-      await Promise.all([client?.close(), mcp?.close()]);
-      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await harness.close();
     }
   }, 10_000);
 
@@ -172,25 +182,9 @@ describe("execution-policy-contract", () => {
           : { error: "EXECUTION_INVOCATION_TIMEOUT" }));
       }, 30_100);
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const address = server.address();
-    if (!address || typeof address === "string") throw new Error("Protocol fixture listener is unavailable");
-    const baseUrl = `http://127.0.0.1:${address.port}`;
-    let mcp: Awaited<ReturnType<typeof createOMRMcpServer>> | undefined;
-    let client: McpClient | undefined;
+    const harness = await protocolHarness(server, "delayed-errors", 75_000);
+    const { client, runCli } = harness;
     try {
-      mcp = await createOMRMcpServer({ baseUrl, credential: "mcp-fixture", workspaceId: "workspace_1" });
-      client = new McpClient({ name: "delayed-errors", version: "1.0.0" }, { capabilities: {} });
-      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-      await mcp.connect(serverTransport);
-      await client.connect(clientTransport);
-      const runCli = (args: string[]) => execFileAsync(process.execPath,
-        [join(process.cwd(), "packages/cli/dist/bin.js"), ...args, "--json"], {
-          env: { ...process.env, OMR_BACKEND: baseUrl, OMR_API_KEY: "cli-fixture",
-            OMR_WORKSPACE_ID: "workspace_1" },
-          timeout: 75_000,
-        }).then(() => { throw new Error("CLI unexpectedly succeeded"); },
-          (error: { code: number; stdout: string; stderr: string }) => error);
       const [cliRead, cliBefore, cliAfter, mcpRead, mcpBefore, mcpAfter] = await Promise.all([
         runCli(["tools", "run", "linear.read"]),
         runCli(["approvals", "execute", "before-dispatch"]),
@@ -213,8 +207,7 @@ describe("execution-policy-contract", () => {
       expect(mcpAfter).toMatchObject({ isError: true, structuredContent: { ok: false,
         error: { details: { error: "EXECUTION_OUTCOME_UNKNOWN", receiptId: "receipt_after_dispatch" } } } });
     } finally {
-      await Promise.all([client?.close(), mcp?.close()]);
-      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await harness.close();
     }
   }, 80_000);
 
@@ -281,9 +274,13 @@ describe("execution-policy-contract", () => {
         member.workspaceId === workspaceId && member.userId === actorUserId);
     const receiptStore = new MemoryExecutionReceiptStore(isMember);
     const approvalStore = new MemoryExecutionApprovalStore(isMember, receiptStore);
+    const guard: ExecutionInvocationGuard = { run: async (_input, invoke) => {
+      await invoke(() => undefined);
+      throw new Error("guard COMMIT response lost after durable completion");
+    } };
     const service = new ExecutionService(catalog, connections, { action: provider },
       receiptStore, async () => [], Date.now,
-      approvalStore, undefined, new Uint8Array(32).fill(7));
+      approvalStore, guard, new Uint8Array(32).fill(7));
     const principal = (request: Request): ExecutionPrincipal => surface === "web"
       ? { kind: "web", userId: "user_1", workspaceId: workspace.id }
       : { kind: "client", userId: "user_1", workspaceId: workspace.id,
@@ -400,7 +397,8 @@ describe("execution-policy-contract", () => {
         await webPost("/api/approvals/approve", { approvalId: approval.id });
         const executed = await runCli(["approvals", "execute", approval.id]);
         expect(JSON.parse(executed.stdout)).toMatchObject({ status: "succeeded" });
-        await expect(runCli(["approvals", "execute", approval.id])).rejects.toMatchObject({ code: 1 });
+        expect(JSON.parse((await runCli(["approvals", "execute", approval.id])).stdout))
+          .toMatchObject({ id: JSON.parse(executed.stdout).id, status: "succeeded" });
         expect(provider).toHaveBeenCalledTimes(2);
         await webPost("/api/approvals/approve", { approvalId: opaque.id });
         expect(JSON.parse((await runCli(["approvals", "execute", opaque.id])).stdout))
@@ -470,10 +468,10 @@ describe("execution-policy-contract", () => {
         expect(JSON.stringify(pending)).not.toContain("requestHash");
         expect(provider).toHaveBeenCalledTimes(1);
         await webPost("/api/approvals/approve", { approvalId });
+        const executed = await client.callTool({ name: "omr.approvals.execute", arguments: { approvalId } });
+        expect(executed).toMatchObject({ structuredContent: { status: "succeeded" } });
         expect(await client.callTool({ name: "omr.approvals.execute", arguments: { approvalId } }))
-          .toMatchObject({ structuredContent: { status: "succeeded" } });
-        expect(await client.callTool({ name: "omr.approvals.execute", arguments: { approvalId } }))
-          .toMatchObject({ isError: true });
+          .toMatchObject({ structuredContent: { id: executed.structuredContent?.id, status: "succeeded" } });
         expect(provider).toHaveBeenCalledTimes(2);
         await webPost("/api/approvals/approve", { approvalId: opaqueId });
         expect(await client.callTool({ name: "omr.approvals.execute", arguments: { approvalId: opaqueId } }))
@@ -553,8 +551,9 @@ describe("execution-policy-contract", () => {
     const receipt = await client.executeApproved(approval.id) as { id: string; status: string };
     expect(receipt.status).toBe("succeeded");
     expect(JSON.stringify(receipt)).not.toContain("remote_secret_handle");
-    await expect(client.executeApproved(approval.id)).rejects.toMatchObject({ status: 409,
-      body: { error: "APPROVAL_UNAVAILABLE" } });
+    await expect(client.executeApproved(approval.id)).resolves.toMatchObject({
+      id: receipt.id, status: "succeeded",
+    });
     expect(provider).toHaveBeenCalledTimes(2);
     expect(await client.approve(opaque.id)).toMatchObject({ previewMode: "opaque",
       params: "[REDACTED]" });

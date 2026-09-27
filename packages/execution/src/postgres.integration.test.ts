@@ -52,6 +52,29 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     await runtime.close();
   });
 
+  const approvalFixture = (now: number, overrides: Partial<ExecutionApproval> = {}): ExecutionApproval => ({
+    id: `approval_${crypto.randomUUID()}`, workspaceId, actorUserId: "execution_owner",
+    principalKey: "web:execution_owner", toolId: "linear.create_issue",
+    manifestHash: `sha256-${"d".repeat(64)}`, connectionId,
+    providerConnectionId: `plug_${crypto.randomUUID()}`, params: {},
+    idempotencyKey: `approval_${crypto.randomUUID()}`, status: "pending",
+    approvedBy: null, decidedAt: null, expiresAt: now + 60_000,
+    executionReceiptId: null, createdAt: now, updatedAt: now,
+    ...overrides,
+  });
+
+  const receiptFixture = (approval: ExecutionApproval, now: number,
+    overrides: Partial<ExecutionReceipt> = {}): ExecutionReceipt => ({
+    id: `execution_${crypto.randomUUID()}`, workspaceId: approval.workspaceId,
+    actorUserId: approval.actorUserId, principalKey: approval.principalKey,
+    toolId: approval.toolId, manifestHash: approval.manifestHash,
+    connectionId: approval.connectionId, providerConnectionId: approval.providerConnectionId,
+    idempotencyKey: approval.idempotencyKey, requestHash: `sha256-${"f".repeat(64)}`,
+    approvalId: approval.id, status: "reserved", result: null, errorCode: null,
+    startedAt: now, completedAt: null, createdAt: now, updatedAt: now,
+    ...overrides,
+  });
+
   it("reserves idempotently and encrypts successful results at rest", async () => {
     const now = Date.now();
     const receipt: ExecutionReceipt = {
@@ -116,27 +139,84 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     }
   });
 
+  it("authenticates PostgreSQL ciphertext against its exact row and workspace", async () => {
+    const now = Date.now();
+    const approvals = [0, 1].map(() => approvalFixture(now, {
+      manifestHash: `sha256-${"a".repeat(64)}`, params: { secret: "approval-secret" },
+    }));
+    await Promise.all(approvals.map((approval) => runtime.approvals.create(approval)));
+    const observer = new Client({ connectionString: connectionString! });
+    await observer.connect();
+    const original = await observer.query<{ params_ciphertext: Buffer; params_iv: Buffer }>(
+      `SELECT params_ciphertext, params_iv FROM omr_control.execution_approvals WHERE id = $1`,
+      [approvals[1]!.id]);
+    try {
+      await observer.query(`UPDATE omr_control.execution_approvals AS target
+        SET params_ciphertext = source.params_ciphertext, params_iv = source.params_iv
+        FROM omr_control.execution_approvals AS source
+        WHERE target.id = $1 AND source.id = $2`, [approvals[1]!.id, approvals[0]!.id]);
+      await expect(runtime.approvals.getForActor(approvals[1]!.id, "execution_owner"))
+        .rejects.toThrow();
+      await expect(runtime.approvals.getForActor(approvals[0]!.id, "execution_owner"))
+        .resolves.toMatchObject({ params: { secret: "approval-secret" } });
+    } finally {
+      await observer.query(`UPDATE omr_control.execution_approvals
+        SET params_ciphertext = $2, params_iv = $3 WHERE id = $1`,
+      [approvals[1]!.id, original.rows[0]!.params_ciphertext, original.rows[0]!.params_iv]);
+      await observer.end();
+    }
+  });
+
+  it("atomically commits approved result and consumption after a lock timeout retry", async () => {
+    const now = Date.now();
+    const approval = approvalFixture(now, { manifestHash: `sha256-${"b".repeat(64)}` });
+    await runtime.approvals.create(approval);
+    await runtime.approvals.approve({ approvalId: approval.id,
+      actorUserId: "execution_owner", now: now + 1 });
+    await runtime.approvals.claim({ approvalId: approval.id,
+      actorUserId: "execution_owner", principalKey: approval.principalKey,
+      now: now + 2, deadlineAt: Date.now() + 1_000 });
+    const receipt = receiptFixture(approval, now, { requestHash: `sha256-${"c".repeat(64)}` });
+    await runtime.receipts.reserve(receipt);
+    await runtime.receipts.beginDispatch(receipt.id, now + 3);
+    const observer = new Client({ connectionString: connectionString! });
+    await observer.connect();
+    try {
+      await observer.query("BEGIN");
+      await observer.query(`SELECT id FROM omr_control.execution_approvals
+        WHERE id = $1 FOR UPDATE`, [approval.id]);
+      await expect(runtime.approvals.succeedWithReceipt({ approvalId: approval.id,
+        receipt, result: { id: "confirmed" }, now: now + 4, deadlineAt: Date.now() + 80 }))
+        .rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
+      await observer.query("ROLLBACK");
+      const before = await observer.query<{ receipt_status: string; approval_status: string }>(
+        `SELECT receipt.status AS receipt_status, approval.status AS approval_status
+         FROM omr_control.execution_receipts AS receipt
+         JOIN omr_control.execution_approvals AS approval ON approval.id = receipt.approval_id
+         WHERE receipt.id = $1`, [receipt.id]);
+      expect(before.rows[0]).toEqual({ receipt_status: "running", approval_status: "executing" });
+      await expect(runtime.approvals.succeedWithReceipt({ approvalId: approval.id,
+        receipt, result: { id: "confirmed" }, now: now + 5, deadlineAt: Date.now() + 2_000 }))
+        .resolves.toMatchObject({ status: "succeeded", result: { id: "confirmed" } });
+      const after = await observer.query<{ receipt_status: string; approval_status: string }>(
+        `SELECT receipt.status AS receipt_status, approval.status AS approval_status
+         FROM omr_control.execution_receipts AS receipt
+         JOIN omr_control.execution_approvals AS approval ON approval.id = receipt.approval_id
+         WHERE receipt.id = $1`, [receipt.id]);
+      expect(after.rows[0]).toEqual({ receipt_status: "succeeded", approval_status: "consumed" });
+      await expect(runtime.receipts.findByIdempotency({ workspaceId,
+        principalKey: approval.principalKey, idempotencyKey: approval.idempotencyKey }))
+        .resolves.toMatchObject({ id: receipt.id, result: { id: "confirmed" } });
+    } finally {
+      await observer.query("ROLLBACK").catch(() => undefined);
+      await observer.end();
+    }
+  }, 15_000);
+
   it("atomically binds encrypted approval parameters to one actor and principal", async () => {
     const now = Date.now();
-    const approval: ExecutionApproval = {
-      id: `approval_${crypto.randomUUID()}`,
-      workspaceId,
-      actorUserId: "execution_owner",
-      principalKey: "web:execution_owner",
-      toolId: "linear.create_issue",
-      manifestHash: `sha256-${"c".repeat(64)}`,
-      connectionId,
-      providerConnectionId: `plug_${crypto.randomUUID()}`,
-      params: { title: "Sensitive approval title" },
-      idempotencyKey: `approval_${crypto.randomUUID()}`,
-      status: "pending",
-      approvedBy: null,
-      decidedAt: null,
-      expiresAt: now + 60_000,
-      executionReceiptId: null,
-      createdAt: now,
-      updatedAt: now,
-    };
+    const approval = approvalFixture(now, { manifestHash: `sha256-${"c".repeat(64)}`,
+      params: { title: "Sensitive approval title" } });
     await expect(runtime.approvals.create(approval)).resolves.toMatchObject({
       params: { title: "Sensitive approval title" },
       status: "pending",
@@ -145,12 +225,12 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       workspaceId,
       actorUserId: "execution_owner",
       limit: 20,
-    })).resolves.toEqual([
+    })).resolves.toContainEqual(
       expect.objectContaining({
         id: approval.id,
         params: { title: "Sensitive approval title" },
       }),
-    ]);
+    );
     await expect(runtime.approvals.approve({
       approvalId: approval.id,
       actorUserId: "other_user",
@@ -192,15 +272,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
 
   it("times out an approved claim behind a membership lock and permits a safe retry", async () => {
     const now = Date.now();
-    const approval: ExecutionApproval = {
-      id: `approval_${crypto.randomUUID()}`, workspaceId, actorUserId: "execution_owner",
-      principalKey: "web:execution_owner", toolId: "linear.create_issue",
-      manifestHash: `sha256-${"d".repeat(64)}`, connectionId,
-      providerConnectionId: `plug_${crypto.randomUUID()}`, params: {},
-      idempotencyKey: `approval_${crypto.randomUUID()}`, status: "pending",
-      approvedBy: null, decidedAt: null, expiresAt: now + 60_000,
-      executionReceiptId: null, createdAt: now, updatedAt: now,
-    };
+    const approval = approvalFixture(now);
     await runtime.approvals.create(approval);
     await runtime.approvals.approve({ approvalId: approval.id,
       actorUserId: "execution_owner", now: now + 1 });
@@ -242,31 +314,14 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
 
   it("keeps a stale claimed approval uncertain when its receipt may have dispatched", async () => {
     const now = Date.now();
-    const approval: ExecutionApproval = {
-      id: `approval_${crypto.randomUUID()}`, workspaceId, actorUserId: "execution_owner",
-      principalKey: "web:execution_owner", toolId: "linear.create_issue",
-      manifestHash: `sha256-${"e".repeat(64)}`, connectionId,
-      providerConnectionId: `plug_${crypto.randomUUID()}`, params: {},
-      idempotencyKey: `approval_${crypto.randomUUID()}`, status: "pending",
-      approvedBy: null, decidedAt: null, expiresAt: now + 60_000,
-      executionReceiptId: null, createdAt: now, updatedAt: now,
-    };
+    const approval = approvalFixture(now, { manifestHash: `sha256-${"e".repeat(64)}` });
     await runtime.approvals.create(approval);
     await runtime.approvals.approve({ approvalId: approval.id,
       actorUserId: "execution_owner", now: now + 1 });
     await runtime.approvals.claim({ approvalId: approval.id,
       actorUserId: "execution_owner", principalKey: "web:execution_owner",
       now: now + 2, deadlineAt: Date.now() + 1_000 });
-    const receipt: ExecutionReceipt = {
-      id: `execution_${crypto.randomUUID()}`, workspaceId, actorUserId: "execution_owner",
-      principalKey: "web:execution_owner", toolId: approval.toolId,
-      manifestHash: approval.manifestHash, connectionId,
-      providerConnectionId: approval.providerConnectionId,
-      idempotencyKey: approval.idempotencyKey, requestHash: `sha256-${"f".repeat(64)}`,
-      approvalId: approval.id,
-      status: "reserved", result: null, errorCode: null, startedAt: now,
-      completedAt: null, createdAt: now, updatedAt: now,
-    };
+    const receipt = receiptFixture(approval, now);
     await runtime.receipts.reserve(receipt);
     await runtime.receipts.beginDispatch(receipt.id, now + 3);
 
@@ -290,15 +345,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
 
   it("does not claim an approval that expires behind a membership lock", async () => {
     const now = Date.now();
-    const approval: ExecutionApproval = {
-      id: `approval_${crypto.randomUUID()}`, workspaceId, actorUserId: "execution_owner",
-      principalKey: "web:execution_owner", toolId: "linear.create_issue",
-      manifestHash: `sha256-${"d".repeat(64)}`, connectionId,
-      providerConnectionId: `plug_${crypto.randomUUID()}`, params: {},
-      idempotencyKey: `approval_${crypto.randomUUID()}`, status: "pending",
-      approvedBy: null, decidedAt: null, expiresAt: now + 300,
-      executionReceiptId: null, createdAt: now, updatedAt: now,
-    };
+    const approval = approvalFixture(now, { expiresAt: now + 300 });
     await runtime.approvals.create(approval);
     await runtime.approvals.approve({ approvalId: approval.id,
       actorUserId: "execution_owner", now: now + 1 });
@@ -322,15 +369,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
 
   it("does not claim an approval that expires while opening its connection", async () => {
     const now = Date.now();
-    const approval: ExecutionApproval = {
-      id: `approval_${crypto.randomUUID()}`, workspaceId, actorUserId: "execution_owner",
-      principalKey: "web:execution_owner", toolId: "linear.create_issue",
-      manifestHash: `sha256-${"d".repeat(64)}`, connectionId,
-      providerConnectionId: `plug_${crypto.randomUUID()}`, params: {},
-      idempotencyKey: `approval_${crypto.randomUUID()}`, status: "pending",
-      approvedBy: null, decidedAt: null, expiresAt: now + 300,
-      executionReceiptId: null, createdAt: now, updatedAt: now,
-    };
+    const approval = approvalFixture(now, { expiresAt: now + 300 });
     await runtime.approvals.create(approval);
     await runtime.approvals.approve({ approvalId: approval.id,
       actorUserId: "execution_owner", now: now + 1 });
@@ -357,15 +396,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       for (const association of ["exact", "legacy", "foreign", "wrong-operation"] as const) {
         for (const status of scenarios) {
           const now = Date.now();
-          const approval: ExecutionApproval = {
-            id: `approval_${crypto.randomUUID()}`, workspaceId, actorUserId: "execution_owner",
-            principalKey: "web:execution_owner", toolId: "linear.create_issue",
-            manifestHash: `sha256-${"d".repeat(64)}`, connectionId,
-            providerConnectionId: `plug_${crypto.randomUUID()}`, params: {},
-            idempotencyKey: `approval_${crypto.randomUUID()}`, status: "pending",
-            approvedBy: null, decidedAt: null, expiresAt: now + 60_000,
-            executionReceiptId: null, createdAt: now, updatedAt: now,
-          };
+          const approval = approvalFixture(now);
           await runtime.approvals.create(approval);
           await runtime.approvals.approve({ approvalId: approval.id,
             actorUserId: "execution_owner", now: now + 1 });
@@ -375,17 +406,10 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
           let associatedApprovalId: string | null = approval.id;
           if (association === "legacy") associatedApprovalId = null;
           if (association === "foreign") associatedApprovalId = `approval_foreign_${crypto.randomUUID()}`;
-          const receipt: ExecutionReceipt = {
-            id: `execution_${crypto.randomUUID()}`, workspaceId, actorUserId: "execution_owner",
-            principalKey: "web:execution_owner",
+          const receipt = receiptFixture(approval, now, {
             toolId: association === "wrong-operation" ? "linear.other" : approval.toolId,
-            manifestHash: approval.manifestHash, connectionId,
-            providerConnectionId: approval.providerConnectionId,
-            idempotencyKey: approval.idempotencyKey, requestHash: `sha256-${"f".repeat(64)}`,
             approvalId: associatedApprovalId,
-            status: "reserved", result: null, errorCode: null, startedAt: now,
-            completedAt: null, createdAt: now, updatedAt: now,
-          };
+          });
           await runtime.receipts.reserve(receipt);
           if (["running", "succeeded", "uncertain"].includes(status)) {
             await runtime.receipts.beginDispatch(receipt.id, now + 3);

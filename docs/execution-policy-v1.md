@@ -56,17 +56,20 @@ Public responses
 omit remote connection handles and internal hashes. Stored request fingerprints are HMACs keyed
 with a domain-separated HKDF subkey derived from the server's stable execution wrapping secret.
 Old HMAC fingerprints made with the raw wrapping key conflict on retry and remain reserved until
-reconciled. Unexpected execution errors log only
-their class. If the provider receipt succeeds but approval consumption cannot be persisted, the
-service reports an unknown completion with the receipt ID and marks the approval uncertain for
-reconciliation; it never marks the successful effect failed or retries it. The same state applies
-to provider ambiguity, a missing-connection reply after entering the provider action, receipt
-persistence failure, and a guard commit failure after dispatch. A matching same-key replay of an
-uncertain read or approval returns the original receipt ID without invoking the provider, even if
+reconciled. Unexpected execution errors log only their class. Approved execution persists
+receipt success and approval consumption in one PostgreSQL transaction. If that transaction
+fails or its commit response is lost, the service reports an unknown completion with the
+receipt ID and does not retry the effect. A committed success remains authoritative even if
+the separate invocation guard COMMIT fails afterward: the response and same-key replay
+return the successful receipt without another provider call. If an earlier Worker left an
+uncertain approval linked to a succeeded receipt, replay verifies the exact association
+and reconciles the approval to consumed. Provider ambiguity, a missing-connection reply
+after entering the provider action, and receipt persistence failure remain uncertain.
+A matching same-key replay of an uncertain read or approval returns the original receipt ID without invoking the provider, even if
 the selected binding has since degraded; the receipt lookup still requires current workspace
 membership. A guard transaction owns a separate PostgreSQL client for each invocation.
 The HTTP boundary returns `504 EXECUTION_INVOCATION_TIMEOUT` without a receipt ID when the
-deadline closes before provider dispatch. After dispatch, it returns
+deadline closes before provider dispatch. After dispatch with an unconfirmed outcome, it returns
 `502 EXECUTION_OUTCOME_UNKNOWN` with the receipt ID. CLI JSON errors and MCP structured tool
 errors retain these response fields for callers deciding whether to reconcile or retry.
 CLI and MCP execution requests allow 70 seconds before aborting the HTTP request, leaving
@@ -132,9 +135,13 @@ back the Worker. The old Worker can read and fail a `reserved` receipt as a
 non-replayable state, but rollback must not remove the constraint while these
 rows exist. Drain them first if a schema rollback is required.
 Migration `0016` adds a nullable, unique `approval_id` to execution receipts.
-Keep execution writers quiesced for its non-concurrent index build. Apply the
-file in a dedicated session with `PGOPTIONS='-c lock_timeout=5s -c statement_timeout=300s'`
-and stop-on-error enabled. Abort the rollout if it
+Quiesce all traffic that reads or writes `execution_receipts`, including history and approval
+replay, before applying it. Use a dedicated `psql` session with autocommit enabled and run
+`PGOPTIONS='-c lock_timeout=5s -c statement_timeout=300s' psql -X -v ON_ERROR_STOP=1
+-f packages/execution/migrations/0016_receipt_approval_identity.sql "$OMR_DATABASE_URL"`.
+The two statements commit separately in this executor; a driver call that submits the whole
+file as one query instead holds the `ALTER TABLE` lock through the index build and requires
+the same full traffic quiescence. Abort the rollout if it
 cannot finish within that five-minute window; inspect the index and rerun the
 idempotent migration before starting new writers. Do not serve mixed old and
 new writers while the build is waiting for a table lock. This bound protects
@@ -152,6 +159,26 @@ leave the column NULL and old readers ignore it. Quiesce new writers before an
 old Worker rollback, and do not drop the column while associated receipts remain.
 Do not reset a `running` or `uncertain` receipt without reconciling the provider outcome. Rollback
 does not restore a revoked connection or an expired grant.
+
+Migration `0017` adds crypto version columns with default 0 for existing AES-GCM rows.
+Quiesce all execution, approval, and history access; apply `0017` with the same dedicated
+`psql` options and stop-on-error setting as `0016`. Build the new execution package, then run
+`OMR_DATABASE_URL=... EXECUTION_RESULT_WRAPPING_KEY=... node
+scripts/rebind-execution-ciphertext.mjs` with the existing 32-byte Worker key. The script
+locks and re-encrypts one legacy row per transaction with version-1 associated data containing
+record kind, workspace ID, and row ID. It stops on a bad ciphertext or after five minutes;
+keep traffic quiesced, inspect the error without exposing plaintext, and rerun after repair.
+Verify zero version-0 rows with non-null ciphertext in both tables before deploying the new
+Worker with `SELECT count(*) FROM omr_control.execution_approvals WHERE
+params_crypto_version = 0 AND params_ciphertext IS NOT NULL` and the equivalent receipt query
+for `result_crypto_version` and `result_ciphertext`. Version-0 reads are available only for
+migration compatibility; do not resume traffic with legacy rows still present. To roll the Worker
+back, quiesce all execution traffic again,
+run the same rebind command with `--rollback`, verify zero version-1 rows with non-null
+ciphertext in both tables, and only then deploy the previous Worker. Keep the additive `0017`
+columns. A rollback deliberately restores legacy, unbound ciphertext until the version-1
+rollout is retried. Never reuse a version-1 ciphertext in another row or treat decryption failure
+as an empty result.
 
 ## Acceptance boundary
 

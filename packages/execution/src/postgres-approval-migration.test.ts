@@ -101,6 +101,15 @@ describeDatabase("approval migration from origin/dev schema", () => {
       await migrate("0014_approval_reconciliation");
       await client.query("BEGIN");
       await migrate("0016_receipt_approval_identity");
+      const reader = new Client({ connectionString: databaseUrl! });
+      await reader.connect();
+      try {
+        await reader.query("SET lock_timeout = '75ms'");
+        await expect(reader.query(`SELECT count(*) FROM ${qualified}.execution_receipts`))
+          .rejects.toMatchObject({ code: "55P03" });
+      } finally {
+        await reader.end();
+      }
       await client.query("ROLLBACK");
       const rolledBackIdentity = await client.query<{ count: string }>(
         `SELECT count(*) FROM information_schema.columns
@@ -109,6 +118,19 @@ describeDatabase("approval migration from origin/dev schema", () => {
       expect(Number(rolledBackIdentity.rows[0]?.count)).toBe(0);
       await migrate("0016_receipt_approval_identity");
       await migrate("0016_receipt_approval_identity");
+      await client.query("BEGIN");
+      await migrate("0017_ciphertext_context");
+      await client.query("ROLLBACK");
+      const rolledBackCrypto = await client.query<{ count: string }>(
+        `SELECT count(*) FROM information_schema.columns
+         WHERE table_schema = $1 AND table_name = 'execution_approvals'
+           AND column_name = 'params_crypto_version'`, [schema]);
+      expect(Number(rolledBackCrypto.rows[0]?.count)).toBe(0);
+      await migrate("0017_ciphertext_context");
+      await migrate("0017_ciphertext_context");
+      const legacyVersion = await client.query<{ params_crypto_version: number }>(
+        `SELECT params_crypto_version FROM ${qualified}.execution_approvals WHERE id = 'approval_old'`);
+      expect(legacyVersion.rows[0]?.params_crypto_version).toBe(0);
       const rows = await client.query<{ id: string; idempotency_key: string; status: string; request_hash: string }>(
         `SELECT id, idempotency_key, status, request_hash
          FROM ${qualified}.execution_approvals ORDER BY created_at, id`,

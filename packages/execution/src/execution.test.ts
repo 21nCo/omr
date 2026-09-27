@@ -176,7 +176,8 @@ describe("execution service", () => {
     expect(actionCall).toHaveBeenCalledWith("linear", "uncontracted", expect.objectContaining({
       params, retry: { maxAttempts: 1, backoff: "exponential" },
     }));
-    await expect(service.executeApproved(principal, approved.id)).rejects.toBeInstanceOf(ApprovalUnavailableError);
+    await expect(service.executeApproved(principal, approved.id))
+      .resolves.toMatchObject({ id: receipt.id, status: "succeeded" });
   });
 
   it("rejects unsafe unknown previews while preserving explicit unknown contracts", async () => {
@@ -968,20 +969,20 @@ describe("execution service", () => {
       executionReceiptId: receipt.id,
     });
     await expect(service.executeApproved(principal, approval.id))
-      .rejects.toBeInstanceOf(ApprovalUnavailableError);
+      .resolves.toMatchObject({ id: receipt.id, status: "succeeded" });
     expect(actionCall).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps a successful receipt authoritative when approval consumption fails", async () => {
+  it("leaves both records nonterminal when approved completion cannot commit", async () => {
     const { actionCall, approvals, receipts, service, workspace } = await fixture();
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
     const approval = await requestApproval(service, { principal, toolId: "linear.create_issue", params: {},
       idempotencyKey: "consume-failure" });
     await service.approve(approval.id, principal.userId);
-    vi.spyOn(approvals, "consume").mockRejectedValueOnce(new Error("approval store unavailable"));
+    vi.spyOn(approvals, "succeedWithReceipt").mockRejectedValueOnce(new Error("approval store unavailable"));
     const error = await service.executeApproved(principal, approval.id).catch((failure: unknown) => failure);
     expect(error).toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: expect.any(String) });
-    expect(receipts.receipts.get(error.receiptId)).toMatchObject({ status: "succeeded" });
+    expect(receipts.receipts.get(error.receiptId)).toMatchObject({ status: "uncertain" });
     expect(approvals.approvals.get(approval.id)).toMatchObject({
       status: "uncertain", executionReceiptId: error.receiptId,
     });
@@ -993,12 +994,9 @@ describe("execution service", () => {
   it.each([
     "provider ambiguity",
     "receipt persistence failure",
-    "guard commit failure",
   ])("retains a reconcilable approval after %s", async (failure) => {
     const guard: ExecutionInvocationGuard = { run: async (_input, invoke) => {
-      const receipt = await invoke(() => undefined);
-      if (failure === "guard commit failure") throw new Error("COMMIT failed");
-      return receipt;
+      return invoke(() => undefined);
     } };
     const { actionCall, approvals, receipts, service, workspace } = await fixture(
       undefined, undefined, false, guard,
@@ -1009,18 +1007,70 @@ describe("execution service", () => {
     await service.approve(approval.id, principal.userId);
     if (failure === "provider ambiguity") actionCall.mockRejectedValueOnce(new Error("secret upstream detail"));
     if (failure === "receipt persistence failure") {
-      vi.spyOn(receipts, "succeed").mockRejectedValueOnce(new Error("database write failed"));
+      vi.spyOn(approvals, "succeedWithReceipt").mockRejectedValueOnce(new Error("database write failed"));
     }
     const error = await service.executeApproved(principal, approval.id).catch((value: unknown) => value);
     expect(error).toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: expect.any(String) });
     expect(approvals.approvals.get(approval.id)).toMatchObject({
       status: "uncertain", executionReceiptId: error.receiptId,
     });
-    expect(receipts.receipts.get(error.receiptId)?.status).toBe(
-      failure === "guard commit failure" ? "succeeded" : "uncertain",
-    );
+    expect(receipts.receipts.get(error.receiptId)?.status).toBe("uncertain");
     await expect(service.executeApproved(principal, approval.id))
       .rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: error.receiptId });
+    expect(actionCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns durable approved success after guard COMMIT fails and replays without dispatch", async () => {
+    const guard: ExecutionInvocationGuard = { run: async (_input, invoke) => {
+      await invoke(() => undefined);
+      throw new Error("COMMIT failed");
+    } };
+    const { actionCall, approvals, receipts, service, workspace } = await fixture(
+      undefined, undefined, false, guard,
+    );
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const approval = await requestApproval(service, { principal, toolId: "linear.create_issue",
+      params: {}, idempotencyKey: "guard-commit-success" });
+    await service.approve(approval.id, principal.userId);
+    const receipt = await service.executeApproved(principal, approval.id);
+    expect(receipt.status).toBe("succeeded");
+    expect(receipts.receipts.get(receipt.id)?.status).toBe("succeeded");
+    expect(approvals.approvals.get(approval.id)).toMatchObject({
+      status: "consumed", executionReceiptId: receipt.id,
+    });
+    await expect(service.executeApproved(principal, approval.id))
+      .resolves.toMatchObject({ id: receipt.id, status: "succeeded" });
+    expect(actionCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("replays a durable read after guard COMMIT fails without another provider call", async () => {
+    const guard: ExecutionInvocationGuard = { run: async (_input, invoke) => {
+      await invoke(() => undefined);
+      throw new Error("COMMIT failed");
+    } };
+    const { actionCall, service, workspace } = await fixture(undefined, undefined, false, guard);
+    const request = { principal: { kind: "web" as const, userId: "user_1", workspaceId: workspace.id },
+      toolId: "linear.get_issue", params: {}, idempotencyKey: "read-commit-replay" };
+    const receipt = await service.execute(request);
+    await expect(service.execute(request)).resolves.toMatchObject({
+      id: receipt.id, status: "succeeded",
+    });
+    expect(actionCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("reconciles a legacy uncertain approval with an exact succeeded receipt", async () => {
+    const { actionCall, approvals, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const approval = await requestApproval(service, { principal, toolId: "linear.create_issue",
+      params: {}, idempotencyKey: "legacy-success-replay" });
+    await service.approve(approval.id, principal.userId);
+    const receipt = await service.executeApproved(principal, approval.id);
+    approvals.approvals.get(approval.id)!.status = "uncertain";
+    await expect(service.executeApproved(principal, approval.id))
+      .resolves.toMatchObject({ id: receipt.id, status: "succeeded" });
+    expect(approvals.approvals.get(approval.id)).toMatchObject({
+      status: "consumed", executionReceiptId: receipt.id,
+    });
     expect(actionCall).toHaveBeenCalledTimes(1);
   });
 

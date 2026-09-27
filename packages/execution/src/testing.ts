@@ -210,7 +210,12 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
     now: number;
   }): Promise<ExecutionApproval> {
     const approval = this.approvals.get(input.approvalId);
-    if (approval?.status !== "executing") throw new ApprovalUnavailableError();
+    if (approval?.status !== "executing" && approval?.status !== "uncertain") {
+      throw new ApprovalUnavailableError();
+    }
+    if (approval.executionReceiptId && approval.executionReceiptId !== input.receiptId) {
+      throw new ApprovalUnavailableError();
+    }
     if (this.assertReceiptOwnership(approval, input.receiptId).status !== "succeeded") {
       throw new ApprovalUnavailableError();
     }
@@ -218,6 +223,24 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
     approval.executionReceiptId = input.receiptId;
     approval.updatedAt = input.now;
     return structuredClone(approval);
+  }
+
+  async succeedWithReceipt(input: { approvalId: string; receipt: ExecutionReceipt;
+    result: JsonValue; now: number; deadlineAt: number }): Promise<ExecutionReceipt> {
+    const approval = this.approvals.get(input.approvalId);
+    if (approval?.status !== "executing" ||
+        this.assertReceiptOwnership(approval, input.receipt.id).status !== "running") {
+      throw new ApprovalUnavailableError();
+    }
+    const receipt = this.receipts.receipts.get(input.receipt.id)!;
+    receipt.status = "succeeded";
+    receipt.result = structuredClone(input.result);
+    receipt.completedAt = input.now;
+    receipt.updatedAt = input.now;
+    approval.status = "consumed";
+    approval.executionReceiptId = receipt.id;
+    approval.updatedAt = input.now;
+    return structuredClone(receipt);
   }
 
   async fail(input: { approvalId: string; now: number }): Promise<ExecutionApproval> {
@@ -269,7 +292,7 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
 
   private assertReceiptOwnership(approval: ExecutionApproval, receiptId: string): ExecutionReceipt {
     const receipt = this.receipts.receipts.get(receiptId);
-    if (!receipt || receipt.approvalId !== approval.id ||
+    if (receipt?.approvalId !== approval.id ||
         receipt.workspaceId !== approval.workspaceId || receipt.actorUserId !== approval.actorUserId ||
         receipt.principalKey !== approval.principalKey || receipt.toolId !== approval.toolId ||
         receipt.manifestHash !== approval.manifestHash || receipt.connectionId !== approval.connectionId ||

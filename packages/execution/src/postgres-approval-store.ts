@@ -1,4 +1,5 @@
 import pg, { type Client } from "pg";
+import type { JsonValue } from "@oh-my-router/tools";
 
 import {
   ApprovalUnavailableError,
@@ -10,6 +11,7 @@ import {
   type ApprovalStatus,
   type ExecutionApproval,
   type ExecutionApprovalStore,
+  type ExecutionReceipt,
 } from "./execution.js";
 import { decryptJson, encryptJson } from "./postgres-crypto.js";
 
@@ -24,6 +26,7 @@ interface ApprovalRow {
   provider_connection_id: string;
   params_ciphertext: Buffer;
   params_iv: Buffer;
+  params_crypto_version: number;
   idempotency_key: string;
   request_hash: string | null;
   status: ApprovalStatus;
@@ -36,7 +39,8 @@ interface ApprovalRow {
 }
 
 const COLUMNS = `id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash,
-  connection_id, provider_connection_id, params_ciphertext, params_iv, idempotency_key, request_hash,
+  connection_id, provider_connection_id, params_ciphertext, params_iv, params_crypto_version,
+  idempotency_key, request_hash,
   status, approved_by, decided_at, expires_at, execution_receipt_id, created_at, updated_at`;
 const EXACT_RECEIPT = `receipt.approval_id = approval.id
   AND receipt.workspace_id = approval.workspace_id
@@ -59,13 +63,15 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
   }
 
   async create(approval: ExecutionApproval): Promise<ExecutionApproval> {
-    const encrypted = await encryptJson(approval.params, this.wrappingKey);
+    const encrypted = await encryptJson(approval.params, this.wrappingKey,
+      { kind: "approval-params", workspaceId: approval.workspaceId, id: approval.id });
     const result = await this.client.query<ApprovalRow>(
       `INSERT INTO omr_control.execution_approvals
          (id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash,
-          connection_id, provider_connection_id, params_ciphertext, params_iv, idempotency_key, request_hash,
+          connection_id, provider_connection_id, params_ciphertext, params_iv, params_crypto_version,
+          idempotency_key, request_hash,
           status, approved_by, decided_at, expires_at, execution_receipt_id, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11, $12, $13, $14, $15, $16, $17, $18, $19)
        ON CONFLICT (workspace_id, principal_key, idempotency_key) DO NOTHING
        RETURNING ${COLUMNS}`,
       [
@@ -216,7 +222,8 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     if (transactionOpen && Date.now() < deadlineAt) {
       await withinInvocationDeadline(deadlineAt, () => client.query("ROLLBACK")).catch(() => undefined);
     }
-    if (error instanceof ExecutionOutcomeUnknownError) throw error;
+    if (error instanceof ExecutionOutcomeUnknownError ||
+        error instanceof ApprovalUnavailableError) throw error;
     if (Date.now() >= deadlineAt ||
       (error instanceof Error && "code" in error && error.code === "57014" &&
         /statement timeout/i.test(error.message))) {
@@ -292,12 +299,68 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     return this.transition(
       `UPDATE omr_control.execution_approvals AS approval
        SET status = 'consumed', execution_receipt_id = $2, updated_at = $3
-       WHERE approval.id = $1 AND approval.status = 'executing'
+       WHERE approval.id = $1 AND approval.status IN ('executing', 'uncertain')
+         AND (approval.execution_receipt_id IS NULL OR approval.execution_receipt_id = $2)
          AND EXISTS (SELECT 1 FROM omr_control.execution_receipts AS receipt
            WHERE receipt.id = $2 AND ${EXACT_RECEIPT} AND receipt.status = 'succeeded')
        RETURNING ${COLUMNS}`,
       [input.approvalId, input.receiptId, input.now],
     );
+  }
+
+  async succeedWithReceipt(input: { approvalId: string; receipt: ExecutionReceipt;
+    result: JsonValue; now: number; deadlineAt: number }): Promise<ExecutionReceipt> {
+    if (!this.claimConnectionString) {
+      throw new Error("Approved completion requires a dedicated PostgreSQL connection");
+    }
+    const deadlineAt = Math.max(input.deadlineAt + 5_000, Date.now() + 5_000);
+    const client = new PostgresClient({ connectionString: this.claimConnectionString,
+      connectionTimeoutMillis: Math.max(1, deadlineAt - Date.now()) });
+    client.on("error", () => undefined);
+    const query = <R extends object>(sql: string, values?: unknown[]) =>
+      withinInvocationDeadline(deadlineAt, () => client.query<R>(sql, values));
+    try {
+      await withinInvocationDeadline(deadlineAt, () => client.connect());
+      await query("BEGIN");
+      await query("SELECT set_config('statement_timeout', $1, true)",
+        [`${Math.max(1, deadlineAt - Date.now())}ms`]);
+      const locked = await query<{ workspace_id: string }>(
+        `SELECT receipt.workspace_id FROM omr_control.execution_receipts AS receipt
+         JOIN omr_control.execution_approvals AS approval ON ${EXACT_RECEIPT}
+         WHERE receipt.id = $1 AND approval.id = $2 AND receipt.status = 'running'
+           AND approval.status = 'executing'
+         FOR UPDATE OF receipt, approval`,
+        [input.receipt.id, input.approvalId],
+      );
+      if (!locked.rows[0] || locked.rows[0].workspace_id !== input.receipt.workspaceId) {
+        throw new ApprovalUnavailableError();
+      }
+      const encrypted = await withinInvocationDeadline(deadlineAt, () =>
+        encryptJson(input.result, this.wrappingKey,
+          { kind: "receipt-result", workspaceId: input.receipt.workspaceId, id: input.receipt.id }));
+      await query(
+        `UPDATE omr_control.execution_receipts
+         SET status = 'succeeded', result_ciphertext = $2, result_iv = $3,
+             result_crypto_version = 1, completed_at = $4, updated_at = $4 WHERE id = $1`,
+        [input.receipt.id, encrypted.ciphertext, encrypted.iv, input.now],
+      );
+      await query(
+        `UPDATE omr_control.execution_approvals
+         SET status = 'consumed', execution_receipt_id = $2, updated_at = $3 WHERE id = $1`,
+        [input.approvalId, input.receipt.id, input.now],
+      );
+      await query("COMMIT");
+      return { ...input.receipt, status: "succeeded", result: input.result,
+        completedAt: input.now, updatedAt: input.now };
+    } finally {
+      const closing = client.end();
+      try {
+        await withinInvocationDeadline(Date.now() + 1_000, () => closing);
+      } catch {
+        client.connection?.stream.destroy();
+        await withinInvocationDeadline(Date.now() + 1_000, () => closing).catch(() => undefined);
+      }
+    }
   }
 
   async fail(input: { approvalId: string; now: number }): Promise<ExecutionApproval> {
@@ -359,7 +422,9 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
       manifestHash: row.manifest_hash,
       connectionId: row.connection_id,
       providerConnectionId: row.provider_connection_id,
-      params: await decryptJson(row.params_ciphertext, row.params_iv, this.wrappingKey),
+      params: await decryptJson(row.params_ciphertext, row.params_iv, this.wrappingKey,
+        { kind: "approval-params", workspaceId: row.workspace_id, id: row.id },
+        row.params_crypto_version),
       idempotencyKey: row.idempotency_key,
       ...(row.request_hash ? { requestHash: row.request_hash } : {}),
       status: row.status,

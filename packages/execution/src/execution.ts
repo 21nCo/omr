@@ -125,6 +125,8 @@ export interface ExecutionApprovalStore {
     deadlineAt: number;
   }): Promise<ExecutionApproval>;
   consume(input: { approvalId: string; receiptId: string; now: number }): Promise<ExecutionApproval>;
+  succeedWithReceipt(input: { approvalId: string; receipt: ExecutionReceipt;
+    result: JsonValue; now: number; deadlineAt: number }): Promise<ExecutionReceipt>;
   uncertain(input: { approvalId: string; receiptId: string | null; now: number }): Promise<ExecutionApproval>;
   fail(input: { approvalId: string; now: number }): Promise<ExecutionApproval>;
   listForActor(input: {
@@ -385,13 +387,24 @@ export class ExecutionService {
   ): Promise<ExecutionReceipt> {
     const deadlineAt = Date.now() + EXECUTION_INVOCATION_DEADLINE_MS;
     const approvals = this.requiredApprovals();
-    const approval = await withinInvocationDeadline(deadlineAt, () => approvals.claim({
-      approvalId,
-      actorUserId: principal.userId,
-      principalKey: principalKey(principal),
-      now: this.now(),
-      deadlineAt,
-    }));
+    const replay = await this.replayApprovedReceipt(principal, approvalId, deadlineAt);
+    if (replay) return replay;
+    let approval: ExecutionApproval;
+    try {
+      approval = await withinInvocationDeadline(deadlineAt, () => approvals.claim({
+        approvalId,
+        actorUserId: principal.userId,
+        principalKey: principalKey(principal),
+        now: this.now(),
+        deadlineAt,
+      }));
+    } catch (error) {
+      if (error instanceof ExecutionOutcomeUnknownError) {
+        const recovered = await this.replayApprovedReceipt(principal, approvalId, deadlineAt);
+        if (recovered) return recovered;
+      }
+      throw error;
+    }
     try {
       const manifest = this.catalog.get(approval.toolId);
       if (this.now() >= approval.expiresAt) throw new ApprovalUnavailableError();
@@ -430,13 +443,6 @@ export class ExecutionService {
         approvalExpiresAt: approval.expiresAt,
         deadlineAt,
       });
-      try {
-        await withinInvocationDeadline(deadlineAt,
-          () => approvals.consume({ approvalId, receiptId: receipt.id, now: this.now() }));
-      } catch {
-        // The receipt is authoritative. Reconciliation must not replay the effect.
-        throw new ExecutionOutcomeUnknownError(receipt.id);
-      }
       return receipt;
     } catch (error) {
       // Give cleanup a bounded grace period. The receipt remains authoritative
@@ -454,6 +460,40 @@ export class ExecutionService {
     }
   }
 
+  private async replayApprovedReceipt(principal: ExecutionPrincipal, approvalId: string,
+    deadlineAt: number): Promise<ExecutionReceipt | null> {
+    const approvals = this.requiredApprovals();
+    const prior = await withinInvocationDeadline(deadlineAt,
+      () => approvals.getForActor(approvalId, principal.userId));
+    if (prior.principalKey !== principalKey(principal) ||
+        (principal.workspaceId !== prior.workspaceId &&
+          !(principal.kind === "web" && principal.workspaceId === ""))) {
+      throw new ApprovalUnavailableError();
+    }
+    if (prior.status !== "consumed" && prior.status !== "uncertain") return null;
+    const receipt = await withinInvocationDeadline(deadlineAt,
+      () => this.receipts.findByIdempotency({ workspaceId: prior.workspaceId,
+        principalKey: prior.principalKey, idempotencyKey: prior.idempotencyKey }));
+    if (!receipt || receipt.id !== prior.executionReceiptId ||
+        receipt.approvalId !== prior.id || receipt.actorUserId !== prior.actorUserId ||
+        receipt.toolId !== prior.toolId || receipt.manifestHash !== prior.manifestHash ||
+        receipt.connectionId !== prior.connectionId ||
+        receipt.providerConnectionId !== prior.providerConnectionId) {
+      throw new ApprovalUnavailableError();
+    }
+    if (receipt.status === "succeeded") {
+      if (prior.status === "uncertain") {
+        await withinInvocationDeadline(deadlineAt,
+          () => approvals.consume({ approvalId, receiptId: receipt.id, now: this.now() }));
+      }
+      return receipt;
+    }
+    if (receipt.status === "running" || receipt.status === "uncertain") {
+      throw new ExecutionOutcomeUnknownError(receipt.id);
+    }
+    throw new ApprovalUnavailableError();
+  }
+
   private async runAuthorized(input: {
     principal: ExecutionPrincipal;
     manifest: ToolManifest;
@@ -466,6 +506,7 @@ export class ExecutionService {
   }): Promise<ExecutionReceipt> {
     let missingRemoteAfterInvoke = false;
     let dispatchedReceiptId: string | null = null;
+    let succeededReceipt: ExecutionReceipt | null = null;
     const invoke = async (assertCanDispatch: () => void): Promise<ExecutionReceipt> => {
       const assertApprovedCanDispatch = () => {
         assertCanDispatch();
@@ -505,8 +546,10 @@ export class ExecutionService {
       };
       const reservation = await this.receipts.reserve(expectedReceipt);
       if (!reservation.created) {
-        return this.replayReceipt(reservation.receipt, expectedReceipt,
+        const replay = this.replayReceipt(reservation.receipt, expectedReceipt,
           assertApprovedCanDispatch);
+        if (replay.status === "succeeded") succeededReceipt = replay;
+        return replay;
       }
 
       let result: JsonValue;
@@ -555,7 +598,12 @@ export class ExecutionService {
         throw new ExecutionOutcomeUnknownError(reservation.receipt.id);
       }
       try {
-        return await this.receipts.succeed(reservation.receipt.id, result, this.now());
+        succeededReceipt = input.approvalId
+          ? await this.requiredApprovals().succeedWithReceipt({ approvalId: input.approvalId,
+            receipt: reservation.receipt, result, now: this.now(),
+            deadlineAt: input.deadlineAt ?? Date.now() + EXECUTION_INVOCATION_DEADLINE_MS })
+          : await this.receipts.succeed(reservation.receipt.id, result, this.now());
+        return succeededReceipt;
       } catch {
         // The upstream call has already returned. A failed receipt write cannot make it safe to retry.
         await this.receipts.uncertain(reservation.receipt.id, "receipt_persist_failed", this.now())
@@ -579,6 +627,9 @@ export class ExecutionService {
       if (missingRemoteAfterInvoke) {
         await markMissingRemoteConnection(this.connections, input.connection.id);
       }
+      // The provider result and (for approved effects) approval transition are
+      // already durable. A later guard COMMIT failure cannot erase that result.
+      if (succeededReceipt) return succeededReceipt;
       if (dispatchedReceiptId &&
           !(error instanceof ExecutionOutcomeUnknownError)) {
         await this.receipts.uncertain(dispatchedReceiptId, "invocation_outcome_unknown", this.now())

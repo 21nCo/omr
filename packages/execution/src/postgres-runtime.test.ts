@@ -5,6 +5,7 @@ const mockState = vi.hoisted(() => ({
   stallConnectAt: -1,
   stallClaimAt: -1,
   uncertainOnClaim: false,
+  unavailableOnClaim: false,
   advanceClock: () => undefined,
 }));
 
@@ -26,6 +27,10 @@ vi.mock("pg", () => {
       if (mockState.uncertainOnClaim && sql.includes("status = 'uncertain'")) {
         mockState.advanceClock();
         return { rows: [{ execution_receipt_id: "execution_known_uncertain" }] };
+      }
+      if (mockState.unavailableOnClaim && sql.includes("SET status = CASE")) {
+        mockState.advanceClock();
+        return { rows: [] };
       }
       if (mockState.uncertainOnClaim && sql.includes("UPDATE omr_control.execution_approvals")) {
         return { rows: [] };
@@ -154,6 +159,30 @@ describe("PostgreSQL execution runtime", () => {
       expect(mockState.clients[1]?.ended).toBe(true);
     } finally {
       mockState.uncertainOnClaim = false;
+      mockState.advanceClock = () => undefined;
+      vi.restoreAllMocks();
+      await runtime.close();
+    }
+  });
+
+  it("preserves an established unavailable approval after the claim deadline", async () => {
+    mockState.clients.length = 0;
+    mockState.unavailableOnClaim = true;
+    const actualNow = Date.now.bind(Date);
+    let offset = 0;
+    mockState.advanceClock = () => { offset = 2_000; };
+    vi.spyOn(Date, "now").mockImplementation(() => actualNow() + offset);
+    const runtime = await connectPostgresExecutionReceipts({
+      connectionString: "postgresql://localhost:5432/fixture",
+      resultWrappingKey: new Uint8Array(32).fill(1),
+    });
+    try {
+      await expect(runtime.approvals.claim({ approvalId: "approval_1", actorUserId: "user_1",
+        principalKey: "web:user_1", now: Date.now(), deadlineAt: Date.now() + 1_000 }))
+        .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      expect(mockState.clients[1]?.ended).toBe(true);
+    } finally {
+      mockState.unavailableOnClaim = false;
       mockState.advanceClock = () => undefined;
       vi.restoreAllMocks();
       await runtime.close();
