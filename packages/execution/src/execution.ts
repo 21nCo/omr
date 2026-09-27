@@ -123,7 +123,7 @@ export interface ExecutionInvocationGuard {
     principal: ExecutionPrincipal;
     connection: ConnectionBindingRecord;
     capability: ClientCapability;
-  }, invoke: () => Promise<T>): Promise<T>;
+  }, invoke: (assertCanDispatch: () => void) => Promise<T>): Promise<T>;
 }
 
 export class ExecutionInputError extends Error {
@@ -398,13 +398,15 @@ export class ExecutionService {
   }): Promise<ExecutionReceipt> {
     let missingRemoteAfterInvoke = false;
     let dispatchedReceiptId: string | null = null;
-    const invoke = async (): Promise<ExecutionReceipt> => {
+    const invoke = async (assertCanDispatch: () => void): Promise<ExecutionReceipt> => {
+      assertCanDispatch();
       const principal = principalKey(input.principal);
       const requestHash = await hashJson({
         manifestHash: input.manifest.hash,
         connectionId: input.connection.id,
         params: input.params,
       }, this.fingerprintKey);
+      assertCanDispatch();
       const timestamp = this.now();
       const idempotencyKey = input.idempotencyKey ?? `request_${crypto.randomUUID()}`;
       const reservation = await this.receipts.reserve({
@@ -430,7 +432,10 @@ export class ExecutionService {
         if (reservation.receipt.requestHash !== requestHash) {
           throw new ExecutionIdempotencyConflictError();
         }
-        if (reservation.receipt.status === "succeeded") return reservation.receipt;
+        if (reservation.receipt.status === "succeeded") {
+          assertCanDispatch();
+          return reservation.receipt;
+        }
         if (reservation.receipt.status === "running") {
           throw new ExecutionInProgressError(reservation.receipt.id);
         }
@@ -441,6 +446,14 @@ export class ExecutionService {
       }
 
       let result: JsonValue;
+      try {
+        assertCanDispatch();
+      } catch (error) {
+        // Reservation is durable, but the provider was never called.
+        await this.receipts.fail(reservation.receipt.id, "authorization_window_closed", this.now())
+          .catch(() => undefined);
+        throw error;
+      }
       try {
         dispatchedReceiptId = reservation.receipt.id;
         result = jsonResult(await this.plugfn.action(input.manifest.provider, input.manifest.action, {
@@ -483,7 +496,7 @@ export class ExecutionService {
       principal: input.principal,
       connection: input.connection,
       capability: input.manifest.contract.effect === "read" ? "tools:read" : "tools:write",
-    }, invoke) : invoke();
+    }, invoke) : invoke(() => undefined);
     try {
       return await run();
     } catch (error) {

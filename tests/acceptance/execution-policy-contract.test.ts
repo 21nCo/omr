@@ -21,7 +21,7 @@ const execFileAsync = promisify(execFile);
 function action(name: string, effect: ToolEffect) {
   return { name, displayName: name, description: name, parameters: { type: "object" },
     returns: { type: "object" }, contract: { version: "1.0.0", effect,
-      requiredScopes: [], resources: [], sensitiveKeys: ["secretField"],
+      requiredScopes: [], resources: [], sensitiveKeys: ["secretField", "items[*].pin", "metadata.*.pin"],
       pagination: { kind: "none" as const }, retry: "never" as const } };
 }
 
@@ -81,7 +81,8 @@ describe("execution-policy-contract", () => {
     };
     const request = { workspaceId: workspace.id, toolId: "linear.write",
       params: { title: "Review", secretField: "fixture-secret", passphrase: "passphrase-secret",
-        privateKey: "private-key-secret" }, idempotencyKey: `${surface}-write` };
+        privateKey: "private-key-secret", items: [{ pin: "array-PIN" }],
+        metadata: { first: { pin: "object-PIN" } } }, idempotencyKey: `${surface}-write` };
 
     if (surface === "cli") {
       const server = createServer(async (incoming, outgoing) => {
@@ -134,10 +135,11 @@ describe("execution-policy-contract", () => {
         const retried = await runCli(["approvals", "request", "linear.write", "--params",
           JSON.stringify(request.params), "--idempotency", request.idempotencyKey]);
         expect(JSON.parse(retried.stdout)).toMatchObject({ id: approval.id });
-        expect(approval.params).toEqual({ title: "Review", secretField: "[REDACTED]",
-          passphrase: "[REDACTED]", privateKey: "[REDACTED]" });
+        expect(approval.params).toMatchObject({ title: "Review", secretField: "[REDACTED]",
+          passphrase: "[REDACTED]", privateKey: "[REDACTED]",
+          items: [{ pin: "[REDACTED]" }], metadata: { first: { pin: "[REDACTED]" } } });
         expect(pending.stdout).not.toContain("fixture-secret");
-        expect(pending.stdout).not.toMatch(/passphrase-secret|private-key-secret/);
+        expect(pending.stdout).not.toMatch(/passphrase-secret|private-key-secret|array-PIN|object-PIN/);
         expect(pending.stdout).not.toContain("requestHash");
         expect(provider).toHaveBeenCalledTimes(1);
         await webPost("/api/approvals/approve", { approvalId: approval.id });
@@ -175,6 +177,7 @@ describe("execution-policy-contract", () => {
         const retried = await client.callTool({ name: "linear.write", arguments: args });
         expect(retried).toMatchObject({ structuredContent: { approvalId } });
         expect(JSON.stringify(pending)).not.toContain("fixture-secret");
+        expect(JSON.stringify(pending)).not.toMatch(/array-PIN|object-PIN/);
         expect(JSON.stringify(pending)).not.toContain("requestHash");
         expect(provider).toHaveBeenCalledTimes(1);
         await webPost("/api/approvals/approve", { approvalId });
@@ -217,10 +220,12 @@ describe("execution-policy-contract", () => {
     const approval = await client.requestApproval(request) as { id: string; params: unknown };
     expect(approval.id).toBe(storedId);
     expect(approvalStore.approvals.size).toBe(1);
-    expect(approval.params).toEqual({ title: "Review", secretField: "[REDACTED]",
-      passphrase: "[REDACTED]", privateKey: "[REDACTED]" });
+    expect(approval.params).toMatchObject({ title: "Review", secretField: "[REDACTED]",
+      passphrase: "[REDACTED]", privateKey: "[REDACTED]",
+      items: [{ pin: "[REDACTED]" }], metadata: { first: { pin: "[REDACTED]" } } });
     expect(JSON.stringify(approval)).not.toContain("remote_secret_handle");
     expect(JSON.stringify(approval)).not.toContain("fixture-secret");
+    expect(JSON.stringify(approval)).not.toMatch(/array-PIN|object-PIN/);
     expect(approval).not.toHaveProperty("requestHash");
     expect((await client.requestApproval(request) as { id: string }).id).toBe(approval.id);
     expect(provider).toHaveBeenCalledTimes(1);

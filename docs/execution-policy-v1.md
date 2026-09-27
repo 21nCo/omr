@@ -22,7 +22,10 @@ commits on a separate connection **before** calling the provider. A crash after 
 receipt persistence failure is `uncertain`, with a stable receipt ID and no automatic replay.
 The guard has a 60-second end-to-end deadline. Its PostgreSQL statement timeout bounds individual
 queries, and an idle transaction timeout releases revocation locks if the Worker stops while waiting
-for the provider. A provider call that outlives the deadline may still finish upstream; its receipt
+for the provider. Pre-dispatch work checks a deadline-bound dispatch callback after fingerprinting
+and receipt reservation, so a late continuation cannot call the provider after rollback. The callback
+also checks the web session or client grant expiry at dispatch. A pre-dispatch timeout or expiry
+fails a newly reserved receipt without an upstream effect. A provider call that outlives the deadline may still finish upstream; its receipt
 and approval are marked uncertain and cannot be replayed automatically. Approval and rejection
 decisions also require a current workspace membership in the database statement, with a row lock
 that serializes concurrent membership removal. Safe reads can use the manifest's retry policy
@@ -36,7 +39,9 @@ with `EXECUTION_INPUT_INVALID` before storing an approval or calling the provide
 manifest has no sensitive-key metadata, or the manifest changed, every parameter is masked and
 old pending approvals cannot be approved or executed. Declared target parameters must also be
 present as own properties and visible through every ancestor; a missing, inherited, or redacted
-target fails closed. Array indices in sensitive paths are redacted in the complete preview. Public responses
+target fails closed. Explicit array indices, `[]` and `[*]` array wildcards, and `*` object-key
+wildcards in sensitive paths are redacted in the complete preview. Unsupported selectors fail closed.
+Public responses
 omit remote connection handles and internal hashes. Stored request fingerprints are HMACs keyed
 with a domain-separated HKDF subkey derived from the server's stable execution wrapping secret.
 Old HMAC fingerprints made with the raw wrapping key conflict on retry and remain reserved until
@@ -54,7 +59,7 @@ to provider ambiguity, receipt persistence failure, and a guard commit failure a
 | Caller retry key | Lost response creates a second executable approval | Required-key and same-key replay tests on all three surfaces |
 | Approval request and claim | Duplicate pending work, expiry, changed params, concurrent use | Service idempotency and single-claim tests |
 | Approval projection | Guessable hashes or secrets after manifest change | Projection, decision, and overview-shaped history tests |
-| Approval preview | Hidden late target, missing redaction metadata, stale manifest, primitive secret | Full-length UI preview, three-surface denial, and old-envelope service tests |
+| Approval preview | Hidden late target, wildcard secret, missing redaction metadata, stale manifest, primitive secret | Full-length UI preview, wildcard web/CLI/MCP contract, and old-envelope service tests |
 | Nested preview | Masked parent or indexed array secret hides the real target or leaks a value | Projection and request/decision/overview/execute tests |
 | Approval decision | Removed member uses a known approval ID or races revocation | PostgreSQL membership-locked decision fixture |
 | Fingerprint key | Reusing the encryption key for HMAC | HKDF separation and existing-fingerprint conflict checks |
@@ -63,7 +68,7 @@ to provider ambiguity, receipt persistence failure, and a guard commit failure a
 | Web approval execution | Actor/workspace substitution or revoked membership with an empty route workspace | Empty-workspace principal and guard tests |
 | Workspace, grant, connection | Cross-workspace use or use after revocation | Service denial and PostgreSQL guard fixture tests |
 | Provider and receipt | Second effect after timeout, crash, or ambiguous error | Uncertain replay and reservation tests |
-| Invocation liveness | Hung provider holds revocation locks without bound | Deadline, rollback, and uncertain non-replay tests |
+| Invocation liveness | Hung provider holds revocation locks or late reservation dispatches after rollback/expiry | Deadline, rollback, pre-dispatch cancellation, and uncertain non-replay tests |
 | Storage | Plaintext parameters or results | PostgreSQL encryption integration test when a disposable database is available |
 
 ## Migration and rollback

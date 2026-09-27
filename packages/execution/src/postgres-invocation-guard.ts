@@ -8,6 +8,13 @@ import {
 
 const DEFAULT_INVOCATION_DEADLINE_MS = 60_000;
 
+function expirationTime(value: unknown): number {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === "number") return value;
+  if (typeof value === "string") return /^\d+$/.test(value) ? Number(value) : Date.parse(value);
+  return NaN;
+}
+
 export class ExecutionInvocationDeadlineError extends Error {
   readonly code = "EXECUTION_INVOCATION_TIMEOUT";
   constructor() {
@@ -22,17 +29,27 @@ export class PostgresExecutionInvocationGuard implements ExecutionInvocationGuar
     if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= 0) throw new Error("Invalid invocation deadline");
   }
 
-  async run<T>(input: Parameters<ExecutionInvocationGuard["run"]>[0], invoke: () => Promise<T>): Promise<T> {
+  async run<T>(input: Parameters<ExecutionInvocationGuard["run"]>[0],
+    invoke: (assertCanDispatch: () => void) => Promise<T>): Promise<T> {
     const deadline = Date.now() + this.deadlineMs;
-    const withinDeadline = async <R>(operation: Promise<R>): Promise<R> => {
+    const controller = new AbortController();
+    let credentialExpiresAt = Infinity;
+    const assertCanDispatch = () => {
+      if (controller.signal.aborted || Date.now() >= deadline) throw new ExecutionInvocationDeadlineError();
+      if (Date.now() >= credentialExpiresAt) throw new ConnectionAccessDeniedError();
+    };
+    const withinDeadline = async <R>(operation: () => Promise<R>): Promise<R> => {
       const remaining = deadline - Date.now();
-      if (remaining <= 0) throw new ExecutionInvocationDeadlineError();
+      if (remaining <= 0 || controller.signal.aborted) throw new ExecutionInvocationDeadlineError();
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         return await Promise.race([
-          operation,
+          operation(),
           new Promise<never>((_resolve, reject) => {
-            timer = setTimeout(() => reject(new ExecutionInvocationDeadlineError()), remaining);
+            timer = setTimeout(() => {
+              controller.abort();
+              reject(new ExecutionInvocationDeadlineError());
+            }, remaining);
           }),
         ]);
       } finally {
@@ -40,13 +57,13 @@ export class PostgresExecutionInvocationGuard implements ExecutionInvocationGuar
       }
     };
     try {
-      await withinDeadline(this.client.query("BEGIN"));
+      await withinDeadline(() => this.client.query("BEGIN"));
       // PostgreSQL releases row locks even if the worker stops while awaiting a provider.
-      await withinDeadline(this.client.query(
+      await withinDeadline(() => this.client.query(
         "SELECT set_config('statement_timeout', $1, true), set_config('idle_in_transaction_session_timeout', $2, true)",
         [`${this.deadlineMs}ms`, `${this.deadlineMs + 5_000}ms`],
       ));
-      const binding = await withinDeadline(this.client.query<{
+      const binding = await withinDeadline(() => this.client.query<{
         workspace_id: string;
         provider_connection_id: string;
         ownership: "personal" | "workspace";
@@ -68,7 +85,7 @@ export class PostgresExecutionInvocationGuard implements ExecutionInvocationGuar
         throw new ConnectionUnavailableError();
       }
 
-      const membership = await withinDeadline(this.client.query(
+      const membership = await withinDeadline(() => this.client.query(
         `SELECT id FROM omr_control.workspace_memberships
          WHERE workspace_id = $1 AND user_id = $2 FOR SHARE`,
         [input.principal.workspaceId, input.principal.userId],
@@ -76,47 +93,54 @@ export class PostgresExecutionInvocationGuard implements ExecutionInvocationGuar
       if (!membership.rows[0]) throw new ConnectionAccessDeniedError();
 
       if (input.principal.kind === "web") {
-        if (!input.principal.sessionId) throw new ConnectionAccessDeniedError();
-        const session = await withinDeadline(this.client.query(
-          `SELECT id FROM omr_identity.sessions
+        const { sessionId } = input.principal;
+        if (!sessionId) throw new ConnectionAccessDeniedError();
+        const session = await withinDeadline(() => this.client.query<{ expires_at: Date | string }>(
+          `SELECT id, expires_at FROM omr_identity.sessions
            WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
              AND expires_at > clock_timestamp() FOR SHARE`,
-          [input.principal.sessionId, input.principal.userId],
+          [sessionId, input.principal.userId],
         ));
         if (!session.rows[0]) throw new ConnectionAccessDeniedError();
+        credentialExpiresAt = expirationTime(session.rows[0].expires_at);
+        if (!Number.isFinite(credentialExpiresAt)) throw new ConnectionAccessDeniedError();
       } else {
-        const client = await withinDeadline(this.client.query<{ workspace_id: string; revoked_at: string | null }>(
+        const { clientId, grantId } = input.principal;
+        const client = await withinDeadline(() => this.client.query<{ workspace_id: string; revoked_at: string | null }>(
           `SELECT workspace_id, revoked_at FROM omr_control.clients WHERE id = $1 FOR SHARE`,
-          [input.principal.clientId],
+          [clientId],
         ));
         if (!client.rows[0] || client.rows[0].workspace_id !== input.principal.workspaceId ||
             client.rows[0].revoked_at !== null) throw new ConnectionAccessDeniedError();
-        const grant = await withinDeadline(this.client.query<{
+        const grant = await withinDeadline(() => this.client.query<{
           client_id: string;
           workspace_id: string;
           user_id: string;
           capabilities: string[];
           revoked_at: string | null;
-          expires_at: string;
+          expires_at: Date | string;
         }>(
           `SELECT client_id, workspace_id, user_id, capabilities, revoked_at, expires_at
            FROM omr_control.client_grants WHERE id = $1 FOR SHARE`,
-          [input.principal.grantId],
+          [grantId],
         ));
         const currentGrant = grant.rows[0];
         if (!currentGrant || currentGrant.client_id !== input.principal.clientId ||
             currentGrant.workspace_id !== input.principal.workspaceId ||
             currentGrant.user_id !== input.principal.userId || currentGrant.revoked_at !== null ||
-            Number(currentGrant.expires_at) <= Date.now()) throw new ConnectionAccessDeniedError();
+            expirationTime(currentGrant.expires_at) <= Date.now()) throw new ConnectionAccessDeniedError();
+        credentialExpiresAt = expirationTime(currentGrant.expires_at);
+        if (!Number.isFinite(credentialExpiresAt)) throw new ConnectionAccessDeniedError();
         if (!currentGrant.capabilities.includes(input.capability)) {
           throw new ExecutionCapabilityDeniedError(input.capability);
         }
       }
-      if (Date.now() >= deadline) throw new ExecutionInvocationDeadlineError();
-      const result = await withinDeadline(invoke());
-      await withinDeadline(this.client.query("COMMIT"));
+      assertCanDispatch();
+      const result = await withinDeadline(() => invoke(assertCanDispatch));
+      await withinDeadline(() => this.client.query("COMMIT"));
       return result;
     } catch (error) {
+      controller.abort();
       await this.client.query("ROLLBACK").catch(() => undefined);
       throw error;
     }

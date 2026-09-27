@@ -128,4 +128,39 @@ describe("PostgreSQL invocation transaction contract", () => {
     expect(timeline).not.toContain("COMMIT");
     expect(query.mock.calls[1]?.[0]).toContain("idle_in_transaction_session_timeout");
   });
+
+  it("cancels pre-dispatch work that completes after rollback", async () => {
+    const timeline: string[] = [];
+    const query = vi.fn(async (sql: string) => {
+      timeline.push(sql);
+      if (sql.includes("connection_bindings")) return { rows: [{ workspace_id: "workspace_1",
+        provider_connection_id: "remote_1", ownership: "workspace", owner_user_id: null,
+        status: "active", readiness: "ready" }] };
+      if (sql.includes("workspace_memberships")) return { rows: [{ id: "member_1" }] };
+      if (sql.includes("client_grants")) return { rows: [{ client_id: "client_1", workspace_id: "workspace_1",
+        user_id: "user_1", capabilities: ["tools:write"], revoked_at: null,
+        expires_at: String(Date.now() + 60_000) }] };
+      if (sql.includes("omr_control.clients")) return { rows: [{ workspace_id: "workspace_1", revoked_at: null }] };
+      return { rows: [] };
+    });
+    let release!: () => void;
+    let entered!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const provider = vi.fn();
+    const guard = new PostgresExecutionInvocationGuard({ query } as unknown as Client, 100);
+    const pending = guard.run({ principal, connection, capability: "tools:write" }, async (assertCanDispatch) => {
+      entered();
+      await hold; // Hashing or receipt reservation has not yet dispatched the provider.
+      assertCanDispatch();
+      provider();
+      return "ok";
+    });
+    await started;
+    await expect(pending).rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
+    expect(timeline.at(-1)).toBe("ROLLBACK");
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(provider).not.toHaveBeenCalled();
+  });
 });

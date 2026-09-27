@@ -4,23 +4,25 @@ import type { ExecutionApproval, ExecutionReceipt } from "./execution.js";
 
 const SECRET_NAME = /(?:secret|token|password|passphrase|credential|authorization|api[_-]?key|private[_-]?key)/i;
 
-function normalizeSensitiveKey(key: string): string {
-  return key.replace(/\[(\d+)\]/g, ".$1").replace(/\[\]/g, "")
-    .split(".").filter((part) => part !== "*").join(".").toLowerCase();
+function parseSensitiveKey(key: string): string[] | null {
+  // A wildcard consumes exactly one array index or object key. Unknown selector
+  // syntax cannot safely describe what should be hidden, so fail closed.
+  if (!/^[^.[\]]+(?:(?:\.[^.[\]]+)|(?:\[(?:\d+|\*)?\]))*$/.test(key)) return null;
+  return key.replace(/\[(\d+|\*)?\]/g, (_match, index: string | undefined) => `.${index || "*"}`)
+    .split(".").map((part) => part.toLowerCase());
 }
 
-function sensitivePath(path: string[], sensitive: Set<string>): boolean {
-  const full = path.join(".").toLowerCase();
-  const withoutIndexes = path.filter((part) => !/^\d+$/.test(part)).join(".").toLowerCase();
-  return sensitive.has(full) || sensitive.has(withoutIndexes);
+function sensitivePath(path: string[], sensitive: string[][]): boolean {
+  return sensitive.some((selector) => selector.length === path.length &&
+    selector.every((part, index) => part === "*" || part === path[index]?.toLowerCase()));
 }
 
-function redact(value: JsonValue, sensitive: Set<string>, path: string[] = []): JsonValue {
+function redact(value: JsonValue, sensitive: string[][], path: string[] = []): JsonValue {
   if (Array.isArray(value)) return value.map((item, index) => redact(item, sensitive, [...path, String(index)]));
   if (value === null || typeof value !== "object") return value;
   return Object.fromEntries(Object.entries(value).map(([key, item]) => {
     const fieldPath = [...path, key];
-    return [key, sensitive.has(key.toLowerCase()) || sensitivePath(fieldPath, sensitive) || SECRET_NAME.test(key)
+    return [key, sensitivePath([key], sensitive) || sensitivePath(fieldPath, sensitive) || SECRET_NAME.test(key)
       ? "[REDACTED]"
       : redact(item, sensitive, fieldPath)];
   }));
@@ -36,14 +38,16 @@ export function approvalPreviewReady(
       manifest.contract.sensitiveKeys.length === 0 ||
       manifest.contract.sensitiveKeys.some((key) => !key.trim()) ||
       params === null || typeof params !== "object" || Array.isArray(params)) return false;
-  const sensitive = new Set(manifest.contract.sensitiveKeys.map(normalizeSensitiveKey));
+  const sensitive = manifest.contract.sensitiveKeys.map(parseSensitiveKey);
+  if (sensitive.some((selector) => !selector)) return false;
+  const selectors = sensitive as string[][];
   // A declared target that would be masked or is absent cannot be reviewed.
   return manifest.contract.resources.every(({ parameter }) => {
     if (!parameter) return true;
     const keys = parameter.split(".");
     let value: JsonValue | undefined = params;
     for (const [index, key] of keys.entries()) {
-      if (!key || sensitive.has(key.toLowerCase()) || sensitivePath(keys.slice(0, index + 1), sensitive) ||
+      if (!key || sensitivePath([key], selectors) || sensitivePath(keys.slice(0, index + 1), selectors) ||
           SECRET_NAME.test(key) || value === null || typeof value !== "object" ||
           !Object.hasOwn(value, key)) return false;
       value = (value as Record<string, JsonValue>)[key];
@@ -57,7 +61,7 @@ export function publicApproval(approval: ExecutionApproval, manifest?: ToolManif
   const { principalKey: _principalKey, providerConnectionId: _providerConnectionId,
     idempotencyKey: _idempotencyKey, requestHash: _requestHash, ...visible } = approval;
   const manifestCurrent = manifest?.hash === approval.manifestHash;
-  const sensitive = new Set(manifest?.contract.sensitiveKeys.map(normalizeSensitiveKey) ?? []);
+  const sensitive = manifest?.contract.sensitiveKeys.map(parseSensitiveKey).filter((key): key is string[] => key !== null) ?? [];
   // With no declared secret fields, the catalog cannot tell us which values are safe to show.
   // An approval whose arguments cannot be reviewed must not be actionable.
   const previewReady = approvalPreviewReady(manifest, approval.manifestHash, approval.params);

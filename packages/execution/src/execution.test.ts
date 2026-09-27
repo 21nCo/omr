@@ -10,6 +10,7 @@ import {
   ExecutionApprovalRequiredError,
   ExecutionCapabilityDeniedError,
   ExecutionIdempotencyConflictError,
+  ExecutionInputError,
   ExecutionService,
   type ExecutionInvocationGuard,
 } from "./execution.js";
@@ -609,6 +610,43 @@ describe("execution service", () => {
     expect(approvalPreviewReady(targetManifest, manifest.hash, {})).toBe(false);
   });
 
+  it("masks wildcard array and object secrets in every approval projection and rejects hidden targets", async () => {
+    const { actionCall, approvals, catalog, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const originalGet = catalog.get.bind(catalog);
+    const manifest = originalGet("linear.create_issue")!;
+    const wildcard = { ...manifest, contract: { ...manifest.contract,
+      sensitiveKeys: ["items[*].pin", "metadata.*.pin"],
+    } };
+    vi.spyOn(catalog, "get").mockImplementation((id) => id === manifest.id ? wildcard : originalGet(id));
+    const params = { title: "Review", items: [{ pin: "array-PIN", target: "issue-1" }],
+      metadata: { first: { pin: "object-PIN" } } };
+    const pending = await requestApproval(service, { principal, toolId: manifest.id, params });
+    const approved = await requestApproval(service, { principal, toolId: manifest.id, params });
+    await service.approve(approved.id, principal.userId);
+    const projections = [pending, approved,
+      ...(await approvals.listForActor({ workspaceId: workspace.id, actorUserId: principal.userId, limit: 10 }))];
+    for (const record of projections) {
+      const preview = publicApproval(record, catalog.get(record.toolId));
+      expect(preview).toMatchObject({ previewReady: true,
+        params: { items: [{ pin: "[REDACTED]", target: "issue-1" }],
+          metadata: { first: { pin: "[REDACTED]" } } } });
+      expect(JSON.stringify(preview)).not.toMatch(/array-PIN|object-PIN/);
+    }
+    expect(actionCall).not.toHaveBeenCalled();
+    const hiddenTarget = { ...wildcard, contract: { ...wildcard.contract,
+      resources: [{ kind: "issue", parameter: "items.0.pin" }] } };
+    expect(approvalPreviewReady(hiddenTarget, manifest.hash, params)).toBe(false);
+    expect(approvalPreviewReady({ ...wildcard, contract: { ...wildcard.contract,
+      sensitiveKeys: ["items[?].pin"] } }, manifest.hash, params)).toBe(false);
+    vi.spyOn(catalog, "get").mockImplementation((id) => id === manifest.id ? hiddenTarget : originalGet(id));
+    await expect(requestApproval(service, { principal, toolId: manifest.id, params }))
+      .rejects.toBeInstanceOf(ExecutionInputError);
+    await expect(service.approve(pending.id, principal.userId)).rejects.toBeInstanceOf(ApprovalUnavailableError);
+    await expect(service.executeApproved(principal, approved.id)).rejects.toBeInstanceOf(ApprovalUnavailableError);
+    expect(actionCall).not.toHaveBeenCalled();
+  });
+
   it("stores keyed request fingerprints that do not reveal a guessable parameter digest", async () => {
     const { approvals, receipts, service, workspace } = await fixture();
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
@@ -742,7 +780,7 @@ describe("execution service", () => {
     "guard commit failure",
   ])("retains a reconcilable approval after %s", async (failure) => {
     const guard: ExecutionInvocationGuard = { run: async (_input, invoke) => {
-      const receipt = await invoke();
+      const receipt = await invoke(() => undefined);
       if (failure === "guard commit failure") throw new Error("COMMIT failed");
       return receipt;
     } };
@@ -777,7 +815,8 @@ describe("execution service", () => {
         provider_connection_id: "plug_linear", ownership: "personal", owner_user_id: "user_1",
         status: "active", readiness: "ready" }] };
       if (sql.includes("workspace_memberships")) return { rows: [{ id: "membership_1" }] };
-      if (sql.includes("omr_identity.sessions")) return { rows: [{ id: "session_1" }] };
+      if (sql.includes("omr_identity.sessions")) return { rows: [{ id: "session_1",
+        expires_at: new Date(Date.now() + 60_000) }] };
       return { rows: [] };
     });
     const guard = new PostgresExecutionInvocationGuard({ query } as never, 15);
@@ -801,13 +840,106 @@ describe("execution service", () => {
     expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
   });
 
+  it.each([
+    ["web", "read"], ["web", "approved effect"],
+    ["client", "read"], ["client", "approved effect"],
+  ] as const)("does not dispatch a %s %s after reservation outlives the revocation lock", async (kind, operation) => {
+    let workspaceId = "";
+    let revoked = false;
+    const queries: string[] = [];
+    const query = vi.fn(async (sql: string) => {
+      queries.push(sql);
+      if (sql.includes("connection_bindings")) return { rows: [{ workspace_id: workspaceId,
+        provider_connection_id: "plug_linear", ownership: "personal", owner_user_id: "user_1",
+        status: revoked ? "revoked" : "active", readiness: "ready" }] };
+      if (sql.includes("workspace_memberships")) return { rows: [{ id: "membership_1" }] };
+      if (sql.includes("omr_identity.sessions")) return { rows: [{ id: "session_1",
+        expires_at: new Date(Date.now() + 60_000) }] };
+      if (sql.includes("omr_control.clients")) return { rows: [{ workspace_id: workspaceId, revoked_at: null }] };
+      if (sql.includes("client_grants")) return { rows: [{ client_id: "client_1",
+        workspace_id: workspaceId, user_id: "user_1", capabilities: ["tools:read", "tools:write"],
+        revoked_at: null, expires_at: new Date(Date.now() + 60_000) }] };
+      return { rows: [] };
+    });
+    const guard = new PostgresExecutionInvocationGuard({ query } as never, 150);
+    const { actionCall, approvals, receipts, service, workspace } = await fixture(undefined, undefined, false, guard);
+    workspaceId = workspace.id;
+    const principal = kind === "web"
+      ? { kind, userId: "user_1", workspaceId, sessionId: "session_1" } as const
+      : { kind, userId: "user_1", workspaceId, clientId: "client_1", grantId: "grant_1",
+        capabilities: ["tools:read", "tools:write", "approvals:create"] as const };
+    const approval = operation === "approved effect"
+      ? await requestApproval(service, { principal, toolId: "linear.create_issue", params: {} })
+      : null;
+    if (approval) await service.approve(approval.id, principal.userId);
+    let release!: () => void;
+    let entered!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    const reserved = new Promise<void>((resolve) => { entered = resolve; });
+    const reserve = receipts.reserve.bind(receipts);
+    vi.spyOn(receipts, "reserve").mockImplementation(async (receipt) => {
+      entered();
+      await hold;
+      return reserve(receipt);
+    });
+    const pending = approval
+      ? service.executeApproved(principal, approval.id)
+      : service.execute({ principal, toolId: "linear.get_issue", params: {} });
+    await reserved;
+    await expect(pending).rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
+    expect(queries.at(-1)).toBe("ROLLBACK");
+    // A revocation can now commit because the transaction has released its locks.
+    revoked = true;
+    release();
+    await vi.waitFor(() => expect([...receipts.receipts.values()][0]?.status).toBe("failed"));
+    expect(actionCall).not.toHaveBeenCalled();
+    if (approval) {
+      expect(approvals.approvals.get(approval.id)?.status).toBe("failed");
+      await expect(service.executeApproved(principal, approval.id))
+        .rejects.toBeInstanceOf(ApprovalUnavailableError);
+    }
+  });
+
+  it.each(["web", "client"] as const)("rechecks %s credential expiry at the actual dispatch boundary", async (kind) => {
+    let workspaceId = "";
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("connection_bindings")) return { rows: [{ workspace_id: workspaceId,
+        provider_connection_id: "plug_linear", ownership: "personal", owner_user_id: "user_1",
+        status: "active", readiness: "ready" }] };
+      if (sql.includes("workspace_memberships")) return { rows: [{ id: "membership_1" }] };
+      if (sql.includes("omr_identity.sessions")) return { rows: [{ id: "session_1",
+        expires_at: new Date(Date.now() + 300) }] };
+      if (sql.includes("omr_control.clients")) return { rows: [{ workspace_id: workspaceId, revoked_at: null }] };
+      if (sql.includes("client_grants")) return { rows: [{ client_id: "client_1",
+        workspace_id: workspaceId, user_id: "user_1", capabilities: ["tools:read"],
+        revoked_at: null, expires_at: new Date(Date.now() + 300) }] };
+      return { rows: [] };
+    });
+    const guard = new PostgresExecutionInvocationGuard({ query } as never, 2_000);
+    const { actionCall, receipts, service, workspace } = await fixture(undefined, undefined, false, guard);
+    workspaceId = workspace.id;
+    const principal = kind === "web"
+      ? { kind, userId: "user_1", workspaceId, sessionId: "session_1" } as const
+      : { kind, userId: "user_1", workspaceId, clientId: "client_1", grantId: "grant_1",
+        capabilities: ["tools:read"] as const };
+    const reserve = receipts.reserve.bind(receipts);
+    vi.spyOn(receipts, "reserve").mockImplementation(async (receipt) => {
+      await new Promise((resolve) => setTimeout(resolve, 450));
+      return reserve(receipt);
+    });
+    await expect(service.execute({ principal, toolId: "linear.get_issue", params: {} }))
+      .rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+    expect(actionCall).not.toHaveBeenCalled();
+    expect([...receipts.receipts.values()][0]?.status).toBe("failed");
+  });
+
   it("binds the empty-workspace web approval route to actor, workspace, and current membership", async () => {
     let member = true;
     let expectedWorkspaceId = "";
     const guard: ExecutionInvocationGuard = { run: vi.fn(async ({ principal }, invoke) => {
       expect(principal.workspaceId).toBe(expectedWorkspaceId);
       if (!member) throw Object.assign(new Error("membership revoked"), { code: "CONNECTION_ACCESS_DENIED" });
-      return invoke();
+      return invoke(() => undefined);
     }) };
     const { actionCall, approvals, service, workspace } = await fixture(undefined, undefined, false, guard);
     expectedWorkspaceId = workspace.id;
