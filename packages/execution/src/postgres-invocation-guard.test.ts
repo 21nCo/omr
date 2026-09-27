@@ -39,6 +39,43 @@ function authorizedQuery(timeline: string[], options: {
 }
 
 describe("PostgreSQL invocation transaction contract", () => {
+  it("rechecks membership and grant before reporting an uncertain receipt without binding health", async () => {
+    for (const grantState of [undefined, "revoked"] as const) {
+      const timeline: string[] = [];
+      const query = authorizedQuery(timeline, { grantState });
+      const guard = new PostgresExecutionInvocationGuard({ query } as unknown as Client);
+      const report = vi.fn(async () => "receipt_1");
+      const result = guard.runIdentity({ principal, capability: "tools:write",
+        deadlineAt: Date.now() + 1_000 }, report);
+      if (grantState === "revoked") {
+        await expect(result).rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+        expect(report).not.toHaveBeenCalled();
+      } else {
+        await expect(result).resolves.toBe("receipt_1");
+        expect(report).toHaveBeenCalledOnce();
+      }
+      expect(timeline.some((sql) => sql.includes("connection_bindings"))).toBe(false);
+      expect(timeline.some((sql) => sql.includes("workspace_memberships") && sql.includes("FOR SHARE"))).toBe(true);
+      expect(timeline.some((sql) => sql.includes("client_grants") && sql.includes("FOR SHARE"))).toBe(true);
+    }
+  });
+
+  it.each([
+    ["membership", { member: false }, principal],
+    ["web session", { session: false }, { kind: "web" as const, userId: "user_1",
+      workspaceId: "workspace_1", sessionId: "session_revoked" }],
+  ])("denies uncertain receipt identity after %s revocation", async (_name, options, actor) => {
+    const queries: string[] = [];
+    const query = authorizedQuery(queries, options);
+    const guard = new PostgresExecutionInvocationGuard({ query } as unknown as Client);
+    const report = vi.fn(async () => "receipt_1");
+    await expect(guard.runIdentity({ principal: actor, capability: "tools:write",
+      deadlineAt: Date.now() + 1_000 }, report))
+      .rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+    expect(report).not.toHaveBeenCalled();
+    expect(queries.at(-1)).toBe("ROLLBACK");
+  });
+
   it("holds binding, membership, client and grant row locks through the provider call", async () => {
     const timeline: string[] = [];
     const query = authorizedQuery(timeline);

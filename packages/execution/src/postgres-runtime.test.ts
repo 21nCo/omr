@@ -6,12 +6,13 @@ const mockState = vi.hoisted(() => ({
   stallClaimAt: -1,
   uncertainOnClaim: false,
   unavailableOnClaim: false,
+  stallReceiptWrite: false,
   advanceClock: () => undefined,
 }));
 
 vi.mock("pg", () => {
   class Client {
-    private readonly state = { ended: false, queries: [] as string[] };
+    private readonly state = { ended: false, queries: [] as string[], blocked: false };
 
     constructor() { mockState.clients.push(this.state); }
     on() { return this; }
@@ -24,6 +25,12 @@ vi.mock("pg", () => {
     async end() { this.state.ended = true; }
     async query(sql: string) {
       this.state.queries.push(sql);
+      if (this.state.blocked || (mockState.stallReceiptWrite &&
+          /UPDATE omr_control\.execution_receipts\s+SET status = 'uncertain'/.test(sql))) {
+        this.state.blocked = true;
+        mockState.stallReceiptWrite = false;
+        return new Promise<{ rows: never[] }>(() => undefined);
+      }
       if (mockState.uncertainOnClaim && sql.includes("status = 'uncertain'")) {
         mockState.advanceClock();
         return { rows: [{ execution_receipt_id: "execution_known_uncertain" }] };
@@ -61,6 +68,26 @@ vi.mock("pg", () => {
 import { connectPostgresExecutionReceipts } from "./postgres.js";
 
 describe("PostgreSQL execution runtime", () => {
+  it("fences a stalled receipt write so the next store call uses a free socket", async () => {
+    mockState.clients.length = 0;
+    mockState.stallReceiptWrite = true;
+    const runtime = await connectPostgresExecutionReceipts({
+      connectionString: "postgresql://localhost:5432/fixture",
+      resultWrappingKey: new Uint8Array(32).fill(1),
+    });
+    try {
+      await expect(runtime.receipts.uncertain("receipt_1", "unknown", Date.now(), Date.now() + 40))
+        .rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
+      await expect(runtime.receipts.findByIdempotency({ workspaceId: "workspace_1",
+        principalKey: "web:user_1", idempotencyKey: "next", deadlineAt: Date.now() + 200 }))
+        .resolves.toBeNull();
+      expect(mockState.clients.filter((client) => client.blocked && !client.ended)).toHaveLength(0);
+    } finally {
+      mockState.stallReceiptWrite = false;
+      await runtime.close();
+    }
+  });
+
   it("closes the primary client if store construction fails", async () => {
     mockState.clients.length = 0;
     await expect(connectPostgresExecutionReceipts({

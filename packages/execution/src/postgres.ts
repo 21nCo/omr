@@ -3,6 +3,7 @@ import pg from "pg";
 import { PostgresExecutionReceiptStore } from "./postgres-store.js";
 import { PostgresExecutionApprovalStore } from "./postgres-approval-store.js";
 import { PostgresExecutionInvocationGuard } from "./postgres-invocation-guard.js";
+import { PostgresOwnedQueries } from "./postgres-owned-query.js";
 import { EXECUTION_INVOCATION_DEADLINE_MS, withinInvocationDeadline,
   type ExecutionInvocationGuard } from "./execution.js";
 
@@ -26,10 +27,11 @@ export async function connectPostgresExecutionReceipts(input: {
   const client = new Client({ connectionString: input.connectionString });
   await client.connect();
   try {
+    const ownedQueries = new PostgresOwnedQueries(input.connectionString);
     return {
-      receipts: new PostgresExecutionReceiptStore(client, input.resultWrappingKey),
+      receipts: new PostgresExecutionReceiptStore(client, input.resultWrappingKey, ownedQueries),
       approvals: new PostgresExecutionApprovalStore(client, input.resultWrappingKey,
-        input.connectionString),
+        input.connectionString, ownedQueries),
       // A deadline destroys its transaction socket. Each invocation owns its guard
       // client, so a later call on this runtime cannot reuse a closed connection.
       invocationGuard: {
@@ -48,8 +50,21 @@ export async function connectPostgresExecutionReceipts(input: {
             void guardClient.end().catch(() => undefined);
           }
         },
+        async runIdentity(identityInput, invoke) {
+          const guardClient = new Client({ connectionString: input.connectionString });
+          guardClient.on("error", () => undefined);
+          try {
+            await withinInvocationDeadline(identityInput.deadlineAt, () => guardClient.connect());
+            return await new PostgresExecutionInvocationGuard(guardClient).runIdentity(identityInput, invoke);
+          } finally {
+            void guardClient.end().catch(() => undefined);
+          }
+        },
       },
-      async close() { await client.end(); },
+      async close() {
+        await ownedQueries.close();
+        await client.end();
+      },
     };
   } catch (error) {
     await client.end().catch(() => undefined);

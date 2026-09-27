@@ -21,6 +21,7 @@ function isStatementTimeout(error: unknown): boolean {
 }
 
 type GuardInput = Parameters<ExecutionInvocationGuard["run"]>[0];
+type IdentityInput = Pick<GuardInput, "principal" | "capability" | "deadlineAt">;
 type GuardQuery = <R extends Record<string, unknown>>(
   sql: string, values?: unknown[],
 ) => Promise<{ rows: R[] }>;
@@ -95,8 +96,8 @@ async function authorizeClient(input: Extract<GuardInput["principal"], { kind: "
   return expiresAt;
 }
 
-async function authorizeInvocation(input: GuardInput, query: GuardQuery): Promise<number> {
-  await authorizeBinding(input, query);
+async function authorizeInvocation(input: GuardInput | IdentityInput, query: GuardQuery): Promise<number> {
+  if ("connection" in input) await authorizeBinding(input, query);
   const membership = await query(
     `SELECT id FROM omr_control.workspace_memberships
      WHERE workspace_id = $1 AND user_id = $2 FOR SHARE`,
@@ -117,6 +118,15 @@ export class PostgresExecutionInvocationGuard implements ExecutionInvocationGuar
   }
 
   async run<T>(input: Parameters<ExecutionInvocationGuard["run"]>[0],
+    invoke: (assertCanDispatch: () => void) => Promise<T>): Promise<T> {
+    return this.runAuthorized(input, invoke);
+  }
+
+  async runIdentity<T>(input: IdentityInput, invoke: () => Promise<T>): Promise<T> {
+    return this.runAuthorized(input, invoke);
+  }
+
+  private async runAuthorized<T>(input: GuardInput | IdentityInput,
     invoke: (assertCanDispatch: () => void) => Promise<T>): Promise<T> {
     const deadline = Math.min(input.deadlineAt ?? Infinity, Date.now() + this.deadlineMs);
     const controller = new AbortController();

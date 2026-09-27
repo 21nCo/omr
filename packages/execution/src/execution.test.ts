@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
 import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
-import { ConnectionAuthority, ConnectionSelectionRequiredError, ConnectionUnavailableError } from "@oh-my-router/connections";
+import { ConnectionAccessDeniedError, ConnectionAuthority, ConnectionSelectionRequiredError,
+  ConnectionUnavailableError } from "@oh-my-router/connections";
 import { MemoryConnectionBindingStore } from "@oh-my-router/connections/testing";
 import { ToolCatalog, usableToolIds, type ToolEffect } from "@oh-my-router/tools";
 
@@ -347,7 +348,7 @@ describe("execution service", () => {
   });
 
   it("keeps an approved effect uncertain after a missing-remote reply, including approval replay", async () => {
-    const { actionCall, approvals, receipts, service, workspace } = await fixture();
+    const { actionCall, approvals, receipts, service, workspace, workspaceStore } = await fixture();
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
     const approval = await requestApproval(service, { principal, toolId: "linear.create_issue", params: {} });
     await service.approve(approval.id, principal.userId);
@@ -364,9 +365,42 @@ describe("execution service", () => {
       status: "uncertain", executionReceiptId: outcome.receiptId,
     });
     await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({
-      code: "CONNECTION_ACCESS_DENIED",
+      code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: outcome.receiptId,
+    });
+    approvals.approvals.get(approval.id)!.status = "executing";
+    approvals.approvals.get(approval.id)!.executionReceiptId = null;
+    receipts.receipts.get(outcome.receiptId)!.status = "running";
+    await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({
+      code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: outcome.receiptId,
+    });
+    workspaceStore.memberships.clear();
+    await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({
+      code: "APPROVAL_UNAVAILABLE",
     });
     expect(effectApplied).toBe(1);
+    expect(actionCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("rechecks current identity before disclosing an uncertain read receipt", async () => {
+    let currentGrant = true;
+    const guard: ExecutionInvocationGuard = {
+      run: async (_input, invoke) => invoke(() => undefined),
+      runIdentity: async (_input, report) => {
+        if (!currentGrant) throw new ConnectionAccessDeniedError();
+        return report();
+      },
+    };
+    const { actionCall, service, workspace } = await fixture(undefined, undefined, false, guard);
+    const principal = { kind: "client" as const, userId: "user_1", workspaceId: workspace.id,
+      clientId: "client_1", grantId: "grant_1", capabilities: ["tools:read" as const] };
+    const request = { principal, toolId: "linear.get_issue", params: {}, idempotencyKey: "uncertain-read" };
+    actionCall.mockRejectedValueOnce(new Error("upstream response lost"));
+    const first = await service.execute(request).catch((error: unknown) => error) as { receiptId: string };
+    await expect(service.execute(request)).rejects.toMatchObject({
+      code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: first.receiptId,
+    });
+    currentGrant = false;
+    await expect(service.execute(request)).rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
     expect(actionCall).toHaveBeenCalledTimes(1);
   });
 
@@ -997,7 +1031,7 @@ describe("execution service", () => {
   ])("retains a reconcilable approval after %s", async (failure) => {
     const guard: ExecutionInvocationGuard = { run: async (_input, invoke) => {
       return invoke(() => undefined);
-    } };
+    }, runIdentity: async (_input, invoke) => invoke() };
     const { actionCall, approvals, receipts, service, workspace } = await fixture(
       undefined, undefined, false, guard,
     );

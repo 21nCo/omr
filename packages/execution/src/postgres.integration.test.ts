@@ -540,4 +540,60 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       await observer.end();
     }
   });
+
+  it("cancels a lock-stalled receipt write without poisoning the runtime's next store call", async () => {
+    const now = Date.now();
+    const approval = approvalFixture(now);
+    await runtime.approvals.create(approval);
+    const receipt = receiptFixture(approval, now);
+    await runtime.receipts.reserve(receipt);
+    await runtime.receipts.beginDispatch(receipt.id, now + 1);
+    const blocker = new Client({ connectionString: connectionString! });
+    await blocker.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT id FROM omr_control.execution_receipts WHERE id = $1 FOR UPDATE", [receipt.id]);
+      await expect(runtime.receipts.uncertain(receipt.id, "unknown", now + 2, Date.now() + 80))
+        .rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
+      await expect(runtime.receipts.findByIdempotency({ workspaceId,
+        principalKey: receipt.principalKey, idempotencyKey: receipt.idempotencyKey,
+        deadlineAt: Date.now() + 500 })).resolves.toMatchObject({ id: receipt.id, status: "running" });
+    } finally {
+      await blocker.query("ROLLBACK");
+      await blocker.end();
+    }
+    await expect(runtime.receipts.uncertain(receipt.id, "unknown", Date.now(), Date.now() + 1_000))
+      .resolves.toMatchObject({ id: receipt.id, status: "uncertain" });
+  });
+
+  it("cancels a lock-stalled approval cleanup and preserves the associated receipt", async () => {
+    const now = Date.now();
+    const approval = approvalFixture(now);
+    await runtime.approvals.create(approval);
+    await runtime.approvals.approve({ approvalId: approval.id,
+      actorUserId: approval.actorUserId, now: now + 1 });
+    await runtime.approvals.claim({ approvalId: approval.id, actorUserId: approval.actorUserId,
+      principalKey: approval.principalKey, now: now + 2, deadlineAt: Date.now() + 1_000 });
+    const receipt = receiptFixture(approval, now);
+    await runtime.receipts.reserve(receipt);
+    await runtime.receipts.beginDispatch(receipt.id, now + 3);
+    await runtime.receipts.uncertain(receipt.id, "unknown", now + 4);
+    const blocker = new Client({ connectionString: connectionString! });
+    await blocker.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT id FROM omr_control.execution_approvals WHERE id = $1 FOR UPDATE", [approval.id]);
+      await expect(runtime.approvals.uncertain({ approvalId: approval.id, receiptId: receipt.id,
+        now: now + 5, deadlineAt: Date.now() + 80 }))
+        .rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
+      await expect(runtime.approvals.getForActor(approval.id, approval.actorUserId, Date.now() + 500))
+        .resolves.toMatchObject({ status: "executing", executionReceiptId: null });
+    } finally {
+      await blocker.query("ROLLBACK");
+      await blocker.end();
+    }
+    await expect(runtime.approvals.uncertain({ approvalId: approval.id, receiptId: receipt.id,
+      now: Date.now(), deadlineAt: Date.now() + 1_000 }))
+      .resolves.toMatchObject({ status: "uncertain", executionReceiptId: receipt.id });
+  });
 });

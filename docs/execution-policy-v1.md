@@ -71,8 +71,14 @@ uncertain approval linked to a succeeded receipt, replay verifies the exact asso
 and reconciles the approval to consumed. Provider ambiguity, a missing-connection reply
 after entering the provider action, and receipt persistence failure remain uncertain.
 A matching same-key replay of an uncertain read or approval returns the original receipt ID without invoking the provider, even if
-the selected binding has since degraded; the receipt lookup still requires current workspace
-membership. A guard transaction owns a separate PostgreSQL client for each invocation.
+the selected binding has since degraded. Approval uncertainty identity still requires current
+workspace membership and session or client-grant authorization. A successful result replay also
+requires current binding, scope, and guard authorization. A guard transaction owns a separate
+PostgreSQL client for each invocation. Each receipt or approval store query owns its own socket,
+sets the server statement timeout to the remaining invocation budget, and closes the socket on
+timeout; a stalled cleanup write cannot queue the next invocation on a shared client. No schema
+migration is needed for this socket-ownership change, and Worker rollback retains the existing
+receipt and approval rows.
 The HTTP boundary returns `504 EXECUTION_INVOCATION_TIMEOUT` without a receipt ID when the
 deadline closes before provider dispatch. After dispatch with an unconfirmed outcome, it returns
 `502 EXECUTION_OUTCOME_UNKNOWN` with the receipt ID. CLI JSON errors and MCP structured tool
@@ -100,6 +106,7 @@ approval-request calls keep their shorter client timeout.
 | Web approval execution | Actor/workspace substitution or revoked membership with an empty route workspace | Empty-workspace principal and guard tests |
 | Workspace, grant, connection | Cross-workspace use or use after revocation | Service denial and PostgreSQL guard fixture tests |
 | Provider and receipt | Second effect after timeout, crash, or ambiguous error | Uncertain replay and reservation tests |
+| Store socket lifetime | Timed-out cleanup blocks the next invocation or commits after its deadline | Stalled-write PostgreSQL and runtime lifecycle fixtures |
 | Invocation liveness | A near-deadline query or queued rollback holds locks beyond the client timeout; late reservation dispatches after expiry | Queued-client query and rollback deadline fixtures, pre-dispatch cancellation, and uncertain non-replay tests |
 | Reservation response loss | INSERT commits but its response is lost as the guard deadline closes the request | Delayed-INSERT fixture, stale reserved replay and no-provider-call checks |
 | Client execution deadline | CLI or MCP aborts before a structured timeout or uncertain receipt arrives | Delayed protocol responses beyond the former 30-second client timeout |

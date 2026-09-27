@@ -1,9 +1,10 @@
-import type { Client } from "pg";
+import type { Client, QueryResult, QueryResultRow } from "pg";
 import type { JsonValue } from "@oh-my-router/tools";
 
 import { EXECUTION_STALE_AFTER_MS,
   type ExecutionReceipt, type ExecutionReceiptStore, type ExecutionStatus } from "./execution.js";
 import { decryptJson, encryptJson } from "./postgres-crypto.js";
+import { PostgresOwnedQueries } from "./postgres-owned-query.js";
 
 interface ReceiptRow {
   id: string;
@@ -37,23 +38,32 @@ export class PostgresExecutionReceiptStore implements ExecutionReceiptStore {
   constructor(
     private readonly client: Client,
     private readonly wrappingKey: Uint8Array<ArrayBuffer>,
+    private readonly ownedQueries?: PostgresOwnedQueries,
   ) {
     if (wrappingKey.byteLength !== 32) throw new Error("Execution receipt wrapping key must be 32 bytes");
   }
 
-  async findByIdempotency(input: { workspaceId: string; principalKey: string; idempotencyKey: string }): Promise<ExecutionReceipt | null> {
-    const result = await this.client.query<ReceiptRow>(
+  private query<R extends QueryResultRow>(sql: string, values?: unknown[],
+    deadlineAt?: number): Promise<QueryResult<R>> {
+    return this.ownedQueries
+      ? this.ownedQueries.query<R>(sql, values, deadlineAt)
+      : this.client.query<R>(sql, values);
+  }
+
+  async findByIdempotency(input: { workspaceId: string; principalKey: string; idempotencyKey: string;
+    deadlineAt?: number }): Promise<ExecutionReceipt | null> {
+    const result = await this.query<ReceiptRow>(
       `SELECT ${COLUMNS} FROM omr_control.execution_receipts
        WHERE workspace_id = $1 AND principal_key = $2 AND idempotency_key = $3
          AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
                      WHERE workspace_id = $1 AND user_id = actor_user_id)`,
-      [input.workspaceId, input.principalKey, input.idempotencyKey],
+      [input.workspaceId, input.principalKey, input.idempotencyKey], input.deadlineAt,
     );
     return result.rows[0] ? this.toReceipt(result.rows[0]) : null;
   }
 
-  async reserve(receipt: ExecutionReceipt): Promise<{ receipt: ExecutionReceipt; created: boolean }> {
-    const result = await this.client.query<ReceiptRow>(
+  async reserve(receipt: ExecutionReceipt, deadlineAt?: number): Promise<{ receipt: ExecutionReceipt; created: boolean }> {
+    const result = await this.query<ReceiptRow>(
       `INSERT INTO omr_control.execution_receipts
          (id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash,
           connection_id, provider_connection_id, idempotency_key, request_hash, approval_id, status,
@@ -79,10 +89,10 @@ export class PostgresExecutionReceiptStore implements ExecutionReceiptStore {
         receipt.completedAt,
         receipt.createdAt,
         receipt.updatedAt,
-      ],
+      ], deadlineAt,
     );
     if (result.rows[0]) return { receipt: await this.toReceipt(result.rows[0]), created: true };
-    const existing = await this.client.query<ReceiptRow>(
+    const existing = await this.query<ReceiptRow>(
       `UPDATE omr_control.execution_receipts
        SET status = CASE WHEN status = 'reserved' THEN 'failed' ELSE 'uncertain' END,
            error_code = CASE WHEN status = 'reserved' THEN 'reservation_expired'
@@ -97,67 +107,70 @@ export class PostgresExecutionReceiptStore implements ExecutionReceiptStore {
       [receipt.workspaceId, receipt.principalKey, receipt.idempotencyKey,
         receipt.startedAt, receipt.startedAt - EXECUTION_STALE_AFTER_MS, receipt.approvalId ?? null,
         receipt.requestHash, receipt.actorUserId, receipt.toolId, receipt.manifestHash,
-        receipt.connectionId, receipt.providerConnectionId],
+        receipt.connectionId, receipt.providerConnectionId], deadlineAt,
     );
     if (existing.rows[0]) return { receipt: await this.toReceipt(existing.rows[0]), created: false };
-    const current = await this.client.query<ReceiptRow>(
+    const current = await this.query<ReceiptRow>(
       `SELECT ${COLUMNS} FROM omr_control.execution_receipts
        WHERE workspace_id = $1 AND principal_key = $2 AND idempotency_key = $3`,
-      [receipt.workspaceId, receipt.principalKey, receipt.idempotencyKey],
+      [receipt.workspaceId, receipt.principalKey, receipt.idempotencyKey], deadlineAt,
     );
     if (!current.rows[0]) throw new Error("Idempotency reservation disappeared");
     return { receipt: await this.toReceipt(current.rows[0]), created: false };
   }
 
-  async beginDispatch(receiptId: string, now: number): Promise<void> {
-    const updated = await this.client.query(
+  async beginDispatch(receiptId: string, now: number, deadlineAt?: number): Promise<void> {
+    const updated = await this.query(
       `UPDATE omr_control.execution_receipts SET status = 'running', updated_at = $2
        WHERE id = $1 AND status = 'reserved' RETURNING id`,
-      [receiptId, now],
+      [receiptId, now], deadlineAt,
     );
     if (!updated.rows[0]) throw new Error("Execution reservation is unavailable");
   }
 
-  async succeed(receiptId: string, result: JsonValue, now: number): Promise<ExecutionReceipt> {
-    const context = await this.client.query<{ workspace_id: string }>(
+  async succeed(receiptId: string, result: JsonValue, now: number,
+    deadlineAt?: number): Promise<ExecutionReceipt> {
+    const context = await this.query<{ workspace_id: string }>(
       `SELECT workspace_id FROM omr_control.execution_receipts WHERE id = $1 AND status = 'running'`,
-      [receiptId],
+      [receiptId], deadlineAt,
     );
     if (!context.rows[0]) throw new Error("Execution receipt is not running");
     const encrypted = await encryptJson(result, this.wrappingKey,
       { kind: "receipt-result", workspaceId: context.rows[0].workspace_id, id: receiptId });
-    const updated = await this.client.query<ReceiptRow>(
+    const updated = await this.query<ReceiptRow>(
       `UPDATE omr_control.execution_receipts
        SET status = 'succeeded', result_ciphertext = $1, result_iv = $2,
            result_crypto_version = 1,
            completed_at = $3, updated_at = $3
        WHERE id = $4 AND status = 'running'
        RETURNING ${COLUMNS}`,
-      [encrypted.ciphertext, encrypted.iv, now, receiptId],
+      [encrypted.ciphertext, encrypted.iv, now, receiptId], deadlineAt,
     );
     if (!updated.rows[0]) throw new Error("Execution receipt is not running");
     return this.toReceipt(updated.rows[0]);
   }
 
-  async fail(receiptId: string, errorCode: string, now: number): Promise<ExecutionReceipt> {
-    const updated = await this.client.query<ReceiptRow>(
+  async fail(receiptId: string, errorCode: string, now: number,
+    deadlineAt?: number): Promise<ExecutionReceipt> {
+    const updated = await this.query<ReceiptRow>(
       `UPDATE omr_control.execution_receipts
        SET status = 'failed', error_code = $1, completed_at = $2, updated_at = $2
        WHERE id = $3 AND status IN ('reserved', 'running')
        RETURNING ${COLUMNS}`,
-      [errorCode, now, receiptId],
+      [errorCode, now, receiptId], deadlineAt,
     );
     if (!updated.rows[0]) throw new Error("Execution receipt is not running");
     return this.toReceipt(updated.rows[0]);
   }
 
-  async uncertain(receiptId: string, errorCode: string, now: number): Promise<ExecutionReceipt> {
-    const updated = await this.client.query<ReceiptRow>(
+  async uncertain(receiptId: string, errorCode: string, now: number,
+    deadlineAt?: number): Promise<ExecutionReceipt> {
+    const updated = await this.query<ReceiptRow>(
       `UPDATE omr_control.execution_receipts
        SET status = 'uncertain', error_code = $1, completed_at = $2, updated_at = $2
        WHERE id = $3 AND status = 'running'
        RETURNING ${COLUMNS}`,
-      [errorCode, now, receiptId],
+      [errorCode, now, receiptId], deadlineAt,
     );
     if (!updated.rows[0]) throw new Error("Execution receipt is not running");
     return this.toReceipt(updated.rows[0]);
@@ -168,7 +181,7 @@ export class PostgresExecutionReceiptStore implements ExecutionReceiptStore {
     actorUserId: string;
     limit: number;
   }): Promise<ExecutionReceipt[]> {
-    const result = await this.client.query<ReceiptRow>(
+    const result = await this.query<ReceiptRow>(
       `SELECT ${COLUMNS}
        FROM omr_control.execution_receipts
        WHERE workspace_id = $1 AND actor_user_id = $2

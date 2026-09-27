@@ -69,12 +69,13 @@ export interface ExecutionReceipt {
 }
 
 export interface ExecutionReceiptStore {
-  findByIdempotency(input: { workspaceId: string; principalKey: string; idempotencyKey: string }): Promise<ExecutionReceipt | null>;
-  reserve(receipt: ExecutionReceipt): Promise<{ receipt: ExecutionReceipt; created: boolean }>;
-  beginDispatch(receiptId: string, now: number): Promise<void>;
-  succeed(receiptId: string, result: JsonValue, now: number): Promise<ExecutionReceipt>;
-  fail(receiptId: string, errorCode: string, now: number): Promise<ExecutionReceipt>;
-  uncertain(receiptId: string, errorCode: string, now: number): Promise<ExecutionReceipt>;
+  findByIdempotency(input: { workspaceId: string; principalKey: string; idempotencyKey: string;
+    deadlineAt?: number }): Promise<ExecutionReceipt | null>;
+  reserve(receipt: ExecutionReceipt, deadlineAt?: number): Promise<{ receipt: ExecutionReceipt; created: boolean }>;
+  beginDispatch(receiptId: string, now: number, deadlineAt?: number): Promise<void>;
+  succeed(receiptId: string, result: JsonValue, now: number, deadlineAt?: number): Promise<ExecutionReceipt>;
+  fail(receiptId: string, errorCode: string, now: number, deadlineAt?: number): Promise<ExecutionReceipt>;
+  uncertain(receiptId: string, errorCode: string, now: number, deadlineAt?: number): Promise<ExecutionReceipt>;
   listForActor(input: {
     workspaceId: string;
     actorUserId: string;
@@ -114,7 +115,7 @@ export interface ExecutionApproval {
 
 export interface ExecutionApprovalStore {
   create(approval: ExecutionApproval): Promise<ExecutionApproval>;
-  getForActor(approvalId: string, actorUserId: string): Promise<ExecutionApproval>;
+  getForActor(approvalId: string, actorUserId: string, deadlineAt?: number): Promise<ExecutionApproval>;
   approve(input: { approvalId: string; actorUserId: string; now: number }): Promise<ExecutionApproval>;
   reject(input: { approvalId: string; actorUserId: string; now: number }): Promise<ExecutionApproval>;
   claim(input: {
@@ -124,11 +125,13 @@ export interface ExecutionApprovalStore {
     now: number;
     deadlineAt: number;
   }): Promise<ExecutionApproval>;
-  consume(input: { approvalId: string; receiptId: string; now: number }): Promise<ExecutionApproval>;
+  consume(input: { approvalId: string; receiptId: string; now: number;
+    deadlineAt?: number }): Promise<ExecutionApproval>;
   succeedWithReceipt(input: { approvalId: string; receipt: ExecutionReceipt;
     result: JsonValue; now: number; deadlineAt: number }): Promise<ExecutionReceipt>;
-  uncertain(input: { approvalId: string; receiptId: string | null; now: number }): Promise<ExecutionApproval>;
-  fail(input: { approvalId: string; now: number }): Promise<ExecutionApproval>;
+  uncertain(input: { approvalId: string; receiptId: string | null; now: number;
+    deadlineAt?: number }): Promise<ExecutionApproval>;
+  fail(input: { approvalId: string; now: number; deadlineAt?: number }): Promise<ExecutionApproval>;
   listForActor(input: {
     workspaceId: string;
     actorUserId: string;
@@ -159,6 +162,11 @@ export interface ExecutionInvocationGuard {
     capability: ClientCapability;
     deadlineAt?: number;
   }, invoke: (assertCanDispatch: () => void) => Promise<T>): Promise<T>;
+  runIdentity?<T>(input: {
+    principal: ExecutionPrincipal;
+    capability: ClientCapability;
+    deadlineAt: number;
+  }, invoke: () => Promise<T>): Promise<T>;
 }
 
 export class ExecutionInputError extends Error {
@@ -270,7 +278,7 @@ export class ExecutionService {
       const prior = await withinInvocationDeadline(deadlineAt, () => this.receipts.findByIdempotency({
         workspaceId: input.principal.workspaceId,
         principalKey: principalKey(input.principal),
-        idempotencyKey,
+        idempotencyKey, deadlineAt,
       }));
       if (prior?.status === "uncertain") {
         if (prior.toolId !== manifest.id || prior.manifestHash !== manifest.hash ||
@@ -279,7 +287,9 @@ export class ExecutionService {
               connectionId: prior.connectionId, params }, this.fingerprintKey)) {
           throw new ExecutionIdempotencyConflictError();
         }
-        throw new ExecutionOutcomeUnknownError(prior.id);
+        return this.reportUncertainReceipt(input.principal,
+          manifest.contract.effect === "read" ? "tools:read" : "tools:write",
+          prior.id, deadlineAt);
       }
     }
 
@@ -426,11 +436,13 @@ export class ExecutionService {
       const cleanupDeadlineAt = deadlineAt + 5_000;
       if (error instanceof ExecutionOutcomeUnknownError || error instanceof ExecutionInProgressError) {
         await withinInvocationDeadline(cleanupDeadlineAt,
-          () => approvals.uncertain({ approvalId, receiptId: error.receiptId, now: this.now() }))
+          () => approvals.uncertain({ approvalId, receiptId: error.receiptId, now: this.now(),
+            deadlineAt: cleanupDeadlineAt }))
           .catch(() => undefined);
       } else {
         await withinInvocationDeadline(cleanupDeadlineAt,
-          () => approvals.fail({ approvalId, now: this.now() })).catch(() => undefined);
+          () => approvals.fail({ approvalId, now: this.now(), deadlineAt: cleanupDeadlineAt }))
+          .catch(() => undefined);
       }
       throw error;
     }
@@ -440,18 +452,25 @@ export class ExecutionService {
     deadlineAt: number): Promise<ExecutionReceipt | null> {
     const approvals = this.requiredApprovals();
     const prior = await withinInvocationDeadline(deadlineAt,
-      () => approvals.getForActor(approvalId, principal.userId));
+      () => approvals.getForActor(approvalId, principal.userId, deadlineAt));
     if (prior.principalKey !== principalKey(principal) ||
         (principal.workspaceId !== prior.workspaceId &&
           !(principal.kind === "web" && principal.workspaceId === ""))) {
       throw new ApprovalUnavailableError();
     }
-    if (prior.status !== "consumed" && prior.status !== "uncertain") return null;
+    if (prior.status !== "consumed" && prior.status !== "uncertain" &&
+        prior.status !== "executing") return null;
     const receipt = await withinInvocationDeadline(deadlineAt,
       () => this.receipts.findByIdempotency({ workspaceId: prior.workspaceId,
-        principalKey: prior.principalKey, idempotencyKey: prior.idempotencyKey }));
+        principalKey: prior.principalKey, idempotencyKey: prior.idempotencyKey, deadlineAt }));
     if (!receipt || !matchesApprovalReceipt(receipt, prior)) {
       throw new ApprovalUnavailableError();
+    }
+    if (receipt.status === "running" || receipt.status === "uncertain") {
+      const manifest = this.approvedManifest(principal, prior);
+      const effectivePrincipal: ExecutionPrincipal = { ...principal, workspaceId: prior.workspaceId };
+      this.authorizeEffect(effectivePrincipal, manifest);
+      return this.reportUncertainReceipt(effectivePrincipal, "tools:write", receipt.id, deadlineAt);
     }
     const { manifest, effectivePrincipal, connection } = await this.authorizeApproved(
       principal, prior, deadlineAt);
@@ -478,9 +497,10 @@ export class ExecutionService {
   private async approvedReplayOutcome(approvals: ExecutionApprovalStore,
     prior: ExecutionApproval, receipt: ExecutionReceipt, deadlineAt: number): Promise<ExecutionReceipt> {
     if (receipt.status === "succeeded") {
-      if (prior.status === "uncertain") {
+      if (prior.status !== "consumed") {
         await withinInvocationDeadline(deadlineAt,
-          () => approvals.consume({ approvalId: prior.id, receiptId: receipt.id, now: this.now() }));
+          () => approvals.consume({ approvalId: prior.id, receiptId: receipt.id, now: this.now(),
+            deadlineAt }));
       }
       return receipt;
     }
@@ -492,13 +512,7 @@ export class ExecutionService {
 
   private async authorizeApproved(principal: ExecutionPrincipal, approval: ExecutionApproval,
     deadlineAt: number) {
-    const manifest = this.catalog.get(approval.toolId);
-    if (!manifest || manifest.hash !== approval.manifestHash || manifest.contract.effect === "read" ||
-        !approvalPreviewReady(manifest, approval.manifestHash, approval.params) ||
-        (principal.workspaceId !== approval.workspaceId &&
-          !(principal.kind === "web" && principal.workspaceId === ""))) {
-      throw new ApprovalUnavailableError();
-    }
+    const manifest = this.approvedManifest(principal, approval);
     const effectivePrincipal: ExecutionPrincipal = { ...principal, workspaceId: approval.workspaceId };
     this.authorizeEffect(effectivePrincipal, manifest);
     const connection = await withinInvocationDeadline(deadlineAt, () => this.connections.resolve({
@@ -514,6 +528,25 @@ export class ExecutionService {
     return { manifest, effectivePrincipal, connection };
   }
 
+  private approvedManifest(principal: ExecutionPrincipal, approval: ExecutionApproval): ToolManifest {
+    const manifest = this.catalog.get(approval.toolId);
+    if (manifest?.hash !== approval.manifestHash || manifest.contract.effect === "read" ||
+        !approvalPreviewReady(manifest, approval.manifestHash, approval.params) ||
+        (principal.workspaceId !== approval.workspaceId &&
+          !(principal.kind === "web" && principal.workspaceId === ""))) {
+      throw new ApprovalUnavailableError();
+    }
+    return manifest;
+  }
+
+  private reportUncertainReceipt(principal: ExecutionPrincipal, capability: ClientCapability,
+    receiptId: string, deadlineAt: number): Promise<never> {
+    const report = async (): Promise<never> => { throw new ExecutionOutcomeUnknownError(receiptId); };
+    if (!this.invocationGuard) return report();
+    if (!this.invocationGuard.runIdentity) throw new ApprovalUnavailableError();
+    return this.invocationGuard.runIdentity({ principal, capability, deadlineAt }, report);
+  }
+
   private async runAuthorized(input: {
     principal: ExecutionPrincipal;
     manifest: ToolManifest;
@@ -524,8 +557,9 @@ export class ExecutionService {
     approvalExpiresAt?: number;
     deadlineAt: number;
   }): Promise<ExecutionReceipt> {
+    const cleanupDeadlineAt = input.deadlineAt + 5_000;
     const settle = (operation: () => Promise<unknown>) =>
-      withinInvocationDeadline(input.deadlineAt + 5_000, operation).catch(() => undefined);
+      withinInvocationDeadline(cleanupDeadlineAt, operation).catch(() => undefined);
     let missingRemoteAfterInvoke = false;
     let dispatchedReceiptId: string | null = null;
     let succeededReceipt: ExecutionReceipt | null = null;
@@ -566,7 +600,7 @@ export class ExecutionService {
         createdAt: timestamp,
         updatedAt: timestamp,
       };
-      const reservation = await this.receipts.reserve(expectedReceipt);
+      const reservation = await this.receipts.reserve(expectedReceipt, input.deadlineAt);
       if (!reservation.created) {
         const replay = this.replayReceipt(reservation.receipt, expectedReceipt,
           assertApprovedCanDispatch);
@@ -580,17 +614,17 @@ export class ExecutionService {
       } catch (error) {
         // Reservation is durable, but the provider was never called.
         await settle(() => this.receipts.fail(reservation.receipt.id,
-          "authorization_window_closed", this.now()));
+          "authorization_window_closed", this.now(), cleanupDeadlineAt));
         throw error;
       }
       try {
-        await this.receipts.beginDispatch(reservation.receipt.id, this.now());
+        await this.receipts.beginDispatch(reservation.receipt.id, this.now(), input.deadlineAt);
         assertApprovedCanDispatch();
       } catch (error) {
         // The provider has not been entered. A late database response may have
         // committed the transition, so settle either predispatch state if possible.
         await settle(() => this.receipts.fail(reservation.receipt.id,
-          "authorization_window_closed", this.now()));
+          "authorization_window_closed", this.now(), cleanupDeadlineAt));
         throw error;
       }
       try {
@@ -616,7 +650,7 @@ export class ExecutionService {
           missingRemoteAfterInvoke = true;
         }
         await settle(() => this.receipts.uncertain(reservation.receipt.id,
-          "provider_outcome_unknown", this.now()));
+          "provider_outcome_unknown", this.now(), cleanupDeadlineAt));
         throw new ExecutionOutcomeUnknownError(reservation.receipt.id);
       }
       try {
@@ -626,12 +660,12 @@ export class ExecutionService {
             receipt: reservation.receipt, result, now: this.now(),
             deadlineAt: input.deadlineAt }))
           : await withinInvocationDeadline(input.deadlineAt,
-            () => this.receipts.succeed(reservation.receipt.id, result, this.now()));
+            () => this.receipts.succeed(reservation.receipt.id, result, this.now(), input.deadlineAt));
         return succeededReceipt;
       } catch {
         // The upstream call has already returned. A failed receipt write cannot make it safe to retry.
         await settle(() => this.receipts.uncertain(reservation.receipt.id,
-          "receipt_persist_failed", this.now()));
+          "receipt_persist_failed", this.now(), cleanupDeadlineAt));
         throw new ExecutionOutcomeUnknownError(reservation.receipt.id);
       }
     };
@@ -658,7 +692,7 @@ export class ExecutionService {
           !(error instanceof ExecutionOutcomeUnknownError)) {
         const receiptId = dispatchedReceiptId;
         await settle(() => this.receipts.uncertain(receiptId,
-          "invocation_outcome_unknown", this.now()));
+          "invocation_outcome_unknown", this.now(), cleanupDeadlineAt));
         throw new ExecutionOutcomeUnknownError(receiptId);
       }
       throw error;
@@ -722,7 +756,10 @@ function principalKey(principal: ExecutionPrincipal): string {
 }
 
 function matchesApprovalReceipt(receipt: ExecutionReceipt, approval: ExecutionApproval): boolean {
-  return receipt.id === approval.executionReceiptId && receipt.approvalId === approval.id &&
+  return (receipt.id === approval.executionReceiptId ||
+    (approval.status === "executing" && approval.executionReceiptId === null &&
+      (receipt.status === "running" || receipt.status === "uncertain" || receipt.status === "succeeded"))) &&
+    receipt.approvalId === approval.id &&
     receipt.workspaceId === approval.workspaceId && receipt.actorUserId === approval.actorUserId &&
     receipt.principalKey === approval.principalKey &&
     receipt.idempotencyKey === approval.idempotencyKey && receipt.toolId === approval.toolId &&

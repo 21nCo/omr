@@ -1,4 +1,4 @@
-import pg, { type Client } from "pg";
+import pg, { type Client, type QueryResult, type QueryResultRow } from "pg";
 import type { JsonValue } from "@oh-my-router/tools";
 
 import {
@@ -14,6 +14,7 @@ import {
   type ExecutionReceipt,
 } from "./execution.js";
 import { decryptJson, encryptJson } from "./postgres-crypto.js";
+import { PostgresOwnedQueries } from "./postgres-owned-query.js";
 
 interface ApprovalRow {
   id: string;
@@ -58,14 +59,22 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     private readonly client: Client,
     private readonly wrappingKey: Uint8Array<ArrayBuffer>,
     private readonly claimConnectionString?: string,
+    private readonly ownedQueries?: PostgresOwnedQueries,
   ) {
     if (wrappingKey.byteLength !== 32) throw new Error("Execution approval wrapping key must be 32 bytes");
+  }
+
+  private query<R extends QueryResultRow>(sql: string, values?: unknown[],
+    deadlineAt?: number): Promise<QueryResult<R>> {
+    return this.ownedQueries
+      ? this.ownedQueries.query<R>(sql, values, deadlineAt)
+      : this.client.query<R>(sql, values);
   }
 
   async create(approval: ExecutionApproval): Promise<ExecutionApproval> {
     const encrypted = await encryptJson(approval.params, this.wrappingKey,
       { kind: "approval-params", workspaceId: approval.workspaceId, id: approval.id });
-    const result = await this.client.query<ApprovalRow>(
+    const result = await this.query<ApprovalRow>(
       `INSERT INTO omr_control.execution_approvals
          (id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash,
           connection_id, provider_connection_id, params_ciphertext, params_iv, params_crypto_version,
@@ -97,7 +106,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
       ],
     );
     if (result.rows[0]) return this.toApproval(result.rows[0]);
-    const existing = await this.client.query<ApprovalRow>(
+    const existing = await this.query<ApprovalRow>(
       `SELECT ${COLUMNS} FROM omr_control.execution_approvals
        WHERE workspace_id = $1 AND principal_key = $2 AND idempotency_key = $3`,
       [approval.workspaceId, approval.principalKey, approval.idempotencyKey],
@@ -109,13 +118,14 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     return this.toApproval(existing.rows[0]);
   }
 
-  async getForActor(approvalId: string, actorUserId: string): Promise<ExecutionApproval> {
+  async getForActor(approvalId: string, actorUserId: string,
+    deadlineAt?: number): Promise<ExecutionApproval> {
     return this.transition(
       `SELECT ${COLUMNS} FROM omr_control.execution_approvals
        WHERE id = $1 AND actor_user_id = $2
          AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
                      WHERE workspace_id = execution_approvals.workspace_id AND user_id = $2)`,
-      [approvalId, actorUserId],
+      [approvalId, actorUserId], deadlineAt,
     );
   }
 
@@ -295,6 +305,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     approvalId: string;
     receiptId: string;
     now: number;
+    deadlineAt?: number;
   }): Promise<ExecutionApproval> {
     return this.transition(
       `UPDATE omr_control.execution_approvals AS approval
@@ -304,7 +315,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
          AND EXISTS (SELECT 1 FROM omr_control.execution_receipts AS receipt
            WHERE receipt.id = $2 AND ${EXACT_RECEIPT} AND receipt.status = 'succeeded')
        RETURNING ${COLUMNS}`,
-      [input.approvalId, input.receiptId, input.now],
+      [input.approvalId, input.receiptId, input.now], input.deadlineAt,
     );
   }
 
@@ -363,13 +374,13 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     }
   }
 
-  async fail(input: { approvalId: string; now: number }): Promise<ExecutionApproval> {
+  async fail(input: { approvalId: string; now: number; deadlineAt?: number }): Promise<ExecutionApproval> {
     return this.transition(
       `UPDATE omr_control.execution_approvals
        SET status = 'failed', updated_at = $2
        WHERE id = $1 AND status = 'executing'
        RETURNING ${COLUMNS}`,
-      [input.approvalId, input.now],
+      [input.approvalId, input.now], input.deadlineAt,
     );
   }
 
@@ -377,6 +388,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     approvalId: string;
     receiptId: string | null;
     now: number;
+    deadlineAt?: number;
   }): Promise<ExecutionApproval> {
     return this.transition(
       `UPDATE omr_control.execution_approvals AS approval
@@ -386,7 +398,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
            WHERE receipt.id = $2 AND ${EXACT_RECEIPT}
              AND receipt.status IN ('running', 'succeeded', 'uncertain')))
        RETURNING ${COLUMNS}`,
-      [input.approvalId, input.receiptId, input.now],
+      [input.approvalId, input.receiptId, input.now], input.deadlineAt,
     );
   }
 
@@ -395,7 +407,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     actorUserId: string;
     limit: number;
   }): Promise<ExecutionApproval[]> {
-    const result = await this.client.query<ApprovalRow>(
+    const result = await this.query<ApprovalRow>(
       `SELECT ${COLUMNS}
        FROM omr_control.execution_approvals
        WHERE workspace_id = $1 AND actor_user_id = $2
@@ -406,8 +418,8 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     return Promise.all(result.rows.map((row) => this.toApproval(row)));
   }
 
-  private async transition(query: string, values: unknown[]): Promise<ExecutionApproval> {
-    const result = await this.client.query<ApprovalRow>(query, values);
+  private async transition(query: string, values: unknown[], deadlineAt?: number): Promise<ExecutionApproval> {
+    const result = await this.query<ApprovalRow>(query, values, deadlineAt);
     if (!result.rows[0]) throw new ApprovalUnavailableError();
     return this.toApproval(result.rows[0]);
   }
