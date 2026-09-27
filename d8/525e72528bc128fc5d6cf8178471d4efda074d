@@ -1,0 +1,50 @@
+apps/web/src/lib/approval-preview.test.ts
+  h_a39f9495f9ec1d 8
+apps/web/src/lib/server/cloudflare-runtime.test.ts
+  h_a39f9495f9ec1d 45-47
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 195
+docs/execution-policy-v1.md
+  h_a39f9495f9ec1d 63-67,110-123
+packages/execution/migrations/0014_approval_reconciliation.sql
+  h_a39f9495f9ec1d 1-3,11-57,67-68
+packages/execution/src/execution.test.ts
+  h_a39f9495f9ec1d 75-80,90,136-154,331-334,336,340-343,348-371,381-384,392,961,994,1026,1166
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 47,215,238-254,455,523,533-546
+packages/execution/src/postgres-approval-migration.test.ts
+  h_a39f9495f9ec1d 6,26-32,38-39,41-42,51-52,58-59,64-67,72-88,104,106-112,167-170,174-176,181-187
+packages/execution/src/postgres-approval-store.ts
+  h_a39f9495f9ec1d 7,140,145-146,150-162
+packages/execution/src/postgres-invocation-guard.test.ts
+  h_a39f9495f9ec1d 18-40,44,58,69,83,98,100,113
+packages/execution/src/postgres-invocation-guard.ts
+  h_a39f9495f9ec1d 14,22-109,179
+packages/execution/src/postgres-runtime.test.ts
+  h_a39f9495f9ec1d 1-70
+packages/execution/src/postgres-store.ts
+  h_a39f9495f9ec1d 40-50
+packages/execution/src/postgres.ts
+  h_a39f9495f9ec1d 6,13,31-45,48
+packages/execution/src/projection.ts
+  h_a39f9495f9ec1d 5,10,67,109,114-118
+packages/execution/src/testing.ts
+  h_a39f9495f9ec1d 7,22-30,114-115,121-123,134-136,172-176,182-183,198,207,215,242-243
+packages/mcp/src/server.test.ts
+  h_a39f9495f9ec1d 62-65,116,160-162
+packages/mcp/src/server.ts
+  h_a39f9495f9ec1d 31,120
+tests/acceptance/execution-policy-contract.test.ts
+  h_a39f9495f9ec1d 279-281,283-285,409-424,478-494,559-574
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d8525e72528bc128fc5d6cf8178471d4efda074d",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
