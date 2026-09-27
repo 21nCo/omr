@@ -1,0 +1,18 @@
+packages/execution/src/execution.test.ts
+  h_a39f9495f9ec1d 694-731
+packages/execution/src/projection.ts
+  h_a39f9495f9ec1d 11,13-18,32
+tests/acceptance/execution-policy-contract.test.ts
+  h_a39f9495f9ec1d 150-152,245-249,292-296,337-341
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fb38316291d4a1f51614b256924a8ad0314cc2b9",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
