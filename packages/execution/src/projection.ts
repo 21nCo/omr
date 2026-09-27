@@ -7,9 +7,33 @@ const SECRET_NAME = /secret|token|password|passphrase|credential|authorization|a
 function parseSensitiveKey(key: string): string[] | null {
   // A wildcard consumes exactly one array index or object key. Unknown selector
   // syntax cannot safely describe what should be hidden, so fail closed.
-  if (!/^[^.[\]]+(?:\.[^.[\]]+|\[(?:\d+|\*)?\])*$/.test(key)) return null;
-  const parts = key.replace(/\[(\d+|\*)?\]/g, (_match, index: string | undefined) => `.${index || "*"}`)
-    .split(".").map((part) => part.toLowerCase());
+  const parts: string[] = [];
+  let cursor = 0;
+  while (cursor < key.length) {
+    if (key[cursor] === "[") {
+      if (parts.length === 0) return null;
+      const end = key.indexOf("]", cursor + 1);
+      if (end < 0) return null;
+      const index = key.slice(cursor + 1, end);
+      if (index && index !== "*" && !/^\d+$/.test(index)) return null;
+      parts.push(index || "*");
+      cursor = end + 1;
+      if (cursor < key.length && key[cursor] !== "." && key[cursor] !== "[") return null;
+    } else {
+      if (key[cursor] === ".") {
+        if (cursor === 0 || key[cursor + 1] === "[") return null;
+        cursor += 1;
+      }
+      const start = cursor;
+      while (cursor < key.length && key[cursor] !== "." && key[cursor] !== "[" && key[cursor] !== "]") {
+        cursor += 1;
+      }
+      if (cursor === start) return null;
+      parts.push(key.slice(start, cursor).toLowerCase());
+      if (key[cursor] === "]") return null;
+    }
+  }
+  if (key.endsWith(".") || parts.length === 0) return null;
   // Array paths are emitted using canonical decimal indices. Accepting "00"
   // here would make readiness look at a missing property while redaction walks
   // index "0", exposing the declared secret in a reviewable preview.

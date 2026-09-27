@@ -12,6 +12,30 @@ export const EXECUTION_INVOCATION_DEADLINE_MS = 60_000;
 // Allow guard cleanup five seconds before reconciling an abandoned receipt.
 export const EXECUTION_STALE_AFTER_MS = EXECUTION_INVOCATION_DEADLINE_MS + 5_000;
 
+export class ExecutionInvocationDeadlineError extends Error {
+  readonly code = "EXECUTION_INVOCATION_TIMEOUT";
+  constructor() {
+    super("The invocation deadline expired");
+    this.name = "ExecutionInvocationDeadlineError";
+  }
+}
+
+export async function withinInvocationDeadline<T>(deadlineAt: number, operation: () => Promise<T>): Promise<T> {
+  const remaining = deadlineAt - Date.now();
+  if (remaining <= 0) throw new ExecutionInvocationDeadlineError();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new ExecutionInvocationDeadlineError()), remaining);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export type ExecutionPrincipal =
   | { kind: "web"; userId: string; workspaceId: string; sessionId?: string }
   | {
@@ -97,6 +121,7 @@ export interface ExecutionApprovalStore {
     actorUserId: string;
     principalKey: string;
     now: number;
+    deadlineAt?: number;
   }): Promise<ExecutionApproval>;
   consume(input: { approvalId: string; receiptId: string; now: number }): Promise<ExecutionApproval>;
   uncertain(input: { approvalId: string; receiptId: string | null; now: number }): Promise<ExecutionApproval>;
@@ -129,6 +154,7 @@ export interface ExecutionInvocationGuard {
     principal: ExecutionPrincipal;
     connection: ConnectionBindingRecord;
     capability: ClientCapability;
+    deadlineAt?: number;
   }, invoke: (assertCanDispatch: () => void) => Promise<T>): Promise<T>;
 }
 
@@ -225,6 +251,7 @@ export class ExecutionService {
     connectionId?: string;
     idempotencyKey?: string;
   }): Promise<ExecutionReceipt> {
+    const deadlineAt = Date.now() + EXECUTION_INVOCATION_DEADLINE_MS;
     const manifest = this.catalog.get(input.toolId);
     if (!manifest) throw new ExecutionInputError("Unknown tool identifier");
     this.authorizeEffect(input.principal, manifest);
@@ -236,11 +263,12 @@ export class ExecutionService {
     const params = structuredClone(input.params);
 
     if (input.idempotencyKey) {
-      const prior = await this.receipts.findByIdempotency({
+      const idempotencyKey = input.idempotencyKey;
+      const prior = await withinInvocationDeadline(deadlineAt, () => this.receipts.findByIdempotency({
         workspaceId: input.principal.workspaceId,
         principalKey: principalKey(input.principal),
-        idempotencyKey: input.idempotencyKey,
-      });
+        idempotencyKey,
+      }));
       if (prior?.status === "uncertain") {
         if (prior.toolId !== manifest.id || prior.manifestHash !== manifest.hash ||
             (input.connectionId && input.connectionId !== prior.connectionId) ||
@@ -252,13 +280,13 @@ export class ExecutionService {
       }
     }
 
-    const connection = await this.connections.resolve({
+    const connection = await withinInvocationDeadline(deadlineAt, () => this.connections.resolve({
       actorUserId: input.principal.userId,
       workspaceId: input.principal.workspaceId,
       provider: manifest.provider,
       ...(input.connectionId ? { connectionId: input.connectionId } : {}),
-    });
-    await this.assertScopes(manifest, connection);
+    }));
+    await withinInvocationDeadline(deadlineAt, () => this.assertScopes(manifest, connection));
     if (manifest.contract.effect !== "read") {
       throw new ExecutionApprovalRequiredError(manifest);
     }
@@ -268,6 +296,7 @@ export class ExecutionService {
       params,
       connection,
       idempotencyKey: input.idempotencyKey,
+      deadlineAt,
     });
   }
 
@@ -353,13 +382,15 @@ export class ExecutionService {
     principal: ExecutionPrincipal,
     approvalId: string,
   ): Promise<ExecutionReceipt> {
+    const deadlineAt = Date.now() + EXECUTION_INVOCATION_DEADLINE_MS;
     const approvals = this.requiredApprovals();
-    const approval = await approvals.claim({
+    const approval = await withinInvocationDeadline(deadlineAt, () => approvals.claim({
       approvalId,
       actorUserId: principal.userId,
       principalKey: principalKey(principal),
       now: this.now(),
-    });
+      deadlineAt,
+    }));
     try {
       const manifest = this.catalog.get(approval.toolId);
       if (!manifest || manifest.hash !== approval.manifestHash || manifest.contract.effect === "read") {
@@ -377,36 +408,43 @@ export class ExecutionService {
         workspaceId: approval.workspaceId,
       };
       this.authorizeEffect(effectivePrincipal, manifest);
-      const connection = await this.connections.resolve({
+      const connection = await withinInvocationDeadline(deadlineAt, () => this.connections.resolve({
         actorUserId: effectivePrincipal.userId,
         workspaceId: effectivePrincipal.workspaceId,
         provider: manifest.provider,
         connectionId: approval.connectionId,
-      });
+      }));
       if (connection.providerConnectionId !== approval.providerConnectionId) {
         throw new ApprovalUnavailableError();
       }
-      await this.assertScopes(manifest, connection);
+      await withinInvocationDeadline(deadlineAt, () => this.assertScopes(manifest, connection));
       const receipt = await this.runAuthorized({
         principal: effectivePrincipal,
         manifest,
         params: approval.params,
         connection,
         idempotencyKey: approval.idempotencyKey,
+        deadlineAt,
       });
       try {
-        await approvals.consume({ approvalId, receiptId: receipt.id, now: this.now() });
+        await withinInvocationDeadline(deadlineAt,
+          () => approvals.consume({ approvalId, receiptId: receipt.id, now: this.now() }));
       } catch {
         // The receipt is authoritative. Reconciliation must not replay the effect.
         throw new ExecutionOutcomeUnknownError(receipt.id);
       }
       return receipt;
     } catch (error) {
+      // Give cleanup a bounded grace period. The receipt remains authoritative
+      // if a timed-out cleanup write cannot finish before the runtime closes.
+      const cleanupDeadlineAt = deadlineAt + 5_000;
       if (error instanceof ExecutionOutcomeUnknownError || error instanceof ExecutionInProgressError) {
-        await approvals.uncertain({ approvalId, receiptId: error.receiptId, now: this.now() })
+        await withinInvocationDeadline(cleanupDeadlineAt,
+          () => approvals.uncertain({ approvalId, receiptId: error.receiptId, now: this.now() }))
           .catch(() => undefined);
       } else {
-        await approvals.fail({ approvalId, now: this.now() }).catch(() => undefined);
+        await withinInvocationDeadline(cleanupDeadlineAt,
+          () => approvals.fail({ approvalId, now: this.now() })).catch(() => undefined);
       }
       throw error;
     }
@@ -418,6 +456,7 @@ export class ExecutionService {
     params: JsonValue;
     connection: Awaited<ReturnType<ConnectionAuthority["resolve"]>>;
     idempotencyKey?: string;
+    deadlineAt?: number;
   }): Promise<ExecutionReceipt> {
     let missingRemoteAfterInvoke = false;
     let dispatchedReceiptId: string | null = null;
@@ -513,7 +552,12 @@ export class ExecutionService {
       principal: input.principal,
       connection: input.connection,
       capability: input.manifest.contract.effect === "read" ? "tools:read" : "tools:write",
-    }, invoke) : invoke(() => undefined);
+      deadlineAt: input.deadlineAt,
+    }, invoke) : invoke(() => {
+      if (input.deadlineAt && Date.now() >= input.deadlineAt) {
+        throw new ExecutionInvocationDeadlineError();
+      }
+    });
     try {
       return await run();
     } catch (error) {

@@ -815,7 +815,8 @@ describe("execution service", () => {
     });
 
     for (const selector of ["items[00].pin", "items.00.pin", "nested.rows[0][00].pin",
-      "nested.rows.0.00.pin", "items[4294967295].pin"]) {
+      "nested.rows.0.00.pin", "items[4294967295].pin", ".items[0].pin",
+      "items.[0].pin"]) {
       const changed = { ...manifest, contract: { ...manifest.contract, sensitiveKeys: [selector] } };
       vi.spyOn(catalog, "get").mockImplementation((id) => id === manifest.id ? changed : originalGet(id));
       expect(approvalPreviewReady(changed, manifest.hash, params)).toBe(false);

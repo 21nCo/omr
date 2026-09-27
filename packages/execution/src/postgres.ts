@@ -3,7 +3,8 @@ import pg from "pg";
 import { PostgresExecutionReceiptStore } from "./postgres-store.js";
 import { PostgresExecutionApprovalStore } from "./postgres-approval-store.js";
 import { PostgresExecutionInvocationGuard } from "./postgres-invocation-guard.js";
-import type { ExecutionInvocationGuard } from "./execution.js";
+import { EXECUTION_INVOCATION_DEADLINE_MS, withinInvocationDeadline,
+  type ExecutionInvocationGuard } from "./execution.js";
 
 const { Client } = pg;
 
@@ -27,18 +28,24 @@ export async function connectPostgresExecutionReceipts(input: {
   try {
     return {
       receipts: new PostgresExecutionReceiptStore(client, input.resultWrappingKey),
-      approvals: new PostgresExecutionApprovalStore(client, input.resultWrappingKey),
+      approvals: new PostgresExecutionApprovalStore(client, input.resultWrappingKey,
+        input.connectionString),
       // A deadline destroys its transaction socket. Each invocation owns its guard
       // client, so a later call on this runtime cannot reuse a closed connection.
       invocationGuard: {
         async run(guardInput, invoke) {
           const guardClient = new Client({ connectionString: input.connectionString });
           guardClient.on("error", () => undefined);
+          const deadlineAt = guardInput.deadlineAt ?? Date.now() + EXECUTION_INVOCATION_DEADLINE_MS;
           try {
-            await guardClient.connect();
-            return await new PostgresExecutionInvocationGuard(guardClient).run(guardInput, invoke);
+            await withinInvocationDeadline(deadlineAt, () => guardClient.connect());
+            return await new PostgresExecutionInvocationGuard(guardClient).run({
+              ...guardInput, deadlineAt,
+            }, invoke);
           } finally {
-            await guardClient.end().catch(() => undefined);
+            // Closing a connection that is still establishing must not extend the
+            // request beyond its deadline. pg releases its socket asynchronously.
+            void guardClient.end().catch(() => undefined);
           }
         },
       },

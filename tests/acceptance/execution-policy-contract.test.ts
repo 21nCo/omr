@@ -418,8 +418,12 @@ describe("execution-policy-contract", () => {
         expect(errorText).toContain("EXECUTION_OUTCOME_UNKNOWN");
         const receiptId = errorText.match(/execution_[\w-]+/)?.[0];
         expect(receiptId).toBeTruthy();
-        const replay = await runCli(["approvals", "execute", ambiguous.id])
-          .catch((error: { code: number; stdout: string; stderr: string }) => error);
+        const replay = await runCli(["approvals", "execute", ambiguous.id]).then(
+          () => { throw new Error("An uncertain approval replay unexpectedly succeeded"); },
+          (error: { code: number; stdout: string; stderr: string }) => error,
+        );
+        expect(replay.code).toBe(1);
+        expect(replay.stdout + replay.stderr).toContain("EXECUTION_OUTCOME_UNKNOWN");
         expect(replay.stdout + replay.stderr).toContain(receiptId);
         expect(provider).toHaveBeenCalledTimes(4);
       } finally {

@@ -1,10 +1,13 @@
-import type { Client } from "pg";
+import pg, { type Client } from "pg";
 import type { JsonValue } from "@oh-my-router/tools";
 
 import {
   ApprovalUnavailableError,
   ExecutionIdempotencyConflictError,
+  ExecutionInvocationDeadlineError,
   ExecutionOutcomeUnknownError,
+  EXECUTION_STALE_AFTER_MS,
+  withinInvocationDeadline,
   type ApprovalStatus,
   type ExecutionApproval,
   type ExecutionApprovalStore,
@@ -35,11 +38,13 @@ interface ApprovalRow {
 const COLUMNS = `id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash,
   connection_id, provider_connection_id, params_ciphertext, params_iv, idempotency_key, request_hash,
   status, approved_by, decided_at, expires_at, execution_receipt_id, created_at, updated_at`;
+const { Client: PostgresClient } = pg;
 
 export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
   constructor(
     private readonly client: Client,
     private readonly wrappingKey: Uint8Array<ArrayBuffer>,
+    private readonly claimConnectionString?: string,
   ) {
     if (wrappingKey.byteLength !== 32) throw new Error("Execution approval wrapping key must be 32 bytes");
   }
@@ -136,8 +141,23 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     actorUserId: string;
     principalKey: string;
     now: number;
+    deadlineAt?: number;
   }): Promise<ExecutionApproval> {
-    const claimed = await this.client.query<ApprovalRow>(
+    const client = input.deadlineAt && this.claimConnectionString
+      ? new PostgresClient({ connectionString: this.claimConnectionString }) : this.client;
+    const query = <R extends object>(sql: string, values?: unknown[]) =>
+      input.deadlineAt ? withinInvocationDeadline(input.deadlineAt,
+        () => client.query<R>(sql, values)) : client.query<R>(sql, values);
+    if (client !== this.client) {
+      client.on("error", () => undefined);
+    }
+    try {
+      if (client !== this.client) {
+        await withinInvocationDeadline(input.deadlineAt!, () => client.connect());
+        await query("SELECT set_config('statement_timeout', $1, false)",
+          [`${Math.max(1, input.deadlineAt! - Date.now())}ms`]);
+      }
+      const claimed = await query<ApprovalRow>(
       `UPDATE omr_control.execution_approvals
        SET status = 'executing', updated_at = $4
        WHERE id = $1 AND actor_user_id = $2 AND principal_key = $3
@@ -147,8 +167,8 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
        RETURNING ${COLUMNS}`,
       [input.approvalId, input.actorUserId, input.principalKey, input.now],
     );
-    if (claimed.rows[0]) return this.toApproval(claimed.rows[0]);
-    const prior = await this.client.query<Pick<ApprovalRow, "execution_receipt_id">>(
+      if (claimed.rows[0]) return this.toApproval(claimed.rows[0]);
+      const prior = await query<Pick<ApprovalRow, "execution_receipt_id">>(
       `SELECT execution_receipt_id FROM omr_control.execution_approvals
        WHERE id = $1 AND actor_user_id = $2 AND principal_key = $3
          AND status = 'uncertain' AND execution_receipt_id IS NOT NULL
@@ -156,10 +176,51 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
                      WHERE workspace_id = execution_approvals.workspace_id AND user_id = $2)`,
       [input.approvalId, input.actorUserId, input.principalKey],
     );
-    if (prior.rows[0]?.execution_receipt_id) {
-      throw new ExecutionOutcomeUnknownError(prior.rows[0].execution_receipt_id);
+      if (prior.rows[0]?.execution_receipt_id) {
+        throw new ExecutionOutcomeUnknownError(prior.rows[0].execution_receipt_id);
+      }
+      if (input.deadlineAt) {
+        // A timed-out claim can commit before its response is lost. Once the
+        // invocation and cleanup budgets are past, reconcile its original key
+        // without ever making that approval executable a second time.
+        const stale = await query<{ status: ApprovalStatus; execution_receipt_id: string | null }>(
+          `UPDATE omr_control.execution_approvals AS approval
+           SET status = CASE WHEN EXISTS (
+             SELECT 1 FROM omr_control.execution_receipts AS receipt
+             WHERE receipt.workspace_id = approval.workspace_id
+               AND receipt.principal_key = approval.principal_key
+               AND receipt.idempotency_key = approval.idempotency_key
+           ) THEN 'uncertain' ELSE 'failed' END,
+             execution_receipt_id = (
+               SELECT id FROM omr_control.execution_receipts AS receipt
+               WHERE receipt.workspace_id = approval.workspace_id
+                 AND receipt.principal_key = approval.principal_key
+                 AND receipt.idempotency_key = approval.idempotency_key LIMIT 1
+             ), updated_at = $4
+           WHERE approval.id = $1 AND approval.actor_user_id = $2 AND approval.principal_key = $3
+             AND approval.status = 'executing' AND approval.execution_receipt_id IS NULL
+             AND approval.updated_at <= $5
+             AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
+               WHERE workspace_id = approval.workspace_id AND user_id = $2)
+           RETURNING approval.status, approval.execution_receipt_id`,
+          [input.approvalId, input.actorUserId, input.principalKey, input.now,
+            input.now - EXECUTION_STALE_AFTER_MS],
+        );
+        if (stale.rows[0]?.execution_receipt_id) {
+          throw new ExecutionOutcomeUnknownError(stale.rows[0].execution_receipt_id);
+        }
+      }
+      throw new ApprovalUnavailableError();
+    } catch (error) {
+      if (input.deadlineAt && (Date.now() >= input.deadlineAt ||
+        (error instanceof Error && "code" in error && error.code === "57014" &&
+          /statement timeout/i.test(error.message)))) {
+        throw new ExecutionInvocationDeadlineError();
+      }
+      throw error;
+    } finally {
+      if (client !== this.client) void client.end().catch(() => undefined);
     }
-    throw new ApprovalUnavailableError();
   }
 
   async consume(input: {

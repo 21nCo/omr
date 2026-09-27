@@ -38,8 +38,14 @@ describeDatabase("approval migration from origin/dev schema", () => {
       const migrate = async (name: string, withinExistingTransaction = false) => {
         let sql = readFileSync(new URL(`../migrations/${name}.sql`, import.meta.url), "utf8")
           .replaceAll("omr_control.", `${qualified}.`);
-        if (withinExistingTransaction) sql = sql.replace(/^--[^\n]*\nBEGIN;/, "")
-          .replace(/COMMIT;\s*$/, "");
+        if (withinExistingTransaction) {
+          const start = /^--[^\n]*\nBEGIN;/;
+          const finish = /COMMIT;\s*$/;
+          if (!start.test(sql) || !finish.test(sql)) {
+            throw new Error(`Migration ${name} must have explicit transaction markers`);
+          }
+          sql = sql.replace(start, "").replace(finish, "");
+        }
         await client.query(sql);
       };
       await migrate("0008_execution_approvals");

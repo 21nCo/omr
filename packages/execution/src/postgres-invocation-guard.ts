@@ -4,6 +4,7 @@ import { ConnectionAccessDeniedError, ConnectionUnavailableError } from "@oh-my-
 import {
   ExecutionCapabilityDeniedError,
   EXECUTION_INVOCATION_DEADLINE_MS,
+  ExecutionInvocationDeadlineError,
   type ExecutionInvocationGuard,
 } from "./execution.js";
 
@@ -107,13 +108,7 @@ async function authorizeInvocation(input: GuardInput, query: GuardQuery): Promis
     : authorizeClient(input.principal, input.capability, query);
 }
 
-export class ExecutionInvocationDeadlineError extends Error {
-  readonly code = "EXECUTION_INVOCATION_TIMEOUT";
-  constructor() {
-    super("The invocation deadline expired");
-    this.name = "ExecutionInvocationDeadlineError";
-  }
-}
+export { ExecutionInvocationDeadlineError } from "./execution.js";
 
 /** Serialize an invocation with membership, client/grant, and binding revocation. */
 export class PostgresExecutionInvocationGuard implements ExecutionInvocationGuard {
@@ -123,7 +118,7 @@ export class PostgresExecutionInvocationGuard implements ExecutionInvocationGuar
 
   async run<T>(input: Parameters<ExecutionInvocationGuard["run"]>[0],
     invoke: (assertCanDispatch: () => void) => Promise<T>): Promise<T> {
-    const deadline = Date.now() + this.deadlineMs;
+    const deadline = Math.min(input.deadlineAt ?? Infinity, Date.now() + this.deadlineMs);
     const controller = new AbortController();
     let clientClosed = false;
     const closeClient = () => {

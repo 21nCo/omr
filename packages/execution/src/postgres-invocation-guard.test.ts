@@ -78,6 +78,19 @@ describe("PostgreSQL invocation transaction contract", () => {
     expect(queries.at(-1)).toBe("ROLLBACK");
   });
 
+  it("dispatches for a current web session after checking its row lock", async () => {
+    const queries: string[] = [];
+    const query = authorizedQuery(queries, { session: true });
+    const guard = new PostgresExecutionInvocationGuard({ query } as unknown as Client);
+    const invoke = vi.fn(async () => "effect");
+    await expect(guard.run({ principal: { kind: "web", userId: "user_1",
+      workspaceId: "workspace_1", sessionId: "session_1" },
+      connection, capability: "tools:write" }, invoke)).resolves.toBe("effect");
+    expect(queries.some((sql) => sql.includes("omr_identity.sessions") && sql.includes("FOR SHARE"))).toBe(true);
+    expect(invoke).toHaveBeenCalledOnce();
+    expect(queries.at(-1)).toBe("COMMIT");
+  });
+
   it("denies a web approval when membership was revoked before the transaction", async () => {
     const queries: string[] = [];
     const query = authorizedQuery(queries, { member: false });

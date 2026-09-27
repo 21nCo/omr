@@ -117,6 +117,8 @@ describe("OMR MCP server", () => {
     })).resolves.toMatchObject({
       structuredContent: { status: "succeeded", output: { value: "read" } },
     });
+    expect(requests.filter(({ path }) => path === "/api/tools/execute").at(-1)?.body)
+      .toEqual({ workspaceId: "workspace-1", toolId: "demo.read", params: { value: "read" } });
     const discoveryCalls = requests.filter(({ path }) => path === "/api/tools").length;
     await expect(client.callTool({
       name: "omr.connections.list",
