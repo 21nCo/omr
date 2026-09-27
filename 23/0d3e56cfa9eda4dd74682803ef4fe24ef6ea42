@@ -1,0 +1,48 @@
+apps/web/src/lib/server/cloudflare-runtime.test.ts
+  h_a39f9495f9ec1d 8,33-47
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 14,193-197,251-262,581-584,605-606,618,620,624,627,629-636,641-644,649-652,655,657,725,735-736
+apps/web/src/lib/server/router.test.ts
+  h_a39f9495f9ec1d 1,5,502-528
+apps/web/src/lib/server/router.ts
+  h_a39f9495f9ec1d 42,336-341,375-377,379,387,637,654,665
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 31-34,459-461,464,479
+docs/execution-policy-v1.md
+  h_a39f9495f9ec1d 1-48
+packages/execution/migrations/0012_execution_uncertainty.sql
+  h_a39f9495f9ec1d 1-12
+packages/execution/src/execution.test.ts
+  h_a39f9495f9ec1d 16,351-360,388-436,455-467,470,474-476,478-479,482-495
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 8,11,45,72,116-124,173-180,200,214,217,232,260,263,276,286-289,324-325,350-354,369-410,413-416,418-458,460,462-465,508
+packages/execution/src/index.ts
+  h_a39f9495f9ec1d 8,17,21
+packages/execution/src/postgres-approval-store.ts
+  h_a39f9495f9ec1d 6,24,35,51,53-55,69,79-90,195
+packages/execution/src/postgres-invocation-guard.test.ts
+  h_a39f9495f9ec1d 1-85
+packages/execution/src/postgres-invocation-guard.ts
+  h_a39f9495f9ec1d 1-90
+packages/execution/src/postgres-store.ts
+  h_a39f9495f9ec1d 104-115
+packages/execution/src/postgres.ts
+  h_a39f9495f9ec1d 5,12,26-43,48
+packages/execution/src/projection.ts
+  h_a39f9495f9ec1d 1-36
+packages/execution/src/testing.ts
+  h_a39f9495f9ec1d 5,48-57,81,84-90,93
+tests/acceptance/execution-policy-contract.test.ts
+  h_a39f9495f9ec1d 1-192
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "230d3e56cfa9eda4dd74682803ef4fe24ef6ea42",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
