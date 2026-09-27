@@ -1,0 +1,32 @@
+docs/execution-policy-v1.md
+  h_a39f9495f9ec1d 22-29,38-39,58-59,66
+packages/execution/src/execution.test.ts
+  h_a39f9495f9ec1d 17,19,560-611,773-803
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 495-496
+packages/execution/src/postgres-approval-migration.test.ts
+  h_a39f9495f9ec1d 21-22,29,102-127
+packages/execution/src/postgres-approval-store.ts
+  h_a39f9495f9ec1d 94-96,110-111,126-127
+packages/execution/src/postgres-invocation-guard.test.ts
+  h_a39f9495f9ec1d 38-39,107-130
+packages/execution/src/postgres-invocation-guard.ts
+  h_a39f9495f9ec1d 9-18,21-23,26-41,43-49,60,71,75,80,85,88,91,94,105,115-117,120
+packages/execution/src/postgres.integration.test.ts
+  h_a39f9495f9ec1d 31-35
+packages/execution/src/postgres.ts
+  h_a39f9495f9ec1d 27-28
+packages/execution/src/projection.ts
+  h_a39f9495f9ec1d 7-19,22-23,39,45-49,60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d85179667779c4723936cc5088ced1239205ab51",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
