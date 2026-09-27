@@ -1,0 +1,23 @@
+docs/execution-policy-v1.md
+  s_3058aa458d6557::t_c6d9756227198d 39-45,174-177
+packages/execution/src/execution.ts
+  s_3058aa458d6557::t_06d7e1e72b16eb 410-411,453,456-479,483,493-516,525,527-528,582-583,592-593,618-619,624-625,627-629,633-634,643-644,647,652,659-662,724-732
+scripts/rebind-execution-ciphertext.mjs
+  s_3058aa458d6557::t_9c226db6724b18 2,4,11-104,106-129,131-144,146-150
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7af2cca1a9a84b4d4f522ae1d5e924cab9559bd2",
+  "prompts": {},
+  "sessions": {
+    "s_3058aa458d6557": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0e214-820d-7fa0-a0ea-0fdea628637e",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
