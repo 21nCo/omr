@@ -1,0 +1,38 @@
+docs/execution-policy-v1.md
+  h_a39f9495f9ec1d 74-81,109
+packages/execution/src/execution.test.ts
+  h_a39f9495f9ec1d 4-5,351,368-378,384-406,1034
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 72-78,118,128-129,132-134,165-169,281,290-292,439-440,444-445,455,461-462,465,469-474,500,502-503,515,531-549,560,562,603,617,621,627,653,663,668,695,759-762
+packages/execution/src/postgres-approval-store.ts
+  h_a39f9495f9ec1d 1,17,62,67-73,77,109,121-122,128,308,318,377,383,391,401,410,421-422
+packages/execution/src/postgres-invocation-guard.test.ts
+  h_a39f9495f9ec1d 42-78
+packages/execution/src/postgres-invocation-guard.ts
+  h_a39f9495f9ec1d 24,99-100,121-129
+packages/execution/src/postgres-owned-query.ts
+  h_a39f9495f9ec1d 1-62
+packages/execution/src/postgres-runtime.test.ts
+  h_a39f9495f9ec1d 9,15,28-33,71-90
+packages/execution/src/postgres-store.ts
+  h_a39f9495f9ec1d 1,7,41,46-55,60,65-66,92,95,110,113,116,122-123,126,131-133,135,140,147,153-155,160,166-168,173,184
+packages/execution/src/postgres.integration.test.ts
+  h_a39f9495f9ec1d 543-598
+packages/execution/src/postgres.ts
+  h_a39f9495f9ec1d 6,30,32,34,53-66
+packages/execution/src/wrapping-key.ts
+  h_a39f9495f9ec1d 14-16,21
+tests/acceptance/execution-policy-contract.test.ts
+  h_a39f9495f9ec1d 280,424-425,495-496,575-576
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "79b378a31ab1871ac2e9ca80f6fbbd7becd0cd89",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
