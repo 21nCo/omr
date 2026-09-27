@@ -88,6 +88,14 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     return this.toApproval(existing.rows[0]);
   }
 
+  async getForActor(approvalId: string, actorUserId: string): Promise<ExecutionApproval> {
+    return this.transition(
+      `SELECT ${COLUMNS} FROM omr_control.execution_approvals
+       WHERE id = $1 AND actor_user_id = $2`,
+      [approvalId, actorUserId],
+    );
+  }
+
   async approve(input: {
     approvalId: string;
     actorUserId: string;

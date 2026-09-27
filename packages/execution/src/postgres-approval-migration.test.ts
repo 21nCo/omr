@@ -92,6 +92,10 @@ describeDatabase("approval migration from origin/dev schema", () => {
       });
       await expect(store.create({ ...candidate, id: "approval_fresh", idempotencyKey: "fresh-key" }))
         .resolves.toMatchObject({ id: "approval_fresh", status: "pending" });
+      await expect(store.getForActor("approval_fresh", "user_1"))
+        .resolves.toMatchObject({ id: "approval_fresh", params: {} });
+      await expect(store.getForActor("approval_fresh", "another_user"))
+        .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
       await store.approve({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5 });
       await store.claim({ approvalId: "approval_fresh", actorUserId: "user_1",
         principalKey: "web:user_1", now: 6 });

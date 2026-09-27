@@ -94,6 +94,12 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
     return structuredClone(approval);
   }
 
+  async getForActor(approvalId: string, actorUserId: string): Promise<ExecutionApproval> {
+    const approval = this.approvals.get(approvalId);
+    if (!approval || approval.actorUserId !== actorUserId) throw new ApprovalUnavailableError();
+    return structuredClone(approval);
+  }
+
   async approve(input: {
     approvalId: string;
     actorUserId: string;

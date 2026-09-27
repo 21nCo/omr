@@ -15,17 +15,50 @@ function redact(value: JsonValue, sensitive: Set<string>, path = ""): JsonValue 
   }));
 }
 
+/** Missing or stale redaction metadata cannot produce a reviewable approval. */
+export function approvalPreviewReady(
+  manifest: ToolManifest | null | undefined,
+  manifestHash: string,
+  params: JsonValue,
+): boolean {
+  if (!manifest || manifest.hash !== manifestHash || manifest.contract.version === "0.0.0" ||
+      manifest.contract.sensitiveKeys.length === 0 ||
+      manifest.contract.sensitiveKeys.some((key) => !key.trim()) ||
+      params === null || typeof params !== "object" || Array.isArray(params)) return false;
+  const sensitive = new Set(manifest.contract.sensitiveKeys.map((key) => key.toLowerCase()));
+  // A declared target that would be masked or is absent cannot be reviewed.
+  return manifest.contract.resources.every(({ parameter }) => {
+    if (!parameter) return true;
+    const keys = parameter.split(".");
+    const last = keys.at(-1)!;
+    if (sensitive.has(last.toLowerCase()) || sensitive.has(parameter.toLowerCase()) || SECRET_NAME.test(last)) {
+      return false;
+    }
+    let value: JsonValue | undefined = params;
+    for (const key of keys) {
+      if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+      value = value[key];
+    }
+    return value !== undefined && value !== null && typeof value !== "object";
+  });
+}
+
 /** Approval parameters remain encrypted in storage; API and UI previews mask secrets. */
 export function publicApproval(approval: ExecutionApproval, manifest?: ToolManifest | null) {
   const { principalKey: _principalKey, providerConnectionId: _providerConnectionId,
     idempotencyKey: _idempotencyKey, requestHash: _requestHash, ...visible } = approval;
   const manifestCurrent = manifest?.hash === approval.manifestHash;
   const sensitive = new Set(manifest?.contract.sensitiveKeys.map((key) => key.toLowerCase()) ?? []);
+  // With no declared secret fields, the catalog cannot tell us which values are safe to show.
+  // An approval whose arguments cannot be reviewed must not be actionable.
+  const previewReady = approvalPreviewReady(manifest, approval.manifestHash, approval.params);
   return { ...visible,
+    action: manifestCurrent && manifest ? manifest.displayName : approval.toolId,
     effect: manifestCurrent && manifest ? manifest.contract.effect : "unknown",
     resources: manifestCurrent && manifest ? manifest.contract.resources : [],
     manifestCurrent,
-    params: manifestCurrent && sensitive.size > 0 ? redact(approval.params, sensitive) : "[REDACTED]",
+    previewReady,
+    params: previewReady ? redact(approval.params, sensitive) : "[REDACTED]",
   };
 }
 

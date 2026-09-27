@@ -37,7 +37,8 @@ describe("execution-policy-contract", () => {
     const catalog = await ToolCatalog.create({ providers: { list: () => [{
       name: "linear", displayName: "Linear", version: "1.0.0", description: "Linear",
       actions: { read: action("read", "read"), write: action("write", "write"),
-        unknown: action("unknown", "unknown") },
+        unknown: action("unknown", "unknown"),
+        opaque: { ...action("opaque", "unknown"), contract: undefined } },
     }] } }, (value) => value as never);
     const provider = vi.fn(async () => ({ result: "private provider result" }));
     const approvalStore = new MemoryExecutionApprovalStore();
@@ -118,6 +119,9 @@ describe("execution-policy-contract", () => {
           });
         const read = await runCli(["tools", "run", "linear.read"]);
         expect(JSON.parse(read.stdout)).toMatchObject({ status: "succeeded" });
+        await expect(runCli(["approvals", "request", "linear.opaque", "--params", "{}",
+          "--idempotency", "opaque-cli"])).rejects.toMatchObject({ code: 1 });
+        expect(approvalStore.approvals.size).toBe(0);
         await expect(runCli(["tools", "run", "linear.write", "--params", JSON.stringify(request.params)]))
           .rejects.toMatchObject({ code: 1 });
         expect(provider).toHaveBeenCalledTimes(1);
@@ -157,6 +161,10 @@ describe("execution-policy-contract", () => {
       try {
         expect(await client.callTool({ name: "linear.read", arguments: {} }))
           .toMatchObject({ structuredContent: { status: "succeeded" } });
+        expect(await client.callTool({ name: "linear.opaque", arguments: {
+          _omrIdempotencyKey: "opaque-mcp",
+        } })).toMatchObject({ isError: true });
+        expect(approvalStore.approvals.size).toBe(0);
         expect(await client.callTool({ name: "linear.write", arguments: request.params }))
           .toMatchObject({ isError: true });
         expect(approvalStore.approvals.size).toBe(0);
@@ -190,6 +198,10 @@ describe("execution-policy-contract", () => {
 
     const read = await client.execute({ workspaceId: workspace.id, toolId: "linear.read", params: {} });
     expect(read).toMatchObject({ status: "succeeded" });
+    await expect(client.requestApproval({ workspaceId: workspace.id, toolId: "linear.opaque",
+      params: {}, idempotencyKey: "opaque-web" })).rejects.toMatchObject({ status: 400,
+      body: { error: "EXECUTION_INPUT_INVALID" } });
+    expect(approvalStore.approvals.size).toBe(0);
     await expect(client.execute(request)).rejects.toMatchObject({ status: 409,
       body: { error: "EXECUTION_APPROVAL_REQUIRED" } });
     expect(provider).toHaveBeenCalledTimes(1);

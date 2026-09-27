@@ -22,8 +22,14 @@ commits on a separate connection **before** calling the provider. A crash after 
 receipt persistence failure is `uncertain`, with a stable receipt ID and no automatic replay. Safe
 reads can use the manifest's retry policy inside one invocation; effects that may write get one
 upstream attempt. The provider result is encrypted at rest. History omits results, and public approval
-previews mask declared sensitive keys and common credential fields. If the current manifest has no
-sensitive-key metadata, or the manifest changed, every parameter is masked. Public responses
+previews mask declared sensitive keys and common credential fields. The preview shows the action,
+effect, account, resource metadata and the full redacted argument object without truncation.
+An effectful tool needs an explicit contract with sensitive-key metadata and object arguments to
+request approval. Default unknown-effect contracts cannot supply a safe preview, so requests fail
+with `EXECUTION_INPUT_INVALID` before storing an approval or calling the provider. If the current
+manifest has no sensitive-key metadata, or the manifest changed, every parameter is masked and
+old pending approvals cannot be approved or executed. Declared target parameters must also be
+present and visible; a missing or redacted target fails closed. Public responses
 omit remote connection handles and internal hashes. Stored request fingerprints are HMACs keyed
 with a domain-separated HKDF subkey derived from the server's stable execution wrapping secret.
 Old HMAC fingerprints made with the raw wrapping key conflict on retry and remain reserved until
@@ -41,6 +47,7 @@ to provider ambiguity, receipt persistence failure, and a guard commit failure a
 | Caller retry key | Lost response creates a second executable approval | Required-key and same-key replay tests on all three surfaces |
 | Approval request and claim | Duplicate pending work, expiry, changed params, concurrent use | Service idempotency and single-claim tests |
 | Approval projection | Guessable hashes or secrets after manifest change | Projection, decision, and overview-shaped history tests |
+| Approval preview | Hidden late target, missing redaction metadata, stale manifest, primitive secret | Full-length UI preview, three-surface denial, and old-envelope service tests |
 | Fingerprint key | Reusing the encryption key for HMAC | HKDF separation and existing-fingerprint conflict checks |
 | Approval completion | Failed consume after successful effect | Successful receipt and non-replayable approval test |
 | Legacy key migration | NULL fingerprints and duplicate old keys permit another approval | Migration and store conflict fixtures |

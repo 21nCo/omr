@@ -48,6 +48,12 @@ async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes: st
         get_issue: action("get_issue", "read"),
         create_issue: action("create_issue", "write"),
         mystery: action("mystery", "unknown"),
+        targeted: { ...action("targeted", "write"), contract: {
+          ...action("targeted", "write").contract, resources: [{ kind: "issue", parameter: "target" }],
+        } },
+        secret_target: { ...action("secret_target", "write"), contract: {
+          ...action("secret_target", "write").contract, resources: [{ kind: "credential", parameter: "passphrase" }],
+        } },
         ...(scopeFree ? {
           no_scope_read: { ...action("no_scope_read", "read"), contract: {
             ...action("no_scope_read", "read").contract, requiredScopes: [],
@@ -111,7 +117,7 @@ function action(name: string, effect: ToolEffect) {
       effect,
       requiredScopes: effect === "read" ? ["issues:read"] : ["repo"],
       resources: [],
-      sensitiveKeys: [],
+      sensitiveKeys: ["passphrase", "privateKey"],
       pagination: { kind: "none" as const },
       retry: effect === "read" ? "safe" as const : "never" as const,
     },
@@ -449,16 +455,19 @@ describe("execution service", () => {
     expect(actionCall).toHaveBeenCalledTimes(1);
   });
 
-  it("masks every parameter when the current catalog has no sensitive-key metadata", async () => {
+  it("masks every parameter when preview metadata is absent", async () => {
     const { approvals, catalog, service, workspace } = await fixture();
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
     const approval = await requestApproval(service, { principal, toolId: "linear.create_issue",
       params: { title: "visible", nested: { passphrase: "secret-value", privateKey: "private-value" } } });
     const records = [approval, await service.approve(approval.id, principal.userId),
       ...(await approvals.listForActor({ workspaceId: workspace.id, actorUserId: principal.userId, limit: 10 }))];
+    const manifest = catalog.get(approval.toolId)!;
+    const withoutMetadata = { ...manifest, contract: { ...manifest.contract, sensitiveKeys: [] } };
     for (const record of records) {
-      const projected = publicApproval(record, catalog.get(approval.toolId));
+      const projected = publicApproval(record, withoutMetadata);
       expect(projected.params).toBe("[REDACTED]");
+      expect(projected.previewReady).toBe(false);
       expect(JSON.stringify(projected)).not.toMatch(/plug_linear|secret-value|private-value/);
       expect(projected).not.toHaveProperty("requestHash");
     }
@@ -481,6 +490,70 @@ describe("execution service", () => {
       expect(JSON.stringify(preview)).not.toContain("old manifest secret");
       expect(preview).not.toHaveProperty("requestHash");
     }
+  });
+
+  it("blocks old pending and approved envelopes when safe preview metadata disappears", async () => {
+    const { approvals, actionCall, catalog, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const params = { title: "visible", passphrase: "private-passphrase" };
+    const pending = await requestApproval(service, { principal, toolId: "linear.create_issue", params });
+    const approved = await requestApproval(service, { principal, toolId: "linear.create_issue", params });
+    await service.approve(approved.id, principal.userId);
+    const originalGet = catalog.get.bind(catalog);
+    vi.spyOn(catalog, "get").mockImplementation((id) => {
+      const manifest = originalGet(id);
+      return manifest ? { ...manifest, contract: { ...manifest.contract, sensitiveKeys: [] } } : null;
+    });
+    const records = [pending, approved,
+      ...(await approvals.listForActor({ workspaceId: workspace.id, actorUserId: principal.userId, limit: 10 }))];
+    for (const record of records) {
+      const projected = publicApproval(record, catalog.get(record.toolId));
+      expect(projected).toMatchObject({ previewReady: false, params: "[REDACTED]" });
+      expect(JSON.stringify(projected)).not.toContain("private-passphrase");
+    }
+    await expect(service.approve(pending.id, principal.userId)).rejects.toBeInstanceOf(ApprovalUnavailableError);
+    await expect(service.executeApproved(principal, approved.id)).rejects.toBeInstanceOf(ApprovalUnavailableError);
+    expect(actionCall).not.toHaveBeenCalled();
+  });
+
+  it("projects a full late target while masking declared secrets across approval states", async () => {
+    const { approvals, catalog, service, workspace, actionCall } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const approval = await requestApproval(service, { principal, toolId: "linear.create_issue",
+      params: { body: "x".repeat(700), target: "late-resource", passphrase: "private-passphrase" } });
+    const records = [approval, await service.approve(approval.id, principal.userId),
+      ...(await approvals.listForActor({ workspaceId: workspace.id, actorUserId: principal.userId, limit: 10 }))];
+    for (const record of records) {
+      const projected = publicApproval(record, catalog.get(record.toolId));
+      expect(projected).toMatchObject({ previewReady: true, action: "create_issue",
+        params: { target: "late-resource", passphrase: "[REDACTED]" } });
+      expect(JSON.stringify(projected)).toContain("late-resource");
+      expect(JSON.stringify(projected)).not.toContain("private-passphrase");
+    }
+    expect(actionCall).not.toHaveBeenCalled();
+  });
+
+  it("rejects primitive approval arguments because their value cannot be safely previewed", async () => {
+    const { actionCall, approvals, service, workspace } = await fixture();
+    await expect(requestApproval(service, { principal: { kind: "web", userId: "user_1",
+      workspaceId: workspace.id }, toolId: "linear.create_issue", params: "hidden-secret" }))
+      .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    expect(approvals.approvals.size).toBe(0);
+    expect(actionCall).not.toHaveBeenCalled();
+  });
+
+  it("requires each declared target to be present and visible before reserving approval", async () => {
+    const { actionCall, approvals, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    await expect(requestApproval(service, { principal, toolId: "linear.targeted", params: { title: "hidden target" } }))
+      .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    await expect(requestApproval(service, { principal, toolId: "linear.secret_target",
+      params: { passphrase: "secret target" } })).rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    const approval = await requestApproval(service, { principal, toolId: "linear.targeted",
+      params: { target: "issue-123", passphrase: "private-passphrase" } });
+    expect(approval.params).toMatchObject({ target: "issue-123" });
+    expect(approvals.approvals.size).toBe(1);
+    expect(actionCall).not.toHaveBeenCalled();
   });
 
   it("stores keyed request fingerprints that do not reveal a guessable parameter digest", async () => {

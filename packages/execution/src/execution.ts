@@ -4,6 +4,7 @@ import {
   type ConnectionAuthority, type ConnectionBindingRecord,
 } from "@oh-my-router/connections";
 import { hasRequiredScopes, type JsonValue, type ToolCatalog, type ToolManifest } from "@oh-my-router/tools";
+import { approvalPreviewReady } from "./projection.js";
 
 export type ExecutionStatus = "running" | "succeeded" | "failed" | "uncertain";
 
@@ -82,6 +83,7 @@ export interface ExecutionApproval {
 
 export interface ExecutionApprovalStore {
   create(approval: ExecutionApproval): Promise<ExecutionApproval>;
+  getForActor(approvalId: string, actorUserId: string): Promise<ExecutionApproval>;
   approve(input: { approvalId: string; actorUserId: string; now: number }): Promise<ExecutionApproval>;
   reject(input: { approvalId: string; actorUserId: string; now: number }): Promise<ExecutionApproval>;
   claim(input: {
@@ -268,6 +270,9 @@ export class ExecutionService {
       throw new ExecutionCapabilityDeniedError("approvals:create");
     }
     assertJson(input.params);
+    if (!approvalPreviewReady(manifest, manifest.hash, input.params)) {
+      throw new ExecutionInputError("This tool has no complete, safely redacted approval preview");
+    }
     if (typeof input.idempotencyKey !== "string" || !IDEMPOTENCY_KEY.test(input.idempotencyKey)) {
       throw new ExecutionInputError("Invalid idempotency key");
     }
@@ -309,7 +314,12 @@ export class ExecutionService {
   }
 
   async approve(approvalId: string, actorUserId: string): Promise<ExecutionApproval> {
-    return this.requiredApprovals().approve({ approvalId, actorUserId, now: this.now() });
+    const approvals = this.requiredApprovals();
+    const approval = await approvals.getForActor(approvalId, actorUserId);
+    if (!approvalPreviewReady(this.catalog.get(approval.toolId), approval.manifestHash, approval.params)) {
+      throw new ApprovalUnavailableError();
+    }
+    return approvals.approve({ approvalId, actorUserId, now: this.now() });
   }
 
   async reject(approvalId: string, actorUserId: string): Promise<ExecutionApproval> {
@@ -330,6 +340,9 @@ export class ExecutionService {
     try {
       const manifest = this.catalog.get(approval.toolId);
       if (!manifest || manifest.hash !== approval.manifestHash || manifest.contract.effect === "read") {
+        throw new ApprovalUnavailableError();
+      }
+      if (!approvalPreviewReady(manifest, approval.manifestHash, approval.params)) {
         throw new ApprovalUnavailableError();
       }
       if (principal.workspaceId !== approval.workspaceId &&
