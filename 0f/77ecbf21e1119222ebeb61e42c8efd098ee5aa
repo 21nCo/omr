@@ -1,0 +1,28 @@
+docs/execution-policy-v1.md
+  h_a39f9495f9ec1d 20-22,33-35,92,114-123
+packages/execution/migrations/0015_predispatch_reservations.sql
+  h_a39f9495f9ec1d 1-9
+packages/execution/src/execution.test.ts
+  h_a39f9495f9ec1d 1038-1129
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 9-13,48,428,444,462-471
+packages/execution/src/postgres-invocation-guard.ts
+  h_a39f9495f9ec1d 6,32
+packages/execution/src/postgres-store.ts
+  h_a39f9495f9ec1d 4-5,70-83,87-97,118
+packages/execution/src/postgres.integration.test.ts
+  h_a39f9495f9ec1d 68,79-80
+packages/execution/src/testing.ts
+  h_a39f9495f9ec1d 5,24-33,40-46,49,59-61
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0f77ecbf21e1119222ebeb61e42c8efd098ee5aa",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
