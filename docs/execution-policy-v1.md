@@ -35,13 +35,16 @@ decisions also require a current workspace membership in the database statement,
 that serializes concurrent membership removal. Safe reads can use the manifest's retry policy
 inside one invocation; effects that may write get one
 upstream attempt. The provider result is encrypted at rest. History omits results, and public approval
-previews mask declared sensitive keys and common credential fields. The preview shows the action,
-effect, account, resource metadata and the full redacted argument object without truncation.
-An effectful tool needs an explicit contract with sensitive-key metadata and object arguments to
-request approval. Default unknown-effect contracts cannot supply a safe preview, so requests fail
-with `EXECUTION_INPUT_INVALID` before storing an approval or calling the provider. If the current
-manifest has no sensitive-key metadata, or the manifest changed, every parameter is masked and
-old pending approvals cannot be approved or executed. Declared target parameters must also be
+previews mask declared sensitive keys and common credential fields. A contracted preview shows the
+action, effect, account, resource metadata and the full redacted argument object without truncation.
+An effectful tool with declared sensitive-key metadata gets a complete redacted argument preview.
+An unknown-effect tool without sensitive-key metadata or declared resource targets can instead use
+an opaque preview: the action, effect, and selected account are shown, but every argument is masked.
+The UI explains this before approval. Opaque unknown actions still require an object argument,
+caller-stable idempotency key, current authorization, one approval, and one upstream attempt.
+Other actions without sensitive-key metadata fail with `EXECUTION_INPUT_INVALID` before storing an
+approval or calling the provider. If the manifest changes, every parameter is masked and old
+pending approvals cannot be approved or executed. Declared target parameters must also be
 present as own properties and visible through every ancestor; a missing, inherited, or redacted
 target fails closed. Explicit array indices, `[]` and `[*]` array wildcards, and `*` object-key
 wildcards in sensitive paths are redacted in the complete preview. Unsupported selectors fail closed.
@@ -72,6 +75,7 @@ approval-request calls keep their shorter client timeout.
 | Approval request and claim | Duplicate pending work, expiry, changed params, concurrent use | Service idempotency and single-claim tests |
 | Approval projection | Guessable hashes or secrets after manifest change | Projection, decision, and overview-shaped history tests |
 | Approval preview | Hidden late target, wildcard secret, missing redaction metadata, stale manifest, primitive secret | Full-length UI preview, wildcard web/CLI/MCP contract, and old-envelope service tests |
+| Default unknown action | No contract blocks all actions or exposes an unclassified secret | Opaque request, decision, overview, execute, and web/CLI/MCP contract checks |
 | Nested preview | Masked parent or indexed array secret hides the real target or leaks a value | Projection and request/decision/overview/execute tests |
 | Whole array secret | An `items[*]` or nested array selector exposes the element itself | Whole-element projection and web/CLI/MCP policy tests |
 | Approval decision | Removed member uses a known approval ID or races revocation | PostgreSQL membership-locked decision fixture |

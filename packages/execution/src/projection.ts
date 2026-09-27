@@ -50,16 +50,25 @@ function redact(value: JsonValue, sensitive: string[][], path: string[] = []): J
   }));
 }
 
-/** Missing or stale redaction metadata cannot produce a reviewable approval. */
+function opaqueUnknownApproval(manifest: ToolManifest): boolean {
+  // An uncontracted action may still be approved as an unknown effect. No
+  // argument value can be shown without redaction metadata, so the entire
+  // argument object is hidden. A declared target needs a visible preview.
+  return manifest.contract.effect === "unknown" && manifest.contract.retry === "never" &&
+    manifest.contract.sensitiveKeys.length === 0 && manifest.contract.resources.length === 0;
+}
+
+/** Only a current manifest can produce a redacted or opaque approval preview. */
 export function approvalPreviewReady(
   manifest: ToolManifest | null | undefined,
   manifestHash: string,
   params: JsonValue,
 ): boolean {
-  if (!manifest || manifest.hash !== manifestHash || manifest.contract.version === "0.0.0" ||
-      manifest.contract.sensitiveKeys.length === 0 ||
-      manifest.contract.sensitiveKeys.some((key) => !key.trim()) ||
+  if (!manifest || manifest.hash !== manifestHash ||
       params === null || typeof params !== "object" || Array.isArray(params)) return false;
+  if (opaqueUnknownApproval(manifest)) return true;
+  if (manifest.contract.version === "0.0.0" || manifest.contract.sensitiveKeys.length === 0 ||
+      manifest.contract.sensitiveKeys.some((key) => !key.trim())) return false;
   const sensitive = manifest.contract.sensitiveKeys.map(parseSensitiveKey);
   if (sensitive.some((selector) => !selector)) return false;
   const selectors = sensitive as string[][];
@@ -87,16 +96,18 @@ export function publicApproval(approval: ExecutionApproval, manifest?: ToolManif
     idempotencyKey: _idempotencyKey, requestHash: _requestHash, ...visible } = approval;
   const manifestCurrent = manifest?.hash === approval.manifestHash;
   const sensitive = manifest?.contract.sensitiveKeys.map(parseSensitiveKey).filter((key): key is string[] => key !== null) ?? [];
-  // With no declared secret fields, the catalog cannot tell us which values are safe to show.
-  // An approval whose arguments cannot be reviewed must not be actionable.
+  // With no declared secret fields, the catalog cannot tell us which values
+  // are safe to show. Only unknown actions without targets use an opaque path.
   const previewReady = approvalPreviewReady(manifest, approval.manifestHash, approval.params);
+  const opaque = manifestCurrent && manifest && opaqueUnknownApproval(manifest);
   return { ...visible,
     action: manifestCurrent && manifest ? manifest.displayName : approval.toolId,
     effect: manifestCurrent && manifest ? manifest.contract.effect : "unknown",
     resources: manifestCurrent && manifest ? manifest.contract.resources : [],
     manifestCurrent,
     previewReady,
-    params: previewReady ? redact(approval.params, sensitive) : "[REDACTED]",
+    previewMode: previewReady && opaque ? "opaque" : previewReady ? "redacted" : "unavailable",
+    params: previewReady && !opaque ? redact(approval.params, sensitive) : "[REDACTED]",
   };
 }
 

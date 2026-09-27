@@ -50,6 +50,7 @@ async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes: st
         get_issue: action("get_issue", "read"),
         create_issue: action("create_issue", "write"),
         mystery: action("mystery", "unknown"),
+        uncontracted: { ...action("uncontracted", "unknown"), contract: undefined },
         targeted: { ...action("targeted", "write"), contract: {
           ...action("targeted", "write").contract, resources: [{ kind: "issue", parameter: "target" }],
         } },
@@ -127,6 +128,54 @@ function action(name: string, effect: ToolEffect) {
 }
 
 describe("execution service", () => {
+  it("keeps uncontracted unknown actions approvable with an opaque preview and no early effect", async () => {
+    const { approvals, actionCall, catalog, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const params = { body: "private body", nested: { token: "private token" } };
+    const pending = await requestApproval(service, { principal, toolId: "linear.uncontracted", params });
+    expect(actionCall).not.toHaveBeenCalled();
+    for (const record of [pending, ...(await approvals.listForActor({ workspaceId: workspace.id,
+      actorUserId: principal.userId, limit: 10 }))]) {
+      const preview = publicApproval(record, catalog.get(record.toolId));
+      expect(preview).toMatchObject({ previewReady: true, previewMode: "opaque",
+        effect: "unknown", params: "[REDACTED]" });
+      expect(JSON.stringify(preview)).not.toMatch(/private body|private token/);
+    }
+    const approved = await service.approve(pending.id, principal.userId);
+    expect(publicApproval(approved, catalog.get(approved.toolId))).toMatchObject({
+      previewReady: true, previewMode: "opaque", params: "[REDACTED]",
+    });
+    expect(actionCall).not.toHaveBeenCalled();
+    const receipt = await service.executeApproved(principal, approved.id);
+    expect(receipt.status).toBe("succeeded");
+    expect(actionCall).toHaveBeenCalledTimes(1);
+    expect(actionCall).toHaveBeenCalledWith("linear", "uncontracted", expect.objectContaining({
+      params, retry: { maxAttempts: 1, backoff: "exponential" },
+    }));
+    await expect(service.executeApproved(principal, approved.id)).rejects.toBeInstanceOf(ApprovalUnavailableError);
+  });
+
+  it("rejects unsafe unknown previews while preserving explicit unknown contracts", async () => {
+    const { actionCall, approvals, catalog, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const manifest = catalog.get("linear.uncontracted")!;
+    expect(approvalPreviewReady(manifest, manifest.hash, ["secret"])).toBe(false);
+    expect(approvalPreviewReady(manifest, manifest.hash, "secret")).toBe(false);
+    expect(approvalPreviewReady({ ...manifest, contract: { ...manifest.contract,
+      resources: [{ kind: "issue", parameter: "target" }],
+    } }, manifest.hash, { target: "secret" })).toBe(false);
+    await expect(requestApproval(service, { principal, toolId: manifest.id, params: ["secret"] }))
+      .rejects.toBeInstanceOf(ExecutionInputError);
+    const explicit = await requestApproval(service, { principal, toolId: "linear.mystery",
+      params: { title: "visible", passphrase: "hidden" } });
+    expect(publicApproval(explicit, catalog.get(explicit.toolId))).toMatchObject({
+      previewReady: true, previewMode: "redacted",
+      params: { title: "visible", passphrase: "[REDACTED]" },
+    });
+    expect(approvals.approvals.size).toBe(1);
+    expect(actionCall).not.toHaveBeenCalled();
+  });
+
   it("derives a stable fingerprint key distinct from the result wrapping key", async () => {
     const wrapping = new Uint8Array(32).fill(7);
     const derived = await deriveExecutionFingerprintKey(wrapping);

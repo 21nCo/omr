@@ -293,8 +293,14 @@ describe("execution-policy-contract", () => {
           params: input.params as never });
         return publicApproval(approval, catalog.get(approval.toolId));
       },
-      approve: async (_request, id) => publicApproval(await service.approve(id, "user_1"), catalog.get("linear.write")),
-      reject: async (_request, id) => publicApproval(await service.reject(id, "user_1"), catalog.get("linear.write")),
+      approve: async (_request, id) => {
+        const approval = await service.approve(id, "user_1");
+        return publicApproval(approval, catalog.get(approval.toolId));
+      },
+      reject: async (_request, id) => {
+        const approval = await service.reject(id, "user_1");
+        return publicApproval(approval, catalog.get(approval.toolId));
+      },
       executeApproved: async (request, id) => publicReceipt(await service.executeApproved(principal(request), id)),
     };
     const tools: ToolRouteServices = {
@@ -356,19 +362,22 @@ describe("execution-policy-contract", () => {
           });
         const read = await runCli(["tools", "run", "linear.read"]);
         expect(JSON.parse(read.stdout)).toMatchObject({ status: "succeeded" });
-        await expect(runCli(["approvals", "request", "linear.opaque", "--params", "{}",
-          "--idempotency", "opaque-cli"])).rejects.toMatchObject({ code: 1 });
-        expect(approvalStore.approvals.size).toBe(0);
+        const opaquePending = await runCli(["approvals", "request", "linear.opaque", "--params",
+          JSON.stringify({ body: "opaque-cli-secret" }), "--idempotency", "opaque-cli"]);
+        const opaque = JSON.parse(opaquePending.stdout) as { id: string; params: unknown; previewMode: string };
+        expect(opaque).toMatchObject({ params: "[REDACTED]", previewMode: "opaque" });
+        expect(opaquePending.stdout).not.toContain("opaque-cli-secret");
+        expect(approvalStore.approvals.size).toBe(1);
         await expect(runCli(["tools", "run", "linear.write", "--params", JSON.stringify(request.params)]))
           .rejects.toMatchObject({ code: 1 });
         expect(provider).toHaveBeenCalledTimes(1);
         await expect(runCli(["approvals", "request", "linear.write", "--params",
           JSON.stringify(request.params)])).rejects.toMatchObject({ code: 1 });
-        expect(approvalStore.approvals.size).toBe(0);
+        expect(approvalStore.approvals.size).toBe(1);
         await expect(runCli(["approvals", "request", "linear.noncanonical", "--params",
           JSON.stringify({ items: [{ pin: "noncanonical-secret" }] }), "--idempotency", "bad-selector-cli"]))
           .rejects.toMatchObject({ code: 1 });
-        expect(approvalStore.approvals.size).toBe(0);
+        expect(approvalStore.approvals.size).toBe(1);
         expect(provider).toHaveBeenCalledTimes(1);
         const pending = await runCli(["approvals", "request", "linear.write", "--params",
           JSON.stringify(request.params), "--idempotency", request.idempotencyKey]);
@@ -389,6 +398,10 @@ describe("execution-policy-contract", () => {
         expect(JSON.parse(executed.stdout)).toMatchObject({ status: "succeeded" });
         await expect(runCli(["approvals", "execute", approval.id])).rejects.toMatchObject({ code: 1 });
         expect(provider).toHaveBeenCalledTimes(2);
+        await webPost("/api/approvals/approve", { approvalId: opaque.id });
+        expect(JSON.parse((await runCli(["approvals", "execute", opaque.id])).stdout))
+          .toMatchObject({ status: "succeeded" });
+        expect(provider).toHaveBeenCalledTimes(3);
       } finally {
         await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
       }
@@ -405,17 +418,22 @@ describe("execution-policy-contract", () => {
       try {
         expect(await client.callTool({ name: "linear.read", arguments: {} }))
           .toMatchObject({ structuredContent: { status: "succeeded" } });
-        expect(await client.callTool({ name: "linear.opaque", arguments: {
-          _omrIdempotencyKey: "opaque-mcp",
-        } })).toMatchObject({ isError: true });
-        expect(approvalStore.approvals.size).toBe(0);
+        const opaquePending = await client.callTool({ name: "linear.opaque", arguments: {
+          body: "opaque-mcp-secret", _omrIdempotencyKey: "opaque-mcp",
+        } });
+        expect(opaquePending).toMatchObject({ structuredContent: {
+          status: "approval_required", executed: false,
+        } });
+        expect(JSON.stringify(opaquePending)).not.toContain("opaque-mcp-secret");
+        const opaqueId = (opaquePending.structuredContent as { approvalId: string }).approvalId;
+        expect(approvalStore.approvals.size).toBe(1);
         expect(await client.callTool({ name: "linear.write", arguments: request.params }))
           .toMatchObject({ isError: true });
-        expect(approvalStore.approvals.size).toBe(0);
+        expect(approvalStore.approvals.size).toBe(1);
         expect(await client.callTool({ name: "linear.noncanonical", arguments: {
           items: [{ pin: "noncanonical-secret" }], _omrIdempotencyKey: "bad-selector-mcp",
         } })).toMatchObject({ isError: true });
-        expect(approvalStore.approvals.size).toBe(0);
+        expect(approvalStore.approvals.size).toBe(1);
         expect(provider).toHaveBeenCalledTimes(1);
         const args = { ...(request.params as Record<string, unknown>), _omrIdempotencyKey: request.idempotencyKey };
         const pending = await client.callTool({ name: "linear.write", arguments: args });
@@ -433,6 +451,10 @@ describe("execution-policy-contract", () => {
         expect(await client.callTool({ name: "omr.approvals.execute", arguments: { approvalId } }))
           .toMatchObject({ isError: true });
         expect(provider).toHaveBeenCalledTimes(2);
+        await webPost("/api/approvals/approve", { approvalId: opaqueId });
+        expect(await client.callTool({ name: "omr.approvals.execute", arguments: { approvalId: opaqueId } }))
+          .toMatchObject({ structuredContent: { status: "succeeded" } });
+        expect(provider).toHaveBeenCalledTimes(3);
       } finally {
         await Promise.all([client.close(), server.close()]);
       }
@@ -448,19 +470,22 @@ describe("execution-policy-contract", () => {
 
     const read = await client.execute({ workspaceId: workspace.id, toolId: "linear.read", params: {} });
     expect(read).toMatchObject({ status: "succeeded" });
-    await expect(client.requestApproval({ workspaceId: workspace.id, toolId: "linear.opaque",
-      params: {}, idempotencyKey: "opaque-web" })).rejects.toMatchObject({ status: 400,
-      body: { error: "EXECUTION_INPUT_INVALID" } });
-    expect(approvalStore.approvals.size).toBe(0);
+    const opaque = await client.requestApproval({ workspaceId: workspace.id, toolId: "linear.opaque",
+      params: { body: "opaque-web-secret" }, idempotencyKey: "opaque-web" }) as {
+        id: string; params: unknown; previewMode: string;
+      };
+    expect(opaque).toMatchObject({ params: "[REDACTED]", previewMode: "opaque" });
+    expect(JSON.stringify(opaque)).not.toContain("opaque-web-secret");
+    expect(approvalStore.approvals.size).toBe(1);
     await expect(client.execute(request)).rejects.toMatchObject({ status: 409,
       body: { error: "EXECUTION_APPROVAL_REQUIRED" } });
     expect(provider).toHaveBeenCalledTimes(1);
     await expect(client.requestApproval({ ...request, idempotencyKey: undefined })).rejects.toMatchObject({ status: 400 });
-    expect(approvalStore.approvals.size).toBe(0);
+    expect(approvalStore.approvals.size).toBe(1);
     await expect(client.requestApproval({ workspaceId: workspace.id, toolId: "linear.noncanonical",
       params: { items: [{ pin: "noncanonical-secret" }] }, idempotencyKey: "bad-selector-web" }))
       .rejects.toMatchObject({ status: 400, body: { error: "EXECUTION_INPUT_INVALID" } });
-    expect(approvalStore.approvals.size).toBe(0);
+    expect(approvalStore.approvals.size).toBe(1);
     expect(provider).toHaveBeenCalledTimes(1);
     // The first response is lost after the server creates its approval.
     const lost = await router.handle(new Request("https://omr.example/api/approvals", {
@@ -468,10 +493,11 @@ describe("execution-policy-contract", () => {
       body: JSON.stringify(request),
     }));
     expect(lost.status).toBe(201);
-    const storedId = [...approvalStore.approvals.keys()][0];
+    const storedId = [...approvalStore.approvals.values()].find((item) =>
+      item.idempotencyKey === request.idempotencyKey)?.id;
     const approval = await client.requestApproval(request) as { id: string; params: unknown };
     expect(approval.id).toBe(storedId);
-    expect(approvalStore.approvals.size).toBe(1);
+    expect(approvalStore.approvals.size).toBe(2);
     expect(approval.params).toMatchObject({ title: "Review", secretField: "[REDACTED]",
       passphrase: "[REDACTED]", privateKey: "[REDACTED]",
       items: [{ pin: "[REDACTED]" }], metadata: { first: { pin: "[REDACTED]" } },
@@ -489,5 +515,9 @@ describe("execution-policy-contract", () => {
     await expect(client.executeApproved(approval.id)).rejects.toMatchObject({ status: 409,
       body: { error: "APPROVAL_UNAVAILABLE" } });
     expect(provider).toHaveBeenCalledTimes(2);
+    expect(await client.approve(opaque.id)).toMatchObject({ previewMode: "opaque",
+      params: "[REDACTED]" });
+    expect(await client.executeApproved(opaque.id)).toMatchObject({ status: "succeeded" });
+    expect(provider).toHaveBeenCalledTimes(3);
   });
 });

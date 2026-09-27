@@ -34,6 +34,7 @@
     resources: { kind: string; parameter?: string }[];
     manifestCurrent: boolean;
     previewReady: boolean;
+    previewMode: "opaque" | "redacted" | "unavailable";
     connectionId: string;
     createdAt: number;
     expiresAt: number;
@@ -458,6 +459,7 @@
               {#if approval.resources.length}<p class="approval-context">Resources: {approval.resources.map((resource) => resource.parameter ? `${resource.kind} (${resource.parameter})` : resource.kind).join(", ")}</p>{/if}
               {#if !approval.manifestCurrent}<p class="approval-context">This tool changed. Request a new approval.</p>{/if}
               {#if !approval.previewReady}<p class="approval-context">A complete, safely redacted preview is unavailable. Request a new approval after this tool has review metadata.</p>{/if}
+              {#if approval.previewMode === "opaque"}<p class="approval-context">This action has no field review metadata. All arguments are hidden; review the action and account before approving.</p>{/if}
               <pre>{renderApprovalPreview(approval.params)}</pre>
               <div class="actions">
                 <button class="primary compact" disabled={Boolean(busy) || !approval.previewReady} onclick={() => void mutate(`approve:${approval.id}`, "/api/approvals/approve", { approvalId: approval.id }, `Approved ${approval.toolId}.`)}>Approve</button>
