@@ -1,0 +1,22 @@
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 37,462
+docs/execution-policy-v1.md
+  h_a39f9495f9ec1d 38-47,78
+packages/execution/src/execution.test.ts
+  h_a39f9495f9ec1d 53,131-178
+packages/execution/src/projection.ts
+  h_a39f9495f9ec1d 53-61,67,69-71,99-100,102,109-110
+tests/acceptance/execution-policy-contract.test.ts
+  h_a39f9495f9ec1d 296-303,365-370,376,380,401-404,421-429,432,436,454-457,473-479,484,488,496-497,500,518-521
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6648f9d1628ddd92c726e12d3814547557bd5fd0",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
