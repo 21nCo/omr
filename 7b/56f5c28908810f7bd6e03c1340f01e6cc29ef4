@@ -1,0 +1,28 @@
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 606
+docs/execution-policy-v1.md
+  h_a39f9495f9ec1d 9-11,22-28,36-38,47-51
+packages/execution/migrations/0013_keyed_execution_fingerprints.sql
+  h_a39f9495f9ec1d 1-9
+packages/execution/src/execution.test.ts
+  h_a39f9495f9ec1d 14,19,89-90,404-415,447,453-482,576-622
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 192-193,203-209,297,327,359,363,368-370,390,541-545
+packages/execution/src/postgres-invocation-guard.test.ts
+  h_a39f9495f9ec1d 85-105
+packages/execution/src/projection.ts
+  h_a39f9495f9ec1d 21-22,25-28
+tests/acceptance/execution-policy-contract.test.ts
+  h_a39f9495f9ec1d 45,127,154,184,187
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7b56f5c28908810f7bd6e03c1340f01e6cc29ef4",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
