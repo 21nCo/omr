@@ -1,0 +1,26 @@
+docs/execution-policy-v1.md
+  h_a39f9495f9ec1d 27-29,39,54-61
+packages/execution/migrations/0014_approval_reconciliation.sql
+  h_a39f9495f9ec1d 1-36
+packages/execution/src/execution.test.ts
+  h_a39f9495f9ec1d 586-588,594-627
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 58,94,363,368-371
+packages/execution/src/postgres-approval-migration.test.ts
+  h_a39f9495f9ec1d 1-113
+packages/execution/src/postgres-approval-store.ts
+  h_a39f9495f9ec1d 54,81,159-172
+packages/execution/src/testing.ts
+  h_a39f9495f9ec1d 164-172
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "460ae8a1b2fe9189e9b1b189c09a7e86d1c3fcaa",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
