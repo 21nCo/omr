@@ -50,6 +50,10 @@ their class. If the provider receipt succeeds but approval consumption cannot be
 service reports an unknown completion with the receipt ID and marks the approval uncertain for
 reconciliation; it never marks the successful effect failed or retries it. The same state applies
 to provider ambiguity, receipt persistence failure, and a guard commit failure after dispatch.
+The HTTP boundary returns `504 EXECUTION_INVOCATION_TIMEOUT` without a receipt ID when the
+deadline closes before provider dispatch. After dispatch, it returns
+`502 EXECUTION_OUTCOME_UNKNOWN` with the receipt ID. CLI JSON errors and MCP structured tool
+errors retain these response fields for callers deciding whether to reconcile or retry.
 
 ## Changed-surface risk matrix
 
@@ -69,6 +73,7 @@ to provider ambiguity, receipt persistence failure, and a guard commit failure a
 | Workspace, grant, connection | Cross-workspace use or use after revocation | Service denial and PostgreSQL guard fixture tests |
 | Provider and receipt | Second effect after timeout, crash, or ambiguous error | Uncertain replay and reservation tests |
 | Invocation liveness | Hung provider holds revocation locks or late reservation dispatches after rollback/expiry | Deadline, rollback, pre-dispatch cancellation, and uncertain non-replay tests |
+| Timeout response | Predispatch timeout becomes a generic 500 or loses its distinction from an uncertain effect | Router, CLI JSON, and MCP protocol tests for read and approved execution |
 | Storage | Plaintext parameters or results | PostgreSQL encryption integration test when a disposable database is available |
 
 ## Migration and rollback

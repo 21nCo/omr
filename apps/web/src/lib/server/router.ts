@@ -39,6 +39,7 @@ import {
   ExecutionFailedError,
   ExecutionIdempotencyConflictError,
   ExecutionInProgressError,
+  ExecutionInvocationDeadlineError,
   ExecutionOutcomeUnknownError,
   ExecutionInputError,
 } from "@oh-my-router/execution";
@@ -332,6 +333,10 @@ export function createOMRRouter(
           { error: error.code, receiptId: error.receiptId },
           { status: 502 },
         );
+      }
+      if (error instanceof ExecutionInvocationDeadlineError) {
+        return Response.json({ error: error.code },
+          { status: 504, headers: PRIVATE_RESPONSE });
       }
       if (error instanceof ExecutionOutcomeUnknownError) {
         return Response.json(

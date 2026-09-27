@@ -26,6 +26,46 @@ function action(name: string, effect: ToolEffect) {
 }
 
 describe("execution-policy-contract", () => {
+  it("keeps predispatch timeout and postdispatch uncertainty distinct in CLI JSON errors", async () => {
+    const server = createServer(async (incoming, outgoing) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of incoming) chunks.push(Buffer.from(chunk));
+      const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) as { approvalId?: string } : {};
+      const uncertain = incoming.url === "/api/approvals/execute" && body.approvalId === "after-dispatch";
+      outgoing.writeHead(uncertain ? 502 : 504, { "content-type": "application/json" });
+      outgoing.end(JSON.stringify(uncertain
+        ? { error: "EXECUTION_OUTCOME_UNKNOWN", receiptId: "receipt_after_dispatch" }
+        : { error: "EXECUTION_INVOCATION_TIMEOUT" }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("CLI fixture listener is unavailable");
+      const runCli = (args: string[]) => execFileAsync(process.execPath,
+        [join(process.cwd(), "packages/cli/dist/bin.js"), ...args, "--json"], {
+          env: { ...process.env, OMR_BACKEND: `http://127.0.0.1:${address.port}`,
+            OMR_API_KEY: "cli-fixture", OMR_WORKSPACE_ID: "workspace_1" },
+          timeout: 10_000,
+        }).then(() => { throw new Error("CLI unexpectedly succeeded"); },
+          (error: { code: number; stdout: string; stderr: string }) => error);
+      for (const args of [
+        ["tools", "run", "linear.read"],
+        ["approvals", "execute", "before-dispatch"],
+      ]) {
+        const error = await runCli(args);
+        expect(error.code).toBe(1);
+        expect(error.stdout + error.stderr).toContain("EXECUTION_INVOCATION_TIMEOUT");
+        expect(error.stdout + error.stderr).not.toContain("receipt_after_dispatch");
+      }
+      const uncertain = await runCli(["approvals", "execute", "after-dispatch"]);
+      expect(uncertain.code).toBe(1);
+      expect(uncertain.stdout + uncertain.stderr).toContain("EXECUTION_OUTCOME_UNKNOWN");
+      expect(uncertain.stdout + uncertain.stderr).toContain("receipt_after_dispatch");
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
   it.each(["web", "cli", "mcp"] as const)("uses the same approval, replay and receipt policy on %s", async (surface) => {
     const workspaceStore = new MemoryWorkspaceStore();
     const workspace = (await new WorkspaceAuthority(workspaceStore)

@@ -204,6 +204,56 @@ describe("OMR MCP server", () => {
     });
   });
 
+  it("preserves predispatch timeout and postdispatch uncertainty for projected MCP calls", async () => {
+    const fetchImpl: typeof fetch = async (request, init) => {
+      const path = requestUrl(request).pathname;
+      if (path === "/api/tools") return Response.json({
+        catalogSchemaVersion: "1.0.0", revision: "revision-1",
+        tools: [manifest("demo.read", "read")],
+      });
+      if (path === "/api/tools/execute") return Response.json({
+        error: "EXECUTION_INVOCATION_TIMEOUT",
+      }, { status: 504 });
+      if (path === "/api/approvals/execute") {
+        const body = JSON.parse(String(init?.body)) as { approvalId: string };
+        return body.approvalId === "before-dispatch"
+          ? Response.json({ error: "EXECUTION_INVOCATION_TIMEOUT" }, { status: 504 })
+          : Response.json({ error: "EXECUTION_OUTCOME_UNKNOWN",
+            receiptId: "receipt_after_dispatch" }, { status: 502 });
+      }
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    };
+    const server = await createOMRMcpServer({
+      baseUrl: "https://omr.test", credential: "credential", workspaceId: "workspace-1", fetchImpl,
+    });
+    const client = new Client({ name: "timeout", version: "1.0.0" }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closeables.push(client, server);
+
+    for (const call of [
+      { name: "demo.read", arguments: { value: "read" } },
+      { name: "omr.approvals.execute", arguments: { approvalId: "before-dispatch" } },
+    ]) {
+      await expect(client.callTool(call)).resolves.toMatchObject({
+        isError: true,
+        structuredContent: { ok: false, error: {
+          code: "OMR_HTTP_ERROR", details: { error: "EXECUTION_INVOCATION_TIMEOUT" },
+        } },
+      });
+    }
+    await expect(client.callTool({
+      name: "omr.approvals.execute", arguments: { approvalId: "after-dispatch" },
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { ok: false, error: {
+        code: "OMR_HTTP_ERROR", details: { error: "EXECUTION_OUTCOME_UNKNOWN",
+          receiptId: "receipt_after_dispatch" },
+      } },
+    });
+  });
+
   it("keeps control tools callable during discovery failure and fails closed for projected actions", async () => {
     let catalogFails = false;
     let executions = 0;
