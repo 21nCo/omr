@@ -483,7 +483,7 @@ export class ExecutionService {
       assertApprovedCanDispatch();
       const timestamp = this.now();
       const idempotencyKey = input.idempotencyKey ?? `request_${crypto.randomUUID()}`;
-      const reservation = await this.receipts.reserve({
+      const expectedReceipt: ExecutionReceipt = {
         id: `execution_${crypto.randomUUID()}`,
         workspaceId: input.principal.workspaceId,
         actorUserId: input.principal.userId,
@@ -502,9 +502,11 @@ export class ExecutionService {
         completedAt: null,
         createdAt: timestamp,
         updatedAt: timestamp,
-      });
+      };
+      const reservation = await this.receipts.reserve(expectedReceipt);
       if (!reservation.created) {
-        return this.replayReceipt(reservation.receipt, requestHash, assertApprovedCanDispatch);
+        return this.replayReceipt(reservation.receipt, expectedReceipt,
+          assertApprovedCanDispatch);
       }
 
       let result: JsonValue;
@@ -587,9 +589,15 @@ export class ExecutionService {
     }
   }
 
-  private replayReceipt(receipt: ExecutionReceipt, requestHash: string,
+  private replayReceipt(receipt: ExecutionReceipt, expected: ExecutionReceipt,
     assertCanDispatch: () => void): ExecutionReceipt {
-    if (receipt.requestHash !== requestHash) throw new ExecutionIdempotencyConflictError();
+    if (receipt.approvalId !== expected.approvalId || receipt.requestHash !== expected.requestHash ||
+        receipt.workspaceId !== expected.workspaceId || receipt.actorUserId !== expected.actorUserId ||
+        receipt.principalKey !== expected.principalKey || receipt.toolId !== expected.toolId ||
+        receipt.manifestHash !== expected.manifestHash || receipt.connectionId !== expected.connectionId ||
+        receipt.providerConnectionId !== expected.providerConnectionId) {
+      throw new ExecutionIdempotencyConflictError();
+    }
     if (receipt.status === "succeeded") {
       assertCanDispatch();
       return receipt;

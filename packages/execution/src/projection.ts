@@ -37,9 +37,12 @@ function parseSensitiveKey(key: string): string[] | null {
   const parts: string[] = [];
   let cursor = 0;
   while (cursor < key.length) {
-    const segment = key[cursor] === "["
-      ? (parts.length ? bracketSegment(key, cursor) : null)
-      : nameSegment(key, cursor);
+    let segment: SelectorSegment | null;
+    if (key[cursor] === "[") {
+      segment = parts.length ? bracketSegment(key, cursor) : null;
+    } else {
+      segment = nameSegment(key, cursor);
+    }
     if (!segment || !canonicalSelectorIndex(segment.part)) return null;
     parts.push(segment.part);
     cursor = segment.next;

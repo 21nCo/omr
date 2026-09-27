@@ -132,6 +132,14 @@ back the Worker. The old Worker can read and fail a `reserved` receipt as a
 non-replayable state, but rollback must not remove the constraint while these
 rows exist. Drain them first if a schema rollback is required.
 Migration `0016` adds a nullable, unique `approval_id` to execution receipts.
+Keep execution writers quiesced for its non-concurrent index build. Apply the
+file in a dedicated session with `PGOPTIONS='-c lock_timeout=5s -c statement_timeout=300s'`
+and stop-on-error enabled. Abort the rollout if it
+cannot finish within that five-minute window; inspect the index and rerun the
+idempotent migration before starting new writers. Do not serve mixed old and
+new writers while the build is waiting for a table lock. This bound protects
+the deployment window; it is not a claim that production data will build in
+five minutes.
 Apply it before deploying the Worker that writes the column. New approved
 executions store the approval ID with the receipt reservation, before provider
 dispatch. Stale approval recovery can attribute only an exact associated

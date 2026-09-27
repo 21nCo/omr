@@ -33,6 +33,13 @@ export class MemoryExecutionReceiptStore implements ExecutionReceiptStore {
     const existingId = this.idempotency.get(key(receipt));
     if (existingId) {
       const existing = this.receipts.get(existingId)!;
+      if (existing.approvalId !== receipt.approvalId ||
+          existing.requestHash !== receipt.requestHash || existing.actorUserId !== receipt.actorUserId ||
+          existing.toolId !== receipt.toolId || existing.manifestHash !== receipt.manifestHash ||
+          existing.connectionId !== receipt.connectionId ||
+          existing.providerConnectionId !== receipt.providerConnectionId) {
+        return { receipt: structuredClone(existing), created: false };
+      }
       if ((existing.status === "reserved" || existing.status === "running") &&
           existing.startedAt <= receipt.startedAt - EXECUTION_STALE_AFTER_MS) {
         existing.errorCode = existing.status === "reserved"
@@ -112,7 +119,8 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
   readonly approvals = new Map<string, ExecutionApproval>();
   private readonly idempotency = new Map<string, string>();
 
-  constructor(private readonly isMember: (workspaceId: string, actorUserId: string) => boolean) {}
+  constructor(private readonly isMember: (workspaceId: string, actorUserId: string) => boolean,
+    private readonly receipts: MemoryExecutionReceiptStore) {}
 
   async create(approval: ExecutionApproval): Promise<ExecutionApproval> {
     const key = `${approval.workspaceId}\u0000${approval.principalKey}\u0000${approval.idempotencyKey}`;
@@ -175,6 +183,10 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
     if (approval?.status === "uncertain" && approval.actorUserId === input.actorUserId &&
         approval.principalKey === input.principalKey && approval.executionReceiptId &&
         this.isMember(approval.workspaceId, input.actorUserId)) {
+      const receipt = this.assertReceiptOwnership(approval, approval.executionReceiptId);
+      if (!["running", "succeeded", "uncertain"].includes(receipt.status)) {
+        throw new ApprovalUnavailableError();
+      }
       throw new ExecutionOutcomeUnknownError(approval.executionReceiptId);
     }
     if (
@@ -199,6 +211,9 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
   }): Promise<ExecutionApproval> {
     const approval = this.approvals.get(input.approvalId);
     if (approval?.status !== "executing") throw new ApprovalUnavailableError();
+    if (this.assertReceiptOwnership(approval, input.receiptId).status !== "succeeded") {
+      throw new ApprovalUnavailableError();
+    }
     approval.status = "consumed";
     approval.executionReceiptId = input.receiptId;
     approval.updatedAt = input.now;
@@ -216,6 +231,8 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
   async uncertain(input: { approvalId: string; receiptId: string | null; now: number }): Promise<ExecutionApproval> {
     const approval = this.approvals.get(input.approvalId);
     if (approval?.status !== "executing") throw new ApprovalUnavailableError();
+    if (input.receiptId && !["running", "succeeded", "uncertain"].includes(
+      this.assertReceiptOwnership(approval, input.receiptId).status)) throw new ApprovalUnavailableError();
     approval.status = "uncertain";
     approval.executionReceiptId = input.receiptId;
     approval.updatedAt = input.now;
@@ -248,5 +265,16 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
       throw new ApprovalUnavailableError();
     }
     return approval;
+  }
+
+  private assertReceiptOwnership(approval: ExecutionApproval, receiptId: string): ExecutionReceipt {
+    const receipt = this.receipts.receipts.get(receiptId);
+    if (!receipt || receipt.approvalId !== approval.id ||
+        receipt.workspaceId !== approval.workspaceId || receipt.actorUserId !== approval.actorUserId ||
+        receipt.principalKey !== approval.principalKey || receipt.toolId !== approval.toolId ||
+        receipt.manifestHash !== approval.manifestHash || receipt.connectionId !== approval.connectionId ||
+        receipt.providerConnectionId !== approval.providerConnectionId ||
+        receipt.idempotencyKey !== approval.idempotencyKey) throw new ApprovalUnavailableError();
+    return receipt;
   }
 }

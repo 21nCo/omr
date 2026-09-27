@@ -276,13 +276,13 @@ describe("execution-policy-contract", () => {
         opaque: { ...action("opaque", "unknown"), contract: undefined } },
     }] } }, (value) => value as never);
     const provider = vi.fn(async () => ({ result: "private provider result" }));
-    const approvalStore = new MemoryExecutionApprovalStore((workspaceId, actorUserId) =>
+    const isMember = (workspaceId: string, actorUserId: string) =>
       [...workspaceStore.memberships.values()].some((member) =>
-        member.workspaceId === workspaceId && member.userId === actorUserId));
+        member.workspaceId === workspaceId && member.userId === actorUserId);
+    const receiptStore = new MemoryExecutionReceiptStore(isMember);
+    const approvalStore = new MemoryExecutionApprovalStore(isMember, receiptStore);
     const service = new ExecutionService(catalog, connections, { action: provider },
-      new MemoryExecutionReceiptStore((workspaceId, actorUserId) =>
-        [...workspaceStore.memberships.values()].some((member) =>
-          member.workspaceId === workspaceId && member.userId === actorUserId)), async () => [], Date.now,
+      receiptStore, async () => [], Date.now,
       approvalStore, undefined, new Uint8Array(32).fill(7));
     const principal = (request: Request): ExecutionPrincipal => surface === "web"
       ? { kind: "web", userId: "user_1", workspaceId: workspace.id }

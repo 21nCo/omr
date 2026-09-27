@@ -41,7 +41,9 @@ vi.mock("pg", () => {
         return { rows: [{ workspace_id: "workspace_1", provider_connection_id: "remote_1",
           ownership: "workspace", owner_user_id: null, status: "active", readiness: "ready" }] };
       }
-      if (sql.includes("workspace_memberships")) return { rows: [{ id: "member_1" }] };
+      if (/^SELECT id FROM omr_control\.workspace_memberships\b/.test(sql.trimStart())) {
+        return { rows: [{ id: "member_1" }] };
+      }
       if (sql.includes("omr_identity.sessions")) return { rows: [{
         id: "session_1", expires_at: new Date(Date.now() + 60_000),
       }] };
@@ -168,7 +170,9 @@ describe("PostgreSQL execution runtime", () => {
       const results = await Promise.allSettled(Array.from({ length: 20 }, (_, index) =>
         runtime.approvals.claim({ approvalId: `approval_${index}`, actorUserId: "user_1",
           principalKey: "web:user_1", now: Date.now(), deadlineAt: Date.now() + 1_000 })));
-      expect(results.every((result) => result.status === "rejected")).toBe(true);
+      expect(results).toEqual(Array.from({ length: 20 }, () =>
+        expect.objectContaining({ status: "rejected",
+          reason: expect.objectContaining({ code: "APPROVAL_UNAVAILABLE" }) })));
       expect(mockState.clients).toHaveLength(21);
       expect(mockState.clients.slice(1).every((client) => client.ended)).toBe(true);
     } finally {

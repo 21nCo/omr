@@ -3,6 +3,7 @@ import type { JsonValue } from "@oh-my-router/tools";
 
 import { EXECUTION_STALE_AFTER_MS,
   type ExecutionReceipt, type ExecutionReceiptStore, type ExecutionStatus } from "./execution.js";
+import { decryptJson, encryptJson } from "./postgres-crypto.js";
 
 interface ReceiptRow {
   id: string;
@@ -86,10 +87,15 @@ export class PostgresExecutionReceiptStore implements ExecutionReceiptStore {
                              ELSE 'invocation_outcome_unknown' END,
            completed_at = $4, updated_at = $4
        WHERE workspace_id = $1 AND principal_key = $2 AND idempotency_key = $3
+         AND approval_id IS NOT DISTINCT FROM $6
+         AND request_hash = $7 AND actor_user_id = $8 AND tool_id = $9
+         AND manifest_hash = $10 AND connection_id = $11 AND provider_connection_id = $12
          AND status IN ('reserved', 'running') AND started_at <= $5
        RETURNING ${COLUMNS}`,
       [receipt.workspaceId, receipt.principalKey, receipt.idempotencyKey,
-        receipt.startedAt, receipt.startedAt - EXECUTION_STALE_AFTER_MS],
+        receipt.startedAt, receipt.startedAt - EXECUTION_STALE_AFTER_MS, receipt.approvalId ?? null,
+        receipt.requestHash, receipt.actorUserId, receipt.toolId, receipt.manifestHash,
+        receipt.connectionId, receipt.providerConnectionId],
     );
     if (existing.rows[0]) return { receipt: await this.toReceipt(existing.rows[0]), created: false };
     const current = await this.client.query<ReceiptRow>(
@@ -111,7 +117,7 @@ export class PostgresExecutionReceiptStore implements ExecutionReceiptStore {
   }
 
   async succeed(receiptId: string, result: JsonValue, now: number): Promise<ExecutionReceipt> {
-    const encrypted = await this.encrypt(result);
+    const encrypted = await encryptJson(result, this.wrappingKey);
     const updated = await this.client.query<ReceiptRow>(
       `UPDATE omr_control.execution_receipts
        SET status = 'succeeded', result_ciphertext = $1, result_iv = $2,
@@ -179,7 +185,7 @@ export class PostgresExecutionReceiptStore implements ExecutionReceiptStore {
       approvalId: row.approval_id,
       status: row.status,
       result: row.result_ciphertext && row.result_iv
-        ? await this.decrypt(row.result_ciphertext, row.result_iv)
+        ? await decryptJson(row.result_ciphertext, row.result_iv, this.wrappingKey)
         : null,
       errorCode: row.error_code,
       startedAt: Number(row.started_at),
@@ -187,26 +193,5 @@ export class PostgresExecutionReceiptStore implements ExecutionReceiptStore {
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
     };
-  }
-
-  private async encrypt(value: JsonValue): Promise<{ ciphertext: Uint8Array; iv: Uint8Array }> {
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const key = await crypto.subtle.importKey("raw", this.wrappingKey, "AES-GCM", false, ["encrypt"]);
-    const ciphertext = await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv },
-      key,
-      new TextEncoder().encode(JSON.stringify(value)),
-    );
-    return { ciphertext: new Uint8Array(ciphertext), iv };
-  }
-
-  private async decrypt(ciphertext: Buffer, iv: Buffer): Promise<JsonValue> {
-    const key = await crypto.subtle.importKey("raw", this.wrappingKey, "AES-GCM", false, ["decrypt"]);
-    const plaintext = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: new Uint8Array(iv) },
-      key,
-      new Uint8Array(ciphertext),
-    );
-    return JSON.parse(new TextDecoder().decode(plaintext)) as JsonValue;
   }
 }

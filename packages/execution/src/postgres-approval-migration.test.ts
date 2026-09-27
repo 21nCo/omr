@@ -150,6 +150,32 @@ describeDatabase("approval migration from origin/dev schema", () => {
         .resolves.toMatchObject({ id: "approval_fresh", params: {} });
       await expect(store.getForActor("approval_fresh", "another_user"))
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      for (const decision of ["approve", "reject"] as const) {
+        const id = `approval_expiring_${decision}`;
+        const expiresAt = Date.now() + 750;
+        await store.create({ ...candidate, id, idempotencyKey: id,
+          expiresAt, createdAt: Date.now(), updatedAt: Date.now() });
+        const blocker = new Client({ connectionString: databaseUrl! });
+        await blocker.connect();
+        try {
+          await blocker.query("BEGIN");
+          await blocker.query(`UPDATE ${qualified}.workspace_memberships SET user_id = user_id
+            WHERE workspace_id = 'workspace_1' AND user_id = 'user_1'`);
+          let settled = false;
+          const pending = store[decision]({ approvalId: id, actorUserId: "user_1", now: Date.now() })
+            .finally(() => { settled = true; });
+          await new Promise((resolve) => setTimeout(resolve, 40));
+          expect(settled).toBe(false);
+          await new Promise((resolve) => setTimeout(resolve, Math.max(0, expiresAt - Date.now() + 30)));
+          await blocker.query("COMMIT");
+          await expect(pending).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+          const state = await client.query(`SELECT status FROM ${qualified}.execution_approvals WHERE id = $1`, [id]);
+          expect(state.rows[0]?.status).toBe("pending");
+        } finally {
+          await blocker.query("ROLLBACK");
+          await blocker.end();
+        }
+      }
       const revoker = new Client({ connectionString: databaseUrl! });
       await revoker.connect();
       try {
@@ -183,7 +209,7 @@ describeDatabase("approval migration from origin/dev schema", () => {
         (id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash, connection_id,
          provider_connection_id, idempotency_key, status, request_hash, started_at, created_at, updated_at)
         VALUES ('execution_reconcile', 'workspace_1', 'user_1', 'web:user_1', 'linear.create_issue',
-                'manifest_1', 'connection_1', 'provider_1', 'uncertain-key', 'uncertain', 'opaque', 1, 1, 1)`);
+                'manifest_1', 'connection_1', 'provider_1', 'fresh-key', 'uncertain', 'opaque', 1, 1, 1)`);
       await client.query(`UPDATE ${qualified}.execution_receipts SET approval_id = 'approval_fresh'
         WHERE id = 'execution_reconcile'`);
       await expect(client.query(`INSERT INTO ${qualified}.execution_receipts
@@ -205,7 +231,7 @@ describeDatabase("approval migration from origin/dev schema", () => {
       expect(Number(count.rows[0]?.count)).toBe(1);
       const receiptStore = new PostgresExecutionReceiptStore(fixtureClient, key);
       const lookup = { workspaceId: "workspace_1", principalKey: "web:user_1",
-        idempotencyKey: "uncertain-key" };
+        idempotencyKey: "fresh-key" };
       await expect(receiptStore.findByIdempotency(lookup))
         .resolves.toMatchObject({ id: "execution_reconcile", status: "uncertain" });
       await client.query(`DELETE FROM ${qualified}.workspace_memberships WHERE user_id = 'user_1'`);

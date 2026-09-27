@@ -77,7 +77,7 @@ async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes: st
       member.workspaceId === workspaceId && member.userId === actorUserId));
   const approvals = new MemoryExecutionApprovalStore((workspaceId, actorUserId) =>
     [...workspaceStore.memberships.values()].some((member) =>
-      member.workspaceId === workspaceId && member.userId === actorUserId));
+      member.workspaceId === workspaceId && member.userId === actorUserId), receipts);
   return {
     actionCall,
     approvals,
@@ -560,6 +560,32 @@ describe("execution service", () => {
       code: "CONNECTION_ACCESS_DENIED",
     });
     expect(actionCall).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([null, "approval_other"])("never attributes a %s receipt to an approved replay", async (foreignApprovalId) => {
+    for (const status of ["reserved", "failed", "running", "succeeded", "uncertain"] as const) {
+      const { actionCall, approvals, receipts, service, workspace } = await fixture();
+      const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+      const approval = await requestApproval(service, { principal, toolId: "linear.create_issue", params: {} });
+      await service.approve(approval.id, principal.userId);
+      const original = await service.executeApproved(principal, approval.id);
+      const stored = receipts.receipts.get(original.id)!;
+      receipts.receipts.set(original.id, { ...stored, approvalId: foreignApprovalId, status });
+      approvals.approvals.get(approval.id)!.status = "uncertain";
+      await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({
+        code: "APPROVAL_UNAVAILABLE",
+      });
+      approvals.approvals.get(approval.id)!.status = "approved";
+      approvals.approvals.get(approval.id)!.executionReceiptId = null;
+
+      await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({
+        code: "EXECUTION_IDEMPOTENCY_CONFLICT",
+      });
+      expect(actionCall).toHaveBeenCalledTimes(1);
+      expect(approvals.approvals.get(approval.id)).toMatchObject({ status: "failed", executionReceiptId: null });
+      expect(receipts.receipts.get(original.id)?.approvalId).toBe(foreignApprovalId);
+      expect(receipts.receipts.get(original.id)?.status).toBe(status);
+    }
   });
 
   it("masks every parameter when preview metadata is absent", async () => {

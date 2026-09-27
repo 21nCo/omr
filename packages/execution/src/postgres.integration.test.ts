@@ -353,54 +353,90 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     const observer = new Client({ connectionString: connectionString! });
     await observer.connect();
     try {
-      for (const status of ["unrelated", "reserved", "failed", "running", "succeeded", "uncertain"] as const) {
-        const now = Date.now();
-        const approval: ExecutionApproval = {
-          id: `approval_${crypto.randomUUID()}`, workspaceId, actorUserId: "execution_owner",
-          principalKey: "web:execution_owner", toolId: "linear.create_issue",
-          manifestHash: `sha256-${"d".repeat(64)}`, connectionId,
-          providerConnectionId: `plug_${crypto.randomUUID()}`, params: {},
-          idempotencyKey: `approval_${crypto.randomUUID()}`, status: "pending",
-          approvedBy: null, decidedAt: null, expiresAt: now + 60_000,
-          executionReceiptId: null, createdAt: now, updatedAt: now,
-        };
-        await runtime.approvals.create(approval);
-        await runtime.approvals.approve({ approvalId: approval.id,
-          actorUserId: "execution_owner", now: now + 1 });
-        await runtime.approvals.claim({ approvalId: approval.id,
-          actorUserId: "execution_owner", principalKey: "web:execution_owner",
-          now: now + 2, deadlineAt: Date.now() + 2_000 });
-        const receipt: ExecutionReceipt = {
-          id: `execution_${crypto.randomUUID()}`, workspaceId, actorUserId: "execution_owner",
-          principalKey: "web:execution_owner", toolId: status === "unrelated" ? "linear.other" : approval.toolId,
-          manifestHash: approval.manifestHash, connectionId,
-          providerConnectionId: approval.providerConnectionId,
-          idempotencyKey: approval.idempotencyKey, requestHash: `sha256-${"f".repeat(64)}`,
-          approvalId: status === "unrelated" ? null : approval.id,
-          status: "reserved", result: null, errorCode: null, startedAt: now,
-          completedAt: null, createdAt: now, updatedAt: now,
-        };
-        await runtime.receipts.reserve(receipt);
-        if (["running", "succeeded", "uncertain", "unrelated"].includes(status)) {
-          await runtime.receipts.beginDispatch(receipt.id, now + 3);
+      const scenarios = ["reserved", "failed", "running", "succeeded", "uncertain"] as const;
+      for (const association of ["exact", "legacy", "foreign", "wrong-operation"] as const) {
+        for (const status of scenarios) {
+          const now = Date.now();
+          const approval: ExecutionApproval = {
+            id: `approval_${crypto.randomUUID()}`, workspaceId, actorUserId: "execution_owner",
+            principalKey: "web:execution_owner", toolId: "linear.create_issue",
+            manifestHash: `sha256-${"d".repeat(64)}`, connectionId,
+            providerConnectionId: `plug_${crypto.randomUUID()}`, params: {},
+            idempotencyKey: `approval_${crypto.randomUUID()}`, status: "pending",
+            approvedBy: null, decidedAt: null, expiresAt: now + 60_000,
+            executionReceiptId: null, createdAt: now, updatedAt: now,
+          };
+          await runtime.approvals.create(approval);
+          await runtime.approvals.approve({ approvalId: approval.id,
+            actorUserId: "execution_owner", now: now + 1 });
+          await runtime.approvals.claim({ approvalId: approval.id,
+            actorUserId: "execution_owner", principalKey: "web:execution_owner",
+            now: now + 2, deadlineAt: Date.now() + 2_000 });
+          let associatedApprovalId: string | null = approval.id;
+          if (association === "legacy") associatedApprovalId = null;
+          if (association === "foreign") associatedApprovalId = `approval_foreign_${crypto.randomUUID()}`;
+          const receipt: ExecutionReceipt = {
+            id: `execution_${crypto.randomUUID()}`, workspaceId, actorUserId: "execution_owner",
+            principalKey: "web:execution_owner",
+            toolId: association === "wrong-operation" ? "linear.other" : approval.toolId,
+            manifestHash: approval.manifestHash, connectionId,
+            providerConnectionId: approval.providerConnectionId,
+            idempotencyKey: approval.idempotencyKey, requestHash: `sha256-${"f".repeat(64)}`,
+            approvalId: associatedApprovalId,
+            status: "reserved", result: null, errorCode: null, startedAt: now,
+            completedAt: null, createdAt: now, updatedAt: now,
+          };
+          await runtime.receipts.reserve(receipt);
+          if (["running", "succeeded", "uncertain"].includes(status)) {
+            await runtime.receipts.beginDispatch(receipt.id, now + 3);
+          }
+          if (status === "failed") await runtime.receipts.fail(receipt.id, "predispatch", now + 3);
+          if (status === "succeeded") await runtime.receipts.succeed(receipt.id, {}, now + 4);
+          if (status === "uncertain") await runtime.receipts.uncertain(receipt.id, "provider_outcome_unknown", now + 4);
+          if (association !== "exact") {
+            await expect(runtime.approvals.consume({ approvalId: approval.id,
+              receiptId: receipt.id, now: now + 5 })).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+            await expect(runtime.approvals.uncertain({ approvalId: approval.id,
+              receiptId: receipt.id, now: now + 5 })).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+          } else if (status === "succeeded") {
+            await expect(runtime.approvals.consume({ approvalId: approval.id,
+              receiptId: receipt.id, now: now + 5 })).resolves.toMatchObject({
+                status: "consumed", executionReceiptId: receipt.id });
+            await observer.query(`UPDATE omr_control.execution_approvals
+              SET status = 'executing', execution_receipt_id = NULL WHERE id = $1`, [approval.id]);
+          } else if (status === "running") {
+            await expect(runtime.approvals.uncertain({ approvalId: approval.id,
+              receiptId: receipt.id, now: now + 5 })).resolves.toMatchObject({
+                status: "uncertain", executionReceiptId: receipt.id });
+            await observer.query(`UPDATE omr_control.execution_approvals
+              SET status = 'executing', execution_receipt_id = NULL WHERE id = $1`, [approval.id]);
+          }
+          await observer.query(`UPDATE omr_control.execution_approvals
+            SET status = 'uncertain', execution_receipt_id = $2 WHERE id = $1`, [approval.id, receipt.id]);
+          const exactEffect = association === "exact" &&
+            ["running", "succeeded", "uncertain"].includes(status);
+          await expect(runtime.approvals.claim({ approvalId: approval.id,
+            actorUserId: "execution_owner", principalKey: "web:execution_owner",
+            now: Date.now(), deadlineAt: Date.now() + 2_000 })).rejects.toMatchObject(exactEffect
+            ? { code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: receipt.id }
+            : { code: "APPROVAL_UNAVAILABLE" });
+          await observer.query(`UPDATE omr_control.execution_approvals
+            SET status = 'executing', execution_receipt_id = NULL WHERE id = $1`, [approval.id]);
+          await observer.query(`UPDATE omr_control.execution_approvals SET updated_at = $2
+            WHERE id = $1`, [approval.id, Date.now() - EXECUTION_STALE_AFTER_MS - 5_000]);
+          const expected = exactEffect
+            ? { code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: receipt.id }
+            : { code: "APPROVAL_UNAVAILABLE" };
+          await expect(runtime.approvals.claim({ approvalId: approval.id,
+            actorUserId: "execution_owner", principalKey: "web:execution_owner",
+            now: Date.now(), deadlineAt: Date.now() + 2_000 })).rejects.toMatchObject(expected);
+          const state = await observer.query<{ status: string; execution_receipt_id: string | null }>(
+            `SELECT status, execution_receipt_id FROM omr_control.execution_approvals WHERE id = $1`,
+            [approval.id]);
+          expect(state.rows[0]).toMatchObject(exactEffect
+            ? { status: "uncertain", execution_receipt_id: receipt.id }
+            : { status: "failed", execution_receipt_id: null });
         }
-        if (status === "failed") await runtime.receipts.fail(receipt.id, "predispatch", now + 3);
-        if (status === "succeeded") await runtime.receipts.succeed(receipt.id, {}, now + 4);
-        if (status === "uncertain") await runtime.receipts.uncertain(receipt.id, "provider_outcome_unknown", now + 4);
-        await observer.query(`UPDATE omr_control.execution_approvals SET updated_at = $2
-          WHERE id = $1`, [approval.id, Date.now() - EXECUTION_STALE_AFTER_MS - 5_000]);
-        const expected = ["running", "succeeded", "uncertain"].includes(status)
-          ? { code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: receipt.id }
-          : { code: "APPROVAL_UNAVAILABLE" };
-        await expect(runtime.approvals.claim({ approvalId: approval.id,
-          actorUserId: "execution_owner", principalKey: "web:execution_owner",
-          now: Date.now(), deadlineAt: Date.now() + 2_000 })).rejects.toMatchObject(expected);
-        const state = await observer.query<{ status: string; execution_receipt_id: string | null }>(
-          `SELECT status, execution_receipt_id FROM omr_control.execution_approvals WHERE id = $1`,
-          [approval.id]);
-        expect(state.rows[0]).toMatchObject(["running", "succeeded", "uncertain"].includes(status)
-          ? { status: "uncertain", execution_receipt_id: receipt.id }
-          : { status: "failed", execution_receipt_id: null });
       }
     } finally {
       await observer.end();
