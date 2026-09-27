@@ -18,13 +18,14 @@ function redact(value: JsonValue, sensitive: Set<string>, path = ""): JsonValue 
 /** Approval parameters remain encrypted in storage; API and UI previews mask secrets. */
 export function publicApproval(approval: ExecutionApproval, manifest?: ToolManifest | null) {
   const { principalKey: _principalKey, providerConnectionId: _providerConnectionId,
-    idempotencyKey: _idempotencyKey, ...visible } = approval;
+    idempotencyKey: _idempotencyKey, requestHash: _requestHash, ...visible } = approval;
+  const manifestCurrent = manifest?.hash === approval.manifestHash;
   const sensitive = new Set(manifest?.contract.sensitiveKeys.map((key) => key.toLowerCase()) ?? []);
   return { ...visible,
-    effect: manifest?.contract.effect ?? "unknown",
-    resources: manifest?.contract.resources ?? [],
-    manifestCurrent: manifest?.hash === approval.manifestHash,
-    params: manifest ? redact(approval.params, sensitive) : "[REDACTED]",
+    effect: manifestCurrent && manifest ? manifest.contract.effect : "unknown",
+    resources: manifestCurrent && manifest ? manifest.contract.resources : [],
+    manifestCurrent,
+    params: manifestCurrent ? redact(approval.params, sensitive) : "[REDACTED]",
   };
 }
 

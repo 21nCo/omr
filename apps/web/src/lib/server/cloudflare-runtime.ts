@@ -603,6 +603,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
         Date.now,
         execution.approvals,
         execution.invocationGuard,
+        executionWrappingKey(event),
       ), catalog);
     } finally {
       await Promise.allSettled([

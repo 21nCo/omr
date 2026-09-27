@@ -11,11 +11,12 @@ import {
   ExecutionCapabilityDeniedError,
   ExecutionIdempotencyConflictError,
   ExecutionService,
+  type ExecutionInvocationGuard,
 } from "./execution.js";
 import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "./testing.js";
 import { publicApproval, publicReceipt } from "./projection.js";
 
-async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes: string[] | undefined = ["issues:read", "repo"], scopeFree = false) {
+async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes: string[] | undefined = ["issues:read", "repo"], scopeFree = false, guard?: ExecutionInvocationGuard) {
   let now = 1_700_000_000_000;
   let grantedScopes: string[] | undefined = initialScopes;
   let remoteError: Error | null = null;
@@ -85,6 +86,8 @@ async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes: st
       },
       () => now,
       approvals,
+      guard,
+      new Uint8Array(32).fill(7),
     ),
     advance(ms: number) { now += ms; },
   };
@@ -398,6 +401,18 @@ describe("execution service", () => {
     expect(actionCall).not.toHaveBeenCalled();
   });
 
+  it("binds approval lifetime to the idempotency key while retaining the original expiry on a true retry", async () => {
+    const { approvals, service, workspace, advance } = await fixture();
+    const request = { principal: { kind: "web" as const, userId: "user_1", workspaceId: workspace.id },
+      toolId: "linear.create_issue", params: { title: "same" }, idempotencyKey: "ttl-retry", ttlMs: 60_000 };
+    const first = await service.requestApproval(request);
+    advance(1_000);
+    expect(await service.requestApproval(request)).toMatchObject({ id: first.id, expiresAt: first.expiresAt });
+    await expect(service.requestApproval({ ...request, ttlMs: 120_000 }))
+      .rejects.toBeInstanceOf(ExecutionIdempotencyConflictError);
+    expect(approvals.approvals.size).toBe(1);
+  });
+
   it("allows only one concurrent approved invocation and blocks revoked bindings", async () => {
     const { actionCall, connections, service, workspace } = await fixture();
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
@@ -429,9 +444,40 @@ describe("execution service", () => {
     expect(projected.params).toEqual({ title: "visible", nested: { apiKey: "[REDACTED]" } });
     expect(JSON.stringify(projected)).not.toContain("plug_linear");
     expect(JSON.stringify(projected)).not.toContain("secret-value");
+    expect(projected).not.toHaveProperty("requestHash");
     const receipt = await service.execute({ principal, toolId: "linear.get_issue", params: {} });
     expect(publicReceipt(receipt, false)).toMatchObject({ result: null, status: "succeeded" });
     expect(JSON.stringify(publicReceipt(receipt, false))).not.toContain("plug_linear");
+  });
+
+  it("masks every preview field when the current manifest no longer matches the approval", async () => {
+    const { approvals, catalog, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const approval = await service.requestApproval({ principal, toolId: "linear.create_issue",
+      params: { title: "visible", passphrase: "old manifest secret" } });
+    const changed = { ...catalog.get(approval.toolId)!, hash: "replacement-manifest" };
+    const projections = [approval, await service.approve(approval.id, principal.userId),
+      ...(await approvals.listForActor({ workspaceId: workspace.id, actorUserId: principal.userId, limit: 10 }))];
+    for (const record of projections) {
+      const preview = publicApproval(record, changed);
+      expect(preview).toMatchObject({ manifestCurrent: false, params: "[REDACTED]" });
+      expect(JSON.stringify(preview)).not.toContain("old manifest secret");
+      expect(preview).not.toHaveProperty("requestHash");
+    }
+  });
+
+  it("stores keyed request fingerprints that do not reveal a guessable parameter digest", async () => {
+    const { approvals, receipts, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const approval = await service.requestApproval({ principal, toolId: "linear.create_issue",
+      params: { passphrase: "short secret" } });
+    await service.execute({ principal, toolId: "linear.get_issue", params: { passphrase: "short secret" } });
+    expect(approval.requestHash).toMatch(/^hmac-sha256-[a-f0-9]{64}$/);
+    expect([...receipts.receipts.values()][0]?.requestHash).toMatch(/^hmac-sha256-[a-f0-9]{64}$/);
+    expect(approvals.approvals.get(approval.id)?.requestHash).toBe(approval.requestHash);
+    const plainDigest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("short secret"));
+    const guess = [...new Uint8Array(plainDigest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    expect(approval.requestHash).not.toContain(guess);
   });
 
   it("rejects reuse of an idempotency key for different parameters", async () => {
@@ -525,6 +571,53 @@ describe("execution service", () => {
     await expect(service.executeApproved(principal, approval.id))
       .rejects.toBeInstanceOf(ApprovalUnavailableError);
     expect(actionCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a successful receipt authoritative when approval consumption fails", async () => {
+    const { actionCall, approvals, receipts, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const approval = await service.requestApproval({ principal, toolId: "linear.create_issue", params: {},
+      idempotencyKey: "consume-failure" });
+    await service.approve(approval.id, principal.userId);
+    vi.spyOn(approvals, "consume").mockRejectedValueOnce(new Error("approval store unavailable"));
+    const error = await service.executeApproved(principal, approval.id).catch((failure: unknown) => failure);
+    expect(error).toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: expect.any(String) });
+    expect(receipts.receipts.get(error.receiptId)).toMatchObject({ status: "succeeded" });
+    expect(approvals.approvals.get(approval.id)).toMatchObject({ status: "executing" });
+    expect(actionCall).toHaveBeenCalledTimes(1);
+    await expect(service.executeApproved(principal, approval.id))
+      .rejects.toBeInstanceOf(ApprovalUnavailableError);
+  });
+
+  it("binds the empty-workspace web approval route to actor, workspace, and current membership", async () => {
+    let member = true;
+    let expectedWorkspaceId = "";
+    const guard: ExecutionInvocationGuard = { run: vi.fn(async ({ principal }, invoke) => {
+      expect(principal.workspaceId).toBe(expectedWorkspaceId);
+      if (!member) throw Object.assign(new Error("membership revoked"), { code: "CONNECTION_ACCESS_DENIED" });
+      return invoke();
+    }) };
+    const { actionCall, approvals, service, workspace } = await fixture(undefined, undefined, false, guard);
+    expectedWorkspaceId = workspace.id;
+    const requestPrincipal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const makeApproval = async () => {
+      const approval = await service.requestApproval({ principal: requestPrincipal,
+        toolId: "linear.create_issue", params: {} });
+      await service.approve(approval.id, requestPrincipal.userId);
+      return approval;
+    };
+    const actorBound = await makeApproval();
+    await expect(service.executeApproved({ kind: "web", userId: "user_2", workspaceId: "" }, actorBound.id))
+      .rejects.toBeInstanceOf(ApprovalUnavailableError);
+    const workspaceBound = await makeApproval();
+    await expect(service.executeApproved({ ...requestPrincipal, workspaceId: "workspace_other" }, workspaceBound.id))
+      .rejects.toBeInstanceOf(ApprovalUnavailableError);
+    const revoked = await makeApproval();
+    member = false;
+    await expect(service.executeApproved({ ...requestPrincipal, workspaceId: "", sessionId: "session_1" }, revoked.id))
+      .rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+    expect(approvals.approvals.get(revoked.id)?.status).toBe("failed");
+    expect(actionCall).not.toHaveBeenCalled();
   });
 
   it("requires client approval capability and rejects expired approvals", async () => {

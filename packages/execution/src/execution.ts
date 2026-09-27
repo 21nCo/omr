@@ -189,6 +189,8 @@ export class ApprovalUnavailableError extends Error {
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,199}$/;
 
 export class ExecutionService {
+  private readonly fingerprintKey: Uint8Array<ArrayBuffer>;
+
   constructor(
     private readonly catalog: ToolCatalog,
     private readonly connections: ConnectionAuthority,
@@ -198,7 +200,13 @@ export class ExecutionService {
     private readonly now: () => number = Date.now,
     private readonly approvals?: ExecutionApprovalStore,
     private readonly invocationGuard?: ExecutionInvocationGuard,
-  ) {}
+    fingerprintKey?: Uint8Array<ArrayBuffer>,
+  ) {
+    if (!fingerprintKey || fingerprintKey.byteLength !== 32) {
+      throw new Error("Execution fingerprint key must be 32 bytes");
+    }
+    this.fingerprintKey = fingerprintKey;
+  }
 
   async execute(input: {
     principal: ExecutionPrincipal;
@@ -286,7 +294,7 @@ export class ExecutionService {
       params,
       idempotencyKey,
       requestHash: await hashJson({ manifestHash: manifest.hash, connectionId: connection.id,
-        params }),
+        params, ttlMs }, this.fingerprintKey),
       status: "pending",
       approvedBy: null,
       decidedAt: null,
@@ -316,6 +324,7 @@ export class ExecutionService {
       principalKey: principalKey(principal),
       now: this.now(),
     });
+    let completedReceipt: ExecutionReceipt | undefined;
     try {
       const manifest = this.catalog.get(approval.toolId);
       if (!manifest || manifest.hash !== approval.manifestHash || manifest.contract.effect === "read") {
@@ -347,14 +356,18 @@ export class ExecutionService {
         connection,
         idempotencyKey: approval.idempotencyKey,
       });
+      completedReceipt = receipt;
       try {
         await approvals.consume({ approvalId, receiptId: receipt.id, now: this.now() });
       } catch {
+        // The receipt is authoritative. Do not turn a successful provider effect into a failed approval.
         throw new ExecutionOutcomeUnknownError(receipt.id);
       }
       return receipt;
     } catch (error) {
-      await approvals.fail({ approvalId, now: this.now() }).catch(() => undefined);
+      if (!completedReceipt) {
+        await approvals.fail({ approvalId, now: this.now() }).catch(() => undefined);
+      }
       throw error;
     }
   }
@@ -374,7 +387,7 @@ export class ExecutionService {
         manifestHash: input.manifest.hash,
         connectionId: input.connection.id,
         params: input.params,
-      });
+      }, this.fingerprintKey);
       const timestamp = this.now();
       const idempotencyKey = input.idempotencyKey ?? `request_${crypto.randomUUID()}`;
       const reservation = await this.receipts.reserve({
@@ -525,12 +538,11 @@ function assertJson(value: unknown, depth = 0): void {
   throw new ExecutionInputError("Execution values must be JSON-compatible");
 }
 
-async function hashJson(value: JsonValue | Record<string, unknown>): Promise<string> {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(canonicalJson(value)),
-  );
-  return `sha256-${[...new Uint8Array(digest)]
+async function hashJson(value: JsonValue | Record<string, unknown>, secret: Uint8Array<ArrayBuffer>): Promise<string> {
+  const key = await crypto.subtle.importKey("raw", secret, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const digest = await crypto.subtle.sign("HMAC", key,
+    new TextEncoder().encode(`omr-execution-fingerprint-v1:${canonicalJson(value)}`));
+  return `hmac-sha256-${[...new Uint8Array(digest)]
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("")}`;
 }

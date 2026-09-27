@@ -82,4 +82,25 @@ describe("PostgreSQL invocation transaction contract", () => {
     expect(invoke).not.toHaveBeenCalled();
     expect(queries.at(-1)).toBe("ROLLBACK");
   });
+
+  it("denies a web approval when membership was revoked before the transaction", async () => {
+    const queries: string[] = [];
+    const query = vi.fn(async (sql: string) => {
+      queries.push(sql);
+      if (sql.includes("connection_bindings")) return { rows: [{ workspace_id: "workspace_1",
+        provider_connection_id: "remote_1", ownership: "workspace", owner_user_id: null,
+        status: "active", readiness: "ready" }] };
+      return { rows: [] };
+    });
+    const guard = new PostgresExecutionInvocationGuard({ query } as unknown as Client);
+    const invoke = vi.fn(async () => "effect");
+    await expect(guard.run({ principal: { kind: "web", userId: "user_1",
+      workspaceId: "workspace_1", sessionId: "session_1" },
+      connection, capability: "tools:write" }, invoke))
+      .rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+    expect(queries.some((sql) => sql.includes("workspace_memberships") && sql.includes("FOR SHARE"))).toBe(true);
+    expect(queries.some((sql) => sql.includes("omr_identity.sessions"))).toBe(false);
+    expect(invoke).not.toHaveBeenCalled();
+    expect(queries.at(-1)).toBe("ROLLBACK");
+  });
 });

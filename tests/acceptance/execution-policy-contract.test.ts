@@ -42,7 +42,7 @@ describe("execution-policy-contract", () => {
     const provider = vi.fn(async () => ({ result: "private provider result" }));
     const service = new ExecutionService(catalog, connections, { action: provider },
       new MemoryExecutionReceiptStore(), async () => [], Date.now,
-      new MemoryExecutionApprovalStore());
+      new MemoryExecutionApprovalStore(), undefined, new Uint8Array(32).fill(7));
     const principal = (request: Request): ExecutionPrincipal => surface === "web"
       ? { kind: "web", userId: "user_1", workspaceId: workspace.id }
       : { kind: "client", userId: "user_1", workspaceId: workspace.id,
@@ -124,6 +124,7 @@ describe("execution-policy-contract", () => {
         const approval = JSON.parse(pending.stdout) as { id: string; params: unknown };
         expect(approval.params).toEqual({ title: "Review", secretField: "[REDACTED]" });
         expect(pending.stdout).not.toContain("fixture-secret");
+        expect(pending.stdout).not.toContain("requestHash");
         expect(provider).toHaveBeenCalledTimes(1);
         await webPost("/api/approvals/approve", { approvalId: approval.id });
         const executed = await runCli(["approvals", "execute", approval.id]);
@@ -150,6 +151,7 @@ describe("execution-policy-contract", () => {
         expect(pending).toMatchObject({ structuredContent: { status: "approval_required", executed: false } });
         const approvalId = (pending.structuredContent as { approvalId: string }).approvalId;
         expect(JSON.stringify(pending)).not.toContain("fixture-secret");
+        expect(JSON.stringify(pending)).not.toContain("requestHash");
         expect(provider).toHaveBeenCalledTimes(1);
         await webPost("/api/approvals/approve", { approvalId });
         expect(await client.callTool({ name: "omr.approvals.execute", arguments: { approvalId } }))
@@ -179,9 +181,10 @@ describe("execution-policy-contract", () => {
     expect(approval.params).toEqual({ title: "Review", secretField: "[REDACTED]" });
     expect(JSON.stringify(approval)).not.toContain("remote_secret_handle");
     expect(JSON.stringify(approval)).not.toContain("fixture-secret");
+    expect(approval).not.toHaveProperty("requestHash");
     expect((await client.requestApproval(request) as { id: string }).id).toBe(approval.id);
     expect(provider).toHaveBeenCalledTimes(1);
-    await client.approve(approval.id);
+    expect(await client.approve(approval.id)).not.toHaveProperty("requestHash");
     const receipt = await client.executeApproved(approval.id) as { id: string; status: string };
     expect(receipt.status).toBe("succeeded");
     expect(JSON.stringify(receipt)).not.toContain("remote_secret_handle");
