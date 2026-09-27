@@ -168,11 +168,12 @@ receipts cannot certify an external effect. Stale reconciliation fails an exactl
 associated `reserved` receipt with `reservation_expired` in the same transaction
 that fails its approval; interruption rolls back both changes for a later retry.
 An unassociated stale approval is failed and cannot be executed again; inspect
-the original key and provider history before any manual retry. Keep `0016` during Worker rollback: old writers
-leave the column NULL and old readers ignore it. Quiesce new writers before an
-old Worker rollback, and do not drop the column while associated receipts remain.
-Do not reset a `running` or `uncertain` receipt without reconciling the provider outcome. Rollback
-does not restore a revoked connection or an expired grant.
+the original key and provider history before any manual retry. Keep `0016` during
+Worker rollback: old writers leave the column NULL and old readers ignore it.
+Quiesce new writers before an old Worker rollback, and do not drop the column
+while associated receipts remain.
+Do not reset a `running` or `uncertain` receipt without reconciling the provider
+outcome. Rollback does not restore a revoked connection or an expired grant.
 This reconciliation and runtime socket shutdown change adds no migration. Drain
 in-flight claims and invocations before a Worker rollback; keep the additive schema
 and reconcile any predispatch receipts left by the older Worker before retrying keys.

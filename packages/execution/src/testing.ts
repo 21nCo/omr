@@ -194,29 +194,7 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
         approval.executionReceiptId === null &&
         this.isMember(approval.workspaceId, input.actorUserId) &&
         input.now - approval.updatedAt >= EXECUTION_STALE_AFTER_MS) {
-      const exactReceipt = [...this.receipts.receipts.values()].find((candidate) =>
-        candidate.approvalId === approval.id &&
-        candidate.workspaceId === approval.workspaceId &&
-        candidate.actorUserId === approval.actorUserId &&
-        candidate.principalKey === approval.principalKey &&
-        candidate.toolId === approval.toolId &&
-        candidate.manifestHash === approval.manifestHash &&
-        candidate.connectionId === approval.connectionId &&
-        candidate.providerConnectionId === approval.providerConnectionId &&
-        candidate.idempotencyKey === approval.idempotencyKey);
-      const receipt = exactReceipt && ["running", "succeeded", "uncertain"].includes(exactReceipt.status)
-        ? exactReceipt : undefined;
-      if (exactReceipt?.status === "reserved") {
-        exactReceipt.status = "failed";
-        exactReceipt.errorCode = "reservation_expired";
-        exactReceipt.completedAt = input.now;
-        exactReceipt.updatedAt = input.now;
-      }
-      approval.status = receipt ? "uncertain" : "failed";
-      approval.executionReceiptId = receipt?.id ?? null;
-      approval.updatedAt = input.now;
-      if (receipt) throw new ExecutionOutcomeUnknownError(receipt.id);
-      throw new ApprovalUnavailableError();
+      this.reconcileStaleExecutingClaim(approval, input.now);
     }
     if (
       !approval ||
@@ -231,6 +209,32 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
     approval.status = "executing";
     approval.updatedAt = input.now;
     return structuredClone(approval);
+  }
+
+  private reconcileStaleExecutingClaim(approval: ExecutionApproval, now: number): never {
+    const exactReceipt = [...this.receipts.receipts.values()].find((candidate) =>
+      candidate.approvalId === approval.id &&
+      candidate.workspaceId === approval.workspaceId &&
+      candidate.actorUserId === approval.actorUserId &&
+      candidate.principalKey === approval.principalKey &&
+      candidate.toolId === approval.toolId &&
+      candidate.manifestHash === approval.manifestHash &&
+      candidate.connectionId === approval.connectionId &&
+      candidate.providerConnectionId === approval.providerConnectionId &&
+      candidate.idempotencyKey === approval.idempotencyKey);
+    const effectReceipt = exactReceipt && ["running", "succeeded", "uncertain"].includes(exactReceipt.status)
+      ? exactReceipt : undefined;
+    if (exactReceipt?.status === "reserved") {
+      exactReceipt.status = "failed";
+      exactReceipt.errorCode = "reservation_expired";
+      exactReceipt.completedAt = now;
+      exactReceipt.updatedAt = now;
+    }
+    approval.status = effectReceipt ? "uncertain" : "failed";
+    approval.executionReceiptId = effectReceipt?.id ?? null;
+    approval.updatedAt = now;
+    if (effectReceipt) throw new ExecutionOutcomeUnknownError(effectReceipt.id);
+    throw new ApprovalUnavailableError();
   }
 
   async consume(input: {
