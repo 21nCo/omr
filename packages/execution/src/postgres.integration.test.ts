@@ -1,5 +1,5 @@
 import { Client } from "pg";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { EXECUTION_STALE_AFTER_MS, type ExecutionReceipt } from "./execution.js";
 import type { ExecutionApproval } from "./execution.js";
@@ -48,8 +48,26 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     });
   });
 
+  afterEach(async () => {
+    const client = new Client({ connectionString: connectionString! });
+    await client.connect();
+    try {
+      await client.query("DELETE FROM omr_control.execution_approvals WHERE workspace_id = $1", [workspaceId]);
+      await client.query("DELETE FROM omr_control.execution_receipts WHERE workspace_id = $1", [workspaceId]);
+    } finally {
+      await client.end();
+    }
+  });
+
   afterAll(async () => {
     await runtime.close();
+    const client = new Client({ connectionString: connectionString! });
+    await client.connect();
+    try {
+      await client.query("DELETE FROM omr_control.workspaces WHERE id = $1", [workspaceId]);
+    } finally {
+      await client.end();
+    }
   });
 
   const approvalFixture = (now: number, overrides: Partial<ExecutionApproval> = {}): ExecutionApproval => ({
@@ -213,6 +231,37 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     }
   }, 15_000);
 
+  it("does not restart an expired invocation while completing an approved receipt", async () => {
+    const now = Date.now();
+    const approval = approvalFixture(now);
+    await runtime.approvals.create(approval);
+    await runtime.approvals.approve({ approvalId: approval.id,
+      actorUserId: "execution_owner", now: now + 1 });
+    await runtime.approvals.claim({ approvalId: approval.id,
+      actorUserId: "execution_owner", principalKey: approval.principalKey,
+      now: now + 2, deadlineAt: Date.now() + 1_000 });
+    const receipt = receiptFixture(approval, now);
+    await runtime.receipts.reserve(receipt);
+    await runtime.receipts.beginDispatch(receipt.id, now + 3);
+    const started = Date.now();
+    await expect(runtime.approvals.succeedWithReceipt({ approvalId: approval.id,
+      receipt, result: { id: "late" }, now: now + 4, deadlineAt: started - 1 }))
+      .rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    const observer = new Client({ connectionString: connectionString! });
+    await observer.connect();
+    try {
+      const state = await observer.query<{ receipt_status: string; approval_status: string }>(
+        `SELECT receipt.status AS receipt_status, approval.status AS approval_status
+         FROM omr_control.execution_receipts AS receipt
+         JOIN omr_control.execution_approvals AS approval ON approval.id = receipt.approval_id
+         WHERE receipt.id = $1`, [receipt.id]);
+      expect(state.rows[0]).toEqual({ receipt_status: "running", approval_status: "executing" });
+    } finally {
+      await observer.end();
+    }
+  });
+
   it("atomically binds encrypted approval parameters to one actor and principal", async () => {
     const now = Date.now();
     const approval = approvalFixture(now, { manifestHash: `sha256-${"c".repeat(64)}`,
@@ -225,12 +274,12 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       workspaceId,
       actorUserId: "execution_owner",
       limit: 20,
-    })).resolves.toContainEqual(
+    })).resolves.toEqual([
       expect.objectContaining({
         id: approval.id,
         params: { title: "Sensitive approval title" },
       }),
-    );
+    ]);
     await expect(runtime.approvals.approve({
       approvalId: approval.id,
       actorUserId: "other_user",

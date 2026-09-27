@@ -313,7 +313,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     if (!this.claimConnectionString) {
       throw new Error("Approved completion requires a dedicated PostgreSQL connection");
     }
-    const deadlineAt = Math.max(input.deadlineAt + 5_000, Date.now() + 5_000);
+    const deadlineAt = input.deadlineAt;
     const client = new PostgresClient({ connectionString: this.claimConnectionString,
       connectionTimeoutMillis: Math.max(1, deadlineAt - Date.now()) });
     client.on("error", () => undefined);
@@ -332,7 +332,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
          FOR UPDATE OF receipt, approval`,
         [input.receipt.id, input.approvalId],
       );
-      if (!locked.rows[0] || locked.rows[0].workspace_id !== input.receipt.workspaceId) {
+      if (locked.rows[0]?.workspace_id !== input.receipt.workspaceId) {
         throw new ApprovalUnavailableError();
       }
       const encrypted = await withinInvocationDeadline(deadlineAt, () =>
@@ -355,10 +355,10 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     } finally {
       const closing = client.end();
       try {
-        await withinInvocationDeadline(Date.now() + 1_000, () => closing);
+        await withinInvocationDeadline(Math.min(deadlineAt, Date.now() + 1_000), () => closing);
       } catch {
         client.connection?.stream.destroy();
-        await withinInvocationDeadline(Date.now() + 1_000, () => closing).catch(() => undefined);
+        void closing.catch(() => undefined);
       }
     }
   }

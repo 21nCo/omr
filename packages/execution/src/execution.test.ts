@@ -364,7 +364,7 @@ describe("execution service", () => {
       status: "uncertain", executionReceiptId: outcome.receiptId,
     });
     await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({
-      code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: outcome.receiptId,
+      code: "CONNECTION_ACCESS_DENIED",
     });
     expect(effectApplied).toBe(1);
     expect(actionCall).toHaveBeenCalledTimes(1);
@@ -1043,6 +1043,67 @@ describe("execution service", () => {
     expect(actionCall).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["web", "client"] as const)("authorizes a consumed %s approval again before exposing its result", async (kind) => {
+    let workspaceId = "";
+    let revoked = false;
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("connection_bindings")) return { rows: [{ workspace_id: workspaceId,
+        provider_connection_id: "plug_linear", ownership: "personal", owner_user_id: "user_1",
+        status: "active", readiness: "ready" }] };
+      if (sql.includes("workspace_memberships")) return { rows: [{ id: "membership_1" }] };
+      if (sql.includes("omr_identity.sessions")) return { rows: revoked ? [] : [{ id: "session_1",
+        expires_at: new Date(Date.now() + 60_000) }] };
+      if (sql.includes("omr_control.clients")) return { rows: [{ workspace_id: workspaceId,
+        revoked_at: null }] };
+      if (sql.includes("client_grants")) return { rows: [{ client_id: "client_1",
+        workspace_id: workspaceId, user_id: "user_1",
+        capabilities: ["tools:read", "tools:write", "approvals:create"],
+        revoked_at: revoked ? "2026-09-27" : null,
+        expires_at: new Date(Date.now() + 60_000) }] };
+      return { rows: [] };
+    });
+    const guard = new PostgresExecutionInvocationGuard({ query,
+      end: vi.fn(async () => undefined) } as never);
+    const { actionCall, service, workspace } = await fixture(undefined, undefined, false, guard);
+    workspaceId = workspace.id;
+    const principal = kind === "web"
+      ? { kind, userId: "user_1", workspaceId, sessionId: "session_1" } as const
+      : { kind, userId: "user_1", workspaceId, clientId: "client_1", grantId: "grant_1",
+        capabilities: ["tools:read", "tools:write", "approvals:create"] as const };
+    const approval = await requestApproval(service, { principal, toolId: "linear.create_issue", params: {} });
+    await service.approve(approval.id, principal.userId);
+    const first = await service.executeApproved(principal, approval.id);
+    expect(await service.executeApproved(principal, approval.id)).toMatchObject({ id: first.id });
+    revoked = true;
+    await expect(service.executeApproved(principal, approval.id))
+      .rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+    expect(actionCall).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the original deadline and stable receipt when a provider returns late", async () => {
+    const { actionCall, approvals, receipts, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const approval = await requestApproval(service, { principal, toolId: "linear.create_issue", params: {} });
+    await service.approve(approval.id, principal.userId);
+    const started = Date.now();
+    let clock = started;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    try {
+      actionCall.mockImplementation(async () => {
+        clock = started + 60_001;
+        return { id: "late-effect" };
+      });
+      const failure = await service.executeApproved(principal, approval.id).catch((error: unknown) => error);
+      expect(failure).toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: expect.any(String) });
+      expect(receipts.receipts.get(failure.receiptId)).toMatchObject({ status: "uncertain" });
+      expect(approvals.approvals.get(approval.id)).toMatchObject({ status: "uncertain",
+        executionReceiptId: failure.receiptId });
+      expect(actionCall).toHaveBeenCalledOnce();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it("replays a durable read after guard COMMIT fails without another provider call", async () => {
     const guard: ExecutionInvocationGuard = { run: async (_input, invoke) => {
       await invoke(() => undefined);
@@ -1105,7 +1166,7 @@ describe("execution service", () => {
       .rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: error.receiptId });
     expect(actionCall).toHaveBeenCalledOnce();
     expect(end).toHaveBeenCalledOnce();
-    expect(query.mock.calls.at(-1)?.[0]).not.toBe("ROLLBACK");
+    expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
   });
 
   it.each([

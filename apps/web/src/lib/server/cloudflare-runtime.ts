@@ -11,7 +11,7 @@ import {
   type ConnectionBindingRecord,
 } from "@oh-my-router/connections";
 import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
-import { deriveExecutionFingerprintKey, ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
+import { decodeExecutionWrappingKey, deriveExecutionFingerprintKey, ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
 import { connectPostgresExecutionReceipts } from "@oh-my-router/execution/postgres";
 import { connectPostgresIdentityRuntime } from "@oh-my-router/identity/postgres";
 import { connectPostgresPlugFn } from "@oh-my-router/plugfn-runtime";
@@ -115,10 +115,12 @@ function deviceWrappingKey(event: RequestEvent): Uint8Array<ArrayBuffer> {
 }
 
 function executionWrappingKey(event: RequestEvent): Uint8Array<ArrayBuffer> {
-  return decodeWrappingKey(
-    requiredSecret(event, "EXECUTION_RESULT_WRAPPING_KEY"),
-    "Execution result",
-  );
+  const encoded = requiredSecret(event, "EXECUTION_RESULT_WRAPPING_KEY");
+  try {
+    return decodeExecutionWrappingKey(encoded);
+  } catch {
+    throw new RuntimeUnavailableError("Execution result wrapping key is invalid");
+  }
 }
 
 const OAUTH_BINDINGS: Record<string, readonly [string, string]> = {

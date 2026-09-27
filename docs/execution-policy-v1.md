@@ -36,8 +36,13 @@ that outlives the deadline may still finish upstream; its receipt
 and approval are marked uncertain and cannot be replayed automatically. Approval and rejection
 decisions also require a current workspace membership in the database statement, with a row lock
 that serializes concurrent membership removal. Safe reads can use the manifest's retry policy
-inside one invocation; effects that may write get one
-upstream attempt. The provider result is encrypted at rest. History omits results, and public approval
+inside one invocation; effects that may write get one upstream attempt.
+Approved completion uses that same original deadline for its separate receipt and approval
+transaction. A late provider result cannot open a fresh completion window; the response keeps
+the stable receipt ID and reports an uncertain outcome. Successful approval replay rechecks the
+current manifest, capability, connection, scopes, membership, session or grant through the same
+invocation guard before exposing the saved result. A revoked caller cannot retrieve it.
+The provider result is encrypted at rest. History omits results, and public approval
 previews mask declared sensitive keys and common credential fields. A contracted preview shows the
 action, effect, account, resource metadata and the full redacted argument object without truncation.
 An effectful tool with declared sensitive-key metadata gets a complete redacted argument preview.
@@ -166,7 +171,10 @@ Quiesce all execution, approval, and history access; apply `0017` with the same 
 `OMR_DATABASE_URL=... EXECUTION_RESULT_WRAPPING_KEY=... node
 scripts/rebind-execution-ciphertext.mjs` with the existing 32-byte Worker key. The script
 locks and re-encrypts one legacy row per transaction with version-1 associated data containing
-record kind, workspace ID, and row ID. It stops on a bad ciphertext or after five minutes;
+record kind, workspace ID, and row ID. The Worker and script accept the same canonical
+hexadecimal or base64url key encoding. The five-minute deadline bounds connection, queries,
+crypto, commit, and socket cleanup; an interrupted row transaction rolls back when its socket
+closes. It stops on a bad ciphertext or when that deadline expires;
 keep traffic quiesced, inspect the error without exposing plaintext, and rerun after repair.
 Verify zero version-0 rows with non-null ciphertext in both tables before deploying the new
 Worker with `SELECT count(*) FROM omr_control.execution_approvals WHERE

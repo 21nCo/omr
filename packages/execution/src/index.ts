@@ -21,3 +21,4 @@ export {
 export { publicApproval, publicReceipt } from "./projection.js";
 export { deriveExecutionFingerprintKey } from "./fingerprint-key.js";
 export { ExecutionInvocationDeadlineError } from "./postgres-invocation-guard.js";
+export { decodeExecutionWrappingKey } from "./wrapping-key.js";

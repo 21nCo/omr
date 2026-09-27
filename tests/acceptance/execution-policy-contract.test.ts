@@ -421,8 +421,8 @@ describe("execution-policy-contract", () => {
           (error: { code: number; stdout: string; stderr: string }) => error,
         );
         expect(replay.code).toBe(1);
-        expect(replay.stdout + replay.stderr).toContain("EXECUTION_OUTCOME_UNKNOWN");
-        expect(replay.stdout + replay.stderr).toContain(receiptId);
+        expect(replay.stdout + replay.stderr).toContain("CONNECTION_ACCESS_DENIED");
+        expect(replay.stdout + replay.stderr).not.toContain(receiptId);
         expect(provider).toHaveBeenCalledTimes(4);
       } finally {
         await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -492,7 +492,8 @@ describe("execution-policy-contract", () => {
           .error.details);
         expect(await client.callTool({ name: "omr.approvals.execute", arguments: { approvalId: ambiguousId } }))
           .toMatchObject({ isError: true, structuredContent: { ok: false,
-            error: { details: { error: "EXECUTION_OUTCOME_UNKNOWN", receiptId: failedDetails.receiptId } } } });
+            error: { details: { error: "CONNECTION_ACCESS_DENIED" } } } });
+        expect(failedDetails.receiptId).toMatch(/^execution_/);
         expect(provider).toHaveBeenCalledTimes(4);
       } finally {
         await Promise.all([client.close(), server.close()]);
@@ -570,9 +571,8 @@ describe("execution-policy-contract", () => {
     expect(failed).toMatchObject({ status: 502, body: {
       error: "EXECUTION_OUTCOME_UNKNOWN", receiptId: expect.any(String),
     } });
-    const receiptId = (failed.body as { receiptId: string }).receiptId;
-    await expect(client.executeApproved(ambiguous.id)).rejects.toMatchObject({ status: 502, body: {
-      error: "EXECUTION_OUTCOME_UNKNOWN", receiptId,
+    await expect(client.executeApproved(ambiguous.id)).rejects.toMatchObject({ status: 403, body: {
+      error: "CONNECTION_ACCESS_DENIED",
     } });
     expect(provider).toHaveBeenCalledTimes(4);
   });
