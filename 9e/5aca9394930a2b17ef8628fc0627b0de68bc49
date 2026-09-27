@@ -1,0 +1,22 @@
+docs/execution-policy-v1.md
+  h_a39f9495f9ec1d 44,58-60,72,81
+packages/client/src/index.ts
+  h_a39f9495f9ec1d 11-14,175,197-198,211,216
+packages/execution/src/execution.test.ts
+  h_a39f9495f9ec1d 647-690
+packages/execution/src/projection.ts
+  h_a39f9495f9ec1d 20-32,34-36,60-62
+tests/acceptance/execution-policy-contract.test.ts
+  h_a39f9495f9ec1d 24-25,30-97,194-195,250-251,253,291,336-337,340
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9e5aca9394930a2b17ef8628fc0627b0de68bc49",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
