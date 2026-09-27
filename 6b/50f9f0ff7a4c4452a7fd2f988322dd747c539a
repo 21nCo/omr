@@ -1,0 +1,22 @@
+docs/execution-policy-v1.md
+  h_a39f9495f9ec1d 23-29,84
+packages/execution/src/execution.test.ts
+  h_a39f9495f9ec1d 904-905,923-924,948-949,975-976
+packages/execution/src/postgres-invocation-guard.test.ts
+  h_a39f9495f9ec1d 39-41,123-124,129-130,154-155,165-166,171-255
+packages/execution/src/postgres-invocation-guard.ts
+  h_a39f9495f9ec1d 18-22,41-48,64,73-84,90,92,103,114,118,124,129,135,138,141,152,166,170-186
+tests/acceptance/execution-policy-contract.test.ts
+  h_a39f9495f9ec1d 11-13,32-152
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6b50f9f0ff7a4c4452a7fd2f988322dd747c539a",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
