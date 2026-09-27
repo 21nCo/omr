@@ -3,6 +3,7 @@ import type { JsonValue } from "@oh-my-router/tools";
 
 import {
   ApprovalUnavailableError,
+  ExecutionIdempotencyConflictError,
   type ApprovalStatus,
   type ExecutionApproval,
   type ExecutionApprovalStore,
@@ -20,6 +21,7 @@ interface ApprovalRow {
   params_ciphertext: Buffer;
   params_iv: Buffer;
   idempotency_key: string;
+  request_hash: string | null;
   status: ApprovalStatus;
   approved_by: string | null;
   decided_at: string | null;
@@ -30,7 +32,7 @@ interface ApprovalRow {
 }
 
 const COLUMNS = `id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash,
-  connection_id, provider_connection_id, params_ciphertext, params_iv, idempotency_key,
+  connection_id, provider_connection_id, params_ciphertext, params_iv, idempotency_key, request_hash,
   status, approved_by, decided_at, expires_at, execution_receipt_id, created_at, updated_at`;
 
 export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
@@ -46,9 +48,11 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     const result = await this.client.query<ApprovalRow>(
       `INSERT INTO omr_control.execution_approvals
          (id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash,
-          connection_id, provider_connection_id, params_ciphertext, params_iv, idempotency_key,
+          connection_id, provider_connection_id, params_ciphertext, params_iv, idempotency_key, request_hash,
           status, approved_by, decided_at, expires_at, execution_receipt_id, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+       ON CONFLICT (workspace_id, principal_key, idempotency_key)
+         WHERE request_hash IS NOT NULL DO NOTHING
        RETURNING ${COLUMNS}`,
       [
         approval.id,
@@ -62,6 +66,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
         encrypted.ciphertext,
         encrypted.iv,
         approval.idempotencyKey,
+        approval.requestHash ?? null,
         approval.status,
         approval.approvedBy,
         approval.decidedAt,
@@ -71,7 +76,18 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
         approval.updatedAt,
       ],
     );
-    return this.toApproval(result.rows[0]!);
+    if (result.rows[0]) return this.toApproval(result.rows[0]);
+    const existing = await this.client.query<ApprovalRow>(
+      `SELECT ${COLUMNS} FROM omr_control.execution_approvals
+       WHERE workspace_id = $1 AND principal_key = $2 AND idempotency_key = $3
+         AND request_hash IS NOT NULL`,
+      [approval.workspaceId, approval.principalKey, approval.idempotencyKey],
+    );
+    if (!existing.rows[0]) throw new Error("Approval reservation disappeared");
+    if (existing.rows[0].request_hash !== approval.requestHash) {
+      throw new ExecutionIdempotencyConflictError();
+    }
+    return this.toApproval(existing.rows[0]);
   }
 
   async approve(input: {
@@ -176,6 +192,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
       providerConnectionId: row.provider_connection_id,
       params: await this.decrypt(row.params_ciphertext, row.params_iv),
       idempotencyKey: row.idempotency_key,
+      ...(row.request_hash ? { requestHash: row.request_hash } : {}),
       status: row.status,
       approvedBy: row.approved_by,
       decidedAt: row.decided_at === null ? null : Number(row.decided_at),

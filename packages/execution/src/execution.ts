@@ -5,10 +5,10 @@ import {
 } from "@oh-my-router/connections";
 import { hasRequiredScopes, type JsonValue, type ToolCatalog, type ToolManifest } from "@oh-my-router/tools";
 
-export type ExecutionStatus = "running" | "succeeded" | "failed";
+export type ExecutionStatus = "running" | "succeeded" | "failed" | "uncertain";
 
 export type ExecutionPrincipal =
-  | { kind: "web"; userId: string; workspaceId: string }
+  | { kind: "web"; userId: string; workspaceId: string; sessionId?: string }
   | {
       kind: "client";
       userId: string;
@@ -42,6 +42,7 @@ export interface ExecutionReceiptStore {
   reserve(receipt: ExecutionReceipt): Promise<{ receipt: ExecutionReceipt; created: boolean }>;
   succeed(receiptId: string, result: JsonValue, now: number): Promise<ExecutionReceipt>;
   fail(receiptId: string, errorCode: string, now: number): Promise<ExecutionReceipt>;
+  uncertain(receiptId: string, errorCode: string, now: number): Promise<ExecutionReceipt>;
   listForActor(input: {
     workspaceId: string;
     actorUserId: string;
@@ -68,6 +69,7 @@ export interface ExecutionApproval {
   providerConnectionId: string;
   params: JsonValue;
   idempotencyKey: string;
+  requestHash?: string;
   status: ApprovalStatus;
   approvedBy: string | null;
   decidedAt: number | null;
@@ -109,6 +111,15 @@ export interface PlugFnActionPort {
       cache: boolean;
     },
   ): Promise<unknown>;
+}
+
+/** Hold current membership, grant, and binding authorization through the provider call. */
+export interface ExecutionInvocationGuard {
+  run<T>(input: {
+    principal: ExecutionPrincipal;
+    connection: ConnectionBindingRecord;
+    capability: ClientCapability;
+  }, invoke: () => Promise<T>): Promise<T>;
 }
 
 export class ExecutionInputError extends Error {
@@ -159,6 +170,14 @@ export class ExecutionFailedError extends Error {
   }
 }
 
+export class ExecutionOutcomeUnknownError extends Error {
+  readonly code = "EXECUTION_OUTCOME_UNKNOWN";
+  constructor(readonly receiptId: string) {
+    super("The provider outcome could not be confirmed; do not repeat this action");
+    this.name = "ExecutionOutcomeUnknownError";
+  }
+}
+
 export class ApprovalUnavailableError extends Error {
   readonly code = "APPROVAL_UNAVAILABLE";
   constructor() {
@@ -178,6 +197,7 @@ export class ExecutionService {
     private readonly connectionScopes: (providerConnectionId: string) => Promise<readonly string[] | undefined>,
     private readonly now: () => number = Date.now,
     private readonly approvals?: ExecutionApprovalStore,
+    private readonly invocationGuard?: ExecutionInvocationGuard,
   ) {}
 
   async execute(input: {
@@ -191,9 +211,10 @@ export class ExecutionService {
     if (!manifest) throw new ExecutionInputError("Unknown tool identifier");
     this.authorizeEffect(input.principal, manifest);
     assertJson(input.params);
-    if (input.idempotencyKey && !IDEMPOTENCY_KEY.test(input.idempotencyKey)) {
+    if (input.idempotencyKey !== undefined && !IDEMPOTENCY_KEY.test(input.idempotencyKey)) {
       throw new ExecutionInputError("Invalid idempotency key");
     }
+    const params = structuredClone(input.params);
 
     const connection = await this.connections.resolve({
       actorUserId: input.principal.userId,
@@ -208,7 +229,7 @@ export class ExecutionService {
     return this.runAuthorized({
       principal: input.principal,
       manifest,
-      params: input.params,
+      params,
       connection,
       idempotencyKey: input.idempotencyKey,
     });
@@ -236,9 +257,10 @@ export class ExecutionService {
       throw new ExecutionCapabilityDeniedError("approvals:create");
     }
     assertJson(input.params);
-    if (input.idempotencyKey && !IDEMPOTENCY_KEY.test(input.idempotencyKey)) {
+    if (input.idempotencyKey !== undefined && !IDEMPOTENCY_KEY.test(input.idempotencyKey)) {
       throw new ExecutionInputError("Invalid idempotency key");
     }
+    const params = structuredClone(input.params);
     const ttlMs = input.ttlMs ?? 10 * 60_000;
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 60_000 || ttlMs > 60 * 60_000) {
       throw new ExecutionInputError("Approval lifetime must be between one minute and one hour");
@@ -251,6 +273,7 @@ export class ExecutionService {
     });
     await this.assertScopes(manifest, connection);
     const timestamp = this.now();
+    const idempotencyKey = input.idempotencyKey ?? `approval_${crypto.randomUUID()}`;
     return approvals.create({
       id: `approval_${crypto.randomUUID()}`,
       workspaceId: input.principal.workspaceId,
@@ -260,8 +283,10 @@ export class ExecutionService {
       manifestHash: manifest.hash,
       connectionId: connection.id,
       providerConnectionId: connection.providerConnectionId,
-      params: structuredClone(input.params),
-      idempotencyKey: input.idempotencyKey ?? `approval_${crypto.randomUUID()}`,
+      params,
+      idempotencyKey,
+      requestHash: await hashJson({ manifestHash: manifest.hash, connectionId: connection.id,
+        params }),
       status: "pending",
       approvedBy: null,
       decidedAt: null,
@@ -296,7 +321,8 @@ export class ExecutionService {
       if (!manifest || manifest.hash !== approval.manifestHash || manifest.contract.effect === "read") {
         throw new ApprovalUnavailableError();
       }
-      if (principal.kind === "client" && principal.workspaceId !== approval.workspaceId) {
+      if (principal.workspaceId !== approval.workspaceId &&
+          !(principal.kind === "web" && principal.workspaceId === "")) {
         throw new ApprovalUnavailableError();
       }
       const effectivePrincipal: ExecutionPrincipal = {
@@ -321,7 +347,11 @@ export class ExecutionService {
         connection,
         idempotencyKey: approval.idempotencyKey,
       });
-      await approvals.consume({ approvalId, receiptId: receipt.id, now: this.now() });
+      try {
+        await approvals.consume({ approvalId, receiptId: receipt.id, now: this.now() });
+      } catch {
+        throw new ExecutionOutcomeUnknownError(receipt.id);
+      }
       return receipt;
     } catch (error) {
       await approvals.fail({ approvalId, now: this.now() }).catch(() => undefined);
@@ -336,71 +366,103 @@ export class ExecutionService {
     connection: Awaited<ReturnType<ConnectionAuthority["resolve"]>>;
     idempotencyKey?: string;
   }): Promise<ExecutionReceipt> {
-    const principal = principalKey(input.principal);
-    const requestHash = await hashJson({
-      manifestHash: input.manifest.hash,
-      connectionId: input.connection.id,
-      params: input.params,
-    });
-    const timestamp = this.now();
-    const idempotencyKey = input.idempotencyKey ?? `request_${crypto.randomUUID()}`;
-    const reservation = await this.receipts.reserve({
-      id: `execution_${crypto.randomUUID()}`,
-      workspaceId: input.principal.workspaceId,
-      actorUserId: input.principal.userId,
-      principalKey: principal,
-      toolId: input.manifest.id,
-      manifestHash: input.manifest.hash,
-      connectionId: input.connection.id,
-      providerConnectionId: input.connection.providerConnectionId,
-      idempotencyKey,
-      requestHash,
-      status: "running",
-      result: null,
-      errorCode: null,
-      startedAt: timestamp,
-      completedAt: null,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    });
-    if (!reservation.created) {
-      if (reservation.receipt.requestHash !== requestHash) {
-        throw new ExecutionIdempotencyConflictError();
-      }
-      if (reservation.receipt.status === "succeeded") return reservation.receipt;
-      if (reservation.receipt.status === "running") {
-        throw new ExecutionInProgressError(reservation.receipt.id);
-      }
-      throw new ExecutionFailedError(reservation.receipt.id);
-    }
-
-    try {
-      const result = jsonResult(await this.plugfn.action(input.manifest.provider, input.manifest.action, {
-        userId: input.principal.userId,
-        connectionId: input.connection.providerConnectionId,
+    let missingRemoteAfterInvoke = false;
+    let dispatchedReceiptId: string | null = null;
+    const invoke = async (): Promise<ExecutionReceipt> => {
+      const principal = principalKey(input.principal);
+      const requestHash = await hashJson({
+        manifestHash: input.manifest.hash,
+        connectionId: input.connection.id,
         params: input.params,
-        actor: {
+      });
+      const timestamp = this.now();
+      const idempotencyKey = input.idempotencyKey ?? `request_${crypto.randomUUID()}`;
+      const reservation = await this.receipts.reserve({
+        id: `execution_${crypto.randomUUID()}`,
+        workspaceId: input.principal.workspaceId,
+        actorUserId: input.principal.userId,
+        principalKey: principal,
+        toolId: input.manifest.id,
+        manifestHash: input.manifest.hash,
+        connectionId: input.connection.id,
+        providerConnectionId: input.connection.providerConnectionId,
+        idempotencyKey,
+        requestHash,
+        status: "running",
+        result: null,
+        errorCode: null,
+        startedAt: timestamp,
+        completedAt: null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+      if (!reservation.created) {
+        if (reservation.receipt.requestHash !== requestHash) {
+          throw new ExecutionIdempotencyConflictError();
+        }
+        if (reservation.receipt.status === "succeeded") return reservation.receipt;
+        if (reservation.receipt.status === "running") {
+          throw new ExecutionInProgressError(reservation.receipt.id);
+        }
+        if (reservation.receipt.status === "uncertain") {
+          throw new ExecutionOutcomeUnknownError(reservation.receipt.id);
+        }
+        throw new ExecutionFailedError(reservation.receipt.id);
+      }
+
+      let result: JsonValue;
+      try {
+        dispatchedReceiptId = reservation.receipt.id;
+        result = jsonResult(await this.plugfn.action(input.manifest.provider, input.manifest.action, {
           userId: input.principal.userId,
-          tenantId: input.principal.workspaceId,
-          organizationId: input.principal.workspaceId,
-        },
-        retry: {
-          maxAttempts: input.manifest.contract.retry === "safe" ? 3 : 1,
-          backoff: "exponential",
-        },
-        cache: false,
-      }));
-      return await this.receipts.succeed(reservation.receipt.id, result, this.now());
+          connectionId: input.connection.providerConnectionId,
+          params: input.params,
+          actor: {
+            userId: input.principal.userId,
+            tenantId: input.principal.workspaceId,
+            organizationId: input.principal.workspaceId,
+          },
+          retry: {
+            maxAttempts: input.manifest.contract.effect === "read" && input.manifest.contract.retry === "safe" ? 3 : 1,
+            backoff: "exponential",
+          },
+          cache: false,
+        }));
+      } catch (error) {
+        const missingRemote = isMissingRemoteConnection(error);
+        if (missingRemote) {
+          await this.receipts.fail(reservation.receipt.id, "connection_unavailable", this.now())
+            .catch(() => undefined);
+          missingRemoteAfterInvoke = true;
+          throw new ConnectionUnavailableError();
+        }
+        await this.receipts.uncertain(reservation.receipt.id, "provider_outcome_unknown", this.now())
+          .catch(() => undefined);
+        throw new ExecutionOutcomeUnknownError(reservation.receipt.id);
+      }
+      try {
+        return await this.receipts.succeed(reservation.receipt.id, result, this.now());
+      } catch {
+        // The upstream call has already returned. A failed receipt write cannot make it safe to retry.
+        await this.receipts.uncertain(reservation.receipt.id, "receipt_persist_failed", this.now())
+          .catch(() => undefined);
+        throw new ExecutionOutcomeUnknownError(reservation.receipt.id);
+      }
+    };
+    const run = () => this.invocationGuard ? this.invocationGuard.run({
+      principal: input.principal,
+      connection: input.connection,
+      capability: input.manifest.contract.effect === "read" ? "tools:read" : "tools:write",
+    }, invoke) : invoke();
+    try {
+      return await run();
     } catch (error) {
-      const missingRemote = isMissingRemoteConnection(error);
-      await this.receipts.fail(
-        reservation.receipt.id,
-        missingRemote ? "connection_unavailable" : "provider_execution_failed",
-        this.now(),
-      );
-      if (missingRemote) {
+      if (missingRemoteAfterInvoke) {
         await markMissingRemoteConnection(this.connections, input.connection.id);
-        throw new ConnectionUnavailableError();
+      }
+      if (dispatchedReceiptId && !missingRemoteAfterInvoke &&
+          !(error instanceof ExecutionOutcomeUnknownError)) {
+        throw new ExecutionOutcomeUnknownError(dispatchedReceiptId);
       }
       throw error;
     }
@@ -443,6 +505,7 @@ function principalKey(principal: ExecutionPrincipal): string {
 }
 
 function jsonResult(value: unknown): JsonValue {
+  if (value === undefined) return null;
   assertJson(value);
   return structuredClone(value) as JsonValue;
 }

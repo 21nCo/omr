@@ -2,6 +2,7 @@ import type { JsonValue } from "@oh-my-router/tools";
 
 import {
   ApprovalUnavailableError,
+  ExecutionIdempotencyConflictError,
   type ExecutionApproval,
   type ExecutionApprovalStore,
   type ExecutionReceipt,
@@ -44,6 +45,16 @@ export class MemoryExecutionReceiptStore implements ExecutionReceiptStore {
     return structuredClone(receipt);
   }
 
+  async uncertain(receiptId: string, errorCode: string, now: number): Promise<ExecutionReceipt> {
+    const receipt = this.required(receiptId);
+    if (receipt.status !== "running") throw new Error("Execution receipt is not running");
+    receipt.status = "uncertain";
+    receipt.errorCode = errorCode;
+    receipt.completedAt = now;
+    receipt.updatedAt = now;
+    return structuredClone(receipt);
+  }
+
   async listForActor(input: {
     workspaceId: string;
     actorUserId: string;
@@ -67,10 +78,19 @@ export class MemoryExecutionReceiptStore implements ExecutionReceiptStore {
 
 export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
   readonly approvals = new Map<string, ExecutionApproval>();
+  private readonly idempotency = new Map<string, string>();
 
   async create(approval: ExecutionApproval): Promise<ExecutionApproval> {
+    const key = `${approval.workspaceId}\u0000${approval.principalKey}\u0000${approval.idempotencyKey}`;
+    const existingId = this.idempotency.get(key);
+    if (existingId) {
+      const existing = this.approvals.get(existingId)!;
+      if (existing.requestHash !== approval.requestHash) throw new ExecutionIdempotencyConflictError();
+      return structuredClone(existing);
+    }
     if (this.approvals.has(approval.id)) throw new ApprovalUnavailableError();
     this.approvals.set(approval.id, structuredClone(approval));
+    this.idempotency.set(key, approval.id);
     return structuredClone(approval);
   }
 

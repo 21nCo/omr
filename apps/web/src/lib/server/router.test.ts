@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { ClientAccessDeniedError, DeviceAuthorizationError } from "@oh-my-router/client-access";
 import { ConnectionCleanupUntrackedError, ConnectionProviderOperationError } from "@oh-my-router/connections";
-import { ExecutionApprovalRequiredError } from "@oh-my-router/execution";
+import { ExecutionApprovalRequiredError, ExecutionOutcomeUnknownError } from "@oh-my-router/execution";
 
 import {
   createOMRRouter,
@@ -498,5 +498,32 @@ describe("OMR Worker HTTP boundary", () => {
       approvalId: "approval_1",
       status: "succeeded",
     });
+  });
+
+  it("returns an uncertainty receipt without logging provider secrets", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const execution = {
+      execute: async () => { throw new Error("provider returned secret fixture-token"); },
+      requestApproval: async () => { throw new Error("unused"); },
+      approve: async () => { throw new Error("unused"); },
+      reject: async () => { throw new Error("unused"); },
+      executeApproved: async () => { throw new ExecutionOutcomeUnknownError("receipt_1"); },
+    } satisfies ExecutionRouteServices;
+    try {
+      const router = createOMRRouter(undefined, undefined, undefined, execution);
+      const call = (path: string, body: object) => router.handle(new Request(`https://omr.example${path}`,
+        { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
+      const error = await call("/api/tools/execute", { workspaceId: "workspace_1",
+        toolId: "linear.get_issue", params: {} });
+      expect(error.status).toBe(500);
+      expect(JSON.stringify(log.mock.calls)).not.toContain("fixture-token");
+      const uncertain = await call("/api/approvals/execute", { approvalId: "approval_1" });
+      expect(uncertain.status).toBe(502);
+      expect(uncertain.headers.get("cache-control")).toBe("no-store");
+      await expect(uncertain.json()).resolves.toEqual({ error: "EXECUTION_OUTCOME_UNKNOWN",
+        receiptId: "receipt_1" });
+    } finally {
+      log.mockRestore();
+    }
   });
 });

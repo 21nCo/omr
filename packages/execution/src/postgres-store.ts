@@ -101,6 +101,18 @@ export class PostgresExecutionReceiptStore implements ExecutionReceiptStore {
     return this.toReceipt(updated.rows[0]);
   }
 
+  async uncertain(receiptId: string, errorCode: string, now: number): Promise<ExecutionReceipt> {
+    const updated = await this.client.query<ReceiptRow>(
+      `UPDATE omr_control.execution_receipts
+       SET status = 'uncertain', error_code = $1, completed_at = $2, updated_at = $2
+       WHERE id = $3 AND status = 'running'
+       RETURNING ${COLUMNS}`,
+      [errorCode, now, receiptId],
+    );
+    if (!updated.rows[0]) throw new Error("Execution receipt is not running");
+    return this.toReceipt(updated.rows[0]);
+  }
+
   async listForActor(input: {
     workspaceId: string;
     actorUserId: string;

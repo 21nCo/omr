@@ -28,6 +28,10 @@
     toolId: string;
     status: string;
     params: unknown;
+    effect: string;
+    resources: { kind: string; parameter?: string }[];
+    manifestCurrent: boolean;
+    connectionId: string;
     createdAt: number;
     expiresAt: number;
   };
@@ -452,9 +456,12 @@
           {#each overview.approvals.filter((item) => item.status === "pending") as approval}
             <article class="approval-card">
               <div class="approval-top"><strong>{approval.toolId}</strong><span>Expires {timestamp(approval.expiresAt)}</span></div>
+              <p class="approval-context">Effect: {approval.effect} · Account: {overview.connections.find((connection) => connection.id === approval.connectionId)?.label ?? "Unavailable"}</p>
+              {#if approval.resources.length}<p class="approval-context">Resources: {approval.resources.map((resource) => resource.parameter ? `${resource.kind} (${resource.parameter})` : resource.kind).join(", ")}</p>{/if}
+              {#if !approval.manifestCurrent}<p class="approval-context">This tool changed. Request a new approval.</p>{/if}
               <pre>{preview(approval.params)}</pre>
               <div class="actions">
-                <button class="primary compact" disabled={Boolean(busy)} onclick={() => void mutate(`approve:${approval.id}`, "/api/approvals/approve", { approvalId: approval.id }, `Approved ${approval.toolId}.`)}>Approve</button>
+                <button class="primary compact" disabled={Boolean(busy) || !approval.manifestCurrent} onclick={() => void mutate(`approve:${approval.id}`, "/api/approvals/approve", { approvalId: approval.id }, `Approved ${approval.toolId}.`)}>Approve</button>
                 <button class="danger compact" disabled={Boolean(busy)} onclick={() => void mutate(`reject:${approval.id}`, "/api/approvals/reject", { approvalId: approval.id }, `Rejected ${approval.toolId}.`)}>Reject</button>
               </div>
             </article>
@@ -469,7 +476,7 @@
             <div class="timeline">
               {#each overview.executions as execution}
                 <article>
-                  <span class:ready={execution.status === "succeeded"} class:error-dot={execution.status === "failed"} class="dot"></span>
+                  <span class:ready={execution.status === "succeeded"} class:error-dot={execution.status === "failed" || execution.status === "uncertain"} class="dot"></span>
                   <div><strong>{execution.toolId}</strong><span>{timestamp(execution.createdAt)} · {execution.status}</span></div>
                   {#if execution.errorCode}<code>{execution.errorCode}</code>{/if}
                 </article>

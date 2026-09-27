@@ -13,6 +13,7 @@ import {
   ExecutionService,
 } from "./execution.js";
 import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "./testing.js";
+import { publicApproval, publicReceipt } from "./projection.js";
 
 async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes: string[] | undefined = ["issues:read", "repo"], scopeFree = false) {
   let now = 1_700_000_000_000;
@@ -347,6 +348,16 @@ describe("execution service", () => {
     expect(actionCall).not.toHaveBeenCalled();
   });
 
+  it("denies an explicit connection from another workspace before any provider effect", async () => {
+    const { actionCall, firstBinding, service } = await fixture();
+    await expect(service.execute({
+      principal: { kind: "client", userId: "user_1", workspaceId: "workspace_other",
+        clientId: "client_other", grantId: "grant_other", capabilities: ["tools:read"] },
+      toolId: "linear.get_issue", connectionId: firstBinding.id, params: {},
+    })).rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+    expect(actionCall).not.toHaveBeenCalled();
+  });
+
   it.each(["linear.create_issue", "linear.mystery"])(
     "requires approval for %s without calling PlugFn",
     async (toolId) => {
@@ -374,6 +385,55 @@ describe("execution service", () => {
     expect(actionCall).toHaveBeenCalledTimes(1);
   });
 
+  it("reuses one pending approval for a retry and rejects changed parameters", async () => {
+    const { actionCall, approvals, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const request = { principal, toolId: "linear.create_issue", params: { title: "first" },
+      idempotencyKey: "approval-retry" } as const;
+    const first = await service.requestApproval(request);
+    expect((await service.requestApproval(request)).id).toBe(first.id);
+    await expect(service.requestApproval({ ...request, params: { title: "changed" } }))
+      .rejects.toBeInstanceOf(ExecutionIdempotencyConflictError);
+    expect(approvals.approvals.size).toBe(1);
+    expect(actionCall).not.toHaveBeenCalled();
+  });
+
+  it("allows only one concurrent approved invocation and blocks revoked bindings", async () => {
+    const { actionCall, connections, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const approval = await service.requestApproval({ principal, toolId: "linear.create_issue", params: {} });
+    await service.approve(approval.id, principal.userId);
+    const results = await Promise.allSettled([
+      service.executeApproved(principal, approval.id),
+      service.executeApproved(principal, approval.id),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(actionCall).toHaveBeenCalledTimes(1);
+
+    const later = await service.requestApproval({ principal, toolId: "linear.create_issue", params: {} });
+    await service.approve(later.id, principal.userId);
+    await connections.revoke(principal.userId, later.connectionId);
+    await expect(service.executeApproved(principal, later.id)).rejects.toMatchObject({
+      code: "CONNECTION_ACCESS_DENIED",
+    });
+    expect(actionCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("masks approval secrets and omits internal handles from public receipts", async () => {
+    const { catalog, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const approval = await service.requestApproval({ principal, toolId: "linear.create_issue",
+      params: { title: "visible", nested: { apiKey: "secret-value" } } });
+    const projected = publicApproval(approval, catalog.get(approval.toolId));
+    expect(projected.params).toEqual({ title: "visible", nested: { apiKey: "[REDACTED]" } });
+    expect(JSON.stringify(projected)).not.toContain("plug_linear");
+    expect(JSON.stringify(projected)).not.toContain("secret-value");
+    const receipt = await service.execute({ principal, toolId: "linear.get_issue", params: {} });
+    expect(publicReceipt(receipt, false)).toMatchObject({ result: null, status: "succeeded" });
+    expect(JSON.stringify(publicReceipt(receipt, false))).not.toContain("plug_linear");
+  });
+
   it("rejects reuse of an idempotency key for different parameters", async () => {
     const { actionCall, service, workspace } = await fixture();
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
@@ -392,19 +452,47 @@ describe("execution service", () => {
     expect(actionCall).toHaveBeenCalledTimes(1);
   });
 
-  it("records a sanitized failed receipt while preserving the provider error for the caller", async () => {
+  it("rejects an empty idempotency key before creating approval or receipt state", async () => {
+    const { actionCall, approvals, receipts, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    await expect(service.execute({ principal, toolId: "linear.get_issue", params: {},
+      idempotencyKey: "" })).rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    await expect(service.requestApproval({ principal, toolId: "linear.create_issue", params: {},
+      idempotencyKey: "" })).rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    expect(receipts.receipts.size).toBe(0);
+    expect(approvals.approvals.size).toBe(0);
+    expect(actionCall).not.toHaveBeenCalled();
+  });
+
+  it("records uncertain upstream outcomes without leaking provider details or allowing replay", async () => {
     const { actionCall, receipts, service, workspace } = await fixture();
     actionCall.mockRejectedValueOnce(new Error("provider secret detail"));
-    await expect(service.execute({
+    const request = {
       principal: { kind: "web", userId: "user_1", workspaceId: workspace.id },
       toolId: "linear.get_issue",
       params: {},
-    })).rejects.toThrow("provider secret detail");
+      idempotencyKey: "uncertain-read",
+    } as const;
+    await expect(service.execute(request)).rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN" });
     expect([...receipts.receipts.values()][0]).toMatchObject({
-      status: "failed",
-      errorCode: "provider_execution_failed",
+      status: "uncertain",
+      errorCode: "provider_outcome_unknown",
     });
     expect(JSON.stringify([...receipts.receipts.values()])).not.toContain("provider secret detail");
+    await expect(service.execute(request)).rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN" });
+    expect(actionCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a successful provider effect non-replayable if result persistence fails", async () => {
+    const { actionCall, receipts, service, workspace } = await fixture();
+    vi.spyOn(receipts, "succeed").mockRejectedValueOnce(new Error("database write failed"));
+    const request = { principal: { kind: "web" as const, userId: "user_1", workspaceId: workspace.id },
+      toolId: "linear.get_issue", params: {}, idempotencyKey: "persist-failure" };
+    await expect(service.execute(request)).rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN" });
+    expect([...receipts.receipts.values()][0]).toMatchObject({ status: "uncertain",
+      errorCode: "receipt_persist_failed" });
+    await expect(service.execute(request)).rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN" });
+    expect(actionCall).toHaveBeenCalledTimes(1);
   });
 
   it("binds a single-use approval to the exact actor, principal, manifest, connection, and params", async () => {

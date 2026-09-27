@@ -5,6 +5,7 @@ export {
   ExecutionFailedError,
   ExecutionIdempotencyConflictError,
   ExecutionInProgressError,
+  ExecutionOutcomeUnknownError,
   ExecutionInputError,
   ExecutionService,
   type ApprovalStatus,
@@ -13,6 +14,8 @@ export {
   type ExecutionPrincipal,
   type ExecutionReceipt,
   type ExecutionReceiptStore,
+  type ExecutionInvocationGuard,
   type ExecutionStatus,
   type PlugFnActionPort,
 } from "./execution.js";
+export { publicApproval, publicReceipt } from "./projection.js";

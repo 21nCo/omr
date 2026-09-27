@@ -11,7 +11,7 @@ import {
   type ConnectionBindingRecord,
 } from "@oh-my-router/connections";
 import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
-import { ExecutionService, type ExecutionPrincipal } from "@oh-my-router/execution";
+import { ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
 import { connectPostgresExecutionReceipts } from "@oh-my-router/execution/postgres";
 import { connectPostgresIdentityRuntime } from "@oh-my-router/identity/postgres";
 import { connectPostgresPlugFn } from "@oh-my-router/plugfn-runtime";
@@ -190,6 +190,11 @@ function requireSameOrigin(request: Request): void {
   }
 }
 
+/** Mutating cookie requests need origin proof; bearer clients have explicit credentials. */
+export function requireExecutionOrigin(request: Request): void {
+  if (!bearerCredential(request)) requireSameOrigin(request);
+}
+
 /** A saved selection affects later actions from every client of the same user. */
 export async function selectAuthorizedConnection<T>(
   request: Request,
@@ -243,8 +248,18 @@ async function authenticate(
       await runtime.close();
     }
   }
-  const userId = await requireWebUser(event, request);
-  return { kind: "web", userId, workspaceId: workspaceId ?? "" };
+  const origin = new URL(event.request.url).origin;
+  const identity = await connectPostgresIdentityRuntime({
+    connectionString: databaseConnectionString(event),
+    environment: { resolve: () => ({ issuer: origin, baseUrl: origin }) },
+  });
+  try {
+    const session = await identity.requireSession(request);
+    return { kind: "web", userId: session.actorId, sessionId: session.id,
+      workspaceId: workspaceId ?? "" };
+  } finally {
+    await identity.close();
+  }
 }
 
 /** Prevent a client grant from probing a binding in another workspace. */
@@ -563,7 +578,10 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
     },
   };
 
-  async function withExecution<T>(callback: (service: ExecutionService) => Promise<T>): Promise<T> {
+  async function withExecution<T>(callback: (
+    service: ExecutionService,
+    catalog: Awaited<ReturnType<typeof createPlugFnToolCatalog>>,
+  ) => Promise<T>): Promise<T> {
     const connectionRuntime = await connectPostgresConnections({
       connectionString: databaseConnectionString(event),
     });
@@ -584,7 +602,8 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
         async (connectionId) => (await plugfn!.plugfn.connections.get(connectionId)).scopes,
         Date.now,
         execution.approvals,
-      ));
+        execution.invocationGuard,
+      ), catalog);
     } finally {
       await Promise.allSettled([
         connectionRuntime.close(),
@@ -596,34 +615,46 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
 
   const execution: ExecutionRouteServices = {
     async execute(request, input) {
+      requireExecutionOrigin(request);
       const principal = await authenticate(event, request, input.workspaceId);
-      return withExecution((service) => service.execute({
+      return withExecution(async (service) => publicReceipt(await service.execute({
         principal,
         ...input,
         params: input.params as JsonValue,
-      }));
+      })));
     },
     async requestApproval(request, input) {
+      requireExecutionOrigin(request);
       const principal = await authenticate(event, request, input.workspaceId);
-      return withExecution((service) => service.requestApproval({
-        principal,
-        ...input,
-        params: input.params as JsonValue,
-      }));
+      return withExecution(async (service, catalog) => {
+        const approval = await service.requestApproval({
+          principal,
+          ...input,
+          params: input.params as JsonValue,
+        });
+        return publicApproval(approval, catalog.get(approval.toolId));
+      });
     },
     async approve(request, approvalId) {
       requireSameOrigin(request);
       const actorUserId = await requireWebUser(event, request);
-      return withExecution((service) => service.approve(approvalId, actorUserId));
+      return withExecution(async (service, catalog) => {
+        const approval = await service.approve(approvalId, actorUserId);
+        return publicApproval(approval, catalog.get(approval.toolId));
+      });
     },
     async reject(request, approvalId) {
       requireSameOrigin(request);
       const actorUserId = await requireWebUser(event, request);
-      return withExecution((service) => service.reject(approvalId, actorUserId));
+      return withExecution(async (service, catalog) => {
+        const approval = await service.reject(approvalId, actorUserId);
+        return publicApproval(approval, catalog.get(approval.toolId));
+      });
     },
     async executeApproved(request, approvalId) {
+      requireExecutionOrigin(request);
       const principal = await authenticate(event, request, undefined);
-      return withExecution((service) => service.executeApproved(principal, approvalId));
+      return withExecution(async (service) => publicReceipt(await service.executeApproved(principal, approvalId)));
     },
   };
 
@@ -691,6 +722,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
             limit: 50,
           }),
         ]);
+        const approvalCatalog = await createPlugFnToolCatalog(plugfn.plugfn, configuredProviders(plugfn.plugfn));
         return {
           actor: { id: session.actorId, email: session.primaryEmail ?? null },
           workspaces,
@@ -700,8 +732,8 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
             [...availableConnections, ...orphanedConnections.map((binding) => ({ ...binding,
               cleanupOnly: true, selectable: false }))],
           ),
-          approvals,
-          executions,
+          approvals: approvals.map((approval) => publicApproval(approval, approvalCatalog.get(approval.toolId))),
+          executions: executions.map((receipt) => publicReceipt(receipt, false)),
         };
       } finally {
         await Promise.allSettled([identity.close(), connections?.close(), activity?.close(), plugfn?.close()]);
