@@ -17,7 +17,23 @@ function sensitivePath(path: string[], sensitive: string[][]): boolean {
     selector.every((part, index) => part === "*" || part === path[index]?.toLowerCase()));
 }
 
+function selectorTraversable(value: JsonValue, selector: string[], depth = 0): boolean {
+  if (depth === selector.length) return true;
+  if (value === null || typeof value !== "object") return false;
+  const part = selector[depth]!;
+  if (Array.isArray(value)) {
+    if (part === "*") return value.every((item) => selectorTraversable(item, selector, depth + 1));
+    if (!/^\d+$/.test(part)) return false;
+    return !Object.hasOwn(value, part) || selectorTraversable(value[Number(part)]!, selector, depth + 1);
+  }
+  const matches = Object.entries(value).filter(([key]) => part === "*" || key.toLowerCase() === part);
+  return matches.every(([, item]) => selectorTraversable(item, selector, depth + 1));
+}
+
 function redact(value: JsonValue, sensitive: string[][], path: string[] = []): JsonValue {
+  // Check the value at every path, including array elements. A selector such as
+  // items[*] hides the whole element, not just named fields beneath it.
+  if (sensitivePath(path, sensitive)) return "[REDACTED]";
   if (Array.isArray(value)) return value.map((item, index) => redact(item, sensitive, [...path, String(index)]));
   if (value === null || typeof value !== "object") return value;
   return Object.fromEntries(Object.entries(value).map(([key, item]) => {
@@ -41,6 +57,9 @@ export function approvalPreviewReady(
   const sensitive = manifest.contract.sensitiveKeys.map(parseSensitiveKey);
   if (sensitive.some((selector) => !selector)) return false;
   const selectors = sensitive as string[][];
+  // A present value with the wrong container shape could bypass a descendant
+  // selector, leaving the whole value visible in an approval preview.
+  if (selectors.some((selector) => !selectorTraversable(params, selector))) return false;
   // A declared target that would be masked or is absent cannot be reviewed.
   return manifest.contract.resources.every(({ parameter }) => {
     if (!parameter) return true;

@@ -41,6 +41,7 @@ old pending approvals cannot be approved or executed. Declared target parameters
 present as own properties and visible through every ancestor; a missing, inherited, or redacted
 target fails closed. Explicit array indices, `[]` and `[*]` array wildcards, and `*` object-key
 wildcards in sensitive paths are redacted in the complete preview. Unsupported selectors fail closed.
+Present values with a shape that cannot be traversed by a declared selector fail closed too.
 Public responses
 omit remote connection handles and internal hashes. Stored request fingerprints are HMACs keyed
 with a domain-separated HKDF subkey derived from the server's stable execution wrapping secret.
@@ -54,6 +55,9 @@ The HTTP boundary returns `504 EXECUTION_INVOCATION_TIMEOUT` without a receipt I
 deadline closes before provider dispatch. After dispatch, it returns
 `502 EXECUTION_OUTCOME_UNKNOWN` with the receipt ID. CLI JSON errors and MCP structured tool
 errors retain these response fields for callers deciding whether to reconcile or retry.
+CLI and MCP execution requests allow 70 seconds before aborting the HTTP request, leaving
+response time beyond the server's 60-second invocation deadline. Discovery, connection and
+approval-request calls keep their shorter client timeout.
 
 ## Changed-surface risk matrix
 
@@ -65,6 +69,7 @@ errors retain these response fields for callers deciding whether to reconcile or
 | Approval projection | Guessable hashes or secrets after manifest change | Projection, decision, and overview-shaped history tests |
 | Approval preview | Hidden late target, wildcard secret, missing redaction metadata, stale manifest, primitive secret | Full-length UI preview, wildcard web/CLI/MCP contract, and old-envelope service tests |
 | Nested preview | Masked parent or indexed array secret hides the real target or leaks a value | Projection and request/decision/overview/execute tests |
+| Whole array secret | An `items[*]` or nested array selector exposes the element itself | Whole-element projection and web/CLI/MCP policy tests |
 | Approval decision | Removed member uses a known approval ID or races revocation | PostgreSQL membership-locked decision fixture |
 | Fingerprint key | Reusing the encryption key for HMAC | HKDF separation and existing-fingerprint conflict checks |
 | Approval completion | Failed consume after successful effect | Successful receipt and non-replayable approval test |
@@ -73,6 +78,7 @@ errors retain these response fields for callers deciding whether to reconcile or
 | Workspace, grant, connection | Cross-workspace use or use after revocation | Service denial and PostgreSQL guard fixture tests |
 | Provider and receipt | Second effect after timeout, crash, or ambiguous error | Uncertain replay and reservation tests |
 | Invocation liveness | Hung provider holds revocation locks or late reservation dispatches after rollback/expiry | Deadline, rollback, pre-dispatch cancellation, and uncertain non-replay tests |
+| Client execution deadline | CLI or MCP aborts before a structured timeout or uncertain receipt arrives | Delayed protocol responses beyond the former 30-second client timeout |
 | Timeout response | Predispatch timeout becomes a generic 500 or loses its distinction from an uncertain effect | Router, CLI JSON, and MCP protocol tests for read and approved execution |
 | Storage | Plaintext parameters or results | PostgreSQL encryption integration test when a disposable database is available |
 

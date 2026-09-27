@@ -647,6 +647,50 @@ describe("execution service", () => {
     expect(actionCall).not.toHaveBeenCalled();
   });
 
+  it("masks whole array elements and nested arrays across request, decision, and overview", async () => {
+    const { actionCall, approvals, catalog, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const originalGet = catalog.get.bind(catalog);
+    const manifest = originalGet("linear.create_issue")!;
+    const protectedManifest = { ...manifest, contract: { ...manifest.contract,
+      sensitiveKeys: ["items[*]", "nested.rows[*][*]"],
+    } };
+    vi.spyOn(catalog, "get").mockImplementation((id) => id === manifest.id ? protectedManifest : originalGet(id));
+    const params = { title: "Review", items: ["array-secret", { value: "object-secret" }],
+      nested: { rows: [["nested-secret", { value: "deep-secret" }]] } };
+    const pending = await requestApproval(service, { principal, toolId: manifest.id, params });
+    const approved = await requestApproval(service, { principal, toolId: manifest.id, params });
+    await service.approve(approved.id, principal.userId);
+    const records = [pending, approved,
+      ...(await approvals.listForActor({ workspaceId: workspace.id, actorUserId: principal.userId, limit: 10 }))];
+    for (const record of records) {
+      const preview = publicApproval(record, catalog.get(record.toolId));
+      expect(preview).toMatchObject({ previewReady: true, params: { title: "Review",
+        items: ["[REDACTED]", "[REDACTED]"], nested: { rows: [["[REDACTED]", "[REDACTED]"]] } } });
+      expect(JSON.stringify(preview)).not.toMatch(/array-secret|object-secret|nested-secret|deep-secret/);
+    }
+    expect(actionCall).not.toHaveBeenCalled();
+
+    for (const malformed of [
+      { title: "Review", items: "array-secret" },
+      { title: "Review", nested: { rows: ["nested-secret"] } },
+    ]) {
+      expect(approvalPreviewReady(protectedManifest, manifest.hash, malformed)).toBe(false);
+      await expect(requestApproval(service, { principal, toolId: manifest.id, params: malformed }))
+        .rejects.toBeInstanceOf(ExecutionInputError);
+    }
+    expect(approvals.approvals.size).toBe(2);
+    const hiddenTarget = { ...protectedManifest, contract: { ...protectedManifest.contract,
+      resources: [{ kind: "issue", parameter: "items.0" }] } };
+    expect(approvalPreviewReady(hiddenTarget, manifest.hash, params)).toBe(false);
+    vi.spyOn(catalog, "get").mockImplementation((id) => id === manifest.id ? hiddenTarget : originalGet(id));
+    await expect(requestApproval(service, { principal, toolId: manifest.id, params }))
+      .rejects.toBeInstanceOf(ExecutionInputError);
+    await expect(service.approve(pending.id, principal.userId)).rejects.toBeInstanceOf(ApprovalUnavailableError);
+    await expect(service.executeApproved(principal, approved.id)).rejects.toBeInstanceOf(ApprovalUnavailableError);
+    expect(actionCall).not.toHaveBeenCalled();
+  });
+
   it("stores keyed request fingerprints that do not reveal a guessable parameter digest", async () => {
     const { approvals, receipts, service, workspace } = await fixture();
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };

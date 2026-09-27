@@ -21,11 +21,80 @@ const execFileAsync = promisify(execFile);
 function action(name: string, effect: ToolEffect) {
   return { name, displayName: name, description: name, parameters: { type: "object" },
     returns: { type: "object" }, contract: { version: "1.0.0", effect,
-      requiredScopes: [], resources: [], sensitiveKeys: ["secretField", "items[*].pin", "metadata.*.pin"],
+      requiredScopes: [], resources: [], sensitiveKeys: ["secretField", "items[*].pin", "metadata.*.pin",
+        "wholeItems[*]", "nested.rows[*][*]"],
       pagination: { kind: "none" as const }, retry: "never" as const } };
 }
 
 describe("execution-policy-contract", () => {
+  it("delivers delayed execution errors through CLI and MCP after the old client timeout", async () => {
+    const catalog = await ToolCatalog.create({ providers: { list: () => [{
+      name: "linear", displayName: "Linear", version: "1.0.0", description: "Linear",
+      actions: { read: action("read", "read") },
+    }] } }, (value) => value as never);
+    const server = createServer(async (incoming, outgoing) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of incoming) chunks.push(Buffer.from(chunk));
+      if (incoming.url?.startsWith("/api/tools?")) {
+        outgoing.writeHead(200, { "content-type": "application/json" });
+        outgoing.end(JSON.stringify(catalog.discover()));
+        return;
+      }
+      const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) as { approvalId?: string } : {};
+      const uncertain = incoming.url === "/api/approvals/execute" && body.approvalId === "after-dispatch";
+      setTimeout(() => {
+        outgoing.writeHead(uncertain ? 502 : 504, { "content-type": "application/json" });
+        outgoing.end(JSON.stringify(uncertain
+          ? { error: "EXECUTION_OUTCOME_UNKNOWN", receiptId: "receipt_after_dispatch" }
+          : { error: "EXECUTION_INVOCATION_TIMEOUT" }));
+      }, 30_100);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Protocol fixture listener is unavailable");
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+    let mcp: Awaited<ReturnType<typeof createOMRMcpServer>> | undefined;
+    let client: McpClient | undefined;
+    try {
+      mcp = await createOMRMcpServer({ baseUrl, credential: "mcp-fixture", workspaceId: "workspace_1" });
+      client = new McpClient({ name: "delayed-errors", version: "1.0.0" }, { capabilities: {} });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await mcp.connect(serverTransport);
+      await client.connect(clientTransport);
+      const runCli = (args: string[]) => execFileAsync(process.execPath,
+        [join(process.cwd(), "packages/cli/dist/bin.js"), ...args, "--json"], {
+          env: { ...process.env, OMR_BACKEND: baseUrl, OMR_API_KEY: "cli-fixture",
+            OMR_WORKSPACE_ID: "workspace_1" },
+          timeout: 75_000,
+        }).then(() => { throw new Error("CLI unexpectedly succeeded"); },
+          (error: { code: number; stdout: string; stderr: string }) => error);
+      const [cliRead, cliBefore, cliAfter, mcpRead, mcpBefore, mcpAfter] = await Promise.all([
+        runCli(["tools", "run", "linear.read"]),
+        runCli(["approvals", "execute", "before-dispatch"]),
+        runCli(["approvals", "execute", "after-dispatch"]),
+        client.callTool({ name: "linear.read", arguments: {} }),
+        client.callTool({ name: "omr.approvals.execute", arguments: { approvalId: "before-dispatch" } }),
+        client.callTool({ name: "omr.approvals.execute", arguments: { approvalId: "after-dispatch" } }),
+      ]);
+      for (const error of [cliRead, cliBefore]) {
+        expect(error.code).toBe(1);
+        expect(error.stdout + error.stderr).toContain("EXECUTION_INVOCATION_TIMEOUT");
+        expect(error.stdout + error.stderr).not.toContain("AbortError");
+      }
+      expect(cliAfter.stdout + cliAfter.stderr).toContain("EXECUTION_OUTCOME_UNKNOWN");
+      expect(cliAfter.stdout + cliAfter.stderr).toContain("receipt_after_dispatch");
+      for (const response of [mcpRead, mcpBefore]) {
+        expect(response).toMatchObject({ isError: true, structuredContent: { ok: false,
+          error: { details: { error: "EXECUTION_INVOCATION_TIMEOUT" } } } });
+      }
+      expect(mcpAfter).toMatchObject({ isError: true, structuredContent: { ok: false,
+        error: { details: { error: "EXECUTION_OUTCOME_UNKNOWN", receiptId: "receipt_after_dispatch" } } } });
+    } finally {
+      await Promise.all([client?.close(), mcp?.close()]);
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  }, 80_000);
+
   it("keeps predispatch timeout and postdispatch uncertainty distinct in CLI JSON errors", async () => {
     const server = createServer(async (incoming, outgoing) => {
       const chunks: Buffer[] = [];
@@ -122,7 +191,8 @@ describe("execution-policy-contract", () => {
     const request = { workspaceId: workspace.id, toolId: "linear.write",
       params: { title: "Review", secretField: "fixture-secret", passphrase: "passphrase-secret",
         privateKey: "private-key-secret", items: [{ pin: "array-PIN" }],
-        metadata: { first: { pin: "object-PIN" } } }, idempotencyKey: `${surface}-write` };
+        metadata: { first: { pin: "object-PIN" } }, wholeItems: ["whole-array-secret"],
+        nested: { rows: [["nested-array-secret"]] } }, idempotencyKey: `${surface}-write` };
 
     if (surface === "cli") {
       const server = createServer(async (incoming, outgoing) => {
@@ -177,9 +247,10 @@ describe("execution-policy-contract", () => {
         expect(JSON.parse(retried.stdout)).toMatchObject({ id: approval.id });
         expect(approval.params).toMatchObject({ title: "Review", secretField: "[REDACTED]",
           passphrase: "[REDACTED]", privateKey: "[REDACTED]",
-          items: [{ pin: "[REDACTED]" }], metadata: { first: { pin: "[REDACTED]" } } });
+          items: [{ pin: "[REDACTED]" }], metadata: { first: { pin: "[REDACTED]" } },
+          wholeItems: ["[REDACTED]"], nested: { rows: [["[REDACTED]"]] } });
         expect(pending.stdout).not.toContain("fixture-secret");
-        expect(pending.stdout).not.toMatch(/passphrase-secret|private-key-secret|array-PIN|object-PIN/);
+        expect(pending.stdout).not.toMatch(/passphrase-secret|private-key-secret|array-PIN|object-PIN|whole-array-secret|nested-array-secret/);
         expect(pending.stdout).not.toContain("requestHash");
         expect(provider).toHaveBeenCalledTimes(1);
         await webPost("/api/approvals/approve", { approvalId: approval.id });
@@ -217,7 +288,7 @@ describe("execution-policy-contract", () => {
         const retried = await client.callTool({ name: "linear.write", arguments: args });
         expect(retried).toMatchObject({ structuredContent: { approvalId } });
         expect(JSON.stringify(pending)).not.toContain("fixture-secret");
-        expect(JSON.stringify(pending)).not.toMatch(/array-PIN|object-PIN/);
+        expect(JSON.stringify(pending)).not.toMatch(/array-PIN|object-PIN|whole-array-secret|nested-array-secret/);
         expect(JSON.stringify(pending)).not.toContain("requestHash");
         expect(provider).toHaveBeenCalledTimes(1);
         await webPost("/api/approvals/approve", { approvalId });
@@ -262,10 +333,11 @@ describe("execution-policy-contract", () => {
     expect(approvalStore.approvals.size).toBe(1);
     expect(approval.params).toMatchObject({ title: "Review", secretField: "[REDACTED]",
       passphrase: "[REDACTED]", privateKey: "[REDACTED]",
-      items: [{ pin: "[REDACTED]" }], metadata: { first: { pin: "[REDACTED]" } } });
+      items: [{ pin: "[REDACTED]" }], metadata: { first: { pin: "[REDACTED]" } },
+      wholeItems: ["[REDACTED]"], nested: { rows: [["[REDACTED]"]] } });
     expect(JSON.stringify(approval)).not.toContain("remote_secret_handle");
     expect(JSON.stringify(approval)).not.toContain("fixture-secret");
-    expect(JSON.stringify(approval)).not.toMatch(/array-PIN|object-PIN/);
+    expect(JSON.stringify(approval)).not.toMatch(/array-PIN|object-PIN|whole-array-secret|nested-array-secret/);
     expect(approval).not.toHaveProperty("requestHash");
     expect((await client.requestApproval(request) as { id: string }).id).toBe(approval.id);
     expect(provider).toHaveBeenCalledTimes(1);
