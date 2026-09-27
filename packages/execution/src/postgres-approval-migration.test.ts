@@ -18,12 +18,15 @@ describeDatabase("approval migration from origin/dev schema", () => {
     try {
       await client.query(`CREATE SCHEMA ${qualified}`);
       await client.query(`CREATE TABLE ${qualified}.workspaces (id text PRIMARY KEY)`);
+      await client.query(`CREATE TABLE ${qualified}.workspace_memberships (
+        workspace_id text NOT NULL, user_id text NOT NULL, PRIMARY KEY (workspace_id, user_id))`);
       await client.query(`CREATE TABLE ${qualified}.connection_bindings (id text PRIMARY KEY)`);
       await client.query(`CREATE TABLE ${qualified}.execution_receipts (
         id text PRIMARY KEY, status text NOT NULL, request_hash text NOT NULL,
         CONSTRAINT execution_receipts_status_check CHECK (status IN ('running', 'succeeded', 'failed'))
       )`);
       await client.query(`INSERT INTO ${qualified}.workspaces VALUES ('workspace_1')`);
+      await client.query(`INSERT INTO ${qualified}.workspace_memberships VALUES ('workspace_1', 'user_1')`);
       await client.query(`INSERT INTO ${qualified}.connection_bindings VALUES ('connection_1')`);
       const migrate = async (name: string) => {
         const sql = readFileSync(new URL(`../migrations/${name}.sql`, import.meta.url), "utf8")
@@ -96,6 +99,32 @@ describeDatabase("approval migration from origin/dev schema", () => {
         .resolves.toMatchObject({ id: "approval_fresh", params: {} });
       await expect(store.getForActor("approval_fresh", "another_user"))
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      const revoker = new Client({ connectionString: databaseUrl! });
+      await revoker.connect();
+      try {
+        await revoker.query("BEGIN");
+        await revoker.query(`DELETE FROM ${qualified}.workspace_memberships WHERE user_id = 'user_1'`);
+        let decisionSettled = false;
+        const racingDecision = store.approve({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5 })
+          .then(() => { decisionSettled = true; return null; }, (error: unknown) => {
+            decisionSettled = true;
+            return error;
+          });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(decisionSettled).toBe(false);
+        await revoker.query("COMMIT");
+        await expect(racingDecision).resolves.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      } finally {
+        await revoker.query("ROLLBACK");
+        await revoker.end();
+      }
+      await expect(store.getForActor("approval_fresh", "user_1"))
+        .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      await expect(store.approve({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5 }))
+        .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      await expect(store.reject({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5 }))
+        .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      await client.query(`INSERT INTO ${qualified}.workspace_memberships VALUES ('workspace_1', 'user_1')`);
       await store.approve({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5 });
       await store.claim({ approvalId: "approval_fresh", actorUserId: "user_1",
         principalKey: "web:user_1", now: 6 });

@@ -91,7 +91,9 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
   async getForActor(approvalId: string, actorUserId: string): Promise<ExecutionApproval> {
     return this.transition(
       `SELECT ${COLUMNS} FROM omr_control.execution_approvals
-       WHERE id = $1 AND actor_user_id = $2`,
+       WHERE id = $1 AND actor_user_id = $2
+         AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
+                     WHERE workspace_id = execution_approvals.workspace_id AND user_id = $2)`,
       [approvalId, actorUserId],
     );
   }
@@ -105,6 +107,8 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
       `UPDATE omr_control.execution_approvals
        SET status = 'approved', approved_by = $2, decided_at = $3, updated_at = $3
        WHERE id = $1 AND actor_user_id = $2 AND status = 'pending' AND expires_at > $3
+         AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
+                     WHERE workspace_id = execution_approvals.workspace_id AND user_id = $2 FOR SHARE)
        RETURNING ${COLUMNS}`,
       [input.approvalId, input.actorUserId, input.now],
     );
@@ -119,6 +123,8 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
       `UPDATE omr_control.execution_approvals
        SET status = 'rejected', decided_at = $3, updated_at = $3
        WHERE id = $1 AND actor_user_id = $2 AND status = 'pending' AND expires_at > $3
+         AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
+                     WHERE workspace_id = execution_approvals.workspace_id AND user_id = $2 FOR SHARE)
        RETURNING ${COLUMNS}`,
       [input.approvalId, input.actorUserId, input.now],
     );

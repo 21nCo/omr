@@ -29,6 +29,11 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       [workspaceId, now],
     );
     await client.query(
+      `INSERT INTO omr_control.workspace_memberships (id, workspace_id, user_id, role, created_at, updated_at)
+       VALUES ($1, $2, 'execution_owner', 'member', $3, $3)`,
+      [`membership_${crypto.randomUUID()}`, workspaceId, now],
+    );
+    await client.query(
       `INSERT INTO omr_control.connection_bindings
          (id, workspace_id, provider, provider_connection_id, ownership, owner_user_id,
           installed_by, label, status, readiness, last_checked_at, created_at, updated_at)

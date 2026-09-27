@@ -35,7 +35,8 @@ describe("PostgreSQL invocation transaction contract", () => {
     await expect(guard.run({ principal, connection, capability: "tools:write" }, invoke))
       .resolves.toBe("ok");
     expect(timeline[0]).toBe("BEGIN");
-    expect(timeline.slice(1, 5).every((sql) => sql.includes("FOR SHARE"))).toBe(true);
+    expect(timeline[1]).toContain("idle_in_transaction_session_timeout");
+    expect(timeline.slice(2, 6).every((sql) => sql.includes("FOR SHARE"))).toBe(true);
     expect(timeline.slice(-2)).toEqual(["PROVIDER_ACTION", "COMMIT"]);
   });
 
@@ -102,5 +103,29 @@ describe("PostgreSQL invocation transaction contract", () => {
     expect(queries.some((sql) => sql.includes("omr_identity.sessions"))).toBe(false);
     expect(invoke).not.toHaveBeenCalled();
     expect(queries.at(-1)).toBe("ROLLBACK");
+  });
+
+  it("releases revocation locks after a hung provider reaches the invocation deadline", async () => {
+    const timeline: string[] = [];
+    const query = vi.fn(async (sql: string) => {
+      timeline.push(sql);
+      if (sql.includes("connection_bindings")) return { rows: [{ workspace_id: "workspace_1",
+        provider_connection_id: "remote_1", ownership: "workspace", owner_user_id: null,
+        status: "active", readiness: "ready" }] };
+      if (sql.includes("workspace_memberships")) return { rows: [{ id: "member_1" }] };
+      if (sql.includes("client_grants")) return { rows: [{ client_id: "client_1", workspace_id: "workspace_1",
+        user_id: "user_1", capabilities: ["tools:write"], revoked_at: null,
+        expires_at: String(Date.now() + 60_000) }] };
+      if (sql.includes("omr_control.clients")) return { rows: [{ workspace_id: "workspace_1", revoked_at: null }] };
+      return { rows: [] };
+    });
+    const guard = new PostgresExecutionInvocationGuard({ query } as unknown as Client, 10);
+    const invoke = vi.fn(() => new Promise<string>(() => undefined));
+    await expect(guard.run({ principal, connection, capability: "tools:write" }, invoke))
+      .rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
+    expect(invoke).toHaveBeenCalledOnce();
+    expect(timeline.at(-1)).toBe("ROLLBACK");
+    expect(timeline).not.toContain("COMMIT");
+    expect(query.mock.calls[1]?.[0]).toContain("idle_in_transaction_session_timeout");
   });
 });

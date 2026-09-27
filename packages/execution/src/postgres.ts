@@ -24,6 +24,8 @@ export async function connectPostgresExecutionReceipts(input: {
   const client = new Client({ connectionString: input.connectionString });
   await client.connect();
   const guardClient = new Client({ connectionString: input.connectionString });
+  // PostgreSQL's idle-in-transaction watchdog can close this connection during a hung provider call.
+  guardClient.on("error", () => undefined);
   try {
     await guardClient.connect();
   } catch (error) {

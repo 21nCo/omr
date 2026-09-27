@@ -492,6 +492,8 @@ export class ExecutionService {
       }
       if (dispatchedReceiptId && !missingRemoteAfterInvoke &&
           !(error instanceof ExecutionOutcomeUnknownError)) {
+        await this.receipts.uncertain(dispatchedReceiptId, "invocation_outcome_unknown", this.now())
+          .catch(() => undefined);
         throw new ExecutionOutcomeUnknownError(dispatchedReceiptId);
       }
       throw error;

@@ -14,8 +14,9 @@ import {
   type ExecutionInvocationGuard,
 } from "./execution.js";
 import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "./testing.js";
-import { publicApproval, publicReceipt } from "./projection.js";
+import { approvalPreviewReady, publicApproval, publicReceipt } from "./projection.js";
 import { deriveExecutionFingerprintKey } from "./fingerprint-key.js";
+import { PostgresExecutionInvocationGuard } from "./postgres-invocation-guard.js";
 
 async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes: string[] | undefined = ["issues:read", "repo"], scopeFree = false, guard?: ExecutionInvocationGuard) {
   let now = 1_700_000_000_000;
@@ -556,6 +557,58 @@ describe("execution service", () => {
     expect(actionCall).not.toHaveBeenCalled();
   });
 
+  it("rejects a target hidden by an ancestor at request, decision, overview, and execution", async () => {
+    const { actionCall, approvals, catalog, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const params = { payload: { target: "issue-123", note: "private" }, title: "visible" };
+    const pending = await requestApproval(service, { principal, toolId: "linear.create_issue", params });
+    const approved = await requestApproval(service, { principal, toolId: "linear.create_issue", params });
+    await service.approve(approved.id, principal.userId);
+    const originalGet = catalog.get.bind(catalog);
+    const changed = { ...originalGet(pending.toolId)!, contract: {
+      ...originalGet(pending.toolId)!.contract,
+      resources: [{ kind: "issue", parameter: "payload.target" }], sensitiveKeys: ["payload"],
+    } };
+    vi.spyOn(catalog, "get").mockImplementation((id) => id === pending.toolId ? changed : originalGet(id));
+    await expect(requestApproval(service, { principal, toolId: pending.toolId, params }))
+      .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    const records = [pending, approved,
+      ...(await approvals.listForActor({ workspaceId: workspace.id, actorUserId: principal.userId, limit: 10 }))];
+    for (const record of records) {
+      const preview = publicApproval(record, catalog.get(record.toolId));
+      expect(preview).toMatchObject({ previewReady: false, params: "[REDACTED]" });
+      expect(JSON.stringify(preview)).not.toContain("issue-123");
+    }
+    await expect(service.approve(pending.id, principal.userId)).rejects.toBeInstanceOf(ApprovalUnavailableError);
+    await expect(service.executeApproved(principal, approved.id)).rejects.toBeInstanceOf(ApprovalUnavailableError);
+    expect(actionCall).not.toHaveBeenCalled();
+  });
+
+  it("uses own target properties and masks indexed array secrets in complete previews", async () => {
+    const { catalog, service, workspace } = await fixture();
+    const manifest = catalog.get("linear.create_issue")!;
+    const indexed = { ...manifest, contract: { ...manifest.contract,
+      resources: [{ kind: "issue", parameter: "items.0.target" }],
+      sensitiveKeys: ["items.0.privatePart", "items[].hiddenPart"],
+    } };
+    const params = { items: [{ target: "issue-" + "x".repeat(700), privatePart: "nested-secret",
+      hiddenPart: "array-secret" }] };
+    expect(approvalPreviewReady(indexed, manifest.hash, params)).toBe(true);
+    const approval = await requestApproval(service, { principal: { kind: "web", userId: "user_1",
+      workspaceId: workspace.id }, toolId: manifest.id, params });
+    const preview = publicApproval(approval, indexed);
+    expect(preview).toMatchObject({ previewReady: true,
+      params: { items: [{ target: params.items[0]!.target, privatePart: "[REDACTED]",
+        hiddenPart: "[REDACTED]" }] } });
+    expect(JSON.stringify(preview)).not.toContain("nested-secret");
+    expect(JSON.stringify(preview)).not.toContain("array-secret");
+    const inherited = Object.create({ target: "inherited-target" }) as { target: string };
+    const targetManifest = { ...manifest, contract: { ...manifest.contract,
+      resources: [{ kind: "issue", parameter: "target" }] } };
+    expect(approvalPreviewReady(targetManifest, manifest.hash, inherited)).toBe(false);
+    expect(approvalPreviewReady(targetManifest, manifest.hash, {})).toBe(false);
+  });
+
   it("stores keyed request fingerprints that do not reveal a guessable parameter digest", async () => {
     const { approvals, receipts, service, workspace } = await fixture();
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
@@ -715,6 +768,37 @@ describe("execution service", () => {
     await expect(service.executeApproved(principal, approval.id))
       .rejects.toBeInstanceOf(ApprovalUnavailableError);
     expect(actionCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks a timed-out provider invocation uncertain and denies replay", async () => {
+    let workspaceId = "";
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("connection_bindings")) return { rows: [{ workspace_id: workspaceId,
+        provider_connection_id: "plug_linear", ownership: "personal", owner_user_id: "user_1",
+        status: "active", readiness: "ready" }] };
+      if (sql.includes("workspace_memberships")) return { rows: [{ id: "membership_1" }] };
+      if (sql.includes("omr_identity.sessions")) return { rows: [{ id: "session_1" }] };
+      return { rows: [] };
+    });
+    const guard = new PostgresExecutionInvocationGuard({ query } as never, 15);
+    const { actionCall, approvals, receipts, service, workspace } = await fixture(
+      undefined, undefined, false, guard,
+    );
+    workspaceId = workspace.id;
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId, sessionId: "session_1" };
+    const approval = await requestApproval(service, { principal, toolId: "linear.create_issue", params: {} });
+    await service.approve(approval.id, principal.userId);
+    actionCall.mockImplementation(() => new Promise(() => undefined));
+    const error = await service.executeApproved(principal, approval.id).catch((value: unknown) => value);
+    expect(error).toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: expect.any(String) });
+    expect(receipts.receipts.get(error.receiptId)).toMatchObject({ status: "uncertain",
+      errorCode: "invocation_outcome_unknown" });
+    expect(approvals.approvals.get(approval.id)).toMatchObject({ status: "uncertain",
+      executionReceiptId: error.receiptId });
+    await expect(service.executeApproved(principal, approval.id))
+      .rejects.toBeInstanceOf(ApprovalUnavailableError);
+    expect(actionCall).toHaveBeenCalledOnce();
+    expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
   });
 
   it("binds the empty-workspace web approval route to actor, workspace, and current membership", async () => {
