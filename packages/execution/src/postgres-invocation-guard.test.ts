@@ -15,21 +15,33 @@ const principal = {
   clientId: "client_1", grantId: "grant_1", capabilities: ["tools:write" as const],
 };
 
+function authorizedQuery(timeline: string[], options: {
+  grantState?: "revoked" | "expired";
+  member?: boolean;
+  session?: boolean;
+} = {}) {
+  return vi.fn(async (sql: string) => {
+    timeline.push(sql);
+    if (sql.includes("connection_bindings")) return { rows: [{ workspace_id: "workspace_1",
+      provider_connection_id: "remote_1", ownership: "workspace", owner_user_id: null,
+      status: "active", readiness: "ready" }] };
+    if (sql.includes("workspace_memberships")) return { rows: options.member === false ? [] : [{ id: "member_1" }] };
+    if (sql.includes("omr_identity.sessions")) return { rows: options.session ? [{
+      id: "session_1", expires_at: new Date(Date.now() + 60_000),
+    }] : [] };
+    if (sql.includes("client_grants")) return { rows: [{ client_id: "client_1", workspace_id: "workspace_1",
+      user_id: "user_1", capabilities: ["tools:write"],
+      revoked_at: options.grantState === "revoked" ? "1" : null,
+      expires_at: String(Date.now() + (options.grantState === "expired" ? -1 : 60_000)) }] };
+    if (sql.includes("omr_control.clients")) return { rows: [{ workspace_id: "workspace_1", revoked_at: null }] };
+    return { rows: [] };
+  });
+}
+
 describe("PostgreSQL invocation transaction contract", () => {
   it("holds binding, membership, client and grant row locks through the provider call", async () => {
     const timeline: string[] = [];
-    const query = vi.fn(async (sql: string) => {
-      timeline.push(sql);
-      if (sql.includes("connection_bindings")) return { rows: [{ workspace_id: "workspace_1",
-        provider_connection_id: "remote_1", ownership: "workspace", owner_user_id: null,
-        status: "active", readiness: "ready" }] };
-      if (sql.includes("workspace_memberships")) return { rows: [{ id: "member_1" }] };
-      if (sql.includes("client_grants")) return { rows: [{ client_id: "client_1", workspace_id: "workspace_1",
-        user_id: "user_1", capabilities: ["tools:write"], revoked_at: null,
-        expires_at: String(Date.now() + 60_000) }] };
-      if (sql.includes("omr_control.clients")) return { rows: [{ workspace_id: "workspace_1", revoked_at: null }] };
-      return { rows: [] };
-    });
+    const query = authorizedQuery(timeline);
     const guard = new PostgresExecutionInvocationGuard({ query } as unknown as Client);
     const invoke = vi.fn(async () => { timeline.push("PROVIDER_ACTION"); return "ok"; });
     await expect(guard.run({ principal, connection, capability: "tools:write" }, invoke))
@@ -43,18 +55,7 @@ describe("PostgreSQL invocation transaction contract", () => {
 
   it.each(["revoked", "expired"] as const)("rolls back before a provider call for a %s grant", async (state) => {
     const queries: string[] = [];
-    const query = vi.fn(async (sql: string) => {
-      queries.push(sql);
-      if (sql.includes("connection_bindings")) return { rows: [{ workspace_id: "workspace_1",
-        provider_connection_id: "remote_1", ownership: "workspace", owner_user_id: null,
-        status: "active", readiness: "ready" }] };
-      if (sql.includes("workspace_memberships")) return { rows: [{ id: "member_1" }] };
-      if (sql.includes("client_grants")) return { rows: [{ client_id: "client_1", workspace_id: "workspace_1",
-        user_id: "user_1", capabilities: ["tools:write"], revoked_at: state === "revoked" ? "1" : null,
-        expires_at: String(Date.now() + (state === "expired" ? -1 : 60_000)) }] };
-      if (sql.includes("omr_control.clients")) return { rows: [{ workspace_id: "workspace_1", revoked_at: null }] };
-      return { rows: [] };
-    });
+    const query = authorizedQuery(queries, { grantState: state });
     const guard = new PostgresExecutionInvocationGuard({ query } as unknown as Client);
     const invoke = vi.fn(async () => "effect");
     await expect(guard.run({ principal, connection, capability: "tools:write" }, invoke))
@@ -65,15 +66,7 @@ describe("PostgreSQL invocation transaction contract", () => {
 
   it("denies a revoked web session after membership is checked", async () => {
     const queries: string[] = [];
-    const query = vi.fn(async (sql: string) => {
-      queries.push(sql);
-      if (sql.includes("connection_bindings")) return { rows: [{ workspace_id: "workspace_1",
-        provider_connection_id: "remote_1", ownership: "workspace", owner_user_id: null,
-        status: "active", readiness: "ready" }] };
-      if (sql.includes("workspace_memberships")) return { rows: [{ id: "member_1" }] };
-      if (sql.includes("omr_identity.sessions")) return { rows: [] };
-      return { rows: [] };
-    });
+    const query = authorizedQuery(queries);
     const guard = new PostgresExecutionInvocationGuard({ query } as unknown as Client);
     const invoke = vi.fn(async () => "effect");
     await expect(guard.run({ principal: { kind: "web", userId: "user_1",
@@ -87,13 +80,7 @@ describe("PostgreSQL invocation transaction contract", () => {
 
   it("denies a web approval when membership was revoked before the transaction", async () => {
     const queries: string[] = [];
-    const query = vi.fn(async (sql: string) => {
-      queries.push(sql);
-      if (sql.includes("connection_bindings")) return { rows: [{ workspace_id: "workspace_1",
-        provider_connection_id: "remote_1", ownership: "workspace", owner_user_id: null,
-        status: "active", readiness: "ready" }] };
-      return { rows: [] };
-    });
+    const query = authorizedQuery(queries, { member: false });
     const guard = new PostgresExecutionInvocationGuard({ query } as unknown as Client);
     const invoke = vi.fn(async () => "effect");
     await expect(guard.run({ principal: { kind: "web", userId: "user_1",
@@ -108,20 +95,9 @@ describe("PostgreSQL invocation transaction contract", () => {
 
   it("releases revocation locks after a hung provider reaches the invocation deadline", async () => {
     const timeline: string[] = [];
-    const query = vi.fn(async (sql: string) => {
-      timeline.push(sql);
-      if (sql.includes("connection_bindings")) return { rows: [{ workspace_id: "workspace_1",
-        provider_connection_id: "remote_1", ownership: "workspace", owner_user_id: null,
-        status: "active", readiness: "ready" }] };
-      if (sql.includes("workspace_memberships")) return { rows: [{ id: "member_1" }] };
-      if (sql.includes("client_grants")) return { rows: [{ client_id: "client_1", workspace_id: "workspace_1",
-        user_id: "user_1", capabilities: ["tools:write"], revoked_at: null,
-        expires_at: String(Date.now() + 60_000) }] };
-      if (sql.includes("omr_control.clients")) return { rows: [{ workspace_id: "workspace_1", revoked_at: null }] };
-      return { rows: [] };
-    });
+    const query = authorizedQuery(timeline);
     const end = vi.fn(async () => { timeline.push("DISCONNECT"); });
-    const guard = new PostgresExecutionInvocationGuard({ query, end } as unknown as Client, 10);
+    const guard = new PostgresExecutionInvocationGuard({ query, end } as unknown as Client, 100);
     const invoke = vi.fn(() => new Promise<string>(() => undefined));
     await expect(guard.run({ principal, connection, capability: "tools:write" }, invoke))
       .rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
@@ -134,18 +110,7 @@ describe("PostgreSQL invocation transaction contract", () => {
 
   it("cancels pre-dispatch work that completes after rollback", async () => {
     const timeline: string[] = [];
-    const query = vi.fn(async (sql: string) => {
-      timeline.push(sql);
-      if (sql.includes("connection_bindings")) return { rows: [{ workspace_id: "workspace_1",
-        provider_connection_id: "remote_1", ownership: "workspace", owner_user_id: null,
-        status: "active", readiness: "ready" }] };
-      if (sql.includes("workspace_memberships")) return { rows: [{ id: "member_1" }] };
-      if (sql.includes("client_grants")) return { rows: [{ client_id: "client_1", workspace_id: "workspace_1",
-        user_id: "user_1", capabilities: ["tools:write"], revoked_at: null,
-        expires_at: String(Date.now() + 60_000) }] };
-      if (sql.includes("omr_control.clients")) return { rows: [{ workspace_id: "workspace_1", revoked_at: null }] };
-      return { rows: [] };
-    });
+    const query = authorizedQuery(timeline);
     let release!: () => void;
     let entered!: () => void;
     const hold = new Promise<void>((resolve) => { release = resolve; });

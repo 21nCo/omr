@@ -44,6 +44,7 @@ export interface ExecutionReceipt {
 }
 
 export interface ExecutionReceiptStore {
+  findByIdempotency(input: { workspaceId: string; principalKey: string; idempotencyKey: string }): Promise<ExecutionReceipt | null>;
   reserve(receipt: ExecutionReceipt): Promise<{ receipt: ExecutionReceipt; created: boolean }>;
   beginDispatch(receiptId: string, now: number): Promise<void>;
   succeed(receiptId: string, result: JsonValue, now: number): Promise<ExecutionReceipt>;
@@ -211,7 +212,7 @@ export class ExecutionService {
     private readonly invocationGuard?: ExecutionInvocationGuard,
     fingerprintKey?: Uint8Array<ArrayBuffer>,
   ) {
-    if (!fingerprintKey || fingerprintKey.byteLength !== 32) {
+    if (fingerprintKey?.byteLength !== 32) {
       throw new Error("Execution fingerprint key must be 32 bytes");
     }
     this.fingerprintKey = fingerprintKey;
@@ -233,6 +234,23 @@ export class ExecutionService {
       throw new ExecutionInputError("Invalid idempotency key");
     }
     const params = structuredClone(input.params);
+
+    if (input.idempotencyKey) {
+      const prior = await this.receipts.findByIdempotency({
+        workspaceId: input.principal.workspaceId,
+        principalKey: principalKey(input.principal),
+        idempotencyKey: input.idempotencyKey,
+      });
+      if (prior?.status === "uncertain") {
+        if (prior.toolId !== manifest.id || prior.manifestHash !== manifest.hash ||
+            (input.connectionId && input.connectionId !== prior.connectionId) ||
+            prior.requestHash !== await hashJson({ manifestHash: manifest.hash,
+              connectionId: prior.connectionId, params }, this.fingerprintKey)) {
+          throw new ExecutionIdempotencyConflictError();
+        }
+        throw new ExecutionOutcomeUnknownError(prior.id);
+      }
+    }
 
     const connection = await this.connections.resolve({
       actorUserId: input.principal.userId,
@@ -434,20 +452,7 @@ export class ExecutionService {
         updatedAt: timestamp,
       });
       if (!reservation.created) {
-        if (reservation.receipt.requestHash !== requestHash) {
-          throw new ExecutionIdempotencyConflictError();
-        }
-        if (reservation.receipt.status === "succeeded") {
-          assertCanDispatch();
-          return reservation.receipt;
-        }
-        if (reservation.receipt.status === "reserved" || reservation.receipt.status === "running") {
-          throw new ExecutionInProgressError(reservation.receipt.id);
-        }
-        if (reservation.receipt.status === "uncertain") {
-          throw new ExecutionOutcomeUnknownError(reservation.receipt.id);
-        }
-        throw new ExecutionFailedError(reservation.receipt.id);
+        return this.replayReceipt(reservation.receipt, requestHash, assertCanDispatch);
       }
 
       let result: JsonValue;
@@ -489,10 +494,7 @@ export class ExecutionService {
       } catch (error) {
         const missingRemote = isMissingRemoteConnection(error);
         if (missingRemote) {
-          await this.receipts.fail(reservation.receipt.id, "connection_unavailable", this.now())
-            .catch(() => undefined);
           missingRemoteAfterInvoke = true;
-          throw new ConnectionUnavailableError();
         }
         await this.receipts.uncertain(reservation.receipt.id, "provider_outcome_unknown", this.now())
           .catch(() => undefined);
@@ -518,7 +520,7 @@ export class ExecutionService {
       if (missingRemoteAfterInvoke) {
         await markMissingRemoteConnection(this.connections, input.connection.id);
       }
-      if (dispatchedReceiptId && !missingRemoteAfterInvoke &&
+      if (dispatchedReceiptId &&
           !(error instanceof ExecutionOutcomeUnknownError)) {
         await this.receipts.uncertain(dispatchedReceiptId, "invocation_outcome_unknown", this.now())
           .catch(() => undefined);
@@ -526,6 +528,20 @@ export class ExecutionService {
       }
       throw error;
     }
+  }
+
+  private replayReceipt(receipt: ExecutionReceipt, requestHash: string,
+    assertCanDispatch: () => void): ExecutionReceipt {
+    if (receipt.requestHash !== requestHash) throw new ExecutionIdempotencyConflictError();
+    if (receipt.status === "succeeded") {
+      assertCanDispatch();
+      return receipt;
+    }
+    if (receipt.status === "reserved" || receipt.status === "running") {
+      throw new ExecutionInProgressError(receipt.id);
+    }
+    if (receipt.status === "uncertain") throw new ExecutionOutcomeUnknownError(receipt.id);
+    throw new ExecutionFailedError(receipt.id);
   }
 
   private authorizeEffect(principal: ExecutionPrincipal, manifest: ToolManifest): void {

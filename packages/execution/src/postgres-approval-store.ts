@@ -4,6 +4,7 @@ import type { JsonValue } from "@oh-my-router/tools";
 import {
   ApprovalUnavailableError,
   ExecutionIdempotencyConflictError,
+  ExecutionOutcomeUnknownError,
   type ApprovalStatus,
   type ExecutionApproval,
   type ExecutionApprovalStore,
@@ -136,14 +137,29 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     principalKey: string;
     now: number;
   }): Promise<ExecutionApproval> {
-    return this.transition(
+    const claimed = await this.client.query<ApprovalRow>(
       `UPDATE omr_control.execution_approvals
        SET status = 'executing', updated_at = $4
        WHERE id = $1 AND actor_user_id = $2 AND principal_key = $3
          AND status = 'approved' AND expires_at > $4
+         AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
+                     WHERE workspace_id = execution_approvals.workspace_id AND user_id = $2 FOR SHARE)
        RETURNING ${COLUMNS}`,
       [input.approvalId, input.actorUserId, input.principalKey, input.now],
     );
+    if (claimed.rows[0]) return this.toApproval(claimed.rows[0]);
+    const prior = await this.client.query<Pick<ApprovalRow, "execution_receipt_id">>(
+      `SELECT execution_receipt_id FROM omr_control.execution_approvals
+       WHERE id = $1 AND actor_user_id = $2 AND principal_key = $3
+         AND status = 'uncertain' AND execution_receipt_id IS NOT NULL
+         AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
+                     WHERE workspace_id = execution_approvals.workspace_id AND user_id = $2)`,
+      [input.approvalId, input.actorUserId, input.principalKey],
+    );
+    if (prior.rows[0]?.execution_receipt_id) {
+      throw new ExecutionOutcomeUnknownError(prior.rows[0].execution_receipt_id);
+    }
+    throw new ApprovalUnavailableError();
   }
 
   async consume(input: {

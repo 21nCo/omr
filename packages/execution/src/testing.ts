@@ -4,6 +4,7 @@ import {
   ApprovalUnavailableError,
   EXECUTION_STALE_AFTER_MS,
   ExecutionIdempotencyConflictError,
+  ExecutionOutcomeUnknownError,
   type ExecutionApproval,
   type ExecutionApprovalStore,
   type ExecutionReceipt,
@@ -17,6 +18,15 @@ function key(receipt: ExecutionReceipt): string {
 export class MemoryExecutionReceiptStore implements ExecutionReceiptStore {
   readonly receipts = new Map<string, ExecutionReceipt>();
   private readonly idempotency = new Map<string, string>();
+
+  constructor(private readonly isMember: (workspaceId: string, actorUserId: string) => boolean) {}
+
+  async findByIdempotency(input: { workspaceId: string; principalKey: string; idempotencyKey: string }): Promise<ExecutionReceipt | null> {
+    const id = this.idempotency.get(`${input.workspaceId}\u0000${input.principalKey}\u0000${input.idempotencyKey}`);
+    const receipt = id ? this.receipts.get(id) : undefined;
+    return receipt && this.isMember(receipt.workspaceId, receipt.actorUserId)
+      ? structuredClone(receipt) : null;
+  }
 
   async reserve(receipt: ExecutionReceipt): Promise<{ receipt: ExecutionReceipt; created: boolean }> {
     const existingId = this.idempotency.get(key(receipt));
@@ -101,12 +111,16 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
   readonly approvals = new Map<string, ExecutionApproval>();
   private readonly idempotency = new Map<string, string>();
 
+  constructor(private readonly isMember: (workspaceId: string, actorUserId: string) => boolean) {}
+
   async create(approval: ExecutionApproval): Promise<ExecutionApproval> {
     const key = `${approval.workspaceId}\u0000${approval.principalKey}\u0000${approval.idempotencyKey}`;
     const existingId = this.idempotency.get(key);
     if (existingId) {
       const existing = this.approvals.get(existingId)!;
-      if (existing.requestHash !== approval.requestHash) throw new ExecutionIdempotencyConflictError();
+      if (!existing.requestHash || !approval.requestHash || existing.requestHash !== approval.requestHash) {
+        throw new ExecutionIdempotencyConflictError();
+      }
       return structuredClone(existing);
     }
     if (this.approvals.has(approval.id)) throw new ApprovalUnavailableError();
@@ -117,7 +131,9 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
 
   async getForActor(approvalId: string, actorUserId: string): Promise<ExecutionApproval> {
     const approval = this.approvals.get(approvalId);
-    if (!approval || approval.actorUserId !== actorUserId) throw new ApprovalUnavailableError();
+    if (approval?.actorUserId !== actorUserId || !this.isMember(approval.workspaceId, actorUserId)) {
+      throw new ApprovalUnavailableError();
+    }
     return structuredClone(approval);
   }
 
@@ -153,12 +169,18 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
     now: number;
   }): Promise<ExecutionApproval> {
     const approval = this.approvals.get(input.approvalId);
+    if (approval?.status === "uncertain" && approval.actorUserId === input.actorUserId &&
+        approval.principalKey === input.principalKey && approval.executionReceiptId &&
+        this.isMember(approval.workspaceId, input.actorUserId)) {
+      throw new ExecutionOutcomeUnknownError(approval.executionReceiptId);
+    }
     if (
       !approval ||
       approval.status !== "approved" ||
       approval.actorUserId !== input.actorUserId ||
       approval.principalKey !== input.principalKey ||
-      approval.expiresAt <= input.now
+      approval.expiresAt <= input.now ||
+      !this.isMember(approval.workspaceId, input.actorUserId)
     ) {
       throw new ApprovalUnavailableError();
     }
@@ -173,7 +195,7 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
     now: number;
   }): Promise<ExecutionApproval> {
     const approval = this.approvals.get(input.approvalId);
-    if (!approval || approval.status !== "executing") throw new ApprovalUnavailableError();
+    if (approval?.status !== "executing") throw new ApprovalUnavailableError();
     approval.status = "consumed";
     approval.executionReceiptId = input.receiptId;
     approval.updatedAt = input.now;
@@ -182,7 +204,7 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
 
   async fail(input: { approvalId: string; now: number }): Promise<ExecutionApproval> {
     const approval = this.approvals.get(input.approvalId);
-    if (!approval || approval.status !== "executing") throw new ApprovalUnavailableError();
+    if (approval?.status !== "executing") throw new ApprovalUnavailableError();
     approval.status = "failed";
     approval.updatedAt = input.now;
     return structuredClone(approval);
@@ -190,7 +212,7 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
 
   async uncertain(input: { approvalId: string; receiptId: string | null; now: number }): Promise<ExecutionApproval> {
     const approval = this.approvals.get(input.approvalId);
-    if (!approval || approval.status !== "executing") throw new ApprovalUnavailableError();
+    if (approval?.status !== "executing") throw new ApprovalUnavailableError();
     approval.status = "uncertain";
     approval.executionReceiptId = input.receiptId;
     approval.updatedAt = input.now;
@@ -217,7 +239,8 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
       !approval ||
       approval.status !== "pending" ||
       approval.actorUserId !== actorUserId ||
-      approval.expiresAt <= now
+      approval.expiresAt <= now ||
+      !this.isMember(approval.workspaceId, actorUserId)
     ) {
       throw new ApprovalUnavailableError();
     }

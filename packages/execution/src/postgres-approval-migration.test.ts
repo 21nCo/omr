@@ -3,6 +3,7 @@ import { Client } from "pg";
 import { describe, expect, it } from "vitest";
 
 import { PostgresExecutionApprovalStore } from "./postgres-approval-store.js";
+import { PostgresExecutionReceiptStore } from "./postgres-store.js";
 import type { ExecutionApproval } from "./execution.js";
 
 const databaseUrl = process.env.OMR_TEST_DATABASE_URL;
@@ -22,15 +23,23 @@ describeDatabase("approval migration from origin/dev schema", () => {
         workspace_id text NOT NULL, user_id text NOT NULL, PRIMARY KEY (workspace_id, user_id))`);
       await client.query(`CREATE TABLE ${qualified}.connection_bindings (id text PRIMARY KEY)`);
       await client.query(`CREATE TABLE ${qualified}.execution_receipts (
-        id text PRIMARY KEY, status text NOT NULL, request_hash text NOT NULL,
+        id text PRIMARY KEY, workspace_id text NOT NULL, actor_user_id text NOT NULL,
+        principal_key text NOT NULL, tool_id text NOT NULL, manifest_hash text NOT NULL,
+        connection_id text NOT NULL, provider_connection_id text NOT NULL,
+        idempotency_key text NOT NULL, request_hash text NOT NULL, status text NOT NULL,
+        result_ciphertext bytea, result_iv bytea, error_code text,
+        started_at bigint NOT NULL, completed_at bigint, created_at bigint NOT NULL,
+        updated_at bigint NOT NULL,
         CONSTRAINT execution_receipts_status_check CHECK (status IN ('running', 'succeeded', 'failed'))
       )`);
       await client.query(`INSERT INTO ${qualified}.workspaces VALUES ('workspace_1')`);
       await client.query(`INSERT INTO ${qualified}.workspace_memberships VALUES ('workspace_1', 'user_1')`);
       await client.query(`INSERT INTO ${qualified}.connection_bindings VALUES ('connection_1')`);
-      const migrate = async (name: string) => {
-        const sql = readFileSync(new URL(`../migrations/${name}.sql`, import.meta.url), "utf8")
+      const migrate = async (name: string, withinExistingTransaction = false) => {
+        let sql = readFileSync(new URL(`../migrations/${name}.sql`, import.meta.url), "utf8")
           .replaceAll("omr_control.", `${qualified}.`);
+        if (withinExistingTransaction) sql = sql.replace(/^--[^\n]*\nBEGIN;/, "")
+          .replace(/COMMIT;\s*$/, "");
         await client.query(sql);
       };
       await migrate("0008_execution_approvals");
@@ -39,24 +48,44 @@ describeDatabase("approval migration from origin/dev schema", () => {
       const ciphertext = new Uint8Array(await crypto.subtle.encrypt(
         { name: "AES-GCM", iv }, wrappingKey, new TextEncoder().encode("{}"),
       ));
-      const insertLegacy = async (id: string, status: string, createdAt: number) => {
+      const insertLegacy = async (id: string, status: string, createdAt: number,
+        idempotencyKey = "legacy-key") => {
         await client.query(`INSERT INTO ${qualified}.execution_approvals
           (id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash,
            connection_id, provider_connection_id, params_ciphertext, params_iv,
            idempotency_key, status, expires_at, created_at, updated_at)
           VALUES ($1, 'workspace_1', 'user_1', 'web:user_1', 'linear.create_issue', 'manifest_1',
-                  'connection_1', 'provider_1', $2, $3, 'legacy-key', $4, 9999999999999, $5, $5)`,
-        [id, ciphertext, iv, status, createdAt]);
+                  'connection_1', 'provider_1', $2, $3, $4, $5, 9999999999999, $6, $6)`,
+        [id, ciphertext, iv, idempotencyKey, status, createdAt]);
       };
       await insertLegacy("approval_old", "consumed", 1);
       await insertLegacy("approval_duplicate", "approved", 2);
       await insertLegacy("approval_inflight", "executing", 3);
+      await insertLegacy("approval_later_pending", "pending", 4, "later-key");
+      await insertLegacy("approval_later_consumed", "consumed", 5, "later-key");
+      await insertLegacy("approval_collision", "rejected", 6,
+        "legacy~duplicate~approval_later_pending~0");
       await migrate("0012_execution_uncertainty");
       await migrate("0013_keyed_execution_fingerprints");
 
       await client.query("BEGIN");
-      await migrate("0014_approval_reconciliation");
-      await client.query("ROLLBACK");
+      await migrate("0014_approval_reconciliation", true);
+      const oldWriter = new Client({ connectionString: databaseUrl! });
+      await oldWriter.connect();
+      try {
+        await oldWriter.query("BEGIN");
+        let writerSettled = false;
+        const racingWrite = oldWriter.query(`UPDATE ${qualified}.execution_approvals
+          SET updated_at = 100 WHERE id = 'approval_old'`)
+          .then(() => { writerSettled = true; });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(writerSettled).toBe(false);
+        await client.query("ROLLBACK");
+        await racingWrite;
+        await oldWriter.query("ROLLBACK");
+      } finally {
+        await oldWriter.end();
+      }
       const rolledBack = await client.query<{ count: string }>(
         `SELECT count(*) FROM ${qualified}.execution_approvals
          WHERE idempotency_key = 'legacy-key' AND request_hash IS NULL`,
@@ -72,9 +101,15 @@ describeDatabase("approval migration from origin/dev schema", () => {
         expect.objectContaining({ id: "approval_old", idempotency_key: "legacy-key",
           status: "consumed", request_hash: "legacy-redacted-approval_old" }),
         expect.objectContaining({ id: "approval_duplicate",
-          idempotency_key: "legacy~duplicate~approval_duplicate", status: "failed" }),
+          idempotency_key: "legacy~duplicate~approval_duplicate~0", status: "failed" }),
         expect.objectContaining({ id: "approval_inflight",
-          idempotency_key: "legacy~duplicate~approval_inflight", status: "uncertain" }),
+          idempotency_key: "legacy~duplicate~approval_inflight~0", status: "uncertain" }),
+        expect.objectContaining({ id: "approval_later_pending",
+          idempotency_key: "legacy~duplicate~approval_later_pending~1", status: "failed" }),
+        expect.objectContaining({ id: "approval_later_consumed",
+          idempotency_key: "later-key", status: "consumed" }),
+        expect.objectContaining({ id: "approval_collision",
+          idempotency_key: "legacy~duplicate~approval_later_pending~0", status: "rejected" }),
       ]);
 
       // Point the store at this isolated schema; its SQL otherwise matches production.
@@ -129,15 +164,27 @@ describeDatabase("approval migration from origin/dev schema", () => {
       await store.claim({ approvalId: "approval_fresh", actorUserId: "user_1",
         principalKey: "web:user_1", now: 6 });
       await client.query(`INSERT INTO ${qualified}.execution_receipts
-        (id, status, request_hash) VALUES ('execution_reconcile', 'uncertain', 'opaque')`);
+        (id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash, connection_id,
+         provider_connection_id, idempotency_key, status, request_hash, started_at, created_at, updated_at)
+        VALUES ('execution_reconcile', 'workspace_1', 'user_1', 'web:user_1', 'linear.create_issue',
+                'manifest_1', 'connection_1', 'provider_1', 'uncertain-key', 'uncertain', 'opaque', 1, 1, 1)`);
       await expect(store.uncertain({ approvalId: "approval_fresh", receiptId: "execution_reconcile", now: 7 }))
         .resolves.toMatchObject({ status: "uncertain", executionReceiptId: "execution_reconcile" });
       await expect(store.claim({ approvalId: "approval_fresh", actorUserId: "user_1",
-        principalKey: "web:user_1", now: 8 })).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+        principalKey: "web:user_1", now: 8 })).rejects.toMatchObject({
+        code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: "execution_reconcile",
+      });
       const count = await client.query<{ count: string }>(
         `SELECT count(*) FROM ${qualified}.execution_approvals WHERE idempotency_key = 'legacy-key'`,
       );
       expect(Number(count.rows[0]?.count)).toBe(1);
+      const receiptStore = new PostgresExecutionReceiptStore(fixtureClient, key);
+      const lookup = { workspaceId: "workspace_1", principalKey: "web:user_1",
+        idempotencyKey: "uncertain-key" };
+      await expect(receiptStore.findByIdempotency(lookup))
+        .resolves.toMatchObject({ id: "execution_reconcile", status: "uncertain" });
+      await client.query(`DELETE FROM ${qualified}.workspace_memberships WHERE user_id = 'user_1'`);
+      await expect(receiptStore.findByIdempotency(lookup)).resolves.toBeNull();
     } finally {
       await client.query(`DROP SCHEMA IF EXISTS ${qualified} CASCADE`);
       await client.end();

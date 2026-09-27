@@ -2,12 +2,12 @@ import type { JsonValue, ToolManifest } from "@oh-my-router/tools";
 
 import type { ExecutionApproval, ExecutionReceipt } from "./execution.js";
 
-const SECRET_NAME = /(?:secret|token|password|passphrase|credential|authorization|api[_-]?key|private[_-]?key)/i;
+const SECRET_NAME = /secret|token|password|passphrase|credential|authorization|api[_-]?key|private[_-]?key/i;
 
 function parseSensitiveKey(key: string): string[] | null {
   // A wildcard consumes exactly one array index or object key. Unknown selector
   // syntax cannot safely describe what should be hidden, so fail closed.
-  if (!/^[^.[\]]+(?:(?:\.[^.[\]]+)|(?:\[(?:\d+|\*)?\]))*$/.test(key)) return null;
+  if (!/^[^.[\]]+(?:\.[^.[\]]+|\[(?:\d+|\*)?\])*$/.test(key)) return null;
   const parts = key.replace(/\[(\d+|\*)?\]/g, (_match, index: string | undefined) => `.${index || "*"}`)
     .split(".").map((part) => part.toLowerCase());
   // Array paths are emitted using canonical decimal indices. Accepting "00"
@@ -64,7 +64,7 @@ export function approvalPreviewReady(
   manifestHash: string,
   params: JsonValue,
 ): boolean {
-  if (!manifest || manifest.hash !== manifestHash ||
+  if (manifest?.hash !== manifestHash ||
       params === null || typeof params !== "object" || Array.isArray(params)) return false;
   if (opaqueUnknownApproval(manifest)) return true;
   if (manifest.contract.version === "0.0.0" || manifest.contract.sensitiveKeys.length === 0 ||
@@ -106,9 +106,14 @@ export function publicApproval(approval: ExecutionApproval, manifest?: ToolManif
     resources: manifestCurrent && manifest ? manifest.contract.resources : [],
     manifestCurrent,
     previewReady,
-    previewMode: previewReady && opaque ? "opaque" : previewReady ? "redacted" : "unavailable",
+    previewMode: previewMode(previewReady, Boolean(opaque)),
     params: previewReady && !opaque ? redact(approval.params, sensitive) : "[REDACTED]",
   };
+}
+
+function previewMode(ready: boolean, opaque: boolean): "opaque" | "redacted" | "unavailable" {
+  if (!ready) return "unavailable";
+  return opaque ? "opaque" : "redacted";
 }
 
 /** History omits results; direct execution returns them only to the authenticated actor. */

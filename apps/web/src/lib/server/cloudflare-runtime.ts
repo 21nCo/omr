@@ -192,7 +192,7 @@ function requireSameOrigin(request: Request): void {
 
 /** Mutating cookie requests need origin proof; bearer clients have explicit credentials. */
 export function requireExecutionOrigin(request: Request): void {
-  if (!bearerCredential(request)) requireSameOrigin(request);
+  if (!bearerCredential(request) || request.headers.has("cookie")) requireSameOrigin(request);
 }
 
 /** A saved selection affects later actions from every client of the same user. */

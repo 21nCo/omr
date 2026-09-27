@@ -42,6 +42,9 @@ describe("execution origin policy", () => {
       .not.toThrow();
     expect(() => requireExecutionOrigin(request({ authorization: "Bearer client-grant" })))
       .not.toThrow();
+    expect(() => requireExecutionOrigin(request({
+      cookie: "session=fixture", origin: "https://other.example", authorization: "Bearer bogus-grant",
+    }))).toThrowError(/same-origin/);
   });
 });
 

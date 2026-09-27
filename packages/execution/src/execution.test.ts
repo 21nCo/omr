@@ -72,8 +72,12 @@ async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes: st
     }] },
   }, (value) => value as never, allowedProviders);
   const actionCall = vi.fn(async () => ({ id: "issue_1", title: "Fixed" }));
-  const receipts = new MemoryExecutionReceiptStore();
-  const approvals = new MemoryExecutionApprovalStore();
+  const receipts = new MemoryExecutionReceiptStore((workspaceId, actorUserId) =>
+    [...workspaceStore.memberships.values()].some((member) =>
+      member.workspaceId === workspaceId && member.userId === actorUserId));
+  const approvals = new MemoryExecutionApprovalStore((workspaceId, actorUserId) =>
+    [...workspaceStore.memberships.values()].some((member) =>
+      member.workspaceId === workspaceId && member.userId === actorUserId));
   return {
     actionCall,
     approvals,
@@ -83,6 +87,7 @@ async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes: st
     otherBinding,
     receipts,
     workspace,
+    workspaceStore,
     setScopes(scopes: string[] | undefined) { grantedScopes = scopes; },
     setRemoteError(error: Error | null) { remoteError = error; },
     service: new ExecutionService(
@@ -128,6 +133,25 @@ function action(name: string, effect: ToolEffect) {
 }
 
 describe("execution service", () => {
+  it("keeps memory approval fingerprints and membership decisions fail closed", async () => {
+    const { approvals, service, workspace, workspaceStore } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const legacy = await requestApproval(service, { principal, toolId: "linear.create_issue",
+      params: {}, idempotencyKey: "legacy-without-fingerprint" });
+    approvals.approvals.set(legacy.id, { ...legacy, requestHash: undefined });
+    await expect(requestApproval(service, { principal, toolId: "linear.create_issue",
+      params: {}, idempotencyKey: legacy.idempotencyKey }))
+      .rejects.toMatchObject({ code: "EXECUTION_IDEMPOTENCY_CONFLICT" });
+
+    const pending = await requestApproval(service, { principal, toolId: "linear.create_issue", params: {} });
+    const approved = await requestApproval(service, { principal, toolId: "linear.create_issue", params: {} });
+    await service.approve(approved.id, principal.userId);
+    expect(workspaceStore.removeMembership(workspace.id, principal.userId)).toBe(true);
+    await expect(service.approve(pending.id, principal.userId)).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    await expect(service.reject(pending.id, principal.userId)).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    await expect(service.executeApproved(principal, approved.id)).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+  });
+
   it("keeps uncontracted unknown actions approvable with an opaque preview and no early effect", async () => {
     const { approvals, actionCall, catalog, service, workspace } = await fixture();
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
@@ -304,15 +328,45 @@ describe("execution service", () => {
       code: "CONNECTION_NOT_FOUND",
     }));
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
-    await expect(service.execute({ principal, toolId: "linear.get_issue", params: {} }))
-      .rejects.toBeInstanceOf(ConnectionUnavailableError);
+    const request = { principal, toolId: "linear.get_issue", params: {}, idempotencyKey: "missing-after-dispatch" };
+    const outcome = await service.execute(request)
+      .catch((error: unknown) => error) as { code: string; receiptId: string };
+    expect(outcome).toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN" });
     expect([...receipts.receipts.values()]).toEqual([
-      expect.objectContaining({ status: "failed", errorCode: "connection_unavailable" }),
+      expect.objectContaining({ id: outcome.receiptId, status: "uncertain", errorCode: "provider_outcome_unknown" }),
     ]);
     expect(await connections.listAvailable({ actorUserId: "user_1", workspaceId: workspace.id }))
       .toContainEqual(expect.objectContaining({ id: firstBinding.id, status: "needs_reauth" }));
+    await expect(service.execute(request)).rejects.toMatchObject({
+      code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: outcome.receiptId,
+    });
+    expect(actionCall).toHaveBeenCalledTimes(1);
     await expect(service.execute({ principal, toolId: "github.get_issue", params: {} }))
       .resolves.toMatchObject({ status: "succeeded" });
+  });
+
+  it("keeps an approved effect uncertain after a missing-remote reply, including approval replay", async () => {
+    const { actionCall, approvals, receipts, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const approval = await requestApproval(service, { principal, toolId: "linear.create_issue", params: {} });
+    await service.approve(approval.id, principal.userId);
+    let effectApplied = 0;
+    actionCall.mockImplementationOnce(async () => {
+      effectApplied += 1;
+      throw Object.assign(new Error("reply lost after effect"), { code: "CONNECTION_NOT_FOUND" });
+    });
+    const outcome = await service.executeApproved(principal, approval.id)
+      .catch((error: unknown) => error) as { code: string; receiptId: string };
+    expect(outcome.code).toBe("EXECUTION_OUTCOME_UNKNOWN");
+    expect(receipts.receipts.get(outcome.receiptId)).toMatchObject({ status: "uncertain" });
+    expect(approvals.approvals.get(approval.id)).toMatchObject({
+      status: "uncertain", executionReceiptId: outcome.receiptId,
+    });
+    await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({
+      code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: outcome.receiptId,
+    });
+    expect(effectApplied).toBe(1);
+    expect(actionCall).toHaveBeenCalledTimes(1);
   });
 
   it("keeps missing-remote responses deterministic when recording health fails", async () => {
@@ -324,8 +378,10 @@ describe("execution service", () => {
       const missing = Object.assign(new Error("remote missing"), { code: "CONNECTION_NOT_FOUND" });
       if (phase === "scope") setRemoteError(missing);
       else actionCall.mockRejectedValueOnce(missing);
-      await expect(service.execute({ principal, toolId: "linear.get_issue", params: {} }))
-        .rejects.toBeInstanceOf(ConnectionUnavailableError);
+      const outcome = await service.execute({ principal, toolId: "linear.get_issue", params: {} })
+        .catch((error: unknown) => error) as { code: string; receiptId: string };
+      expect(outcome).toMatchObject({ code: phase === "scope"
+        ? "CONNECTION_UNAVAILABLE" : "EXECUTION_OUTCOME_UNKNOWN" });
       expect(recordHealth).toHaveBeenCalledExactlyOnceWith({
         connectionId: firstBinding.id,
         status: "needs_reauth",
@@ -333,7 +389,7 @@ describe("execution service", () => {
         reason: "plugfn_connection_missing",
       });
       expect([...receipts.receipts.values()]).toEqual(phase === "scope" ? [] : [
-        expect.objectContaining({ status: "failed", errorCode: "connection_unavailable" }),
+        expect.objectContaining({ id: outcome.receiptId, status: "uncertain", errorCode: "provider_outcome_unknown" }),
       ]);
     }
   });
@@ -902,7 +958,7 @@ describe("execution service", () => {
     });
     expect(actionCall).toHaveBeenCalledTimes(1);
     await expect(service.executeApproved(principal, approval.id))
-      .rejects.toBeInstanceOf(ApprovalUnavailableError);
+      .rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: error.receiptId });
   });
 
   it.each([
@@ -935,7 +991,7 @@ describe("execution service", () => {
       failure === "guard commit failure" ? "succeeded" : "uncertain",
     );
     await expect(service.executeApproved(principal, approval.id))
-      .rejects.toBeInstanceOf(ApprovalUnavailableError);
+      .rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: error.receiptId });
     expect(actionCall).toHaveBeenCalledTimes(1);
   });
 
@@ -967,7 +1023,7 @@ describe("execution service", () => {
     expect(approvals.approvals.get(approval.id)).toMatchObject({ status: "uncertain",
       executionReceiptId: error.receiptId });
     await expect(service.executeApproved(principal, approval.id))
-      .rejects.toBeInstanceOf(ApprovalUnavailableError);
+      .rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: error.receiptId });
     expect(actionCall).toHaveBeenCalledOnce();
     expect(end).toHaveBeenCalledOnce();
     expect(query.mock.calls.at(-1)?.[0]).not.toBe("ROLLBACK");
@@ -1107,7 +1163,7 @@ describe("execution service", () => {
   });
 
   it("treats a stale dispatch transition as uncertain instead of replayable", async () => {
-    const store = new MemoryExecutionReceiptStore();
+    const store = new MemoryExecutionReceiptStore(() => true);
     const { receipts, service, workspace } = await fixture();
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
     const first = await service.execute({ principal, toolId: "linear.get_issue", params: {},

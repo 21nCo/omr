@@ -25,10 +25,10 @@ function objectSchema(value: unknown): McpFnObjectSchema {
 
 function actionInputSchema(manifest: ToolManifest): McpFnObjectSchema {
   const schema = objectSchema(manifest.inputSchema);
-  if (manifest.contract.effect === "read") return schema;
   if (IDEMPOTENCY_FIELD in (schema.properties ?? {})) {
     throw new Error(`OMR catalog tool ${manifest.id} conflicts with the MCP idempotency field`);
   }
+  if (manifest.contract.effect === "read") return schema;
   return {
     ...schema,
     properties: {
@@ -117,7 +117,7 @@ export async function createOMRMcpServer(input: {
       const execution = {
         workspaceId: input.workspaceId,
         toolId: manifest.id,
-        params: (manifest.contract.effect === "read" ? args : params) as JsonValue,
+        params: params as JsonValue,
       };
       if (manifest.contract.effect !== "read") {
         if (typeof idempotencyKey !== "string") throw new Error(`${IDEMPOTENCY_FIELD} is required`);

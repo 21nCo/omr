@@ -3,13 +3,14 @@ import pg from "pg";
 import { PostgresExecutionReceiptStore } from "./postgres-store.js";
 import { PostgresExecutionApprovalStore } from "./postgres-approval-store.js";
 import { PostgresExecutionInvocationGuard } from "./postgres-invocation-guard.js";
+import type { ExecutionInvocationGuard } from "./execution.js";
 
 const { Client } = pg;
 
 export interface PostgresExecutionReceiptRuntime {
   receipts: PostgresExecutionReceiptStore;
   approvals: PostgresExecutionApprovalStore;
-  invocationGuard: PostgresExecutionInvocationGuard;
+  invocationGuard: ExecutionInvocationGuard;
   close(): Promise<void>;
 }
 
@@ -23,24 +24,28 @@ export async function connectPostgresExecutionReceipts(input: {
   }
   const client = new Client({ connectionString: input.connectionString });
   await client.connect();
-  const guardClient = new Client({ connectionString: input.connectionString });
-  // PostgreSQL's idle-in-transaction watchdog can close this connection during a hung provider call.
-  guardClient.on("error", () => undefined);
-  try {
-    await guardClient.connect();
-  } catch (error) {
-    await client.end();
-    throw error;
-  }
   try {
     return {
       receipts: new PostgresExecutionReceiptStore(client, input.resultWrappingKey),
       approvals: new PostgresExecutionApprovalStore(client, input.resultWrappingKey),
-      invocationGuard: new PostgresExecutionInvocationGuard(guardClient),
-      async close() { await Promise.all([client.end(), guardClient.end()]); },
+      // A deadline destroys its transaction socket. Each invocation owns its guard
+      // client, so a later call on this runtime cannot reuse a closed connection.
+      invocationGuard: {
+        async run(guardInput, invoke) {
+          const guardClient = new Client({ connectionString: input.connectionString });
+          guardClient.on("error", () => undefined);
+          try {
+            await guardClient.connect();
+            return await new PostgresExecutionInvocationGuard(guardClient).run(guardInput, invoke);
+          } finally {
+            await guardClient.end().catch(() => undefined);
+          }
+        },
+      },
+      async close() { await client.end(); },
     };
   } catch (error) {
-    await Promise.allSettled([client.end(), guardClient.end()]);
+    await client.end().catch(() => undefined);
     throw error;
   }
 }

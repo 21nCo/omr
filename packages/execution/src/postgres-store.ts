@@ -37,6 +37,17 @@ export class PostgresExecutionReceiptStore implements ExecutionReceiptStore {
     if (wrappingKey.byteLength !== 32) throw new Error("Execution receipt wrapping key must be 32 bytes");
   }
 
+  async findByIdempotency(input: { workspaceId: string; principalKey: string; idempotencyKey: string }): Promise<ExecutionReceipt | null> {
+    const result = await this.client.query<ReceiptRow>(
+      `SELECT ${COLUMNS} FROM omr_control.execution_receipts
+       WHERE workspace_id = $1 AND principal_key = $2 AND idempotency_key = $3
+         AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
+                     WHERE workspace_id = $1 AND user_id = actor_user_id)`,
+      [input.workspaceId, input.principalKey, input.idempotencyKey],
+    );
+    return result.rows[0] ? this.toReceipt(result.rows[0]) : null;
+  }
+
   async reserve(receipt: ExecutionReceipt): Promise<{ receipt: ExecutionReceipt; created: boolean }> {
     const result = await this.client.query<ReceiptRow>(
       `INSERT INTO omr_control.execution_receipts

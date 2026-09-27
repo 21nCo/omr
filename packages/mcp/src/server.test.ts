@@ -59,7 +59,10 @@ describe("OMR MCP server", () => {
         return Response.json({
           catalogSchemaVersion: "1.0.0",
           revision: "revision-1",
-          tools: [manifest("demo.read", "read"), manifest("demo.write", "write")],
+          tools: [{ ...manifest("demo.read", "read"), inputSchema: {
+            type: "object", properties: { value: { type: "string" } },
+            required: ["value"], additionalProperties: true,
+          } }, manifest("demo.write", "write")],
         });
       }
       if (url.pathname === "/api/tools/execute") {
@@ -110,7 +113,7 @@ describe("OMR MCP server", () => {
 
     await expect(client.callTool({
       name: "demo.read",
-      arguments: { value: "read" },
+      arguments: { value: "read", _omrIdempotencyKey: "optional-read-key" },
     })).resolves.toMatchObject({
       structuredContent: { status: "succeeded", output: { value: "read" } },
     });
@@ -154,6 +157,9 @@ describe("OMR MCP server", () => {
     });
 
     expect(requests.filter(({ path }) => path === "/api/tools/execute")).toHaveLength(1);
+    expect(requests.find(({ path }) => path === "/api/tools/execute")?.body).toMatchObject({
+      params: { value: "read" },
+    });
     expect(requests.find(({ path }) => path === "/api/approvals")?.body).toEqual({
       workspaceId: "workspace-1",
       toolId: "demo.write",

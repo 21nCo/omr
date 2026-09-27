@@ -276,9 +276,13 @@ describe("execution-policy-contract", () => {
         opaque: { ...action("opaque", "unknown"), contract: undefined } },
     }] } }, (value) => value as never);
     const provider = vi.fn(async () => ({ result: "private provider result" }));
-    const approvalStore = new MemoryExecutionApprovalStore();
+    const approvalStore = new MemoryExecutionApprovalStore((workspaceId, actorUserId) =>
+      [...workspaceStore.memberships.values()].some((member) =>
+        member.workspaceId === workspaceId && member.userId === actorUserId));
     const service = new ExecutionService(catalog, connections, { action: provider },
-      new MemoryExecutionReceiptStore(), async () => [], Date.now,
+      new MemoryExecutionReceiptStore((workspaceId, actorUserId) =>
+        [...workspaceStore.memberships.values()].some((member) =>
+          member.workspaceId === workspaceId && member.userId === actorUserId)), async () => [], Date.now,
       approvalStore, undefined, new Uint8Array(32).fill(7));
     const principal = (request: Request): ExecutionPrincipal => surface === "web"
       ? { kind: "web", userId: "user_1", workspaceId: workspace.id }
@@ -402,6 +406,22 @@ describe("execution-policy-contract", () => {
         expect(JSON.parse((await runCli(["approvals", "execute", opaque.id])).stdout))
           .toMatchObject({ status: "succeeded" });
         expect(provider).toHaveBeenCalledTimes(3);
+        const ambiguous = JSON.parse((await runCli(["approvals", "request", "linear.write",
+          "--params", "{}", "--idempotency", "cli-ambiguous-effect"])).stdout) as { id: string };
+        await webPost("/api/approvals/approve", { approvalId: ambiguous.id });
+        provider.mockRejectedValueOnce(Object.assign(new Error("reply lost after effect"), {
+          code: "CONNECTION_NOT_FOUND",
+        }));
+        const failed = await runCli(["approvals", "execute", ambiguous.id])
+          .catch((error: { code: number; stdout: string; stderr: string }) => error);
+        const errorText = failed.stdout + failed.stderr;
+        expect(errorText).toContain("EXECUTION_OUTCOME_UNKNOWN");
+        const receiptId = errorText.match(/execution_[\w-]+/)?.[0];
+        expect(receiptId).toBeTruthy();
+        const replay = await runCli(["approvals", "execute", ambiguous.id])
+          .catch((error: { code: number; stdout: string; stderr: string }) => error);
+        expect(replay.stdout + replay.stderr).toContain(receiptId);
+        expect(provider).toHaveBeenCalledTimes(4);
       } finally {
         await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
       }
@@ -455,6 +475,23 @@ describe("execution-policy-contract", () => {
         expect(await client.callTool({ name: "omr.approvals.execute", arguments: { approvalId: opaqueId } }))
           .toMatchObject({ structuredContent: { status: "succeeded" } });
         expect(provider).toHaveBeenCalledTimes(3);
+        const ambiguous = await client.callTool({ name: "linear.write", arguments: {
+          _omrIdempotencyKey: "mcp-ambiguous-effect",
+        } });
+        const ambiguousId = (ambiguous.structuredContent as { approvalId: string }).approvalId;
+        await webPost("/api/approvals/approve", { approvalId: ambiguousId });
+        provider.mockRejectedValueOnce(Object.assign(new Error("reply lost after effect"), {
+          code: "CONNECTION_NOT_FOUND",
+        }));
+        const failed = await client.callTool({ name: "omr.approvals.execute", arguments: { approvalId: ambiguousId } });
+        expect(failed).toMatchObject({ isError: true, structuredContent: { ok: false,
+          error: { details: { error: "EXECUTION_OUTCOME_UNKNOWN", receiptId: expect.any(String) } } } });
+        const failedDetails = ((failed.structuredContent as { error: { details: { receiptId: string } } })
+          .error.details);
+        expect(await client.callTool({ name: "omr.approvals.execute", arguments: { approvalId: ambiguousId } }))
+          .toMatchObject({ isError: true, structuredContent: { ok: false,
+            error: { details: { error: "EXECUTION_OUTCOME_UNKNOWN", receiptId: failedDetails.receiptId } } } });
+        expect(provider).toHaveBeenCalledTimes(4);
       } finally {
         await Promise.all([client.close(), server.close()]);
       }
@@ -519,5 +556,21 @@ describe("execution-policy-contract", () => {
       params: "[REDACTED]" });
     expect(await client.executeApproved(opaque.id)).toMatchObject({ status: "succeeded" });
     expect(provider).toHaveBeenCalledTimes(3);
+    const ambiguous = await client.requestApproval({ workspaceId: workspace.id, toolId: "linear.write",
+      params: {}, idempotencyKey: "web-ambiguous-effect" }) as { id: string };
+    await client.approve(ambiguous.id);
+    provider.mockRejectedValueOnce(Object.assign(new Error("reply lost after effect"), {
+      code: "CONNECTION_NOT_FOUND",
+    }));
+    const failed = await client.executeApproved(ambiguous.id)
+      .catch((error: unknown) => error) as OMRHttpError;
+    expect(failed).toMatchObject({ status: 502, body: {
+      error: "EXECUTION_OUTCOME_UNKNOWN", receiptId: expect.any(String),
+    } });
+    const receiptId = (failed.body as { receiptId: string }).receiptId;
+    await expect(client.executeApproved(ambiguous.id)).rejects.toMatchObject({ status: 502, body: {
+      error: "EXECUTION_OUTCOME_UNKNOWN", receiptId,
+    } });
+    expect(provider).toHaveBeenCalledTimes(4);
   });
 });

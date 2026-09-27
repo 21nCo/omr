@@ -60,7 +60,11 @@ reconciled. Unexpected execution errors log only
 their class. If the provider receipt succeeds but approval consumption cannot be persisted, the
 service reports an unknown completion with the receipt ID and marks the approval uncertain for
 reconciliation; it never marks the successful effect failed or retries it. The same state applies
-to provider ambiguity, receipt persistence failure, and a guard commit failure after dispatch.
+to provider ambiguity, a missing-connection reply after entering the provider action, receipt
+persistence failure, and a guard commit failure after dispatch. A matching same-key replay of an
+uncertain read or approval returns the original receipt ID without invoking the provider, even if
+the selected binding has since degraded; the receipt lookup still requires current workspace
+membership. A guard transaction owns a separate PostgreSQL client for each invocation.
 The HTTP boundary returns `504 EXECUTION_INVOCATION_TIMEOUT` without a receipt ID when the
 deadline closes before provider dispatch. After dispatch, it returns
 `502 EXECUTION_OUTCOME_UNKNOWN` with the receipt ID. CLI JSON errors and MCP structured tool
@@ -103,14 +107,20 @@ opaque legacy markers. Those rows remain readable, but retrying their idempotenc
 and requires a new key after reconciliation. Keep the additive schema if rolling the Worker back:
 the previous version treats an `uncertain` receipt as non-replayable, and its inserts leave
 `request_hash` null. Reapplying `0013` after a rollback removes newly written unkeyed hashes.
-Migration `0014` adds the approval `uncertain` state and reserves every original legacy key. If
-origin/dev contains duplicate keys, the oldest row keeps the original key; later rows receive a
-`legacy~duplicate~<id>` audit key (outside the accepted new-key syntax). Pending and approved duplicates are failed, and executing
-duplicates become uncertain for manual reconciliation. NULL fingerprints become opaque legacy
-markers, and the approval index becomes unconditional. Apply `0014` before deploying the new
-Worker. Roll back the Worker without reversing this additive schema; a downgrade that writes new
-NULL fingerprints still cannot reuse an existing key. Do not reverse `0014` while uncertain
-approvals or duplicate legacy history exist.
+Migration `0014` adds the approval `uncertain` state and reserves every original legacy key. Stop
+old Worker traffic and drain in-flight approval writes before applying it; keep all old writers
+quiesced until the new Worker is deployed and serving requests. The migration has its own
+transaction and an exclusive approval-table lock. A consumed, executing, or uncertain duplicate
+keeps the original key ahead of any pending or approved sibling, regardless of creation order.
+Other duplicates receive collision-checked `legacy~duplicate~<id>~<n>` audit keys (outside the
+accepted new-key syntax). Pending and approved duplicates are failed, and executing duplicates
+become uncertain for manual reconciliation. NULL fingerprints become opaque legacy markers, and
+the approval index becomes unconditional. Apply the file with stop-on-error behavior. If a
+statement fails, issue `ROLLBACK` on that migration connection before inspecting data and retrying;
+keep traffic quiesced until the schema and Worker are ready. Roll back the Worker
+without reversing this additive schema, and quiesce new writers before starting an old Worker.
+A downgrade that writes new NULL fingerprints still cannot reuse an existing key. Do not reverse
+`0014` while uncertain approvals or duplicate legacy history exist.
 Migration `0015` permits the `reserved` receipt state. Apply it before deploying the
 new Worker. A reservation stays `reserved` until the durable transition to
 `running` has returned and the guard rechecks the dispatch deadline. After 65
