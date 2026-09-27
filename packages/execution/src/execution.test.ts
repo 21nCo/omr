@@ -901,7 +901,8 @@ describe("execution service", () => {
         expires_at: new Date(Date.now() + 60_000) }] };
       return { rows: [] };
     });
-    const guard = new PostgresExecutionInvocationGuard({ query } as never, 15);
+    const end = vi.fn(async () => undefined);
+    const guard = new PostgresExecutionInvocationGuard({ query, end } as never, 15);
     const { actionCall, approvals, receipts, service, workspace } = await fixture(
       undefined, undefined, false, guard,
     );
@@ -919,7 +920,8 @@ describe("execution service", () => {
     await expect(service.executeApproved(principal, approval.id))
       .rejects.toBeInstanceOf(ApprovalUnavailableError);
     expect(actionCall).toHaveBeenCalledOnce();
-    expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+    expect(end).toHaveBeenCalledOnce();
+    expect(query.mock.calls.at(-1)?.[0]).not.toBe("ROLLBACK");
   });
 
   it.each([
@@ -943,7 +945,8 @@ describe("execution service", () => {
         revoked_at: null, expires_at: new Date(Date.now() + 60_000) }] };
       return { rows: [] };
     });
-    const guard = new PostgresExecutionInvocationGuard({ query } as never, 150);
+    const end = vi.fn(async () => undefined);
+    const guard = new PostgresExecutionInvocationGuard({ query, end } as never, 150);
     const { actionCall, approvals, receipts, service, workspace } = await fixture(undefined, undefined, false, guard);
     workspaceId = workspace.id;
     const principal = kind === "web"
@@ -969,7 +972,8 @@ describe("execution service", () => {
       : service.execute({ principal, toolId: "linear.get_issue", params: {} });
     await reserved;
     await expect(pending).rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
-    expect(queries.at(-1)).toBe("ROLLBACK");
+    expect(end).toHaveBeenCalledOnce();
+    expect(queries.at(-1)).not.toBe("ROLLBACK");
     // A revocation can now commit because the transaction has released its locks.
     revoked = true;
     release();

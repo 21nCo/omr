@@ -8,7 +8,9 @@ import { describe, expect, it, vi } from "vitest";
 import { OMRHttpError } from "@oh-my-router/client";
 import { ConnectionAuthority } from "@oh-my-router/connections";
 import { MemoryConnectionBindingStore } from "@oh-my-router/connections/testing";
-import { ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
+import { ExecutionService, ExecutionInvocationDeadlineError, ExecutionOutcomeUnknownError,
+  publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
+import { PostgresExecutionInvocationGuard } from "@oh-my-router/execution/postgres";
 import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "@oh-my-router/execution/testing";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
 import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
@@ -27,6 +29,127 @@ function action(name: string, effect: ToolEffect) {
 }
 
 describe("execution-policy-contract", () => {
+  it("returns a near-deadline SQL wait through web, CLI and MCP before their client timeout", async () => {
+    const catalog = await ToolCatalog.create({ providers: { list: () => [{
+      name: "linear", displayName: "Linear", version: "1.0.0", description: "Linear",
+      actions: { read: action("read", "read") },
+    }] } }, (value) => value as never);
+    const provider = vi.fn();
+    const timeline: string[] = [];
+    const run = async (afterDispatch: boolean) => {
+      let releaseWait!: () => void;
+      const wait = new Promise<void>((resolve) => { releaseWait = resolve; });
+      let queue = Promise.resolve();
+      const query = vi.fn((sql: string) => {
+        const result = queue.then(async () => {
+          timeline.push(sql);
+          if (sql.includes("connection_bindings")) return { rows: [{ workspace_id: "workspace_1",
+            provider_connection_id: "remote_1", ownership: "workspace", owner_user_id: null,
+            status: "active", readiness: "ready" }] };
+          if (sql.includes("workspace_memberships")) {
+            if (!afterDispatch) await wait;
+            return { rows: [{ id: "membership_1" }] };
+          }
+          if (sql.includes("omr_control.clients")) return { rows: [{ workspace_id: "workspace_1", revoked_at: null }] };
+          if (sql.includes("client_grants")) return { rows: [{ client_id: "client_1",
+            workspace_id: "workspace_1", user_id: "user_1", capabilities: ["tools:read", "tools:write"],
+            revoked_at: null, expires_at: new Date(Date.now() + 60_000) }] };
+          return { rows: [] };
+        });
+        queue = result.then(() => undefined, () => undefined);
+        return result;
+      });
+      const end = vi.fn(async () => { timeline.push("DISCONNECT"); releaseWait(); });
+      const guard = new PostgresExecutionInvocationGuard({ query, end } as never, 140);
+      try {
+        return await guard.run({ principal: { kind: "client", userId: "user_1",
+          workspaceId: "workspace_1", clientId: "client_1", grantId: "grant_1",
+          capabilities: ["tools:read", "tools:write"] },
+        connection: { id: "binding_1", workspaceId: "workspace_1", providerConnectionId: "remote_1" } as never,
+        capability: afterDispatch ? "tools:write" : "tools:read" }, async () => {
+          provider();
+          return new Promise<never>(() => undefined);
+        });
+      } catch (error) {
+        if (afterDispatch && error instanceof ExecutionInvocationDeadlineError) {
+          throw new ExecutionOutcomeUnknownError("receipt_after_dispatch");
+        }
+        throw error;
+      }
+    };
+    const execution: ExecutionRouteServices = {
+      execute: async () => run(false),
+      requestApproval: async () => ({}),
+      approve: async () => ({}),
+      reject: async () => ({}),
+      executeApproved: async (_request, approvalId) => run(approvalId === "after-dispatch"),
+    };
+    const tools: ToolRouteServices = {
+      discover: async () => catalog.discover(),
+      manifest: async () => null,
+    };
+    const router = createOMRRouter(undefined, undefined, tools, execution);
+    const server = createServer(async (incoming, outgoing) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of incoming) chunks.push(Buffer.from(chunk));
+      const response = await router.handle(new Request(`http://127.0.0.1${incoming.url}`, {
+        method: incoming.method, headers: incoming.headers as HeadersInit,
+        ...(chunks.length ? { body: Buffer.concat(chunks) } : {}),
+      }));
+      outgoing.writeHead(response.status, Object.fromEntries(response.headers));
+      outgoing.end(Buffer.from(await response.arrayBuffer()));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Protocol fixture listener is unavailable");
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+    let mcp: Awaited<ReturnType<typeof createOMRMcpServer>> | undefined;
+    let client: McpClient | undefined;
+    try {
+      mcp = await createOMRMcpServer({ baseUrl, credential: "mcp-fixture", workspaceId: "workspace_1" });
+      client = new McpClient({ name: "queued-sql", version: "1.0.0" }, { capabilities: {} });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await mcp.connect(serverTransport);
+      await client.connect(clientTransport);
+      const runCli = (args: string[]) => execFileAsync(process.execPath,
+        [join(process.cwd(), "packages/cli/dist/bin.js"), ...args, "--json"], {
+          env: { ...process.env, OMR_BACKEND: baseUrl, OMR_API_KEY: "cli-fixture",
+            OMR_WORKSPACE_ID: "workspace_1" }, timeout: 5_000,
+        }).then(() => { throw new Error("CLI unexpectedly succeeded"); },
+          (error: { code: number; stdout: string; stderr: string }) => error);
+      const [web, cliRead, cliBefore, cliAfter, mcpRead, mcpBefore, mcpAfter] = await Promise.all([
+        fetch(`${baseUrl}/api/tools/execute`, { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ workspaceId: "workspace_1", toolId: "linear.read", params: {} }) }),
+        runCli(["tools", "run", "linear.read"]),
+        runCli(["approvals", "execute", "before-dispatch"]),
+        runCli(["approvals", "execute", "after-dispatch"]),
+        client.callTool({ name: "linear.read", arguments: {} }),
+        client.callTool({ name: "omr.approvals.execute", arguments: { approvalId: "before-dispatch" } }),
+        client.callTool({ name: "omr.approvals.execute", arguments: { approvalId: "after-dispatch" } }),
+      ]);
+      expect(web.status).toBe(504);
+      await expect(web.json()).resolves.toEqual({ error: "EXECUTION_INVOCATION_TIMEOUT" });
+      for (const error of [cliRead, cliBefore]) {
+        expect(error.code).toBe(1);
+        expect(error.stdout + error.stderr).toContain("EXECUTION_INVOCATION_TIMEOUT");
+      }
+      expect(cliAfter.stdout + cliAfter.stderr).toContain("EXECUTION_OUTCOME_UNKNOWN");
+      expect(cliAfter.stdout + cliAfter.stderr).toContain("receipt_after_dispatch");
+      for (const response of [mcpRead, mcpBefore]) {
+        expect(response).toMatchObject({ isError: true, structuredContent: { ok: false,
+          error: { details: { error: "EXECUTION_INVOCATION_TIMEOUT" } } } });
+      }
+      expect(mcpAfter).toMatchObject({ isError: true, structuredContent: { ok: false,
+        error: { details: { error: "EXECUTION_OUTCOME_UNKNOWN", receiptId: "receipt_after_dispatch" } } } });
+      expect(timeline.filter((sql) => sql === "DISCONNECT")).toHaveLength(7);
+      expect(timeline).not.toContain("ROLLBACK");
+      expect(provider).toHaveBeenCalledTimes(2);
+    } finally {
+      await Promise.all([client?.close(), mcp?.close()]);
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  }, 10_000);
+
   it("delivers delayed execution errors through CLI and MCP after the old client timeout", async () => {
     const catalog = await ToolCatalog.create({ providers: { list: () => [{
       name: "linear", displayName: "Linear", version: "1.0.0", description: "Linear",

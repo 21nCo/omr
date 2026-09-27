@@ -20,9 +20,13 @@ that starts after these locks waits for the authorized invocation to finish. The
 commits on a separate connection **before** calling the provider. A crash after reservation leaves a
 `running` receipt, so retry cannot cause a second provider call. An ambiguous provider error or a
 receipt persistence failure is `uncertain`, with a stable receipt ID and no automatic replay.
-The guard has a 60-second end-to-end deadline. Its PostgreSQL statement timeout bounds individual
-queries, and an idle transaction timeout releases revocation locks if the Worker stops while waiting
-for the provider. Pre-dispatch work checks a deadline-bound dispatch callback after fingerprinting
+The guard has a 60-second end-to-end deadline. It refreshes PostgreSQL's statement timeout with
+the remaining invocation time before each authorization query and commit. At the deadline it closes
+the dedicated non-pipelined guard connection, canceling an active query and rolling back its
+transaction without placing rollback behind a stalled query. A rollback after an earlier failure is
+also bounded by the remaining deadline and closes the connection if cleanup stalls. The idle
+transaction timeout releases revocation locks if the Worker stops while waiting for the provider.
+Pre-dispatch work checks a deadline-bound dispatch callback after fingerprinting
 and receipt reservation, so a late continuation cannot call the provider after rollback. The callback
 also checks the web session or client grant expiry at dispatch. A pre-dispatch timeout or expiry
 fails a newly reserved receipt without an upstream effect. A provider call that outlives the deadline may still finish upstream; its receipt
@@ -77,7 +81,7 @@ approval-request calls keep their shorter client timeout.
 | Web approval execution | Actor/workspace substitution or revoked membership with an empty route workspace | Empty-workspace principal and guard tests |
 | Workspace, grant, connection | Cross-workspace use or use after revocation | Service denial and PostgreSQL guard fixture tests |
 | Provider and receipt | Second effect after timeout, crash, or ambiguous error | Uncertain replay and reservation tests |
-| Invocation liveness | Hung provider holds revocation locks or late reservation dispatches after rollback/expiry | Deadline, rollback, pre-dispatch cancellation, and uncertain non-replay tests |
+| Invocation liveness | A near-deadline query or queued rollback holds locks beyond the client timeout; late reservation dispatches after expiry | Queued-client query and rollback deadline fixtures, pre-dispatch cancellation, and uncertain non-replay tests |
 | Client execution deadline | CLI or MCP aborts before a structured timeout or uncertain receipt arrives | Delayed protocol responses beyond the former 30-second client timeout |
 | Timeout response | Predispatch timeout becomes a generic 500 or loses its distinction from an uncertain effect | Router, CLI JSON, and MCP protocol tests for read and approved execution |
 | Storage | Plaintext parameters or results | PostgreSQL encryption integration test when a disposable database is available |
