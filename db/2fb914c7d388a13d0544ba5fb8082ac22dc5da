@@ -1,0 +1,36 @@
+docs/execution-policy-v1.md
+  h_a39f9495f9ec1d 135-142
+packages/execution/src/execution.test.ts
+  h_a39f9495f9ec1d 80,565-590
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 486,505-506,508-509,592,594-600
+packages/execution/src/postgres-approval-migration.test.ts
+  h_a39f9495f9ec1d 153-178,212,234
+packages/execution/src/postgres-approval-store.ts
+  h_a39f9495f9ec1d 14,41-49,62,123-129,131,142-148,150,206-246,248-251,254-255,257-284,293,295-297,319,321-324,362
+packages/execution/src/postgres-crypto.ts
+  h_a39f9495f9ec1d 1-18
+packages/execution/src/postgres-runtime.test.ts
+  h_a39f9495f9ec1d 44-46,173-175
+packages/execution/src/postgres-store.ts
+  h_a39f9495f9ec1d 6,90-92,96-98,120,188
+packages/execution/src/postgres.integration.test.ts
+  h_a39f9495f9ec1d 356-438
+packages/execution/src/projection.ts
+  h_a39f9495f9ec1d 40-45
+packages/execution/src/testing.ts
+  h_a39f9495f9ec1d 36-42,122-123,186-189,214-216,234-235,269-279
+tests/acceptance/execution-policy-contract.test.ts
+  h_a39f9495f9ec1d 279,281-283,285
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "db2fb914c7d388a13d0544ba5fb8082ac22dc5da",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
