@@ -1,0 +1,19 @@
+packages/execution/src/execution.ts
+  s_03af99908d477a::t_33af81c4261363 61,125,397,429-430,463-464,470-476,483,497,507,512,521
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "06d42e341361a194618efce19c040f5205d57d70",
+  "prompts": {},
+  "sessions": {
+    "s_03af99908d477a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0e228-8df8-7f11-a69d-01469b4c3328",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
