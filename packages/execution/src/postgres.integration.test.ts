@@ -7,6 +7,7 @@ import {
   connectPostgresExecutionReceipts,
   type PostgresExecutionReceiptRuntime,
 } from "./postgres.js";
+import { PostgresOwnedQueries } from "./postgres-owned-query.js";
 
 const connectionString = process.env.OMR_TEST_DATABASE_URL;
 const describePostgres = connectionString ? describe : describe.skip;
@@ -528,15 +529,45 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     try {
       const count = async () => Number((await observer.query<{ count: string }>(
         "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1", [applicationName])).rows[0]?.count);
-      expect(await count()).toBe(1);
+      expect(await count()).toBe(0);
       const results = await Promise.allSettled(Array.from({ length: 20 }, (_, index) =>
         isolated.approvals.claim({ approvalId: `missing_${index}`, actorUserId: "execution_owner",
           principalKey: "web:execution_owner", now: Date.now(), deadlineAt: Date.now() + 3_000 })));
       expect(results.every((result) => result.status === "rejected" &&
         (result.reason as { code?: string }).code === "APPROVAL_UNAVAILABLE")).toBe(true);
-      expect(await count()).toBe(1);
+      expect(await count()).toBe(0);
     } finally {
       await isolated.close();
+      await observer.end();
+    }
+  });
+
+  it("bounds live owned-query sockets under concurrent PostgreSQL load", async () => {
+    const applicationName = `omr_store_${crypto.randomUUID().replaceAll("-", "")}`;
+    const url = new URL(connectionString!);
+    url.searchParams.set("application_name", applicationName);
+    const owned = new PostgresOwnedQueries(url.toString());
+    const observer = new Client({ connectionString: connectionString! });
+    await observer.connect();
+    const count = async () => Number((await observer.query<{ count: string }>(
+      "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1", [applicationName])).rows[0]?.count);
+    try {
+      expect(await count()).toBe(0);
+      let settled = false;
+      const pending = Promise.all(Array.from({ length: 24 }, () =>
+        owned.query("SELECT pg_sleep(0.1)", [], Date.now() + 5_000))).finally(() => { settled = true; });
+      let peak = 0;
+      while (!settled) {
+        peak = Math.max(peak, await count());
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      await pending;
+      expect(peak).toBeGreaterThan(0);
+      expect(peak).toBeLessThanOrEqual(8);
+      await owned.close();
+      expect(await count()).toBe(0);
+    } finally {
+      await owned.close();
       await observer.end();
     }
   });
@@ -549,18 +580,29 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     await runtime.receipts.reserve(receipt);
     await runtime.receipts.beginDispatch(receipt.id, now + 1);
     const blocker = new Client({ connectionString: connectionString! });
+    const observer = new Client({ connectionString: connectionString! });
     await blocker.connect();
+    await observer.connect();
     try {
       await blocker.query("BEGIN");
       await blocker.query("SELECT id FROM omr_control.execution_receipts WHERE id = $1 FOR UPDATE", [receipt.id]);
-      await expect(runtime.receipts.uncertain(receipt.id, "unknown", now + 2, Date.now() + 80))
+      const pending = runtime.receipts.uncertain(receipt.id, "unknown", now + 2, Date.now() + 2_000);
+      await vi.waitFor(async () => {
+        const waiting = await observer.query<{ count: string }>(
+          `SELECT count(*) FROM pg_stat_activity
+           WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock'
+             AND query LIKE 'UPDATE omr_control.execution_receipts%'`);
+        expect(Number(waiting.rows[0]?.count)).toBeGreaterThan(0);
+      }, { timeout: 1_500, interval: 20 });
+      await expect(pending)
         .rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
       await expect(runtime.receipts.findByIdempotency({ workspaceId,
         principalKey: receipt.principalKey, idempotencyKey: receipt.idempotencyKey,
-        deadlineAt: Date.now() + 500 })).resolves.toMatchObject({ id: receipt.id, status: "running" });
+        deadlineAt: Date.now() + 2_000 })).resolves.toMatchObject({ id: receipt.id, status: "running" });
     } finally {
       await blocker.query("ROLLBACK");
       await blocker.end();
+      await observer.end();
     }
     await expect(runtime.receipts.uncertain(receipt.id, "unknown", Date.now(), Date.now() + 1_000))
       .resolves.toMatchObject({ id: receipt.id, status: "uncertain" });
@@ -579,18 +621,29 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     await runtime.receipts.beginDispatch(receipt.id, now + 3);
     await runtime.receipts.uncertain(receipt.id, "unknown", now + 4);
     const blocker = new Client({ connectionString: connectionString! });
+    const observer = new Client({ connectionString: connectionString! });
     await blocker.connect();
+    await observer.connect();
     try {
       await blocker.query("BEGIN");
       await blocker.query("SELECT id FROM omr_control.execution_approvals WHERE id = $1 FOR UPDATE", [approval.id]);
-      await expect(runtime.approvals.uncertain({ approvalId: approval.id, receiptId: receipt.id,
-        now: now + 5, deadlineAt: Date.now() + 80 }))
+      const pending = runtime.approvals.uncertain({ approvalId: approval.id, receiptId: receipt.id,
+        now: now + 5, deadlineAt: Date.now() + 2_000 });
+      await vi.waitFor(async () => {
+        const waiting = await observer.query<{ count: string }>(
+          `SELECT count(*) FROM pg_stat_activity
+           WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock'
+             AND query LIKE 'UPDATE omr_control.execution_approvals%'`);
+        expect(Number(waiting.rows[0]?.count)).toBeGreaterThan(0);
+      }, { timeout: 1_500, interval: 20 });
+      await expect(pending)
         .rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
       await expect(runtime.approvals.getForActor(approval.id, approval.actorUserId, Date.now() + 500))
         .resolves.toMatchObject({ status: "executing", executionReceiptId: null });
     } finally {
       await blocker.query("ROLLBACK");
       await blocker.end();
+      await observer.end();
     }
     await expect(runtime.approvals.uncertain({ approvalId: approval.id, receiptId: receipt.id,
       now: Date.now(), deadlineAt: Date.now() + 1_000 }))

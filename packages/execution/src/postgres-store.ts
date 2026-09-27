@@ -36,18 +36,19 @@ const COLUMNS = `id, workspace_id, actor_user_id, principal_key, tool_id, manife
 
 export class PostgresExecutionReceiptStore implements ExecutionReceiptStore {
   constructor(
-    private readonly client: Client,
+    private readonly client: Client | null,
     private readonly wrappingKey: Uint8Array<ArrayBuffer>,
     private readonly ownedQueries?: PostgresOwnedQueries,
   ) {
     if (wrappingKey.byteLength !== 32) throw new Error("Execution receipt wrapping key must be 32 bytes");
+    if (!client && !ownedQueries) throw new Error("An execution receipt query connection is required");
   }
 
   private query<R extends QueryResultRow>(sql: string, values?: unknown[],
     deadlineAt?: number): Promise<QueryResult<R>> {
     return this.ownedQueries
       ? this.ownedQueries.query<R>(sql, values, deadlineAt)
-      : this.client.query<R>(sql, values);
+      : this.client!.query<R>(sql, values);
   }
 
   async findByIdempotency(input: { workspaceId: string; principalKey: string; idempotencyKey: string;

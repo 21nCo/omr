@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 const mockState = vi.hoisted(() => ({
-  clients: [] as Array<{ ended: boolean; queries: string[] }>,
+  clients: [] as Array<{ connected: boolean; ended: boolean; queries: string[]; blocked: boolean }>,
+  connectHoldMs: 0,
+  endHoldMs: 0,
+  peakConnections: 0,
   stallConnectAt: -1,
   stallClaimAt: -1,
   uncertainOnClaim: false,
@@ -12,17 +15,26 @@ const mockState = vi.hoisted(() => ({
 
 vi.mock("pg", () => {
   class Client {
-    private readonly state = { ended: false, queries: [] as string[], blocked: false };
+    private readonly state = { connected: false, ended: false, queries: [] as string[], blocked: false };
 
     constructor() { mockState.clients.push(this.state); }
     on() { return this; }
     async connect() {
+      if (mockState.connectHoldMs) await new Promise((resolve) => setTimeout(resolve, mockState.connectHoldMs));
       if (mockState.clients.indexOf(this.state) === mockState.stallConnectAt) {
         return new Promise<void>(() => undefined);
       }
+      this.state.connected = true;
+      mockState.peakConnections = Math.max(mockState.peakConnections,
+        mockState.clients.filter((client) => client.connected && !client.ended).length);
       return undefined;
     }
-    async end() { this.state.ended = true; }
+    async end() {
+      if (this.state.blocked && mockState.endHoldMs) {
+        await new Promise((resolve) => setTimeout(resolve, mockState.endHoldMs));
+      }
+      this.state.ended = true;
+    }
     async query(sql: string) {
       this.state.queries.push(sql);
       if (this.state.blocked || (mockState.stallReceiptWrite &&
@@ -47,7 +59,7 @@ vi.mock("pg", () => {
         return new Promise<{ rows: never[] }>(() => undefined);
       }
       if (sql.includes("connection_bindings")) {
-        if (mockState.clients[1] === this.state) {
+        if (mockState.clients[0] === this.state) {
           throw Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" });
         }
         return { rows: [{ workspace_id: "workspace_1", provider_connection_id: "remote_1",
@@ -68,6 +80,92 @@ vi.mock("pg", () => {
 import { connectPostgresExecutionReceipts } from "./postgres.js";
 
 describe("PostgreSQL execution runtime", () => {
+  it("starts without an idle socket and bounds concurrent receipt query sockets", async () => {
+    mockState.clients.length = 0;
+    mockState.peakConnections = 0;
+    mockState.connectHoldMs = 30;
+    const runtime = await connectPostgresExecutionReceipts({
+      connectionString: "postgresql://localhost:5432/fixture",
+      resultWrappingKey: new Uint8Array(32).fill(1),
+    });
+    try {
+      expect(mockState.clients.filter((client) => client.connected && !client.ended)).toHaveLength(0);
+      const requests = Array.from({ length: 20 }, (_, index) =>
+        runtime.receipts.findByIdempotency({ workspaceId: "workspace_1",
+          principalKey: "web:user_1", idempotencyKey: `capacity-${index}`,
+          deadlineAt: Date.now() + 2_000 }));
+      await expect(Promise.all(requests)).resolves.toEqual(Array.from({ length: 20 }, () => null));
+      expect(mockState.peakConnections).toBeLessThanOrEqual(8);
+      expect(mockState.clients.every((client) => client.ended)).toBe(true);
+    } finally {
+      mockState.connectHoldMs = 0;
+      await runtime.close();
+    }
+  });
+
+  it("awaits active socket shutdown when the runtime closes", async () => {
+    mockState.clients.length = 0;
+    mockState.stallReceiptWrite = true;
+    mockState.endHoldMs = 50;
+    const runtime = await connectPostgresExecutionReceipts({
+      connectionString: "postgresql://localhost:5432/fixture",
+      resultWrappingKey: new Uint8Array(32).fill(1),
+    });
+    try {
+      const pending = runtime.receipts.uncertain("receipt_1", "unknown", Date.now(),
+        Date.now() + 2_000).catch((error: unknown) => error);
+      await vi.waitFor(() => expect(mockState.clients.some((client) => client.blocked)).toBe(true));
+      await runtime.close();
+      expect(mockState.clients.every((client) => client.ended)).toBe(true);
+      expect(await pending).toBeInstanceOf(Error);
+    } finally {
+      mockState.endHoldMs = 0;
+      mockState.stallReceiptWrite = false;
+    }
+  });
+
+  it("requires a caller deadline before opening an identity guard socket", async () => {
+    mockState.clients.length = 0;
+    const runtime = await connectPostgresExecutionReceipts({
+      connectionString: "postgresql://localhost:5432/fixture",
+      resultWrappingKey: new Uint8Array(32).fill(1),
+    });
+    try {
+      await expect(runtime.invocationGuard.runIdentity!({ principal: { kind: "web",
+        userId: "user_1", workspaceId: "workspace_1" }, capability: "tools:write" } as never,
+      async () => "effect")).rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
+      expect(mockState.clients).toHaveLength(0);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("expires a queued store query without opening a ninth socket", async () => {
+    mockState.clients.length = 0;
+    mockState.connectHoldMs = 80;
+    const runtime = await connectPostgresExecutionReceipts({
+      connectionString: "postgresql://localhost:5432/fixture",
+      resultWrappingKey: new Uint8Array(32).fill(1),
+    });
+    try {
+      const active = Array.from({ length: 8 }, (_, index) =>
+        runtime.receipts.findByIdempotency({ workspaceId: "workspace_1",
+          principalKey: "web:user_1", idempotencyKey: `active-${index}`,
+          deadlineAt: Date.now() + 1_000 }));
+      await expect(runtime.receipts.findByIdempotency({ workspaceId: "workspace_1",
+        principalKey: "web:user_1", idempotencyKey: "queued",
+        deadlineAt: Date.now() + 20 })).rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
+      expect(mockState.clients).toHaveLength(8);
+      await Promise.all(active);
+      await expect(runtime.receipts.findByIdempotency({ workspaceId: "workspace_1",
+        principalKey: "web:user_1", idempotencyKey: "next",
+        deadlineAt: Date.now() + 1_000 })).resolves.toBeNull();
+    } finally {
+      mockState.connectHoldMs = 0;
+      await runtime.close();
+    }
+  });
+
   it("fences a stalled receipt write so the next store call uses a free socket", async () => {
     mockState.clients.length = 0;
     mockState.stallReceiptWrite = true;
@@ -88,14 +186,13 @@ describe("PostgreSQL execution runtime", () => {
     }
   });
 
-  it("closes the primary client if store construction fails", async () => {
+  it("rejects a bad wrapping key without opening a socket", async () => {
     mockState.clients.length = 0;
     await expect(connectPostgresExecutionReceipts({
       connectionString: "postgresql://localhost:5432/fixture",
       resultWrappingKey: new Uint8Array(3),
     })).rejects.toThrow(/32 bytes/);
-    expect(mockState.clients).toHaveLength(1);
-    expect(mockState.clients[0]?.ended).toBe(true);
+    expect(mockState.clients).toHaveLength(0);
   });
 
   it("owns a new guard client for the invocation after a timed-out authorization query", async () => {
@@ -114,21 +211,20 @@ describe("PostgreSQL execution runtime", () => {
       await expect(runtime.invocationGuard.run(input, invoke))
         .rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
       expect(invoke).not.toHaveBeenCalled();
-      expect(mockState.clients[1]?.ended).toBe(true);
+      expect(mockState.clients[0]?.ended).toBe(true);
       await expect(runtime.invocationGuard.run(input, invoke)).resolves.toBe("ok");
       expect(invoke).toHaveBeenCalledOnce();
-      expect(mockState.clients).toHaveLength(3);
-      expect(mockState.clients[2]?.ended).toBe(true);
-      expect(mockState.clients[0]?.ended).toBe(false);
+      expect(mockState.clients).toHaveLength(2);
+      expect(mockState.clients[1]?.ended).toBe(true);
     } finally {
       await runtime.close();
     }
-    expect(mockState.clients[0]?.ended).toBe(true);
+    expect(mockState.clients.every((client) => client.ended)).toBe(true);
   });
 
   it("bounds a stalled guard connection before any provider call", async () => {
     mockState.clients.length = 0;
-    mockState.stallConnectAt = 1;
+    mockState.stallConnectAt = 0;
     const runtime = await connectPostgresExecutionReceipts({
       connectionString: "postgresql://localhost:5432/fixture",
       resultWrappingKey: new Uint8Array(32).fill(1),
@@ -141,7 +237,7 @@ describe("PostgreSQL execution runtime", () => {
         capability: "tools:read", deadlineAt: Date.now() + 40 }, invoke))
         .rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
       expect(invoke).not.toHaveBeenCalled();
-      expect(mockState.clients[1]?.ended).toBe(true);
+      expect(mockState.clients[0]?.ended).toBe(true);
     } finally {
       mockState.stallConnectAt = -1;
       await runtime.close();
@@ -150,7 +246,7 @@ describe("PostgreSQL execution runtime", () => {
 
   it("bounds an approved claim waiting behind a revocation lock", async () => {
     mockState.clients.length = 0;
-    mockState.stallClaimAt = 1;
+    mockState.stallClaimAt = 0;
     const runtime = await connectPostgresExecutionReceipts({
       connectionString: "postgresql://localhost:5432/fixture",
       resultWrappingKey: new Uint8Array(32).fill(1),
@@ -159,8 +255,7 @@ describe("PostgreSQL execution runtime", () => {
       await expect(runtime.approvals.claim({ approvalId: "approval_1", actorUserId: "user_1",
         principalKey: "web:user_1", now: Date.now(), deadlineAt: Date.now() + 40 }))
         .rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
-      expect(mockState.clients[1]?.ended).toBe(true);
-      expect(mockState.clients[0]?.ended).toBe(false);
+      expect(mockState.clients[0]?.ended).toBe(true);
     } finally {
       mockState.stallClaimAt = -1;
       await runtime.close();
@@ -183,7 +278,7 @@ describe("PostgreSQL execution runtime", () => {
         principalKey: "web:user_1", now: Date.now(), deadlineAt: Date.now() + 1_000 }))
         .rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN",
           receiptId: "execution_known_uncertain" });
-      expect(mockState.clients[1]?.ended).toBe(true);
+      expect(mockState.clients[0]?.ended).toBe(true);
     } finally {
       mockState.uncertainOnClaim = false;
       mockState.advanceClock = () => undefined;
@@ -207,7 +302,7 @@ describe("PostgreSQL execution runtime", () => {
       await expect(runtime.approvals.claim({ approvalId: "approval_1", actorUserId: "user_1",
         principalKey: "web:user_1", now: Date.now(), deadlineAt: Date.now() + 1_000 }))
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
-      expect(mockState.clients[1]?.ended).toBe(true);
+      expect(mockState.clients[0]?.ended).toBe(true);
     } finally {
       mockState.unavailableOnClaim = false;
       mockState.advanceClock = () => undefined;
@@ -229,8 +324,8 @@ describe("PostgreSQL execution runtime", () => {
       expect(results).toEqual(Array.from({ length: 20 }, () =>
         expect.objectContaining({ status: "rejected",
           reason: expect.objectContaining({ code: "APPROVAL_UNAVAILABLE" }) })));
-      expect(mockState.clients).toHaveLength(21);
-      expect(mockState.clients.slice(1).every((client) => client.ended)).toBe(true);
+      expect(mockState.clients).toHaveLength(20);
+      expect(mockState.clients.every((client) => client.ended)).toBe(true);
     } finally {
       await runtime.close();
     }

@@ -4,7 +4,7 @@ import { PostgresExecutionReceiptStore } from "./postgres-store.js";
 import { PostgresExecutionApprovalStore } from "./postgres-approval-store.js";
 import { PostgresExecutionInvocationGuard } from "./postgres-invocation-guard.js";
 import { PostgresOwnedQueries } from "./postgres-owned-query.js";
-import { EXECUTION_INVOCATION_DEADLINE_MS, withinInvocationDeadline,
+import { EXECUTION_INVOCATION_DEADLINE_MS, ExecutionInvocationDeadlineError, withinInvocationDeadline,
   type ExecutionInvocationGuard } from "./execution.js";
 
 const { Client } = pg;
@@ -24,13 +24,11 @@ export async function connectPostgresExecutionReceipts(input: {
   if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
     throw new Error("A PostgreSQL connection string is required");
   }
-  const client = new Client({ connectionString: input.connectionString });
-  await client.connect();
+  const ownedQueries = new PostgresOwnedQueries(input.connectionString);
   try {
-    const ownedQueries = new PostgresOwnedQueries(input.connectionString);
     return {
-      receipts: new PostgresExecutionReceiptStore(client, input.resultWrappingKey, ownedQueries),
-      approvals: new PostgresExecutionApprovalStore(client, input.resultWrappingKey,
+      receipts: new PostgresExecutionReceiptStore(null, input.resultWrappingKey, ownedQueries),
+      approvals: new PostgresExecutionApprovalStore(null, input.resultWrappingKey,
         input.connectionString, ownedQueries),
       // A deadline destroys its transaction socket. Each invocation owns its guard
       // client, so a later call on this runtime cannot reuse a closed connection.
@@ -51,6 +49,9 @@ export async function connectPostgresExecutionReceipts(input: {
           }
         },
         async runIdentity(identityInput, invoke) {
+          if (!Number.isFinite(identityInput.deadlineAt)) {
+            throw new ExecutionInvocationDeadlineError();
+          }
           const guardClient = new Client({ connectionString: input.connectionString });
           guardClient.on("error", () => undefined);
           try {
@@ -63,11 +64,10 @@ export async function connectPostgresExecutionReceipts(input: {
       },
       async close() {
         await ownedQueries.close();
-        await client.end();
       },
     };
   } catch (error) {
-    await client.end().catch(() => undefined);
+    await ownedQueries.close();
     throw error;
   }
 }

@@ -13,7 +13,9 @@ import {
   ExecutionIdempotencyConflictError,
   ExecutionInputError,
   ExecutionService,
+  type ExecutionApproval,
   type ExecutionInvocationGuard,
+  type ExecutionReceipt,
 } from "./execution.js";
 import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "./testing.js";
 import { approvalPreviewReady, publicApproval, publicReceipt } from "./projection.js";
@@ -112,6 +114,19 @@ async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes: st
 let nextApprovalKey = 0;
 function requestApproval(service: ExecutionService, input: Omit<Parameters<ExecutionService["requestApproval"]>[0], "idempotencyKey"> & { idempotencyKey?: string }) {
   return service.requestApproval({ ...input, idempotencyKey: input.idempotencyKey ?? `test-approval-${++nextApprovalKey}` });
+}
+
+function receiptForApproval(approval: ExecutionApproval, status: ExecutionReceipt["status"]): ExecutionReceipt {
+  return {
+    id: `execution_${crypto.randomUUID()}`, workspaceId: approval.workspaceId,
+    actorUserId: approval.actorUserId, principalKey: approval.principalKey,
+    toolId: approval.toolId, manifestHash: approval.manifestHash,
+    connectionId: approval.connectionId, providerConnectionId: approval.providerConnectionId,
+    idempotencyKey: approval.idempotencyKey, requestHash: approval.requestHash!,
+    approvalId: approval.id, status, result: status === "succeeded" ? { id: "issue_1" } : null,
+    errorCode: null, startedAt: approval.updatedAt, completedAt: null,
+    createdAt: approval.updatedAt, updatedAt: approval.updatedAt,
+  };
 }
 
 function action(name: string, effect: ToolEffect) {
@@ -1167,6 +1182,80 @@ describe("execution service", () => {
       status: "consumed", executionReceiptId: receipt.id,
     });
     expect(actionCall).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["missing", "reserved", "failed"] as const)(
+    "reconciles a stale executing approval with a %s predispatch receipt", async (state) => {
+      const { actionCall, advance, approvals, receipts, service, workspace } = await fixture();
+      const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+      const approval = await requestApproval(service, { principal, toolId: "linear.create_issue",
+        params: {}, idempotencyKey: `stale-${state}` });
+      await service.approve(approval.id, principal.userId);
+      const stored = approvals.approvals.get(approval.id)!;
+      stored.status = "executing";
+      if (state !== "missing") {
+        const receipt = receiptForApproval(approval, "reserved");
+        await receipts.reserve(receipt);
+        if (state === "failed") receipts.receipts.get(receipt.id)!.status = "failed";
+      }
+      await expect(service.executeApproved(principal, approval.id))
+        .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      expect(stored.status).toBe("executing");
+      advance(65_001);
+      await expect(service.executeApproved(principal, approval.id))
+        .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      expect(stored.status).toBe("failed");
+      expect(stored.executionReceiptId).toBeNull();
+      expect(actionCall).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["running", "uncertain", "succeeded"] as const)(
+    "keeps the exact %s effect receipt on executing approval retries", async (status) => {
+      const { actionCall, advance, approvals, receipts, service, workspace } = await fixture();
+      const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+      const approval = await requestApproval(service, { principal, toolId: "linear.create_issue",
+        params: {}, idempotencyKey: `effect-${status}` });
+      await service.approve(approval.id, principal.userId);
+      approvals.approvals.get(approval.id)!.status = "executing";
+      const receipt = receiptForApproval(approval, "reserved");
+      await receipts.reserve(receipt);
+      Object.assign(receipts.receipts.get(receipt.id)!, {
+        status, result: status === "succeeded" ? { id: "issue_1" } : null,
+      });
+      for (const age of [0, 65_001]) {
+        advance(age);
+        if (status === "succeeded") {
+          await expect(service.executeApproved(principal, approval.id))
+            .resolves.toMatchObject({ id: receipt.id, status: "succeeded" });
+        } else {
+          await expect(service.executeApproved(principal, approval.id))
+            .rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: receipt.id });
+        }
+      }
+      expect(actionCall).not.toHaveBeenCalled();
+      expect(approvals.approvals.get(approval.id)?.executionReceiptId).toBe(status === "succeeded"
+        ? receipt.id : null);
+    },
+  );
+
+  it("rejects a mismatched effect receipt instead of adopting it during stale reconciliation", async () => {
+    const { actionCall, advance, approvals, receipts, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const approval = await requestApproval(service, { principal, toolId: "linear.create_issue",
+      params: {}, idempotencyKey: "foreign-effect" });
+    await service.approve(approval.id, principal.userId);
+    approvals.approvals.get(approval.id)!.status = "executing";
+    const receipt = receiptForApproval(approval, "reserved");
+    await receipts.reserve(receipt);
+    Object.assign(receipts.receipts.get(receipt.id)!, { status: "running", approvalId: "foreign" });
+    await expect(service.executeApproved(principal, approval.id))
+      .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    advance(65_001);
+    await expect(service.executeApproved(principal, approval.id))
+      .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    expect(approvals.approvals.get(approval.id)?.status).toBe("executing");
+    expect(actionCall).not.toHaveBeenCalled();
   });
 
   it("marks a timed-out provider invocation uncertain and denies replay", async () => {

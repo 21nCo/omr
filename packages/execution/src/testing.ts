@@ -189,6 +189,28 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
       }
       throw new ExecutionOutcomeUnknownError(approval.executionReceiptId);
     }
+    if (approval?.status === "executing" && approval.actorUserId === input.actorUserId &&
+        approval.principalKey === input.principalKey &&
+        approval.executionReceiptId === null &&
+        this.isMember(approval.workspaceId, input.actorUserId) &&
+        input.now - approval.updatedAt >= EXECUTION_STALE_AFTER_MS) {
+      const receipt = [...this.receipts.receipts.values()].find((candidate) =>
+        candidate.approvalId === approval.id &&
+        candidate.workspaceId === approval.workspaceId &&
+        candidate.actorUserId === approval.actorUserId &&
+        candidate.principalKey === approval.principalKey &&
+        candidate.toolId === approval.toolId &&
+        candidate.manifestHash === approval.manifestHash &&
+        candidate.connectionId === approval.connectionId &&
+        candidate.providerConnectionId === approval.providerConnectionId &&
+        candidate.idempotencyKey === approval.idempotencyKey &&
+        ["running", "succeeded", "uncertain"].includes(candidate.status));
+      approval.status = receipt ? "uncertain" : "failed";
+      approval.executionReceiptId = receipt?.id ?? null;
+      approval.updatedAt = input.now;
+      if (receipt) throw new ExecutionOutcomeUnknownError(receipt.id);
+      throw new ApprovalUnavailableError();
+    }
     if (
       !approval ||
       approval.status !== "approved" ||

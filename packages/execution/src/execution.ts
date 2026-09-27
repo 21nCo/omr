@@ -463,6 +463,10 @@ export class ExecutionService {
     const receipt = await withinInvocationDeadline(deadlineAt,
       () => this.receipts.findByIdempotency({ workspaceId: prior.workspaceId,
         principalKey: prior.principalKey, idempotencyKey: prior.idempotencyKey, deadlineAt }));
+    // A claim can commit before its response or reservation reaches this
+    // process. Predispatch states still need the store's stale reconciliation.
+    if (prior.status === "executing" &&
+        (!receipt || receipt.status === "reserved" || receipt.status === "failed")) return null;
     if (!receipt || !matchesApprovalReceipt(receipt, prior)) {
       throw new ApprovalUnavailableError();
     }

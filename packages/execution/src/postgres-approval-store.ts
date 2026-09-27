@@ -56,19 +56,20 @@ const { Client: PostgresClient } = pg;
 
 export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
   constructor(
-    private readonly client: Client,
+    private readonly client: Client | null,
     private readonly wrappingKey: Uint8Array<ArrayBuffer>,
     private readonly claimConnectionString?: string,
     private readonly ownedQueries?: PostgresOwnedQueries,
   ) {
     if (wrappingKey.byteLength !== 32) throw new Error("Execution approval wrapping key must be 32 bytes");
+    if (!client && !ownedQueries) throw new Error("An execution approval query connection is required");
   }
 
   private query<R extends QueryResultRow>(sql: string, values?: unknown[],
     deadlineAt?: number): Promise<QueryResult<R>> {
     return this.ownedQueries
       ? this.ownedQueries.query<R>(sql, values, deadlineAt)
-      : this.client.query<R>(sql, values);
+      : this.client!.query<R>(sql, values);
   }
 
   async create(approval: ExecutionApproval): Promise<ExecutionApproval> {
@@ -174,12 +175,12 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     now: number;
     deadlineAt: number;
   }): Promise<ExecutionApproval> {
-    if (!this.claimConnectionString && this.client instanceof PostgresClient) {
+    if (!this.claimConnectionString && (!this.client || this.client instanceof PostgresClient)) {
       throw new Error("Approval claims require a dedicated PostgreSQL connection");
     }
     const client = this.claimConnectionString
       ? new PostgresClient({ connectionString: this.claimConnectionString,
-        connectionTimeoutMillis: Math.max(1, input.deadlineAt - Date.now()) }) : this.client;
+        connectionTimeoutMillis: Math.max(1, input.deadlineAt - Date.now()) }) : this.client!;
     const query = <R extends object>(sql: string, values?: unknown[]) =>
       withinInvocationDeadline(input.deadlineAt, () => client.query<R>(sql, values));
     if (client !== this.client) {
