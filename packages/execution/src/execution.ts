@@ -58,6 +58,7 @@ export interface ExecutionReceipt {
   providerConnectionId: string;
   idempotencyKey: string;
   requestHash: string;
+  approvalId?: string | null;
   status: ExecutionStatus;
   result: JsonValue | null;
   errorCode: string | null;
@@ -121,7 +122,7 @@ export interface ExecutionApprovalStore {
     actorUserId: string;
     principalKey: string;
     now: number;
-    deadlineAt?: number;
+    deadlineAt: number;
   }): Promise<ExecutionApproval>;
   consume(input: { approvalId: string; receiptId: string; now: number }): Promise<ExecutionApproval>;
   uncertain(input: { approvalId: string; receiptId: string | null; now: number }): Promise<ExecutionApproval>;
@@ -393,6 +394,7 @@ export class ExecutionService {
     }));
     try {
       const manifest = this.catalog.get(approval.toolId);
+      if (this.now() >= approval.expiresAt) throw new ApprovalUnavailableError();
       if (!manifest || manifest.hash !== approval.manifestHash || manifest.contract.effect === "read") {
         throw new ApprovalUnavailableError();
       }
@@ -424,6 +426,8 @@ export class ExecutionService {
         params: approval.params,
         connection,
         idempotencyKey: approval.idempotencyKey,
+        approvalId: approval.id,
+        approvalExpiresAt: approval.expiresAt,
         deadlineAt,
       });
       try {
@@ -456,19 +460,27 @@ export class ExecutionService {
     params: JsonValue;
     connection: Awaited<ReturnType<ConnectionAuthority["resolve"]>>;
     idempotencyKey?: string;
+    approvalId?: string;
+    approvalExpiresAt?: number;
     deadlineAt?: number;
   }): Promise<ExecutionReceipt> {
     let missingRemoteAfterInvoke = false;
     let dispatchedReceiptId: string | null = null;
     const invoke = async (assertCanDispatch: () => void): Promise<ExecutionReceipt> => {
-      assertCanDispatch();
+      const assertApprovedCanDispatch = () => {
+        assertCanDispatch();
+        if (input.approvalExpiresAt !== undefined && this.now() >= input.approvalExpiresAt) {
+          throw new ApprovalUnavailableError();
+        }
+      };
+      assertApprovedCanDispatch();
       const principal = principalKey(input.principal);
       const requestHash = await hashJson({
         manifestHash: input.manifest.hash,
         connectionId: input.connection.id,
         params: input.params,
       }, this.fingerprintKey);
-      assertCanDispatch();
+      assertApprovedCanDispatch();
       const timestamp = this.now();
       const idempotencyKey = input.idempotencyKey ?? `request_${crypto.randomUUID()}`;
       const reservation = await this.receipts.reserve({
@@ -482,6 +494,7 @@ export class ExecutionService {
         providerConnectionId: input.connection.providerConnectionId,
         idempotencyKey,
         requestHash,
+        approvalId: input.approvalId ?? null,
         status: "reserved",
         result: null,
         errorCode: null,
@@ -491,12 +504,12 @@ export class ExecutionService {
         updatedAt: timestamp,
       });
       if (!reservation.created) {
-        return this.replayReceipt(reservation.receipt, requestHash, assertCanDispatch);
+        return this.replayReceipt(reservation.receipt, requestHash, assertApprovedCanDispatch);
       }
 
       let result: JsonValue;
       try {
-        assertCanDispatch();
+        assertApprovedCanDispatch();
       } catch (error) {
         // Reservation is durable, but the provider was never called.
         await this.receipts.fail(reservation.receipt.id, "authorization_window_closed", this.now())
@@ -505,7 +518,7 @@ export class ExecutionService {
       }
       try {
         await this.receipts.beginDispatch(reservation.receipt.id, this.now());
-        assertCanDispatch();
+        assertApprovedCanDispatch();
       } catch (error) {
         // The provider has not been entered. A late database response may have
         // committed the transition, so settle either predispatch state if possible.

@@ -15,6 +15,7 @@ interface ReceiptRow {
   provider_connection_id: string;
   idempotency_key: string;
   request_hash: string;
+  approval_id: string | null;
   status: ExecutionStatus;
   result_ciphertext: Buffer | null;
   result_iv: Buffer | null;
@@ -26,7 +27,7 @@ interface ReceiptRow {
 }
 
 const COLUMNS = `id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash,
-  connection_id, provider_connection_id, idempotency_key, request_hash, status,
+  connection_id, provider_connection_id, idempotency_key, request_hash, approval_id, status,
   result_ciphertext, result_iv, error_code, started_at, completed_at, created_at, updated_at`;
 
 export class PostgresExecutionReceiptStore implements ExecutionReceiptStore {
@@ -52,9 +53,9 @@ export class PostgresExecutionReceiptStore implements ExecutionReceiptStore {
     const result = await this.client.query<ReceiptRow>(
       `INSERT INTO omr_control.execution_receipts
          (id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash,
-          connection_id, provider_connection_id, idempotency_key, request_hash, status,
+          connection_id, provider_connection_id, idempotency_key, request_hash, approval_id, status,
           error_code, started_at, completed_at, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
        ON CONFLICT (workspace_id, principal_key, idempotency_key) DO NOTHING
        RETURNING ${COLUMNS}`,
       [
@@ -68,6 +69,7 @@ export class PostgresExecutionReceiptStore implements ExecutionReceiptStore {
         receipt.providerConnectionId,
         receipt.idempotencyKey,
         receipt.requestHash,
+        receipt.approvalId ?? null,
         receipt.status,
         receipt.errorCode,
         receipt.startedAt,
@@ -174,6 +176,7 @@ export class PostgresExecutionReceiptStore implements ExecutionReceiptStore {
       providerConnectionId: row.provider_connection_id,
       idempotencyKey: row.idempotency_key,
       requestHash: row.request_hash,
+      approvalId: row.approval_id,
       status: row.status,
       result: row.result_ciphertext && row.result_iv
         ? await this.decrypt(row.result_ciphertext, row.result_iv)

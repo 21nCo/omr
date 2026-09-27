@@ -141,33 +141,53 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     actorUserId: string;
     principalKey: string;
     now: number;
-    deadlineAt?: number;
+    deadlineAt: number;
   }): Promise<ExecutionApproval> {
-    const client = input.deadlineAt && this.claimConnectionString
-      ? new PostgresClient({ connectionString: this.claimConnectionString }) : this.client;
+    if (!this.claimConnectionString && this.client instanceof PostgresClient) {
+      throw new Error("Approval claims require a dedicated PostgreSQL connection");
+    }
+    const client = this.claimConnectionString
+      ? new PostgresClient({ connectionString: this.claimConnectionString,
+        connectionTimeoutMillis: Math.max(1, input.deadlineAt - Date.now()) }) : this.client;
     const query = <R extends object>(sql: string, values?: unknown[]) =>
-      input.deadlineAt ? withinInvocationDeadline(input.deadlineAt,
-        () => client.query<R>(sql, values)) : client.query<R>(sql, values);
+      withinInvocationDeadline(input.deadlineAt, () => client.query<R>(sql, values));
     if (client !== this.client) {
       client.on("error", () => undefined);
     }
+    let claimTransactionOpen = false;
     try {
       if (client !== this.client) {
-        await withinInvocationDeadline(input.deadlineAt!, () => client.connect());
+        await withinInvocationDeadline(input.deadlineAt, () => client.connect());
         await query("SELECT set_config('statement_timeout', $1, false)",
-          [`${Math.max(1, input.deadlineAt! - Date.now())}ms`]);
+          [`${Math.max(1, input.deadlineAt - Date.now())}ms`]);
       }
+      await query("BEGIN");
+      claimTransactionOpen = true;
       const claimed = await query<ApprovalRow>(
       `UPDATE omr_control.execution_approvals
        SET status = 'executing', updated_at = $4
        WHERE id = $1 AND actor_user_id = $2 AND principal_key = $3
-         AND status = 'approved' AND expires_at > $4
+         AND status = 'approved'
+         AND expires_at > (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint
          AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
                      WHERE workspace_id = execution_approvals.workspace_id AND user_id = $2 FOR SHARE)
        RETURNING ${COLUMNS}`,
-      [input.approvalId, input.actorUserId, input.principalKey, input.now],
+      [input.approvalId, input.actorUserId, input.principalKey, Date.now()],
     );
-      if (claimed.rows[0]) return this.toApproval(claimed.rows[0]);
+      if (claimed.rows[0]) {
+        const clock = await query<{ now_ms: string }>(
+          "SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint AS now_ms");
+        if (Number(claimed.rows[0].expires_at) <= Number(clock.rows[0]?.now_ms)) {
+          await query("ROLLBACK");
+          claimTransactionOpen = false;
+          throw new ApprovalUnavailableError();
+        }
+        await query("COMMIT");
+        claimTransactionOpen = false;
+        return this.toApproval(claimed.rows[0]);
+      }
+      await query("ROLLBACK");
+      claimTransactionOpen = false;
       const prior = await query<Pick<ApprovalRow, "execution_receipt_id">>(
       `SELECT execution_receipt_id FROM omr_control.execution_approvals
        WHERE id = $1 AND actor_user_id = $2 AND principal_key = $3
@@ -179,7 +199,6 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
       if (prior.rows[0]?.execution_receipt_id) {
         throw new ExecutionOutcomeUnknownError(prior.rows[0].execution_receipt_id);
       }
-      if (input.deadlineAt) {
         // A timed-out claim can commit before its response is lost. Once the
         // invocation and cleanup budgets are past, reconcile its original key
         // without ever making that approval executable a second time.
@@ -187,39 +206,64 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
           `UPDATE omr_control.execution_approvals AS approval
            SET status = CASE WHEN EXISTS (
              SELECT 1 FROM omr_control.execution_receipts AS receipt
-             WHERE receipt.workspace_id = approval.workspace_id
+             WHERE receipt.approval_id = approval.id
+               AND receipt.workspace_id = approval.workspace_id
+               AND receipt.actor_user_id = approval.actor_user_id
                AND receipt.principal_key = approval.principal_key
+               AND receipt.tool_id = approval.tool_id
+               AND receipt.manifest_hash = approval.manifest_hash
+               AND receipt.connection_id = approval.connection_id
+               AND receipt.provider_connection_id = approval.provider_connection_id
                AND receipt.idempotency_key = approval.idempotency_key
+               AND receipt.status IN ('running', 'succeeded', 'uncertain')
            ) THEN 'uncertain' ELSE 'failed' END,
              execution_receipt_id = (
                SELECT id FROM omr_control.execution_receipts AS receipt
-               WHERE receipt.workspace_id = approval.workspace_id
+               WHERE receipt.approval_id = approval.id
+                 AND receipt.workspace_id = approval.workspace_id
+                 AND receipt.actor_user_id = approval.actor_user_id
                  AND receipt.principal_key = approval.principal_key
-                 AND receipt.idempotency_key = approval.idempotency_key LIMIT 1
+                 AND receipt.tool_id = approval.tool_id
+                 AND receipt.manifest_hash = approval.manifest_hash
+                 AND receipt.connection_id = approval.connection_id
+                 AND receipt.provider_connection_id = approval.provider_connection_id
+                 AND receipt.idempotency_key = approval.idempotency_key
+                 AND receipt.status IN ('running', 'succeeded', 'uncertain') LIMIT 1
              ), updated_at = $4
-           WHERE approval.id = $1 AND approval.actor_user_id = $2 AND approval.principal_key = $3
+            WHERE approval.id = $1 AND approval.actor_user_id = $2 AND approval.principal_key = $3
              AND approval.status = 'executing' AND approval.execution_receipt_id IS NULL
              AND approval.updated_at <= $5
              AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
                WHERE workspace_id = approval.workspace_id AND user_id = $2)
            RETURNING approval.status, approval.execution_receipt_id`,
-          [input.approvalId, input.actorUserId, input.principalKey, input.now,
-            input.now - EXECUTION_STALE_AFTER_MS],
+          [input.approvalId, input.actorUserId, input.principalKey, Date.now(),
+            Date.now() - EXECUTION_STALE_AFTER_MS],
         );
         if (stale.rows[0]?.execution_receipt_id) {
           throw new ExecutionOutcomeUnknownError(stale.rows[0].execution_receipt_id);
         }
-      }
       throw new ApprovalUnavailableError();
     } catch (error) {
-      if (input.deadlineAt && (Date.now() >= input.deadlineAt ||
+      if (claimTransactionOpen && Date.now() < input.deadlineAt) {
+        await query("ROLLBACK").catch(() => undefined);
+      }
+      if (error instanceof ExecutionOutcomeUnknownError) throw error;
+      if (Date.now() >= input.deadlineAt ||
         (error instanceof Error && "code" in error && error.code === "57014" &&
-          /statement timeout/i.test(error.message)))) {
+          /statement timeout/i.test(error.message))) {
         throw new ExecutionInvocationDeadlineError();
       }
       throw error;
     } finally {
-      if (client !== this.client) void client.end().catch(() => undefined);
+      if (client !== this.client) {
+        const closing = client.end();
+        try {
+          await withinInvocationDeadline(Date.now() + 1_000, () => closing);
+        } catch {
+          client.connection?.stream.destroy();
+          await withinInvocationDeadline(Date.now() + 1_000, () => closing).catch(() => undefined);
+        }
+      }
     }
   }
 

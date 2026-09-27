@@ -4,6 +4,8 @@ const mockState = vi.hoisted(() => ({
   clients: [] as Array<{ ended: boolean; queries: string[] }>,
   stallConnectAt: -1,
   stallClaimAt: -1,
+  uncertainOnClaim: false,
+  advanceClock: () => undefined,
 }));
 
 vi.mock("pg", () => {
@@ -21,6 +23,13 @@ vi.mock("pg", () => {
     async end() { this.state.ended = true; }
     async query(sql: string) {
       this.state.queries.push(sql);
+      if (mockState.uncertainOnClaim && sql.includes("status = 'uncertain'")) {
+        mockState.advanceClock();
+        return { rows: [{ execution_receipt_id: "execution_known_uncertain" }] };
+      }
+      if (mockState.uncertainOnClaim && sql.includes("UPDATE omr_control.execution_approvals")) {
+        return { rows: [] };
+      }
       if (sql.includes("UPDATE omr_control.execution_approvals") &&
           mockState.clients.indexOf(this.state) === mockState.stallClaimAt) {
         return new Promise<{ rows: never[] }>(() => undefined);
@@ -120,6 +129,49 @@ describe("PostgreSQL execution runtime", () => {
       expect(mockState.clients[0]?.ended).toBe(false);
     } finally {
       mockState.stallClaimAt = -1;
+      await runtime.close();
+    }
+  });
+
+  it("preserves an established uncertain receipt after the claim deadline", async () => {
+    mockState.clients.length = 0;
+    mockState.uncertainOnClaim = true;
+    const actualNow = Date.now.bind(Date);
+    let offset = 0;
+    mockState.advanceClock = () => { offset = 2_000; };
+    vi.spyOn(Date, "now").mockImplementation(() => actualNow() + offset);
+    const runtime = await connectPostgresExecutionReceipts({
+      connectionString: "postgresql://localhost:5432/fixture",
+      resultWrappingKey: new Uint8Array(32).fill(1),
+    });
+    try {
+      await expect(runtime.approvals.claim({ approvalId: "approval_1", actorUserId: "user_1",
+        principalKey: "web:user_1", now: Date.now(), deadlineAt: Date.now() + 1_000 }))
+        .rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN",
+          receiptId: "execution_known_uncertain" });
+      expect(mockState.clients[1]?.ended).toBe(true);
+    } finally {
+      mockState.uncertainOnClaim = false;
+      mockState.advanceClock = () => undefined;
+      vi.restoreAllMocks();
+      await runtime.close();
+    }
+  });
+
+  it("closes every dedicated claim connection before concurrent claims settle", async () => {
+    mockState.clients.length = 0;
+    const runtime = await connectPostgresExecutionReceipts({
+      connectionString: "postgresql://localhost:5432/fixture",
+      resultWrappingKey: new Uint8Array(32).fill(1),
+    });
+    try {
+      const results = await Promise.allSettled(Array.from({ length: 20 }, (_, index) =>
+        runtime.approvals.claim({ approvalId: `approval_${index}`, actorUserId: "user_1",
+          principalKey: "web:user_1", now: Date.now(), deadlineAt: Date.now() + 1_000 })));
+      expect(results.every((result) => result.status === "rejected")).toBe(true);
+      expect(mockState.clients).toHaveLength(21);
+      expect(mockState.clients.slice(1).every((client) => client.ended)).toBe(true);
+    } finally {
       await runtime.close();
     }
   });

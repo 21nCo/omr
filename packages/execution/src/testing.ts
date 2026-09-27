@@ -4,6 +4,7 @@ import {
   ApprovalUnavailableError,
   EXECUTION_STALE_AFTER_MS,
   ExecutionIdempotencyConflictError,
+  ExecutionInvocationDeadlineError,
   ExecutionOutcomeUnknownError,
   type ExecutionApproval,
   type ExecutionApprovalStore,
@@ -167,7 +168,9 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
     actorUserId: string;
     principalKey: string;
     now: number;
+    deadlineAt: number;
   }): Promise<ExecutionApproval> {
+    if (Date.now() >= input.deadlineAt) throw new ExecutionInvocationDeadlineError();
     const approval = this.approvals.get(input.approvalId);
     if (approval?.status === "uncertain" && approval.actorUserId === input.actorUserId &&
         approval.principalKey === input.principalKey && approval.executionReceiptId &&

@@ -931,6 +931,8 @@ describe("execution service", () => {
 
     const receipt = await service.executeApproved(principal, approval.id);
     expect(receipt).toMatchObject({ status: "succeeded", toolId: "linear.create_issue" });
+    expect(receipt.approvalId).toBe(approval.id);
+    expect(publicReceipt(receipt)).not.toHaveProperty("approvalId");
     expect(actionCall).toHaveBeenCalledWith("linear", "create_issue", expect.objectContaining({
       params: { title: "Approved title" },
       retry: { maxAttempts: 1, backoff: "exponential" },
@@ -1214,6 +1216,24 @@ describe("execution service", () => {
     await expect(service.execute({ principal, toolId: "linear.get_issue", params: {} }))
       .rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
     expect(actionCall).not.toHaveBeenCalled();
+    expect([...receipts.receipts.values()][0]?.status).toBe("failed");
+  });
+
+  it("rechecks approval expiry after reservation before provider dispatch", async () => {
+    const { actionCall, advance, approvals, receipts, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const approval = await requestApproval(service, { principal, toolId: "linear.create_issue", params: {} });
+    await service.approve(approval.id, principal.userId);
+    const reserve = receipts.reserve.bind(receipts);
+    vi.spyOn(receipts, "reserve").mockImplementation(async (receipt) => {
+      const result = await reserve(receipt);
+      advance(600_001);
+      return result;
+    });
+    await expect(service.executeApproved(principal, approval.id))
+      .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    expect(actionCall).not.toHaveBeenCalled();
+    expect(approvals.approvals.get(approval.id)?.status).toBe("failed");
     expect([...receipts.receipts.values()][0]?.status).toBe("failed");
   });
 

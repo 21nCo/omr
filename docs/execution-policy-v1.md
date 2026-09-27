@@ -131,6 +131,17 @@ replay; list and reconcile it using the original key. Keep `0015` when rolling
 back the Worker. The old Worker can read and fail a `reserved` receipt as a
 non-replayable state, but rollback must not remove the constraint while these
 rows exist. Drain them first if a schema rollback is required.
+Migration `0016` adds a nullable, unique `approval_id` to execution receipts.
+Apply it before deploying the Worker that writes the column. New approved
+executions store the approval ID with the receipt reservation, before provider
+dispatch. Stale approval recovery can attribute only an exact associated
+receipt whose operation fields match; `running`, `succeeded`, and `uncertain`
+remain outcome-uncertain, while `reserved`, `failed`, and unassociated legacy
+receipts cannot certify an external effect. An unassociated stale approval is
+failed and cannot be executed again; inspect the original key and provider
+history before any manual retry. Keep `0016` during Worker rollback: old writers
+leave the column NULL and old readers ignore it. Quiesce new writers before an
+old Worker rollback, and do not drop the column while associated receipts remain.
 Do not reset a `running` or `uncertain` receipt without reconciling the provider outcome. Rollback
 does not restore a revoked connection or an expired grant.
 

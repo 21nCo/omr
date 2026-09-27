@@ -1,7 +1,7 @@
 import { Client } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
-import type { ExecutionReceipt } from "./execution.js";
+import { EXECUTION_STALE_AFTER_MS, type ExecutionReceipt } from "./execution.js";
 import type { ExecutionApproval } from "./execution.js";
 import {
   connectPostgresExecutionReceipts,
@@ -166,12 +166,14 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       actorUserId: "execution_owner",
       principalKey: "web:execution_owner",
       now: now + 2,
+      deadlineAt: Date.now() + 1_000,
     })).resolves.toMatchObject({ status: "executing" });
     await expect(runtime.approvals.claim({
       approvalId: approval.id,
       actorUserId: "execution_owner",
       principalKey: "web:execution_owner",
       now: now + 3,
+      deadlineAt: Date.now() + 1_000,
     })).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
 
     const client = new Client({ connectionString: connectionString! });
@@ -221,7 +223,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       await observer.connect();
       try {
         await observer.query(`UPDATE omr_control.execution_approvals SET updated_at = $2
-          WHERE id = $1`, [approval.id, Date.now() - 65_001]);
+          WHERE id = $1`, [approval.id, Date.now() - EXECUTION_STALE_AFTER_MS - 5_000]);
         await expect(runtime.approvals.claim({ approvalId: approval.id,
           actorUserId: "execution_owner", principalKey: "web:execution_owner",
           now: Date.now(), deadlineAt: Date.now() + 1_000 }))
@@ -261,6 +263,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       manifestHash: approval.manifestHash, connectionId,
       providerConnectionId: approval.providerConnectionId,
       idempotencyKey: approval.idempotencyKey, requestHash: `sha256-${"f".repeat(64)}`,
+      approvalId: approval.id,
       status: "reserved", result: null, errorCode: null, startedAt: now,
       completedAt: null, createdAt: now, updatedAt: now,
     };
@@ -271,7 +274,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     await observer.connect();
     try {
       await observer.query(`UPDATE omr_control.execution_approvals SET updated_at = $2
-        WHERE id = $1`, [approval.id, Date.now() - 65_001]);
+        WHERE id = $1`, [approval.id, Date.now() - EXECUTION_STALE_AFTER_MS - 5_000]);
       await expect(runtime.approvals.claim({ approvalId: approval.id,
         actorUserId: "execution_owner", principalKey: "web:execution_owner",
         now: Date.now(), deadlineAt: Date.now() + 1_000 }))
@@ -281,6 +284,150 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
         [approval.id]);
       expect(state.rows[0]).toMatchObject({ status: "uncertain", execution_receipt_id: receipt.id });
     } finally {
+      await observer.end();
+    }
+  });
+
+  it("does not claim an approval that expires behind a membership lock", async () => {
+    const now = Date.now();
+    const approval: ExecutionApproval = {
+      id: `approval_${crypto.randomUUID()}`, workspaceId, actorUserId: "execution_owner",
+      principalKey: "web:execution_owner", toolId: "linear.create_issue",
+      manifestHash: `sha256-${"d".repeat(64)}`, connectionId,
+      providerConnectionId: `plug_${crypto.randomUUID()}`, params: {},
+      idempotencyKey: `approval_${crypto.randomUUID()}`, status: "pending",
+      approvedBy: null, decidedAt: null, expiresAt: now + 300,
+      executionReceiptId: null, createdAt: now, updatedAt: now,
+    };
+    await runtime.approvals.create(approval);
+    await runtime.approvals.approve({ approvalId: approval.id,
+      actorUserId: "execution_owner", now: now + 1 });
+    const revoker = new Client({ connectionString: connectionString! });
+    await revoker.connect();
+    try {
+      await revoker.query("BEGIN");
+      await revoker.query(`SELECT id FROM omr_control.workspace_memberships
+        WHERE workspace_id = $1 AND user_id = 'execution_owner' FOR UPDATE`, [workspaceId]);
+      const claim = runtime.approvals.claim({ approvalId: approval.id,
+        actorUserId: "execution_owner", principalKey: "web:execution_owner",
+        now: now + 2, deadlineAt: Date.now() + 2_000 });
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      await revoker.query("ROLLBACK");
+      await expect(claim).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    } finally {
+      await revoker.query("ROLLBACK").catch(() => undefined);
+      await revoker.end();
+    }
+  });
+
+  it("does not claim an approval that expires while opening its connection", async () => {
+    const now = Date.now();
+    const approval: ExecutionApproval = {
+      id: `approval_${crypto.randomUUID()}`, workspaceId, actorUserId: "execution_owner",
+      principalKey: "web:execution_owner", toolId: "linear.create_issue",
+      manifestHash: `sha256-${"d".repeat(64)}`, connectionId,
+      providerConnectionId: `plug_${crypto.randomUUID()}`, params: {},
+      idempotencyKey: `approval_${crypto.randomUUID()}`, status: "pending",
+      approvedBy: null, decidedAt: null, expiresAt: now + 300,
+      executionReceiptId: null, createdAt: now, updatedAt: now,
+    };
+    await runtime.approvals.create(approval);
+    await runtime.approvals.approve({ approvalId: approval.id,
+      actorUserId: "execution_owner", now: now + 1 });
+    const originalConnect = Client.prototype.connect;
+    vi.spyOn(Client.prototype, "connect").mockImplementation(async function (this: Client) {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      return originalConnect.call(this);
+    });
+    try {
+      await expect(runtime.approvals.claim({ approvalId: approval.id,
+        actorUserId: "execution_owner", principalKey: "web:execution_owner",
+        now: now + 2, deadlineAt: Date.now() + 2_000 }))
+        .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("reconciles only an exact approval receipt and its effect-bearing status", async () => {
+    const observer = new Client({ connectionString: connectionString! });
+    await observer.connect();
+    try {
+      for (const status of ["unrelated", "reserved", "failed", "running", "succeeded", "uncertain"] as const) {
+        const now = Date.now();
+        const approval: ExecutionApproval = {
+          id: `approval_${crypto.randomUUID()}`, workspaceId, actorUserId: "execution_owner",
+          principalKey: "web:execution_owner", toolId: "linear.create_issue",
+          manifestHash: `sha256-${"d".repeat(64)}`, connectionId,
+          providerConnectionId: `plug_${crypto.randomUUID()}`, params: {},
+          idempotencyKey: `approval_${crypto.randomUUID()}`, status: "pending",
+          approvedBy: null, decidedAt: null, expiresAt: now + 60_000,
+          executionReceiptId: null, createdAt: now, updatedAt: now,
+        };
+        await runtime.approvals.create(approval);
+        await runtime.approvals.approve({ approvalId: approval.id,
+          actorUserId: "execution_owner", now: now + 1 });
+        await runtime.approvals.claim({ approvalId: approval.id,
+          actorUserId: "execution_owner", principalKey: "web:execution_owner",
+          now: now + 2, deadlineAt: Date.now() + 2_000 });
+        const receipt: ExecutionReceipt = {
+          id: `execution_${crypto.randomUUID()}`, workspaceId, actorUserId: "execution_owner",
+          principalKey: "web:execution_owner", toolId: status === "unrelated" ? "linear.other" : approval.toolId,
+          manifestHash: approval.manifestHash, connectionId,
+          providerConnectionId: approval.providerConnectionId,
+          idempotencyKey: approval.idempotencyKey, requestHash: `sha256-${"f".repeat(64)}`,
+          approvalId: status === "unrelated" ? null : approval.id,
+          status: "reserved", result: null, errorCode: null, startedAt: now,
+          completedAt: null, createdAt: now, updatedAt: now,
+        };
+        await runtime.receipts.reserve(receipt);
+        if (["running", "succeeded", "uncertain", "unrelated"].includes(status)) {
+          await runtime.receipts.beginDispatch(receipt.id, now + 3);
+        }
+        if (status === "failed") await runtime.receipts.fail(receipt.id, "predispatch", now + 3);
+        if (status === "succeeded") await runtime.receipts.succeed(receipt.id, {}, now + 4);
+        if (status === "uncertain") await runtime.receipts.uncertain(receipt.id, "provider_outcome_unknown", now + 4);
+        await observer.query(`UPDATE omr_control.execution_approvals SET updated_at = $2
+          WHERE id = $1`, [approval.id, Date.now() - EXECUTION_STALE_AFTER_MS - 5_000]);
+        const expected = ["running", "succeeded", "uncertain"].includes(status)
+          ? { code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: receipt.id }
+          : { code: "APPROVAL_UNAVAILABLE" };
+        await expect(runtime.approvals.claim({ approvalId: approval.id,
+          actorUserId: "execution_owner", principalKey: "web:execution_owner",
+          now: Date.now(), deadlineAt: Date.now() + 2_000 })).rejects.toMatchObject(expected);
+        const state = await observer.query<{ status: string; execution_receipt_id: string | null }>(
+          `SELECT status, execution_receipt_id FROM omr_control.execution_approvals WHERE id = $1`,
+          [approval.id]);
+        expect(state.rows[0]).toMatchObject(["running", "succeeded", "uncertain"].includes(status)
+          ? { status: "uncertain", execution_receipt_id: receipt.id }
+          : { status: "failed", execution_receipt_id: null });
+      }
+    } finally {
+      await observer.end();
+    }
+  });
+
+  it("releases dedicated PostgreSQL sockets after concurrent failed claims", async () => {
+    const applicationName = `omr_claim_${crypto.randomUUID().replaceAll("-", "")}`;
+    const url = new URL(connectionString!);
+    url.searchParams.set("application_name", applicationName);
+    const isolated = await connectPostgresExecutionReceipts({
+      connectionString: url.toString(), resultWrappingKey: new Uint8Array(WRAPPING_KEY),
+    });
+    const observer = new Client({ connectionString: connectionString! });
+    await observer.connect();
+    try {
+      const count = async () => Number((await observer.query<{ count: string }>(
+        "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1", [applicationName])).rows[0]?.count);
+      expect(await count()).toBe(1);
+      const results = await Promise.allSettled(Array.from({ length: 20 }, (_, index) =>
+        isolated.approvals.claim({ approvalId: `missing_${index}`, actorUserId: "execution_owner",
+          principalKey: "web:execution_owner", now: Date.now(), deadlineAt: Date.now() + 3_000 })));
+      expect(results.every((result) => result.status === "rejected" &&
+        (result.reason as { code?: string }).code === "APPROVAL_UNAVAILABLE")).toBe(true);
+      expect(await count()).toBe(1);
+    } finally {
+      await isolated.close();
       await observer.end();
     }
   });

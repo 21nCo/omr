@@ -99,6 +99,16 @@ describeDatabase("approval migration from origin/dev schema", () => {
       expect(Number(rolledBack.rows[0]?.count)).toBe(3);
 
       await migrate("0014_approval_reconciliation");
+      await client.query("BEGIN");
+      await migrate("0016_receipt_approval_identity");
+      await client.query("ROLLBACK");
+      const rolledBackIdentity = await client.query<{ count: string }>(
+        `SELECT count(*) FROM information_schema.columns
+         WHERE table_schema = $1 AND table_name = 'execution_receipts' AND column_name = 'approval_id'`,
+        [schema]);
+      expect(Number(rolledBackIdentity.rows[0]?.count)).toBe(0);
+      await migrate("0016_receipt_approval_identity");
+      await migrate("0016_receipt_approval_identity");
       const rows = await client.query<{ id: string; idempotency_key: string; status: string; request_hash: string }>(
         `SELECT id, idempotency_key, status, request_hash
          FROM ${qualified}.execution_approvals ORDER BY created_at, id`,
@@ -168,16 +178,25 @@ describeDatabase("approval migration from origin/dev schema", () => {
       await client.query(`INSERT INTO ${qualified}.workspace_memberships VALUES ('workspace_1', 'user_1')`);
       await store.approve({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5 });
       await store.claim({ approvalId: "approval_fresh", actorUserId: "user_1",
-        principalKey: "web:user_1", now: 6 });
+        principalKey: "web:user_1", now: 6, deadlineAt: Date.now() + 1_000 });
       await client.query(`INSERT INTO ${qualified}.execution_receipts
         (id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash, connection_id,
          provider_connection_id, idempotency_key, status, request_hash, started_at, created_at, updated_at)
         VALUES ('execution_reconcile', 'workspace_1', 'user_1', 'web:user_1', 'linear.create_issue',
                 'manifest_1', 'connection_1', 'provider_1', 'uncertain-key', 'uncertain', 'opaque', 1, 1, 1)`);
+      await client.query(`UPDATE ${qualified}.execution_receipts SET approval_id = 'approval_fresh'
+        WHERE id = 'execution_reconcile'`);
+      await expect(client.query(`INSERT INTO ${qualified}.execution_receipts
+        (id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash, connection_id,
+         provider_connection_id, idempotency_key, status, request_hash, approval_id,
+         started_at, created_at, updated_at)
+        VALUES ('execution_duplicate', 'workspace_1', 'user_1', 'web:user_1', 'linear.create_issue',
+                'manifest_1', 'connection_1', 'provider_1', 'another-key', 'uncertain', 'opaque',
+                'approval_fresh', 1, 1, 1)`)).rejects.toMatchObject({ code: "23505" });
       await expect(store.uncertain({ approvalId: "approval_fresh", receiptId: "execution_reconcile", now: 7 }))
         .resolves.toMatchObject({ status: "uncertain", executionReceiptId: "execution_reconcile" });
       await expect(store.claim({ approvalId: "approval_fresh", actorUserId: "user_1",
-        principalKey: "web:user_1", now: 8 })).rejects.toMatchObject({
+        principalKey: "web:user_1", now: 8, deadlineAt: Date.now() + 1_000 })).rejects.toMatchObject({
         code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: "execution_reconcile",
       });
       const count = await client.query<{ count: string }>(

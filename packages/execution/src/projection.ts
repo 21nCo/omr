@@ -4,42 +4,47 @@ import type { ExecutionApproval, ExecutionReceipt } from "./execution.js";
 
 const SECRET_NAME = /secret|token|password|passphrase|credential|authorization|api[_-]?key|private[_-]?key/i;
 
+type SelectorSegment = { part: string; next: number };
+
+function canonicalSelectorIndex(part: string): boolean {
+  if (!/^\d+$/.test(part)) return true;
+  // Readiness and redaction must agree on the same array property.
+  return /^(0|[1-9]\d*)$/.test(part) && Number(part) <= 4_294_967_294;
+}
+
+function bracketSegment(key: string, cursor: number): SelectorSegment | null {
+  const end = key.indexOf("]", cursor + 1);
+  if (end < 0) return null;
+  const index = key.slice(cursor + 1, end);
+  if (index && index !== "*" && !/^\d+$/.test(index)) return null;
+  const next = end + 1;
+  if (next < key.length && key[next] !== "." && key[next] !== "[") return null;
+  return { part: index || "*", next };
+}
+
+function nameSegment(key: string, cursor: number): SelectorSegment | null {
+  const start = key[cursor] === "." ? cursor + 1 : cursor;
+  if (start !== cursor && (cursor === 0 || key[start] === "[")) return null;
+  let next = start;
+  while (next < key.length && key[next] !== "." && key[next] !== "[" && key[next] !== "]") next += 1;
+  if (next === start || key[next] === "]") return null;
+  return { part: key.slice(start, next).toLowerCase(), next };
+}
+
 function parseSensitiveKey(key: string): string[] | null {
   // A wildcard consumes exactly one array index or object key. Unknown selector
   // syntax cannot safely describe what should be hidden, so fail closed.
   const parts: string[] = [];
   let cursor = 0;
   while (cursor < key.length) {
-    if (key[cursor] === "[") {
-      if (parts.length === 0) return null;
-      const end = key.indexOf("]", cursor + 1);
-      if (end < 0) return null;
-      const index = key.slice(cursor + 1, end);
-      if (index && index !== "*" && !/^\d+$/.test(index)) return null;
-      parts.push(index || "*");
-      cursor = end + 1;
-      if (cursor < key.length && key[cursor] !== "." && key[cursor] !== "[") return null;
-    } else {
-      if (key[cursor] === ".") {
-        if (cursor === 0 || key[cursor + 1] === "[") return null;
-        cursor += 1;
-      }
-      const start = cursor;
-      while (cursor < key.length && key[cursor] !== "." && key[cursor] !== "[" && key[cursor] !== "]") {
-        cursor += 1;
-      }
-      if (cursor === start) return null;
-      parts.push(key.slice(start, cursor).toLowerCase());
-      if (key[cursor] === "]") return null;
-    }
+    const segment = key[cursor] === "["
+      ? (parts.length ? bracketSegment(key, cursor) : null)
+      : nameSegment(key, cursor);
+    if (!segment || !canonicalSelectorIndex(segment.part)) return null;
+    parts.push(segment.part);
+    cursor = segment.next;
   }
-  if (key.endsWith(".") || parts.length === 0) return null;
-  // Array paths are emitted using canonical decimal indices. Accepting "00"
-  // here would make readiness look at a missing property while redaction walks
-  // index "0", exposing the declared secret in a reviewable preview.
-  if (parts.some((part) => /^\d+$/.test(part) &&
-    (!/^(0|[1-9]\d*)$/.test(part) || Number(part) > 4_294_967_294))) return null;
-  return parts;
+  return key.endsWith(".") || parts.length === 0 ? null : parts;
 }
 
 function sensitivePath(path: string[], sensitive: string[][]): boolean {
@@ -143,6 +148,7 @@ function previewMode(ready: boolean, opaque: boolean): "opaque" | "redacted" | "
 /** History omits results; direct execution returns them only to the authenticated actor. */
 export function publicReceipt(receipt: ExecutionReceipt, includeResult = true) {
   const { principalKey: _principalKey, providerConnectionId: _providerConnectionId,
-    requestHash: _requestHash, idempotencyKey: _idempotencyKey, ...visible } = receipt;
+    requestHash: _requestHash, idempotencyKey: _idempotencyKey,
+    approvalId: _approvalId, ...visible } = receipt;
   return includeResult ? visible : { ...visible, result: null };
 }
