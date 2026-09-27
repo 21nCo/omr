@@ -114,7 +114,7 @@ export interface ExecutionRouteServices {
     toolId: string;
     params: unknown;
     connectionId?: string;
-    idempotencyKey?: string;
+    idempotencyKey: string;
   }): Promise<unknown>;
   approve(request: Request, approvalId: string): Promise<unknown>;
   reject(request: Request, approvalId: string): Promise<unknown>;
@@ -643,14 +643,14 @@ export function createOMRRouter(
         handler: async (request, context) => {
           const body = objectBody(await context.json());
           const connectionId = optionalString(body, "connectionId");
-          const idempotencyKey = optionalString(body, "idempotencyKey");
+          const idempotencyKey = requiredString(body, "idempotencyKey");
           if (!("params" in body)) throw new RequestInputError("params is required");
           return Response.json(await executionServices.requestApproval(request, {
             workspaceId: requiredString(body, "workspaceId"),
             toolId: requiredString(body, "toolId"),
             params: body.params,
             ...(connectionId ? { connectionId } : {}),
-            ...(idempotencyKey ? { idempotencyKey } : {}),
+            idempotencyKey,
           }), { status: 201, headers: PRIVATE_RESPONSE });
         },
       },

@@ -466,6 +466,7 @@ describe("OMR Worker HTTP boundary", () => {
           workspaceId: "workspace_alpha",
           toolId: "linear.create_issue",
           params: { title: "Approved" },
+          idempotencyKey: "router-approval-1",
         }),
       },
     ));

@@ -19,3 +19,4 @@ export {
   type PlugFnActionPort,
 } from "./execution.js";
 export { publicApproval, publicReceipt } from "./projection.js";
+export { deriveExecutionFingerprintKey } from "./fingerprint-key.js";

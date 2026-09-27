@@ -2,7 +2,7 @@ import type { JsonValue, ToolManifest } from "@oh-my-router/tools";
 
 import type { ExecutionApproval, ExecutionReceipt } from "./execution.js";
 
-const SECRET_NAME = /(?:secret|token|password|credential|authorization|api[_-]?key)/i;
+const SECRET_NAME = /(?:secret|token|password|passphrase|credential|authorization|api[_-]?key|private[_-]?key)/i;
 
 function redact(value: JsonValue, sensitive: Set<string>, path = ""): JsonValue {
   if (Array.isArray(value)) return value.map((item) => redact(item, sensitive, path));
@@ -25,7 +25,7 @@ export function publicApproval(approval: ExecutionApproval, manifest?: ToolManif
     effect: manifestCurrent && manifest ? manifest.contract.effect : "unknown",
     resources: manifestCurrent && manifest ? manifest.contract.resources : [],
     manifestCurrent,
-    params: manifestCurrent ? redact(approval.params, sensitive) : "[REDACTED]",
+    params: manifestCurrent && sensitive.size > 0 ? redact(approval.params, sensitive) : "[REDACTED]",
   };
 }
 

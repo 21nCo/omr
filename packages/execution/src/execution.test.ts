@@ -15,6 +15,7 @@ import {
 } from "./execution.js";
 import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "./testing.js";
 import { publicApproval, publicReceipt } from "./projection.js";
+import { deriveExecutionFingerprintKey } from "./fingerprint-key.js";
 
 async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes: string[] | undefined = ["issues:read", "repo"], scopeFree = false, guard?: ExecutionInvocationGuard) {
   let now = 1_700_000_000_000;
@@ -93,6 +94,11 @@ async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes: st
   };
 }
 
+let nextApprovalKey = 0;
+function requestApproval(service: ExecutionService, input: Omit<Parameters<ExecutionService["requestApproval"]>[0], "idempotencyKey"> & { idempotencyKey?: string }) {
+  return service.requestApproval({ ...input, idempotencyKey: input.idempotencyKey ?? `test-approval-${++nextApprovalKey}` });
+}
+
 function action(name: string, effect: ToolEffect) {
   return {
     name,
@@ -113,6 +119,14 @@ function action(name: string, effect: ToolEffect) {
 }
 
 describe("execution service", () => {
+  it("derives a stable fingerprint key distinct from the result wrapping key", async () => {
+    const wrapping = new Uint8Array(32).fill(7);
+    const derived = await deriveExecutionFingerprintKey(wrapping);
+    expect(derived).toHaveLength(32);
+    expect(derived).not.toEqual(wrapping);
+    expect(await deriveExecutionFingerprintKey(wrapping)).toEqual(derived);
+    expect(await deriveExecutionFingerprintKey(new Uint8Array(32).fill(8))).not.toEqual(derived);
+  });
   it("advertises only actions granted by the effective selected binding across selection and revocation", async () => {
     const { catalog, connections, firstBinding, workspace } = await fixture();
     const second = await connections.attach({
@@ -148,14 +162,14 @@ describe("execution service", () => {
       .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
     await expect(service.execute({ principal, toolId: "linear.create_issue", params: {} }))
       .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
-    await expect(service.requestApproval({ principal, toolId: "linear.create_issue", params: {} }))
+    await expect(requestApproval(service, { principal, toolId: "linear.create_issue", params: {} }))
       .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
     expect(approvals.approvals.size).toBe(0);
     expect(receipts.receipts.size).toBe(0);
     setScopes(["issues:read", "repo"]);
     await expect(service.execute({ principal, toolId: "linear.get_issue", params: {} }))
       .resolves.toMatchObject({ status: "succeeded" });
-    const approval = await service.requestApproval({ principal, toolId: "linear.create_issue", params: {} });
+    const approval = await requestApproval(service, { principal, toolId: "linear.create_issue", params: {} });
     await service.approve(approval.id, "user_1");
     setScopes(["issues:read"]);
     await expect(service.executeApproved(principal, approval.id))
@@ -167,12 +181,12 @@ describe("execution service", () => {
   it("fails closed for an unknown grant even when actions require no scopes", async () => {
     const { actionCall, approvals, receipts, service, workspace, setScopes } = await fixture(undefined, [], true);
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
-    const approval = await service.requestApproval({ principal, toolId: "linear.no_scope_write", params: {} });
+    const approval = await requestApproval(service, { principal, toolId: "linear.no_scope_write", params: {} });
     await service.approve(approval.id, "user_1");
     setScopes(undefined);
     await expect(service.execute({ principal, toolId: "linear.no_scope_read", params: {} }))
       .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
-    await expect(service.requestApproval({ principal, toolId: "linear.no_scope_write", params: {} }))
+    await expect(requestApproval(service, { principal, toolId: "linear.no_scope_write", params: {} }))
       .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
     await expect(service.executeApproved(principal, approval.id))
       .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
@@ -190,7 +204,7 @@ describe("execution service", () => {
       const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
       let approvalId: string | undefined;
       if (entry === "approved") {
-        const approval = await service.requestApproval({ principal, toolId: "linear.create_issue", params: {} });
+        const approval = await requestApproval(service, { principal, toolId: "linear.create_issue", params: {} });
         await service.approve(approval.id, "user_1");
         approvalId = approval.id;
       }
@@ -198,7 +212,7 @@ describe("execution service", () => {
       const call = entry === "direct"
         ? service.execute({ principal, toolId: "linear.get_issue", params: {} })
         : entry === "request"
-          ? service.requestApproval({ principal, toolId: "linear.create_issue", params: {} })
+          ? requestApproval(service, { principal, toolId: "linear.create_issue", params: {} })
           : service.executeApproved(principal, approvalId!);
       await expect(call).rejects.toBeInstanceOf(ConnectionUnavailableError);
       expect(await connections.listAvailable({ actorUserId: "user_1", workspaceId: workspace.id, provider: "linear" }))
@@ -273,7 +287,7 @@ describe("execution service", () => {
       const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
       let approvalId: string | undefined;
       if (entry === "approved") {
-        const approval = await service.requestApproval({ principal, toolId: "linear.create_issue", params: {} });
+        const approval = await requestApproval(service, { principal, toolId: "linear.create_issue", params: {} });
         approvalId = approval.id;
         await service.approve(approvalId, "user_1");
       }
@@ -281,7 +295,7 @@ describe("execution service", () => {
         .mockRejectedValue(new Error("health store unavailable"));
       setRemoteError(Object.assign(new Error("remote missing"), { code: "CONNECTION_NOT_FOUND" }));
       const call = entry === "request"
-        ? service.requestApproval({ principal, toolId: "linear.create_issue", params: {} })
+        ? requestApproval(service, { principal, toolId: "linear.create_issue", params: {} })
         : service.executeApproved(principal, approvalId!);
       await expect(call).rejects.toBeInstanceOf(ConnectionUnavailableError);
       expect(recordHealth).toHaveBeenCalledExactlyOnceWith({
@@ -306,7 +320,7 @@ describe("execution service", () => {
       toolId: "linear.get_issue", params: {},
     };
     await expect(service.execute(input)).rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
-    await expect(service.requestApproval({ ...input, toolId: "linear.create_issue" }))
+    await expect(requestApproval(service, { ...input, toolId: "linear.create_issue" }))
       .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
     expect(actionCall).not.toHaveBeenCalled();
   });
@@ -393,9 +407,9 @@ describe("execution service", () => {
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
     const request = { principal, toolId: "linear.create_issue", params: { title: "first" },
       idempotencyKey: "approval-retry" } as const;
-    const first = await service.requestApproval(request);
-    expect((await service.requestApproval(request)).id).toBe(first.id);
-    await expect(service.requestApproval({ ...request, params: { title: "changed" } }))
+    const first = await requestApproval(service, request);
+    expect((await requestApproval(service, request)).id).toBe(first.id);
+    await expect(requestApproval(service, { ...request, params: { title: "changed" } }))
       .rejects.toBeInstanceOf(ExecutionIdempotencyConflictError);
     expect(approvals.approvals.size).toBe(1);
     expect(actionCall).not.toHaveBeenCalled();
@@ -405,10 +419,10 @@ describe("execution service", () => {
     const { approvals, service, workspace, advance } = await fixture();
     const request = { principal: { kind: "web" as const, userId: "user_1", workspaceId: workspace.id },
       toolId: "linear.create_issue", params: { title: "same" }, idempotencyKey: "ttl-retry", ttlMs: 60_000 };
-    const first = await service.requestApproval(request);
+    const first = await requestApproval(service, request);
     advance(1_000);
-    expect(await service.requestApproval(request)).toMatchObject({ id: first.id, expiresAt: first.expiresAt });
-    await expect(service.requestApproval({ ...request, ttlMs: 120_000 }))
+    expect(await requestApproval(service, request)).toMatchObject({ id: first.id, expiresAt: first.expiresAt });
+    await expect(requestApproval(service, { ...request, ttlMs: 120_000 }))
       .rejects.toBeInstanceOf(ExecutionIdempotencyConflictError);
     expect(approvals.approvals.size).toBe(1);
   });
@@ -416,7 +430,7 @@ describe("execution service", () => {
   it("allows only one concurrent approved invocation and blocks revoked bindings", async () => {
     const { actionCall, connections, service, workspace } = await fixture();
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
-    const approval = await service.requestApproval({ principal, toolId: "linear.create_issue", params: {} });
+    const approval = await requestApproval(service, { principal, toolId: "linear.create_issue", params: {} });
     await service.approve(approval.id, principal.userId);
     const results = await Promise.allSettled([
       service.executeApproved(principal, approval.id),
@@ -426,7 +440,7 @@ describe("execution service", () => {
     expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
     expect(actionCall).toHaveBeenCalledTimes(1);
 
-    const later = await service.requestApproval({ principal, toolId: "linear.create_issue", params: {} });
+    const later = await requestApproval(service, { principal, toolId: "linear.create_issue", params: {} });
     await service.approve(later.id, principal.userId);
     await connections.revoke(principal.userId, later.connectionId);
     await expect(service.executeApproved(principal, later.id)).rejects.toMatchObject({
@@ -435,16 +449,19 @@ describe("execution service", () => {
     expect(actionCall).toHaveBeenCalledTimes(1);
   });
 
-  it("masks approval secrets and omits internal handles from public receipts", async () => {
-    const { catalog, service, workspace } = await fixture();
+  it("masks every parameter when the current catalog has no sensitive-key metadata", async () => {
+    const { approvals, catalog, service, workspace } = await fixture();
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
-    const approval = await service.requestApproval({ principal, toolId: "linear.create_issue",
-      params: { title: "visible", nested: { apiKey: "secret-value" } } });
-    const projected = publicApproval(approval, catalog.get(approval.toolId));
-    expect(projected.params).toEqual({ title: "visible", nested: { apiKey: "[REDACTED]" } });
-    expect(JSON.stringify(projected)).not.toContain("plug_linear");
-    expect(JSON.stringify(projected)).not.toContain("secret-value");
-    expect(projected).not.toHaveProperty("requestHash");
+    const approval = await requestApproval(service, { principal, toolId: "linear.create_issue",
+      params: { title: "visible", nested: { passphrase: "secret-value", privateKey: "private-value" } } });
+    const records = [approval, await service.approve(approval.id, principal.userId),
+      ...(await approvals.listForActor({ workspaceId: workspace.id, actorUserId: principal.userId, limit: 10 }))];
+    for (const record of records) {
+      const projected = publicApproval(record, catalog.get(approval.toolId));
+      expect(projected.params).toBe("[REDACTED]");
+      expect(JSON.stringify(projected)).not.toMatch(/plug_linear|secret-value|private-value/);
+      expect(projected).not.toHaveProperty("requestHash");
+    }
     const receipt = await service.execute({ principal, toolId: "linear.get_issue", params: {} });
     expect(publicReceipt(receipt, false)).toMatchObject({ result: null, status: "succeeded" });
     expect(JSON.stringify(publicReceipt(receipt, false))).not.toContain("plug_linear");
@@ -453,7 +470,7 @@ describe("execution service", () => {
   it("masks every preview field when the current manifest no longer matches the approval", async () => {
     const { approvals, catalog, service, workspace } = await fixture();
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
-    const approval = await service.requestApproval({ principal, toolId: "linear.create_issue",
+    const approval = await requestApproval(service, { principal, toolId: "linear.create_issue",
       params: { title: "visible", passphrase: "old manifest secret" } });
     const changed = { ...catalog.get(approval.toolId)!, hash: "replacement-manifest" };
     const projections = [approval, await service.approve(approval.id, principal.userId),
@@ -469,7 +486,7 @@ describe("execution service", () => {
   it("stores keyed request fingerprints that do not reveal a guessable parameter digest", async () => {
     const { approvals, receipts, service, workspace } = await fixture();
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
-    const approval = await service.requestApproval({ principal, toolId: "linear.create_issue",
+    const approval = await requestApproval(service, { principal, toolId: "linear.create_issue",
       params: { passphrase: "short secret" } });
     await service.execute({ principal, toolId: "linear.get_issue", params: { passphrase: "short secret" } });
     expect(approval.requestHash).toMatch(/^hmac-sha256-[a-f0-9]{64}$/);
@@ -503,8 +520,10 @@ describe("execution service", () => {
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
     await expect(service.execute({ principal, toolId: "linear.get_issue", params: {},
       idempotencyKey: "" })).rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
-    await expect(service.requestApproval({ principal, toolId: "linear.create_issue", params: {},
+    await expect(requestApproval(service, { principal, toolId: "linear.create_issue", params: {},
       idempotencyKey: "" })).rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    await expect(service.requestApproval({ principal, toolId: "linear.create_issue", params: {},
+      idempotencyKey: 123 as never })).rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
     expect(receipts.receipts.size).toBe(0);
     expect(approvals.approvals.size).toBe(0);
     expect(actionCall).not.toHaveBeenCalled();
@@ -544,7 +563,7 @@ describe("execution service", () => {
   it("binds a single-use approval to the exact actor, principal, manifest, connection, and params", async () => {
     const { actionCall, approvals, service, workspace } = await fixture();
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
-    const approval = await service.requestApproval({
+    const approval = await requestApproval(service, {
       principal,
       toolId: "linear.create_issue",
       params: { title: "Approved title" },
@@ -576,7 +595,7 @@ describe("execution service", () => {
   it("keeps a successful receipt authoritative when approval consumption fails", async () => {
     const { actionCall, approvals, receipts, service, workspace } = await fixture();
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
-    const approval = await service.requestApproval({ principal, toolId: "linear.create_issue", params: {},
+    const approval = await requestApproval(service, { principal, toolId: "linear.create_issue", params: {},
       idempotencyKey: "consume-failure" });
     await service.approve(approval.id, principal.userId);
     vi.spyOn(approvals, "consume").mockRejectedValueOnce(new Error("approval store unavailable"));
@@ -605,7 +624,7 @@ describe("execution service", () => {
       undefined, undefined, false, guard,
     );
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
-    const approval = await service.requestApproval({ principal, toolId: "linear.create_issue",
+    const approval = await requestApproval(service, { principal, toolId: "linear.create_issue",
       params: {}, idempotencyKey: `write-${failure.replaceAll(" ", "-")}` });
     await service.approve(approval.id, principal.userId);
     if (failure === "provider ambiguity") actionCall.mockRejectedValueOnce(new Error("secret upstream detail"));
@@ -637,7 +656,7 @@ describe("execution service", () => {
     expectedWorkspaceId = workspace.id;
     const requestPrincipal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
     const makeApproval = async () => {
-      const approval = await service.requestApproval({ principal: requestPrincipal,
+      const approval = await requestApproval(service, { principal: requestPrincipal,
         toolId: "linear.create_issue", params: {} });
       await service.approve(approval.id, requestPrincipal.userId);
       return approval;
@@ -666,13 +685,13 @@ describe("execution service", () => {
       grantId: "grant_1",
       capabilities: ["tools:write" as const],
     };
-    await expect(service.requestApproval({
+    await expect(requestApproval(service, {
       principal: client,
       toolId: "linear.create_issue",
       params: {},
     })).rejects.toBeInstanceOf(ExecutionCapabilityDeniedError);
 
-    const approval = await service.requestApproval({
+    const approval = await requestApproval(service, {
       principal: { kind: "web", userId: "user_1", workspaceId: workspace.id },
       toolId: "linear.create_issue",
       params: {},
@@ -691,7 +710,7 @@ describe("execution service", () => {
       toolId: "linear.get_issue",
       params: { id: "issue_1" },
     });
-    await service.requestApproval({
+    await requestApproval(service, {
       principal: { kind: "web", userId: "user_1", workspaceId: workspace.id },
       toolId: "linear.create_issue",
       params: { title: "Review me" },

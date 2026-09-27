@@ -150,7 +150,7 @@ async function main(): Promise<void> {
       toolId: subject,
       params: jsonParams(),
       ...(option("--connection") ? { connectionId: option("--connection") } : {}),
-      ...(option("--idempotency") ? { idempotencyKey: option("--idempotency") } : {}),
+      idempotencyKey: requiredOption("--idempotency"),
     }));
   }
   if (command === "approvals" && subcommand === "execute" && subject) {

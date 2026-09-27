@@ -11,7 +11,7 @@ import {
   type ConnectionBindingRecord,
 } from "@oh-my-router/connections";
 import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
-import { ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
+import { deriveExecutionFingerprintKey, ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
 import { connectPostgresExecutionReceipts } from "@oh-my-router/execution/postgres";
 import { connectPostgresIdentityRuntime } from "@oh-my-router/identity/postgres";
 import { connectPostgresPlugFn } from "@oh-my-router/plugfn-runtime";
@@ -603,7 +603,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
         Date.now,
         execution.approvals,
         execution.invocationGuard,
-        executionWrappingKey(event),
+        await deriveExecutionFingerprintKey(executionWrappingKey(event)),
       ), catalog);
     } finally {
       await Promise.allSettled([

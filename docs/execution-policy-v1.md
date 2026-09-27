@@ -8,7 +8,10 @@ immediately. Write, destructive, and unknown-effect actions create an approval w
 parameters and make no provider call until the requesting actor approves it in the web control plane.
 The approval binds actor, principal, manifest hash, connection, parameters, requested lifetime,
 expiry, and idempotency key. A retry with the same key and different lifetime conflicts; an identical
-retry keeps the original expiry.
+retry keeps the original expiry. Effectful approval requests require a caller-stable idempotency key
+in the web API and CLI. MCP write calls require `_omrIdempotencyKey` in tool arguments; OMR removes
+that field before storing or sending provider parameters. A caller reuses the key after a lost
+response and chooses a new key for a genuinely new action. Missing or malformed keys are rejected.
 
 On execution, the service atomically claims the approval and rechecks the current manifest, capability,
 connection, and scopes. A PostgreSQL transaction then locks the binding, membership, web session or client, and grant
@@ -19,10 +22,12 @@ commits on a separate connection **before** calling the provider. A crash after 
 receipt persistence failure is `uncertain`, with a stable receipt ID and no automatic replay. Safe
 reads can use the manifest's retry policy inside one invocation; effects that may write get one
 upstream attempt. The provider result is encrypted at rest. History omits results, and public approval
-previews mask declared sensitive keys and common credential fields. If the manifest changed, every
-parameter is masked because the original sensitive-key list is no longer known. Public responses
+previews mask declared sensitive keys and common credential fields. If the current manifest has no
+sensitive-key metadata, or the manifest changed, every parameter is masked. Public responses
 omit remote connection handles and internal hashes. Stored request fingerprints are HMACs keyed
-with the server's stable execution wrapping secret. Unexpected execution errors log only
+with a domain-separated HKDF subkey derived from the server's stable execution wrapping secret.
+Old HMAC fingerprints made with the raw wrapping key conflict on retry and remain reserved until
+reconciled. Unexpected execution errors log only
 their class. If the provider receipt succeeds but approval consumption cannot be persisted, the
 service reports an unknown completion with the receipt ID and marks the approval uncertain for
 reconciliation; it never marks the successful effect failed or retries it. The same state applies
@@ -33,8 +38,10 @@ to provider ambiguity, receipt persistence failure, and a guard commit failure a
 | Boundary | Failure to prevent | Focused evidence |
 | --- | --- | --- |
 | Web, CLI, MCP routes | Different approval policy or leaked response | `execution-policy-contract`, router, MCP, and origin tests |
+| Caller retry key | Lost response creates a second executable approval | Required-key and same-key replay tests on all three surfaces |
 | Approval request and claim | Duplicate pending work, expiry, changed params, concurrent use | Service idempotency and single-claim tests |
 | Approval projection | Guessable hashes or secrets after manifest change | Projection, decision, and overview-shaped history tests |
+| Fingerprint key | Reusing the encryption key for HMAC | HKDF separation and existing-fingerprint conflict checks |
 | Approval completion | Failed consume after successful effect | Successful receipt and non-replayable approval test |
 | Legacy key migration | NULL fingerprints and duplicate old keys permit another approval | Migration and store conflict fixtures |
 | Web approval execution | Actor/workspace substitution or revoked membership with an empty route workspace | Empty-workspace principal and guard tests |

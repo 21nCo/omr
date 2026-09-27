@@ -40,9 +40,10 @@ describe("execution-policy-contract", () => {
         unknown: action("unknown", "unknown") },
     }] } }, (value) => value as never);
     const provider = vi.fn(async () => ({ result: "private provider result" }));
+    const approvalStore = new MemoryExecutionApprovalStore();
     const service = new ExecutionService(catalog, connections, { action: provider },
       new MemoryExecutionReceiptStore(), async () => [], Date.now,
-      new MemoryExecutionApprovalStore(), undefined, new Uint8Array(32).fill(7));
+      approvalStore, undefined, new Uint8Array(32).fill(7));
     const principal = (request: Request): ExecutionPrincipal => surface === "web"
       ? { kind: "web", userId: "user_1", workspaceId: workspace.id }
       : { kind: "client", userId: "user_1", workspaceId: workspace.id,
@@ -78,7 +79,8 @@ describe("execution-policy-contract", () => {
       return payload;
     };
     const request = { workspaceId: workspace.id, toolId: "linear.write",
-      params: { title: "Review", secretField: "fixture-secret" }, idempotencyKey: `${surface}-write` };
+      params: { title: "Review", secretField: "fixture-secret", passphrase: "passphrase-secret",
+        privateKey: "private-key-secret" }, idempotencyKey: `${surface}-write` };
 
     if (surface === "cli") {
       const server = createServer(async (incoming, outgoing) => {
@@ -119,11 +121,19 @@ describe("execution-policy-contract", () => {
         await expect(runCli(["tools", "run", "linear.write", "--params", JSON.stringify(request.params)]))
           .rejects.toMatchObject({ code: 1 });
         expect(provider).toHaveBeenCalledTimes(1);
+        await expect(runCli(["approvals", "request", "linear.write", "--params",
+          JSON.stringify(request.params)])).rejects.toMatchObject({ code: 1 });
+        expect(approvalStore.approvals.size).toBe(0);
         const pending = await runCli(["approvals", "request", "linear.write", "--params",
           JSON.stringify(request.params), "--idempotency", request.idempotencyKey]);
         const approval = JSON.parse(pending.stdout) as { id: string; params: unknown };
-        expect(approval.params).toEqual({ title: "Review", secretField: "[REDACTED]" });
+        const retried = await runCli(["approvals", "request", "linear.write", "--params",
+          JSON.stringify(request.params), "--idempotency", request.idempotencyKey]);
+        expect(JSON.parse(retried.stdout)).toMatchObject({ id: approval.id });
+        expect(approval.params).toEqual({ title: "Review", secretField: "[REDACTED]",
+          passphrase: "[REDACTED]", privateKey: "[REDACTED]" });
         expect(pending.stdout).not.toContain("fixture-secret");
+        expect(pending.stdout).not.toMatch(/passphrase-secret|private-key-secret/);
         expect(pending.stdout).not.toContain("requestHash");
         expect(provider).toHaveBeenCalledTimes(1);
         await webPost("/api/approvals/approve", { approvalId: approval.id });
@@ -147,9 +157,15 @@ describe("execution-policy-contract", () => {
       try {
         expect(await client.callTool({ name: "linear.read", arguments: {} }))
           .toMatchObject({ structuredContent: { status: "succeeded" } });
-        const pending = await client.callTool({ name: "linear.write", arguments: request.params });
+        expect(await client.callTool({ name: "linear.write", arguments: request.params }))
+          .toMatchObject({ isError: true });
+        expect(approvalStore.approvals.size).toBe(0);
+        const args = { ...(request.params as Record<string, unknown>), _omrIdempotencyKey: request.idempotencyKey };
+        const pending = await client.callTool({ name: "linear.write", arguments: args });
         expect(pending).toMatchObject({ structuredContent: { status: "approval_required", executed: false } });
         const approvalId = (pending.structuredContent as { approvalId: string }).approvalId;
+        const retried = await client.callTool({ name: "linear.write", arguments: args });
+        expect(retried).toMatchObject({ structuredContent: { approvalId } });
         expect(JSON.stringify(pending)).not.toContain("fixture-secret");
         expect(JSON.stringify(pending)).not.toContain("requestHash");
         expect(provider).toHaveBeenCalledTimes(1);
@@ -177,8 +193,20 @@ describe("execution-policy-contract", () => {
     await expect(client.execute(request)).rejects.toMatchObject({ status: 409,
       body: { error: "EXECUTION_APPROVAL_REQUIRED" } });
     expect(provider).toHaveBeenCalledTimes(1);
+    await expect(client.requestApproval({ ...request, idempotencyKey: undefined })).rejects.toMatchObject({ status: 400 });
+    expect(approvalStore.approvals.size).toBe(0);
+    // The first response is lost after the server creates its approval.
+    const lost = await router.handle(new Request("https://omr.example/api/approvals", {
+      method: "POST", headers: { "content-type": "application/json", origin: "https://omr.example" },
+      body: JSON.stringify(request),
+    }));
+    expect(lost.status).toBe(201);
+    const storedId = [...approvalStore.approvals.keys()][0];
     const approval = await client.requestApproval(request) as { id: string; params: unknown };
-    expect(approval.params).toEqual({ title: "Review", secretField: "[REDACTED]" });
+    expect(approval.id).toBe(storedId);
+    expect(approvalStore.approvals.size).toBe(1);
+    expect(approval.params).toEqual({ title: "Review", secretField: "[REDACTED]",
+      passphrase: "[REDACTED]", privateKey: "[REDACTED]" });
     expect(JSON.stringify(approval)).not.toContain("remote_secret_handle");
     expect(JSON.stringify(approval)).not.toContain("fixture-secret");
     expect(approval).not.toHaveProperty("requestHash");

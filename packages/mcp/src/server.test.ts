@@ -105,6 +105,8 @@ describe("OMR MCP server", () => {
       "omr.connections.list",
       "omr.connections.select",
     ]);
+    expect(listed.tools.find(({ name }) => name === "demo.write")?.inputSchema.required)
+      .toContain("_omrIdempotencyKey");
 
     await expect(client.callTool({
       name: "demo.read",
@@ -131,7 +133,7 @@ describe("OMR MCP server", () => {
     });
     await expect(client.callTool({
       name: "demo.write",
-      arguments: { value: "write" },
+      arguments: { value: "write", _omrIdempotencyKey: "mcp-write-1" },
     })).resolves.toMatchObject({
       structuredContent: {
         status: "approval_required",
@@ -156,6 +158,7 @@ describe("OMR MCP server", () => {
       workspaceId: "workspace-1",
       toolId: "demo.write",
       params: { value: "write" },
+      idempotencyKey: "mcp-write-1",
     });
     expect(requests.find(({ path }) => path === "/api/approvals/execute")?.body).toEqual({
       approvalId: "approval-1",

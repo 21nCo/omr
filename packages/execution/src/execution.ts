@@ -221,7 +221,8 @@ export class ExecutionService {
     if (!manifest) throw new ExecutionInputError("Unknown tool identifier");
     this.authorizeEffect(input.principal, manifest);
     assertJson(input.params);
-    if (input.idempotencyKey !== undefined && !IDEMPOTENCY_KEY.test(input.idempotencyKey)) {
+    if (input.idempotencyKey !== undefined &&
+      (typeof input.idempotencyKey !== "string" || !IDEMPOTENCY_KEY.test(input.idempotencyKey))) {
       throw new ExecutionInputError("Invalid idempotency key");
     }
     const params = structuredClone(input.params);
@@ -250,7 +251,7 @@ export class ExecutionService {
     toolId: string;
     params: JsonValue;
     connectionId?: string;
-    idempotencyKey?: string;
+    idempotencyKey: string;
     ttlMs?: number;
   }): Promise<ExecutionApproval> {
     const approvals = this.requiredApprovals();
@@ -267,7 +268,7 @@ export class ExecutionService {
       throw new ExecutionCapabilityDeniedError("approvals:create");
     }
     assertJson(input.params);
-    if (input.idempotencyKey !== undefined && !IDEMPOTENCY_KEY.test(input.idempotencyKey)) {
+    if (typeof input.idempotencyKey !== "string" || !IDEMPOTENCY_KEY.test(input.idempotencyKey)) {
       throw new ExecutionInputError("Invalid idempotency key");
     }
     const params = structuredClone(input.params);
@@ -283,7 +284,7 @@ export class ExecutionService {
     });
     await this.assertScopes(manifest, connection);
     const timestamp = this.now();
-    const idempotencyKey = input.idempotencyKey ?? `approval_${crypto.randomUUID()}`;
+    const idempotencyKey = input.idempotencyKey;
     return approvals.create({
       id: `approval_${crypto.randomUUID()}`,
       workspaceId: input.principal.workspaceId,

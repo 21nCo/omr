@@ -176,7 +176,7 @@ export class OMRClient {
     toolId: string;
     params: JsonValue;
     connectionId?: string;
-    idempotencyKey?: string;
+    idempotencyKey: string;
   }): Promise<unknown> {
     return this.post("/api/approvals", input);
   }
