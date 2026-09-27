@@ -147,6 +147,9 @@ describe("execution-policy-contract", () => {
       name: "linear", displayName: "Linear", version: "1.0.0", description: "Linear",
       actions: { read: action("read", "read"), write: action("write", "write"),
         unknown: action("unknown", "unknown"),
+        noncanonical: { ...action("noncanonical", "write"), contract: {
+          ...action("noncanonical", "write").contract, sensitiveKeys: ["items[00].pin"],
+        } },
         opaque: { ...action("opaque", "unknown"), contract: undefined } },
     }] } }, (value) => value as never);
     const provider = vi.fn(async () => ({ result: "private provider result" }));
@@ -239,6 +242,11 @@ describe("execution-policy-contract", () => {
         await expect(runCli(["approvals", "request", "linear.write", "--params",
           JSON.stringify(request.params)])).rejects.toMatchObject({ code: 1 });
         expect(approvalStore.approvals.size).toBe(0);
+        await expect(runCli(["approvals", "request", "linear.noncanonical", "--params",
+          JSON.stringify({ items: [{ pin: "noncanonical-secret" }] }), "--idempotency", "bad-selector-cli"]))
+          .rejects.toMatchObject({ code: 1 });
+        expect(approvalStore.approvals.size).toBe(0);
+        expect(provider).toHaveBeenCalledTimes(1);
         const pending = await runCli(["approvals", "request", "linear.write", "--params",
           JSON.stringify(request.params), "--idempotency", request.idempotencyKey]);
         const approval = JSON.parse(pending.stdout) as { id: string; params: unknown };
@@ -281,6 +289,11 @@ describe("execution-policy-contract", () => {
         expect(await client.callTool({ name: "linear.write", arguments: request.params }))
           .toMatchObject({ isError: true });
         expect(approvalStore.approvals.size).toBe(0);
+        expect(await client.callTool({ name: "linear.noncanonical", arguments: {
+          items: [{ pin: "noncanonical-secret" }], _omrIdempotencyKey: "bad-selector-mcp",
+        } })).toMatchObject({ isError: true });
+        expect(approvalStore.approvals.size).toBe(0);
+        expect(provider).toHaveBeenCalledTimes(1);
         const args = { ...(request.params as Record<string, unknown>), _omrIdempotencyKey: request.idempotencyKey };
         const pending = await client.callTool({ name: "linear.write", arguments: args });
         expect(pending).toMatchObject({ structuredContent: { status: "approval_required", executed: false } });
@@ -321,6 +334,11 @@ describe("execution-policy-contract", () => {
     expect(provider).toHaveBeenCalledTimes(1);
     await expect(client.requestApproval({ ...request, idempotencyKey: undefined })).rejects.toMatchObject({ status: 400 });
     expect(approvalStore.approvals.size).toBe(0);
+    await expect(client.requestApproval({ workspaceId: workspace.id, toolId: "linear.noncanonical",
+      params: { items: [{ pin: "noncanonical-secret" }] }, idempotencyKey: "bad-selector-web" }))
+      .rejects.toMatchObject({ status: 400, body: { error: "EXECUTION_INPUT_INVALID" } });
+    expect(approvalStore.approvals.size).toBe(0);
+    expect(provider).toHaveBeenCalledTimes(1);
     // The first response is lost after the server creates its approval.
     const lost = await router.handle(new Request("https://omr.example/api/approvals", {
       method: "POST", headers: { "content-type": "application/json", origin: "https://omr.example" },

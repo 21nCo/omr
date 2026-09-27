@@ -8,8 +8,14 @@ function parseSensitiveKey(key: string): string[] | null {
   // A wildcard consumes exactly one array index or object key. Unknown selector
   // syntax cannot safely describe what should be hidden, so fail closed.
   if (!/^[^.[\]]+(?:(?:\.[^.[\]]+)|(?:\[(?:\d+|\*)?\]))*$/.test(key)) return null;
-  return key.replace(/\[(\d+|\*)?\]/g, (_match, index: string | undefined) => `.${index || "*"}`)
+  const parts = key.replace(/\[(\d+|\*)?\]/g, (_match, index: string | undefined) => `.${index || "*"}`)
     .split(".").map((part) => part.toLowerCase());
+  // Array paths are emitted using canonical decimal indices. Accepting "00"
+  // here would make readiness look at a missing property while redaction walks
+  // index "0", exposing the declared secret in a reviewable preview.
+  if (parts.some((part) => /^\d+$/.test(part) &&
+    (!/^(0|[1-9]\d*)$/.test(part) || Number(part) > 4_294_967_294))) return null;
+  return parts;
 }
 
 function sensitivePath(path: string[], sensitive: string[][]): boolean {
@@ -23,7 +29,7 @@ function selectorTraversable(value: JsonValue, selector: string[], depth = 0): b
   const part = selector[depth]!;
   if (Array.isArray(value)) {
     if (part === "*") return value.every((item) => selectorTraversable(item, selector, depth + 1));
-    if (!/^\d+$/.test(part)) return false;
+    if (!/^(0|[1-9]\d*)$/.test(part)) return false;
     return !Object.hasOwn(value, part) || selectorTraversable(value[Number(part)]!, selector, depth + 1);
   }
   const matches = Object.entries(value).filter(([key]) => part === "*" || key.toLowerCase() === part);

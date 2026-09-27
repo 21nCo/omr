@@ -691,6 +691,44 @@ describe("execution service", () => {
     expect(actionCall).not.toHaveBeenCalled();
   });
 
+  it("fails closed on noncanonical array indices at request and for stored approvals", async () => {
+    const { actionCall, approvals, catalog, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const originalGet = catalog.get.bind(catalog);
+    const manifest = originalGet("linear.create_issue")!;
+    const params = { title: "Review", items: [{ pin: "array-secret" }],
+      nested: { rows: [[{ pin: "nested-secret" }]] } };
+    const canonical = { ...manifest, contract: { ...manifest.contract,
+      sensitiveKeys: ["items[0].pin", "nested.rows[0][0].pin"],
+    } };
+    expect(approvalPreviewReady(canonical, manifest.hash, params)).toBe(true);
+    const pending = await requestApproval(service, { principal, toolId: manifest.id, params });
+    const approved = await requestApproval(service, { principal, toolId: manifest.id, params });
+    await service.approve(approved.id, principal.userId);
+    expect(publicApproval(pending, canonical).params).toMatchObject({
+      items: [{ pin: "[REDACTED]" }], nested: { rows: [[{ pin: "[REDACTED]" }]] },
+    });
+
+    for (const selector of ["items[00].pin", "items.00.pin", "nested.rows[0][00].pin",
+      "nested.rows.0.00.pin", "items[4294967295].pin"]) {
+      const changed = { ...manifest, contract: { ...manifest.contract, sensitiveKeys: [selector] } };
+      vi.spyOn(catalog, "get").mockImplementation((id) => id === manifest.id ? changed : originalGet(id));
+      expect(approvalPreviewReady(changed, manifest.hash, params)).toBe(false);
+      for (const record of [pending, approved,
+        ...(await approvals.listForActor({ workspaceId: workspace.id, actorUserId: principal.userId, limit: 10 }))]) {
+        const preview = publicApproval(record, catalog.get(record.toolId));
+        expect(preview).toMatchObject({ previewReady: false, params: "[REDACTED]" });
+        expect(JSON.stringify(preview)).not.toMatch(/array-secret|nested-secret/);
+      }
+      await expect(requestApproval(service, { principal, toolId: manifest.id, params }))
+        .rejects.toBeInstanceOf(ExecutionInputError);
+      await expect(service.approve(pending.id, principal.userId)).rejects.toBeInstanceOf(ApprovalUnavailableError);
+      await expect(service.executeApproved(principal, approved.id)).rejects.toBeInstanceOf(ApprovalUnavailableError);
+    }
+    expect(approvals.approvals.size).toBe(2);
+    expect(actionCall).not.toHaveBeenCalled();
+  });
+
   it("stores keyed request fingerprints that do not reveal a guessable parameter digest", async () => {
     const { approvals, receipts, service, workspace } = await fixture();
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
