@@ -1,0 +1,30 @@
+packages/execution/src/execution.test.ts
+  h_a39f9495f9ec1d 16,18,119-131,1187-1260
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 466-469
+packages/execution/src/postgres-approval-store.ts
+  h_a39f9495f9ec1d 59,65,72,178,183
+packages/execution/src/postgres-owned-query.ts
+  h_a39f9495f9ec1d 7-8,10-16,18-23,28,32-90,92-98,107,116,124-130,135,137-142,144-156
+packages/execution/src/postgres-runtime.test.ts
+  h_a39f9495f9ec1d 4-7,18,23,27-29,32-37,62,83-168,189,195,214,217-218,222,227,240,249,258,281,305,327-328
+packages/execution/src/postgres-store.ts
+  h_a39f9495f9ec1d 39,44,51
+packages/execution/src/postgres.integration.test.ts
+  h_a39f9495f9ec1d 10,532,538,545-574,583,585,589-597,601,605,624,626,630-639,646
+packages/execution/src/postgres.ts
+  h_a39f9495f9ec1d 7,27,30-31,52-54,70
+packages/execution/src/testing.ts
+  h_a39f9495f9ec1d 192-213
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d099e159d1b4e2fd6a3aca75ec9e36cf6ea1d76f",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
