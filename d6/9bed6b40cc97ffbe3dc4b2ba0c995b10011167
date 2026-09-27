@@ -1,0 +1,47 @@
+docs/execution-policy-v1.md
+  s_3058aa458d6557::t_ac2ec3198377db 59-68,72,138-144,163-182
+packages/execution/migrations/0017_ciphertext_context.sql
+  s_3058aa458d6557::t_72cf13b6163e22 1-7
+packages/execution/src/execution.ts
+  s_3058aa458d6557::t_6f9ab225fdbaf1 128-129,390-407,463-496,509,549,551-552,601-606,630-632
+packages/execution/src/postgres-approval-migration.test.ts
+  s_3058aa458d6557::t_ff19ef482184dd 104-112,121-133
+packages/execution/src/postgres-approval-store.ts
+  s_3058aa458d6557::t_7308de699d2c8e 2,14,29,42-43,66-67,71-72,74,225-226,302-303,311-365,425-427
+packages/execution/src/postgres-crypto.test.ts
+  s_3058aa458d6557::t_41212933c6a259 1-36
+packages/execution/src/postgres-crypto.ts
+  s_3058aa458d6557::t_b9679102aca2f6 3-13,18-19,24-26,29-31
+packages/execution/src/postgres-runtime.test.ts
+  s_a2bd3276976ac7::t_29b8e0a8328eca 8,31-34,165-188
+packages/execution/src/postgres-store.ts
+  s_3058aa458d6557::t_b9a00b16c2470b 23,33-34,122-128,132,197-199
+packages/execution/src/testing.ts
+  s_3058aa458d6557::t_a4a4b61d13b9e0 213-218,228-245,295
+tests/acceptance/execution-policy-contract.test.ts
+  s_3058aa458d6557::t_3a839305d5cccf 12-13,32-56,128-129,159,185-186,210,277-280,283,400-401,471-472,474,554-556
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d69bed6b40cc97ffbe3dc4b2ba0c995b10011167",
+  "prompts": {},
+  "sessions": {
+    "s_3058aa458d6557": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0e214-820d-7fa0-a0ea-0fdea628637e",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    },
+    "s_a2bd3276976ac7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0d8b0-85e2-7702-9013-989547be5d4f",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
