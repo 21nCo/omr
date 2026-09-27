@@ -1,0 +1,24 @@
+apps/web/src/lib/server/router.test.ts
+  h_a39f9495f9ec1d 5-9,534-573
+apps/web/src/lib/server/router.ts
+  h_a39f9495f9ec1d 42,337-340
+docs/execution-policy-v1.md
+  h_a39f9495f9ec1d 53-56,76
+packages/execution/src/index.ts
+  h_a39f9495f9ec1d 23
+packages/mcp/src/server.test.ts
+  h_a39f9495f9ec1d 207-256
+tests/acceptance/execution-policy-contract.test.ts
+  h_a39f9495f9ec1d 29-68
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b978d3aa9398ec84e8ca79ef411e0155d2cc8b06",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
