@@ -17,6 +17,17 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
   readonly memberships = new Map<string, WorkspaceMembershipRecord>();
   readonly invitations = new Map<string, WorkspaceInvitationRecord>();
 
+  /** Simulate a member departure in tests without coupling callers to map keys. */
+  removeMembership(workspaceId: string, userId: string): boolean {
+    for (const [id, membership] of this.memberships) {
+      if (membership.workspaceId === workspaceId && membership.userId === userId) {
+        this.memberships.delete(id);
+        return true;
+      }
+    }
+    return false;
+  }
+
   async provisionPersonal(input: WorkspaceProvisionInput): Promise<WorkspaceProvisionInput> {
     const existingMembership = await this.findMembership(
       input.workspace.id,

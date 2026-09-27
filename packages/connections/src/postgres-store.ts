@@ -12,6 +12,8 @@ import {
   type ConnectionOwnership,
   type ConnectionReadiness,
   type ConnectionSelectionRecord,
+  type ConditionalRevokeInput,
+  type FinalizeCleanupClaimInput,
   type RevokeConnectionInput,
   type SelectConnectionInput,
 } from "./connections.js";
@@ -47,6 +49,7 @@ const CONNECTION_COLUMNS = `id, workspace_id, provider, provider_connection_id,
   ownership, owner_user_id, installed_by, label, status, readiness, health_reason,
   last_checked_at, revoked_at, created_at, updated_at`;
 
+/** Normalize database binding fields and timestamps for the authority layer. */
 function toConnection(row: ConnectionRow): ConnectionBindingRecord {
   return {
     id: row.id,
@@ -67,6 +70,7 @@ function toConnection(row: ConnectionRow): ConnectionBindingRecord {
   };
 }
 
+/** Normalize database timestamp fields in a saved account selection. */
 function toSelection(row: SelectionRow): ConnectionSelectionRecord {
   return {
     workspaceId: row.workspace_id,
@@ -81,6 +85,7 @@ function toSelection(row: SelectionRow): ConnectionSelectionRecord {
 export class PostgresConnectionBindingStore implements ConnectionBindingStore {
   constructor(private readonly client: Client) {}
 
+  /** Apply workspace role rules before provider setup. */
   async authorizeInstall(input: AuthorizeConnectionInstallInput): Promise<void> {
     const role = await this.membershipRole(input.workspaceId, input.actorUserId);
     if (!role || (input.ownership === "workspace" && role !== "owner" && role !== "admin")) {
@@ -88,18 +93,80 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     }
   }
 
+  /** Persist a binding after checking install authority in the same transaction. */
   async attach(input: AttachConnectionInput): Promise<ConnectionBindingRecord> {
+    return this.insertBinding(input, false);
+  }
+
+  /** Retain a revoked remote handle even if the initiating membership has since ended. */
+  async attachForCleanup(input: AttachConnectionInput): Promise<ConnectionBindingRecord> {
+    if (input.connection.status !== "revoked" || input.connection.readiness !== "unavailable" ||
+        input.connection.installedBy !== input.actorUserId) throw new ConnectionAccessDeniedError();
+    return this.insertBinding(input, true);
+  }
+
+  /** Restore a matching live handle under a row lock and current installer role. */
+  async reconcileActiveDuplicate(input: {
+    actorUserId: string; connectionId: string; workspaceId: string; provider: string;
+    providerConnectionId: string; ownership: ConnectionOwnership; now: number;
+  }): Promise<ConnectionBindingRecord | null> {
     await this.client.query("BEGIN");
     try {
-      const role = await this.membershipRole(
-        input.connection.workspaceId,
-        input.actorUserId,
+      const result = await this.client.query<ConnectionRow>(
+        `SELECT ${CONNECTION_COLUMNS} FROM omr_control.connection_bindings WHERE id = $1 FOR UPDATE`,
+        [input.connectionId],
       );
-      if (
-        !role ||
-        (input.connection.ownership === "workspace" && role !== "owner" && role !== "admin")
-      ) {
+      const connection = result.rows[0];
+      if (!connection || connection.status === "revoked" || connection.workspace_id !== input.workspaceId ||
+          connection.provider !== input.provider || connection.provider_connection_id !== input.providerConnectionId ||
+          connection.ownership !== input.ownership ||
+          (connection.ownership === "personal" && connection.owner_user_id !== input.actorUserId)) {
+        await this.client.query("COMMIT");
+        return null;
+      }
+      const role = await this.membershipRole(input.workspaceId, input.actorUserId);
+      if (!role || (input.ownership === "workspace" && role !== "owner" && role !== "admin")) {
         throw new ConnectionAccessDeniedError();
+      }
+      if (connection.status === "active" && connection.readiness === "ready") {
+        await this.client.query("COMMIT");
+        return toConnection(connection);
+      }
+      const updated = await this.client.query<ConnectionRow>(
+        `UPDATE omr_control.connection_bindings
+         SET status = 'active', readiness = 'ready', health_reason = NULL,
+             last_checked_at = $2, updated_at = $2
+         WHERE id = $1 AND status <> 'revoked'
+         RETURNING ${CONNECTION_COLUMNS}`,
+        [input.connectionId, input.now],
+      );
+      await this.client.query("COMMIT");
+      return updated.rows[0] ? toConnection(updated.rows[0]) : null;
+    } catch (error) {
+      await this.client.query("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** Detect an existing local owner even when the callback actor lost access. */
+  async hasRemoteBinding(input: { workspaceId: string; providerConnectionId: string }): Promise<boolean> {
+    const result = await this.client.query(
+      `SELECT 1 FROM omr_control.connection_bindings
+       WHERE workspace_id = $1 AND provider_connection_id = $2`,
+      [input.workspaceId, input.providerConnectionId],
+    );
+    return result.rowCount === 1;
+  }
+
+  /** Persist either a live binding or a cleanup-only record atomically. */
+  private async insertBinding(input: AttachConnectionInput, cleanupOnly: boolean): Promise<ConnectionBindingRecord> {
+    await this.client.query("BEGIN");
+    try {
+      if (!cleanupOnly) {
+        const role = await this.membershipRole(input.connection.workspaceId, input.actorUserId);
+        if (!role || (input.connection.ownership === "workspace" && role !== "owner" && role !== "admin")) {
+          throw new ConnectionAccessDeniedError();
+        }
       }
       const c = input.connection;
       const result = await this.client.query<ConnectionRow>(
@@ -135,6 +202,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     }
   }
 
+  /** Return a binding only to an actor permitted to use it. */
   async getAccessible(input: AccessConnectionInput): Promise<ConnectionBindingRecord> {
     const connection = await this.readConnection(input.connectionId);
     if (!connection) throw new ConnectionAccessDeniedError();
@@ -145,17 +213,26 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     return toConnection(connection);
   }
 
+  /** Read lifecycle state under current ownership and role rules. */
   async getManageable(input: AccessConnectionInput): Promise<ConnectionBindingRecord> {
     const connection = await this.readConnection(input.connectionId);
     if (!connection) throw new ConnectionAccessDeniedError();
-    const role = await this.membershipRole(connection.workspace_id, input.actorUserId);
-    const authorized = connection.ownership === "personal"
-      ? Boolean(role) && connection.owner_user_id === input.actorUserId
-      : role === "owner" || role === "admin";
-    if (!authorized) throw new ConnectionAccessDeniedError();
+    if (!await this.canManage(connection, input.actorUserId)) throw new ConnectionAccessDeniedError();
     return toConnection(connection);
   }
 
+  /** Include orphan cleanup authority without granting account use. */
+  async getRevocable(input: AccessConnectionInput): Promise<ConnectionBindingRecord> {
+    const connection = await this.readConnection(input.connectionId);
+    // This read is advisory: revoke and revokeIf repeat authorization while
+    // holding the workspace lock in their mutation transactions.
+    if (!connection || !await this.canManage(connection, input.actorUserId, true)) {
+      throw new ConnectionAccessDeniedError();
+    }
+    return toConnection(connection);
+  }
+
+  /** List only bindings visible to this workspace member. */
   async listAvailable(input: {
     actorUserId: string;
     workspaceId: string;
@@ -176,6 +253,25 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     return result.rows.map(toConnection);
   }
 
+  /** Discover former members' personal bindings after checking the caller's current role. */
+  async listOrphanedForCleanup(input: { actorUserId: string; workspaceId: string }): Promise<ConnectionBindingRecord[]> {
+    const role = await this.membershipRole(input.workspaceId, input.actorUserId);
+    if (role !== "owner" && role !== "admin") throw new ConnectionAccessDeniedError();
+    const result = await this.client.query<ConnectionRow>(
+      `SELECT ${CONNECTION_COLUMNS}
+       FROM omr_control.connection_bindings AS binding
+       WHERE binding.workspace_id = $1 AND binding.ownership = 'personal'
+         AND NOT EXISTS (
+           SELECT 1 FROM omr_control.workspace_memberships AS member
+           WHERE member.workspace_id = binding.workspace_id AND member.user_id = binding.owner_user_id
+         )
+       ORDER BY binding.created_at, binding.id`,
+      [input.workspaceId],
+    );
+    return result.rows.map(toConnection);
+  }
+
+  /** Read a member's provider choice only while membership is current. */
   async getSelection(input: {
     actorUserId: string;
     workspaceId: string;
@@ -193,6 +289,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     return result.rows[0] ? toSelection(result.rows[0]) : null;
   }
 
+  /** Persist an eligible account choice under current access rules. */
   async select(input: SelectConnectionInput): Promise<ConnectionSelectionRecord> {
     await this.client.query("BEGIN");
     try {
@@ -226,6 +323,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     }
   }
 
+  /** Revoke and clear selections atomically, preserving an omitted cleanup reason. */
   async revoke(input: RevokeConnectionInput): Promise<ConnectionBindingRecord> {
     await this.client.query("BEGIN");
     try {
@@ -238,12 +336,8 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
       );
       const connection = result.rows[0];
       if (!connection) throw new ConnectionAccessDeniedError();
-      const role = await this.membershipRole(connection.workspace_id, input.actorUserId);
-      const authorized =
-        connection.ownership === "personal"
-          ? connection.owner_user_id === input.actorUserId
-          : role === "owner" || role === "admin";
-      if (!authorized) throw new ConnectionAccessDeniedError();
+      await this.lockWorkspaceForOrphanCleanup(connection);
+      if (!await this.canManage(connection, input.actorUserId, true)) throw new ConnectionAccessDeniedError();
 
       const updated = await this.client.query<ConnectionRow>(
         `UPDATE omr_control.connection_bindings
@@ -266,6 +360,55 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     }
   }
 
+  /** Atomically fence a cleanup state change and remove selections. */
+  async revokeIf(input: ConditionalRevokeInput): Promise<ConnectionBindingRecord | null> {
+    await this.client.query("BEGIN");
+    try {
+      const result = await this.client.query<ConnectionRow>(
+        `SELECT ${CONNECTION_COLUMNS}
+         FROM omr_control.connection_bindings WHERE id = $1 FOR UPDATE`,
+        [input.connectionId],
+      );
+      const connection = result.rows[0];
+      if (!connection) throw new ConnectionAccessDeniedError();
+      await this.lockWorkspaceForOrphanCleanup(connection);
+      if (!await this.canManage(connection, input.actorUserId, true)) throw new ConnectionAccessDeniedError();
+      const matches = input.expectedStatus === "not_revoked"
+        ? connection.status !== "revoked"
+        : connection.status === input.expectedStatus && connection.health_reason === input.expectedReason;
+      if (!matches) {
+        await this.client.query("COMMIT");
+        return null;
+      }
+      const updated = await this.client.query<ConnectionRow>(
+        `UPDATE omr_control.connection_bindings
+         SET status = 'revoked', readiness = 'unavailable', health_reason = $2,
+             revoked_at = COALESCE(revoked_at, $1), updated_at = $1
+         WHERE id = $3 RETURNING ${CONNECTION_COLUMNS}`,
+        [input.now, input.reason ?? null, input.connectionId],
+      );
+      await this.client.query(`DELETE FROM omr_control.connection_selections WHERE connection_id = $1`, [input.connectionId]);
+      await this.client.query("COMMIT");
+      return toConnection(updated.rows[0]!);
+    } catch (error) {
+      await this.client.query("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** Commit a provider outcome only if its previously authorized claim still owns the row. */
+  async finalizeCleanupClaim(input: FinalizeCleanupClaimInput): Promise<ConnectionBindingRecord | null> {
+    const result = await this.client.query<ConnectionRow>(
+      `UPDATE omr_control.connection_bindings
+       SET health_reason = $3, updated_at = $4
+       WHERE id = $1 AND status = 'revoked' AND health_reason = $2
+       RETURNING ${CONNECTION_COLUMNS}`,
+      [input.connectionId, input.claim, input.reason ?? null, input.now],
+    );
+    return result.rows[0] ? toConnection(result.rows[0]) : null;
+  }
+
+  /** Reject late health updates after a binding has been revoked. */
   async recordHealth(input: {
     connectionId: string;
     status: ConnectionLifecycleStatus;
@@ -285,6 +428,7 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     return toConnection(result.rows[0]);
   }
 
+  /** Read the current workspace role, locking an existing membership row. */
   private async membershipRole(
     workspaceId: string,
     userId: string,
@@ -299,6 +443,25 @@ export class PostgresConnectionBindingStore implements ConnectionBindingStore {
     return result.rows[0]?.role ?? null;
   }
 
+  /** Serialize orphan cleanup against membership insertion until the mutation commits. */
+  private async lockWorkspaceForOrphanCleanup(connection: ConnectionRow): Promise<void> {
+    if (connection.ownership !== "personal") return;
+    await this.client.query(
+      `SELECT id FROM omr_control.workspaces WHERE id = $1 FOR UPDATE`,
+      [connection.workspace_id],
+    );
+  }
+
+  /** Check current role and personal ownership, including orphan cleanup authority. */
+  private async canManage(connection: ConnectionRow, actorUserId: string, allowOrphanCleanup = false): Promise<boolean> {
+    const role = await this.membershipRole(connection.workspace_id, actorUserId);
+    if (connection.ownership === "workspace") return role === "owner" || role === "admin";
+    if (role && connection.owner_user_id === actorUserId) return true;
+    if (!allowOrphanCleanup || (role !== "owner" && role !== "admin")) return false;
+    return !await this.membershipRole(connection.workspace_id, connection.owner_user_id!);
+  }
+
+  /** Read a binding for advisory access checks outside mutation transactions. */
   private async readConnection(connectionId: string): Promise<ConnectionRow | null> {
     const result = await this.client.query<ConnectionRow>(
       `SELECT ${CONNECTION_COLUMNS}

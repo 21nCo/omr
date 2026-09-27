@@ -49,6 +49,18 @@ export interface RevokeConnectionInput {
   now: number;
 }
 
+export type ConditionalRevokeInput = RevokeConnectionInput & (
+  | { expectedStatus: "not_revoked"; expectedReason?: never }
+  | { expectedStatus: ConnectionLifecycleStatus; expectedReason: string | null }
+);
+
+export interface FinalizeCleanupClaimInput {
+  connectionId: string;
+  claim: string;
+  reason?: string;
+  now: number;
+}
+
 export interface AuthorizeConnectionInstallInput {
   actorUserId: string;
   workspaceId: string;
@@ -63,12 +75,28 @@ export interface AccessConnectionInput {
 export interface ConnectionBindingStore {
   authorizeInstall(input: AuthorizeConnectionInstallInput): Promise<void>;
   attach(input: AttachConnectionInput): Promise<ConnectionBindingRecord>;
+  attachForCleanup(input: AttachConnectionInput): Promise<ConnectionBindingRecord>;
+  hasRemoteBinding(input: { workspaceId: string; providerConnectionId: string }): Promise<boolean>;
+  reconcileActiveDuplicate(input: {
+    actorUserId: string;
+    connectionId: string;
+    workspaceId: string;
+    provider: string;
+    providerConnectionId: string;
+    ownership: ConnectionOwnership;
+    now: number;
+  }): Promise<ConnectionBindingRecord | null>;
   getAccessible(input: AccessConnectionInput): Promise<ConnectionBindingRecord>;
   getManageable(input: AccessConnectionInput): Promise<ConnectionBindingRecord>;
+  getRevocable(input: AccessConnectionInput): Promise<ConnectionBindingRecord>;
   listAvailable(input: {
     actorUserId: string;
     workspaceId: string;
     provider?: string;
+  }): Promise<ConnectionBindingRecord[]>;
+  listOrphanedForCleanup(input: {
+    actorUserId: string;
+    workspaceId: string;
   }): Promise<ConnectionBindingRecord[]>;
   getSelection(input: {
     actorUserId: string;
@@ -77,6 +105,8 @@ export interface ConnectionBindingStore {
   }): Promise<ConnectionSelectionRecord | null>;
   select(input: SelectConnectionInput): Promise<ConnectionSelectionRecord>;
   revoke(input: RevokeConnectionInput): Promise<ConnectionBindingRecord>;
+  revokeIf(input: ConditionalRevokeInput): Promise<ConnectionBindingRecord | null>;
+  finalizeCleanupClaim(input: FinalizeCleanupClaimInput): Promise<ConnectionBindingRecord | null>;
   recordHealth(input: {
     connectionId: string;
     status: ConnectionLifecycleStatus;
@@ -149,6 +179,12 @@ export class ConnectionAuthority {
     private readonly now: () => number = Date.now,
   ) {}
 
+  /** Use one clock for cleanup leases and conditional state writes. */
+  currentTime(): number {
+    return this.now();
+  }
+
+  /** Check current workspace membership before creating a provider credential. */
   async authorizeInstall(input: AuthorizeConnectionInstallInput): Promise<void> {
     assertId(input.actorUserId);
     assertId(input.workspaceId);
@@ -158,6 +194,7 @@ export class ConnectionAuthority {
     await this.store.authorizeInstall(input);
   }
 
+  /** Persist a server-side binding after the provider has accepted the account. */
   async attach(input: {
     actorUserId: string;
     workspaceId: string;
@@ -166,6 +203,58 @@ export class ConnectionAuthority {
     ownership: ConnectionOwnership;
     label: string;
   }): Promise<ConnectionBindingRecord> {
+    return this.createBinding(input, false);
+  }
+
+  /** Retain a remote handle for cleanup without ever making it usable. */
+  async attachForCleanup(input: {
+    actorUserId: string;
+    workspaceId: string;
+    provider: string;
+    providerConnectionId: string;
+    ownership: ConnectionOwnership;
+    label: string;
+  }): Promise<ConnectionBindingRecord> {
+    return this.createBinding(input, true);
+  }
+
+  /** Restore a validated duplicate only while its owner can still install it. */
+  async reconcileActiveDuplicate(input: {
+    actorUserId: string;
+    connectionId: string;
+    workspaceId: string;
+    provider: string;
+    providerConnectionId: string;
+    ownership: ConnectionOwnership;
+  }): Promise<ConnectionBindingRecord | null> {
+    assertId(input.actorUserId);
+    assertId(input.connectionId);
+    assertId(input.workspaceId);
+    assertId(input.providerConnectionId);
+    if (input.ownership !== "personal" && input.ownership !== "workspace") {
+      throw new ConnectionInputError("Invalid connection ownership");
+    }
+    return this.store.reconcileActiveDuplicate({
+      ...input, provider: normalizeProvider(input.provider), now: this.now(),
+    });
+  }
+
+  /** Classify a failed cleanup claim without authorizing provider deletion. */
+  async hasRemoteBinding(input: { workspaceId: string; providerConnectionId: string }): Promise<boolean> {
+    assertId(input.workspaceId);
+    assertId(input.providerConnectionId);
+    return this.store.hasRemoteBinding(input);
+  }
+
+  /** Build either a usable binding or a revoked cleanup-only record. */
+  private async createBinding(input: {
+    actorUserId: string;
+    workspaceId: string;
+    provider: string;
+    providerConnectionId: string;
+    ownership: ConnectionOwnership;
+    label: string;
+  }, cleanupOnly: boolean): Promise<ConnectionBindingRecord> {
     assertId(input.actorUserId);
     assertId(input.workspaceId);
     assertId(input.providerConnectionId);
@@ -173,7 +262,8 @@ export class ConnectionAuthority {
       throw new ConnectionInputError("Invalid connection ownership");
     }
     const timestamp = this.now();
-    return this.store.attach({
+    const attach = cleanupOnly ? this.store.attachForCleanup.bind(this.store) : this.store.attach.bind(this.store);
+    return attach({
       actorUserId: input.actorUserId,
       connection: {
         id: `connection_${crypto.randomUUID()}`,
@@ -184,17 +274,18 @@ export class ConnectionAuthority {
         ownerUserId: input.ownership === "personal" ? input.actorUserId : null,
         installedBy: input.actorUserId,
         label: normalizeLabel(input.label),
-        status: "active",
-        readiness: "ready",
-        healthReason: null,
-        lastCheckedAt: timestamp,
-        revokedAt: null,
+        status: cleanupOnly ? "revoked" : "active",
+        readiness: cleanupOnly ? "unavailable" : "ready",
+        healthReason: cleanupOnly ? "provider_cleanup_failed" : null,
+        lastCheckedAt: cleanupOnly ? null : timestamp,
+        revokedAt: cleanupOnly ? timestamp : null,
         createdAt: timestamp,
         updatedAt: timestamp,
       },
     });
   }
 
+  /** List bindings usable by this member; other members' personal accounts stay hidden. */
   async listAvailable(input: {
     actorUserId: string;
     workspaceId: string;
@@ -208,18 +299,35 @@ export class ConnectionAuthority {
     });
   }
 
+  /** Return only former members' personal bindings to a workspace owner or admin. */
+  async listOrphanedForCleanup(input: { actorUserId: string; workspaceId: string }): Promise<ConnectionBindingRecord[]> {
+    assertId(input.actorUserId);
+    assertId(input.workspaceId);
+    return this.store.listOrphanedForCleanup(input);
+  }
+
+  /** Read a binding only when the actor may use it. */
   async getAccessible(actorUserId: string, connectionId: string): Promise<ConnectionBindingRecord> {
     assertId(actorUserId);
     assertId(connectionId);
     return this.store.getAccessible({ actorUserId, connectionId });
   }
 
+  /** Read a binding only when the actor may change its lifecycle. */
   async getManageable(actorUserId: string, connectionId: string): Promise<ConnectionBindingRecord> {
     assertId(actorUserId);
     assertId(connectionId);
     return this.store.getManageable({ actorUserId, connectionId });
   }
 
+  /** Permit ordinary lifecycle owners and admins cleaning former members' bindings. */
+  async getRevocable(actorUserId: string, connectionId: string): Promise<ConnectionBindingRecord> {
+    assertId(actorUserId);
+    assertId(connectionId);
+    return this.store.getRevocable({ actorUserId, connectionId });
+  }
+
+  /** Store an explicit account choice for one member and provider. */
   async select(input: {
     actorUserId: string;
     workspaceId: string;
@@ -236,6 +344,18 @@ export class ConnectionAuthority {
     });
   }
 
+  /** Read the member's current account choice. */
+  async getSelection(input: {
+    actorUserId: string;
+    workspaceId: string;
+    provider: string;
+  }): Promise<ConnectionSelectionRecord | null> {
+    assertId(input.actorUserId);
+    assertId(input.workspaceId);
+    return this.store.getSelection({ ...input, provider: normalizeProvider(input.provider) });
+  }
+
+  /** Resolve an eligible binding without exposing another member's account. */
   async resolve(input: {
     actorUserId: string;
     workspaceId: string;
@@ -267,6 +387,7 @@ export class ConnectionAuthority {
     throw new ConnectionSelectionRequiredError(available.map(({ id }) => id).sort());
   }
 
+  /** End local use and clear selections before any provider cleanup. */
   async revoke(
     actorUserId: string,
     connectionId: string,
@@ -280,6 +401,47 @@ export class ConnectionAuthority {
     return this.store.revoke({ actorUserId, connectionId, reason, now: this.now() });
   }
 
+  /** Update a cleanup result only when its expected claim still owns the row. */
+  async revokeIf(
+    actorUserId: string,
+    connectionId: string,
+    expectedStatus: ConnectionLifecycleStatus,
+    expectedReason: string | null,
+    reason?: string,
+  ): Promise<ConnectionBindingRecord | null> {
+    assertId(actorUserId);
+    assertId(connectionId);
+    if (reason && reason.length > 240) throw new ConnectionInputError("Revocation reason must not exceed 240 characters");
+    return this.store.revokeIf({ actorUserId, connectionId, expectedStatus, expectedReason, reason, now: this.now() });
+  }
+
+  /** Claim local revocation from the current row before contacting the provider. */
+  async revokeIfNotRevoked(
+    actorUserId: string,
+    connectionId: string,
+    reason: string,
+  ): Promise<ConnectionBindingRecord | null> {
+    assertId(actorUserId);
+    assertId(connectionId);
+    if (reason.length > 240) throw new ConnectionInputError("Revocation reason must not exceed 240 characters");
+    return this.store.revokeIf({ actorUserId, connectionId, expectedStatus: "not_revoked", reason, now: this.now() });
+  }
+
+  /** Persist an outcome for a previously authorized, unguessable cleanup claim. */
+  async finalizeCleanupClaim(
+    connectionId: string,
+    claim: string,
+    reason?: string,
+  ): Promise<ConnectionBindingRecord | null> {
+    assertId(connectionId);
+    if (!/^provider_cleanup_pending:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(claim)) {
+      throw new ConnectionInputError("Invalid cleanup claim");
+    }
+    if (reason && reason.length > 240) throw new ConnectionInputError("Revocation reason must not exceed 240 characters");
+    return this.store.finalizeCleanupClaim({ connectionId, claim, reason, now: this.now() });
+  }
+
+  /** Update a live binding while leaving revocation terminal. */
   async recordHealth(input: {
     connectionId: string;
     status: ConnectionLifecycleStatus;

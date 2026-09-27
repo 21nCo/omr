@@ -58,11 +58,12 @@ describe("phase 00 dependency provenance", () => {
   });
 
   it("keeps .conduct outside the repository contract", () => {
-    const result = spawnSync("git", ["check-ignore", ".conduct"], {
+    const ignoredPath = ".conduct/omr-ignore-probe";
+    const result = spawnSync("git", ["check-ignore", "--no-index", ignoredPath], {
       cwd: repositoryRoot,
       encoding: "utf8",
     });
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout.trim()).toBe(".conduct");
+    expect(result.stdout.trim()).toBe(ignoredPath);
   });
 });

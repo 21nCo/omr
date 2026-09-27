@@ -180,6 +180,7 @@ export class PostgresWorkspaceStore implements WorkspaceStore {
     }
   }
 
+  /** Insert membership under the workspace lock shared with orphan cleanup. */
   async acceptInvitation(
     input: AcceptWorkspaceInvitationInput,
   ): Promise<WorkspaceMembershipRecord> {
@@ -204,6 +205,12 @@ export class PostgresWorkspaceStore implements WorkspaceStore {
         throw new WorkspaceInvitationError("WORKSPACE_INVITATION_EXPIRED");
       }
 
+      // Match connection cleanup's workspace lock before membership insertion.
+      // Hold it through commit so an orphan decision sees the committed member.
+      await this.client.query(
+        `SELECT id FROM omr_control.workspaces WHERE id = $1 FOR UPDATE`,
+        [invitation.workspace_id],
+      );
       await this.client.query(
         `INSERT INTO omr_control.workspace_memberships
            (id, workspace_id, user_id, role, created_at, updated_at)
@@ -241,6 +248,7 @@ export class PostgresWorkspaceStore implements WorkspaceStore {
     }
   }
 
+  /** Provision a workspace and serialize any owner insertion with cleanup. */
   private async insertWorkspaceWithOwner(
     input: WorkspaceProvisionInput,
     idempotent: boolean,
@@ -263,6 +271,12 @@ export class PostgresWorkspaceStore implements WorkspaceStore {
         throw new Error("Workspace already exists");
       }
 
+      // A repeated personal provision may add a membership to an existing
+      // workspace. Use the same serialization point as invitation acceptance.
+      await this.client.query(
+        `SELECT id FROM omr_control.workspaces WHERE id = $1 FOR UPDATE`,
+        [input.workspace.id],
+      );
       await this.client.query(
         `INSERT INTO omr_control.workspace_memberships
            (id, workspace_id, user_id, role, created_at, updated_at)

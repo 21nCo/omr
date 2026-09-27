@@ -19,6 +19,8 @@ import {
   ConnectionInputError,
   ConnectionSelectionRequiredError,
   ConnectionUnavailableError,
+  ConnectionProviderOperationError,
+  ConnectionCleanupUntrackedError,
   ProviderUnavailableError,
   type ConnectionOwnership,
 } from "@oh-my-router/connections";
@@ -138,7 +140,9 @@ export class RequestOriginDeniedError extends Error {
 }
 
 const CAPABILITIES = new Set<string>(CLIENT_CAPABILITIES);
+const PRIVATE_RESPONSE = { "cache-control": "no-store" };
 
+/** Require a JSON object before reading route-specific fields. */
 function objectBody(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new RequestInputError("A JSON object is required");
@@ -146,6 +150,7 @@ function objectBody(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+/** Read a required nonempty string from a validated request body. */
 function requiredString(body: Record<string, unknown>, field: string): string {
   const value = body[field];
   if (typeof value !== "string" || value.length === 0) {
@@ -154,6 +159,7 @@ function requiredString(body: Record<string, unknown>, field: string): string {
   return value;
 }
 
+/** Accept only declared client capabilities from a device request. */
 function requestedCapabilities(body: Record<string, unknown>): ClientCapability[] {
   const value = body.requestedCapabilities;
   if (
@@ -166,6 +172,7 @@ function requestedCapabilities(body: Record<string, unknown>): ClientCapability[
   return value as ClientCapability[];
 }
 
+/** Validate an optional nonempty string when the caller supplies it. */
 function optionalString(body: Record<string, unknown>, field: string): string | undefined {
   const value = body[field];
   if (value === undefined) return undefined;
@@ -175,6 +182,7 @@ function optionalString(body: Record<string, unknown>, field: string): string | 
   return value;
 }
 
+/** Require an explicit personal or workspace connection owner. */
 function ownership(body: Record<string, unknown>): ConnectionOwnership {
   const value = body.ownership;
   if (value !== "personal" && value !== "workspace") {
@@ -243,6 +251,7 @@ function codedError(error: unknown, code: string): error is Error & { code: stri
   return error instanceof Error && "code" in error && error.code === code;
 }
 
+/** Mount health, device, connection, tool, execution, and control-plane routes. */
 export function createOMRRouter(
   deviceServices: DeviceRouteServices = unavailableDeviceServices(),
   connectionServices: ConnectionRouteServices = unavailableConnectionServices(),
@@ -341,6 +350,14 @@ export function createOMRRouter(
       if (error instanceof ProviderUnavailableError) {
         return Response.json({ error: error.code, state: error.state }, { status: 409 });
       }
+      if (error instanceof ConnectionProviderOperationError) {
+        return Response.json({ error: error.code, message: error.message, operation: error.operation },
+          { status: 502, headers: PRIVATE_RESPONSE });
+      }
+      if (error instanceof ConnectionCleanupUntrackedError) {
+        return Response.json({ error: error.code, message: error.message },
+          { status: 409, headers: PRIVATE_RESPONSE });
+      }
       if (error instanceof RuntimeUnavailableError) {
         return Response.json({ error: error.code }, { status: 503 });
       }
@@ -348,11 +365,18 @@ export function createOMRRouter(
       if (authError?.code === "AUTHFN_UNAUTHENTICATED") {
         return Response.json({ error: "AUTHFN_UNAUTHENTICATED" }, { status: 401 });
       }
+      const connectionRequest = new URL(request.url).pathname.startsWith("/api/connections/");
+      let loggedError: string;
+      if (connectionRequest) {
+        loggedError = error instanceof Error ? error.name : "Unknown connection failure";
+      } else {
+        loggedError = error instanceof Error ? error.message : String(error);
+      }
       console.error(JSON.stringify({
         message: "OMR request failed",
         method: request.method,
         path: new URL(request.url).pathname,
-        error: error instanceof Error ? error.message : String(error),
+        error: loggedError,
       }));
       return Response.json({ error: "INTERNAL_ERROR" }, { status: 500 });
     },
@@ -385,7 +409,9 @@ export function createOMRRouter(
         path: "/api/control-plane",
         handler: async (request) => {
           const workspaceId = new URL(request.url).searchParams.get("workspaceId") ?? undefined;
-          return Response.json(await controlPlaneServices.overview(request, workspaceId));
+          return Response.json(await controlPlaneServices.overview(request, workspaceId), {
+            headers: PRIVATE_RESPONSE,
+          });
         },
       },
       {
@@ -465,7 +491,9 @@ export function createOMRRouter(
           const provider = new URL(request.url).searchParams.get("provider");
           if (!provider) throw new RequestInputError("provider is required");
           const workspaceId = new URL(request.url).searchParams.get("workspaceId") ?? undefined;
-          return Response.json(await connectionServices.providerReadiness(request, provider, workspaceId));
+          return Response.json(await connectionServices.providerReadiness(request, provider, workspaceId), {
+            headers: PRIVATE_RESPONSE,
+          });
         },
       },
       {
@@ -477,7 +505,7 @@ export function createOMRRouter(
           return Response.json(await connectionServices.list(request, {
             workspaceId: requiredString(body, "workspaceId"),
             ...(provider ? { provider } : {}),
-          }));
+          }), { headers: PRIVATE_RESPONSE });
         },
       },
       {
@@ -489,7 +517,7 @@ export function createOMRRouter(
             workspaceId: requiredString(body, "workspaceId"),
             provider: requiredString(body, "provider"),
             connectionId: requiredString(body, "connectionId"),
-          }));
+          }), { headers: PRIVATE_RESPONSE });
         },
       },
       {
@@ -505,7 +533,7 @@ export function createOMRRouter(
             redirectUri: requiredString(body, "redirectUri"),
             label: requiredString(body, "label"),
             ...(returnTo ? { returnTo } : {}),
-          }), { status: 201 });
+          }), { status: 201, headers: PRIVATE_RESPONSE });
         },
       },
       {
@@ -522,7 +550,7 @@ export function createOMRRouter(
             state: requiredString(body, "state"),
             label: requiredString(body, "label"),
             ...(redirectUri ? { redirectUri } : {}),
-          }), { status: 201 });
+          }), { status: 201, headers: PRIVATE_RESPONSE });
         },
       },
       {
@@ -536,7 +564,7 @@ export function createOMRRouter(
             ownership: ownership(body),
             apiKey: requiredString(body, "apiKey"),
             label: requiredString(body, "label"),
-          }), { status: 201 });
+          }), { status: 201, headers: PRIVATE_RESPONSE });
         },
       },
       ...(["health", "refresh", "disconnect"] as const).map((operation) => ({
@@ -547,7 +575,7 @@ export function createOMRRouter(
           const connectionId = requiredString(body, "connectionId");
           return Response.json(await connectionServices[operation === "health"
             ? "checkHealth"
-            : operation](request, connectionId));
+            : operation](request, connectionId), { headers: PRIVATE_RESPONSE });
         },
       })),
       {

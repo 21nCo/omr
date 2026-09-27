@@ -10,10 +10,12 @@ export interface PendingOAuthConnection {
 const PREFIX = "omr.provider-oauth.";
 const MAX_AGE_MS = 10 * 60 * 1000;
 
+/** Resolve the same-origin callback used for every provider authorization. */
 export function oauthCallbackUri(origin: string): string {
   return new URL("/app/oauth/callback", origin).toString();
 }
 
+/** Store only callback intent under the provider state until the one-time callback. */
 export function savePendingOAuthConnection(
   storage: Pick<Storage, "setItem">,
   authUrl: string,
@@ -29,6 +31,7 @@ export function savePendingOAuthConnection(
   return url.toString();
 }
 
+/** Consume one callback intent, rejecting malformed, foreign-origin, or expired state. */
 export function readPendingOAuthConnection(
   storage: Pick<Storage, "getItem" | "removeItem">,
   state: string,
@@ -53,9 +56,13 @@ export function readPendingOAuthConnection(
     return pending as PendingOAuthConnection;
   } catch {
     return null;
+  } finally {
+    // Callback intent is single use even when the provider or server fails.
+    storage.removeItem(key);
   }
 }
 
+/** Remove an abandoned callback intent without exposing its contents. */
 export function clearPendingOAuthConnection(
   storage: Pick<Storage, "removeItem">,
   state: string,
