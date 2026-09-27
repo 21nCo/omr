@@ -24,8 +24,9 @@ parameter is masked because the original sensitive-key list is no longer known. 
 omit remote connection handles and internal hashes. Stored request fingerprints are HMACs keyed
 with the server's stable execution wrapping secret. Unexpected execution errors log only
 their class. If the provider receipt succeeds but approval consumption cannot be persisted, the
-service reports an unknown completion with the receipt ID and leaves the approval executing for
-reconciliation; it never marks the successful effect failed or retries it.
+service reports an unknown completion with the receipt ID and marks the approval uncertain for
+reconciliation; it never marks the successful effect failed or retries it. The same state applies
+to provider ambiguity, receipt persistence failure, and a guard commit failure after dispatch.
 
 ## Changed-surface risk matrix
 
@@ -35,6 +36,7 @@ reconciliation; it never marks the successful effect failed or retries it.
 | Approval request and claim | Duplicate pending work, expiry, changed params, concurrent use | Service idempotency and single-claim tests |
 | Approval projection | Guessable hashes or secrets after manifest change | Projection, decision, and overview-shaped history tests |
 | Approval completion | Failed consume after successful effect | Successful receipt and non-replayable approval test |
+| Legacy key migration | NULL fingerprints and duplicate old keys permit another approval | Migration and store conflict fixtures |
 | Web approval execution | Actor/workspace substitution or revoked membership with an empty route workspace | Empty-workspace principal and guard tests |
 | Workspace, grant, connection | Cross-workspace use or use after revocation | Service denial and PostgreSQL guard fixture tests |
 | Provider and receipt | Second effect after timeout, crash, or ambiguous error | Uncertain replay and reservation tests |
@@ -49,6 +51,14 @@ opaque legacy markers. Those rows remain readable, but retrying their idempotenc
 and requires a new key after reconciliation. Keep the additive schema if rolling the Worker back:
 the previous version treats an `uncertain` receipt as non-replayable, and its inserts leave
 `request_hash` null. Reapplying `0013` after a rollback removes newly written unkeyed hashes.
+Migration `0014` adds the approval `uncertain` state and reserves every original legacy key. If
+origin/dev contains duplicate keys, the oldest row keeps the original key; later rows receive a
+`legacy~duplicate~<id>` audit key (outside the accepted new-key syntax). Pending and approved duplicates are failed, and executing
+duplicates become uncertain for manual reconciliation. NULL fingerprints become opaque legacy
+markers, and the approval index becomes unconditional. Apply `0014` before deploying the new
+Worker. Roll back the Worker without reversing this additive schema; a downgrade that writes new
+NULL fingerprints still cannot reuse an existing key. Do not reverse `0014` while uncertain
+approvals or duplicate legacy history exist.
 Do not reset a `running` or `uncertain` receipt without reconciling the provider outcome. Rollback
 does not restore a revoked connection or an expired grant.
 

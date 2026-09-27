@@ -51,8 +51,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
           connection_id, provider_connection_id, params_ciphertext, params_iv, idempotency_key, request_hash,
           status, approved_by, decided_at, expires_at, execution_receipt_id, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
-       ON CONFLICT (workspace_id, principal_key, idempotency_key)
-         WHERE request_hash IS NOT NULL DO NOTHING
+       ON CONFLICT (workspace_id, principal_key, idempotency_key) DO NOTHING
        RETURNING ${COLUMNS}`,
       [
         approval.id,
@@ -79,8 +78,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     if (result.rows[0]) return this.toApproval(result.rows[0]);
     const existing = await this.client.query<ApprovalRow>(
       `SELECT ${COLUMNS} FROM omr_control.execution_approvals
-       WHERE workspace_id = $1 AND principal_key = $2 AND idempotency_key = $3
-         AND request_hash IS NOT NULL`,
+       WHERE workspace_id = $1 AND principal_key = $2 AND idempotency_key = $3`,
       [approval.workspaceId, approval.principalKey, approval.idempotencyKey],
     );
     if (!existing.rows[0]) throw new Error("Approval reservation disappeared");
@@ -155,6 +153,20 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
        WHERE id = $1 AND status = 'executing'
        RETURNING ${COLUMNS}`,
       [input.approvalId, input.now],
+    );
+  }
+
+  async uncertain(input: {
+    approvalId: string;
+    receiptId: string | null;
+    now: number;
+  }): Promise<ExecutionApproval> {
+    return this.transition(
+      `UPDATE omr_control.execution_approvals
+       SET status = 'uncertain', execution_receipt_id = $2, updated_at = $3
+       WHERE id = $1 AND status = 'executing'
+       RETURNING ${COLUMNS}`,
+      [input.approvalId, input.receiptId, input.now],
     );
   }
 

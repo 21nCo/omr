@@ -161,6 +161,15 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
     return structuredClone(approval);
   }
 
+  async uncertain(input: { approvalId: string; receiptId: string | null; now: number }): Promise<ExecutionApproval> {
+    const approval = this.approvals.get(input.approvalId);
+    if (!approval || approval.status !== "executing") throw new ApprovalUnavailableError();
+    approval.status = "uncertain";
+    approval.executionReceiptId = input.receiptId;
+    approval.updatedAt = input.now;
+    return structuredClone(approval);
+  }
+
   async listForActor(input: {
     workspaceId: string;
     actorUserId: string;

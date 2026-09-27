@@ -583,10 +583,46 @@ describe("execution service", () => {
     const error = await service.executeApproved(principal, approval.id).catch((failure: unknown) => failure);
     expect(error).toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: expect.any(String) });
     expect(receipts.receipts.get(error.receiptId)).toMatchObject({ status: "succeeded" });
-    expect(approvals.approvals.get(approval.id)).toMatchObject({ status: "executing" });
+    expect(approvals.approvals.get(approval.id)).toMatchObject({
+      status: "uncertain", executionReceiptId: error.receiptId,
+    });
     expect(actionCall).toHaveBeenCalledTimes(1);
     await expect(service.executeApproved(principal, approval.id))
       .rejects.toBeInstanceOf(ApprovalUnavailableError);
+  });
+
+  it.each([
+    "provider ambiguity",
+    "receipt persistence failure",
+    "guard commit failure",
+  ])("retains a reconcilable approval after %s", async (failure) => {
+    const guard: ExecutionInvocationGuard = { run: async (_input, invoke) => {
+      const receipt = await invoke();
+      if (failure === "guard commit failure") throw new Error("COMMIT failed");
+      return receipt;
+    } };
+    const { actionCall, approvals, receipts, service, workspace } = await fixture(
+      undefined, undefined, false, guard,
+    );
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const approval = await service.requestApproval({ principal, toolId: "linear.create_issue",
+      params: {}, idempotencyKey: `write-${failure.replaceAll(" ", "-")}` });
+    await service.approve(approval.id, principal.userId);
+    if (failure === "provider ambiguity") actionCall.mockRejectedValueOnce(new Error("secret upstream detail"));
+    if (failure === "receipt persistence failure") {
+      vi.spyOn(receipts, "succeed").mockRejectedValueOnce(new Error("database write failed"));
+    }
+    const error = await service.executeApproved(principal, approval.id).catch((value: unknown) => value);
+    expect(error).toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: expect.any(String) });
+    expect(approvals.approvals.get(approval.id)).toMatchObject({
+      status: "uncertain", executionReceiptId: error.receiptId,
+    });
+    expect(receipts.receipts.get(error.receiptId)?.status).toBe(
+      failure === "guard commit failure" ? "succeeded" : "uncertain",
+    );
+    await expect(service.executeApproved(principal, approval.id))
+      .rejects.toBeInstanceOf(ApprovalUnavailableError);
+    expect(actionCall).toHaveBeenCalledTimes(1);
   });
 
   it("binds the empty-workspace web approval route to actor, workspace, and current membership", async () => {

@@ -55,6 +55,7 @@ export type ApprovalStatus =
   | "approved"
   | "rejected"
   | "executing"
+  | "uncertain"
   | "consumed"
   | "failed";
 
@@ -90,6 +91,7 @@ export interface ExecutionApprovalStore {
     now: number;
   }): Promise<ExecutionApproval>;
   consume(input: { approvalId: string; receiptId: string; now: number }): Promise<ExecutionApproval>;
+  uncertain(input: { approvalId: string; receiptId: string | null; now: number }): Promise<ExecutionApproval>;
   fail(input: { approvalId: string; now: number }): Promise<ExecutionApproval>;
   listForActor(input: {
     workspaceId: string;
@@ -324,7 +326,6 @@ export class ExecutionService {
       principalKey: principalKey(principal),
       now: this.now(),
     });
-    let completedReceipt: ExecutionReceipt | undefined;
     try {
       const manifest = this.catalog.get(approval.toolId);
       if (!manifest || manifest.hash !== approval.manifestHash || manifest.contract.effect === "read") {
@@ -356,16 +357,18 @@ export class ExecutionService {
         connection,
         idempotencyKey: approval.idempotencyKey,
       });
-      completedReceipt = receipt;
       try {
         await approvals.consume({ approvalId, receiptId: receipt.id, now: this.now() });
       } catch {
-        // The receipt is authoritative. Do not turn a successful provider effect into a failed approval.
+        // The receipt is authoritative. Reconciliation must not replay the effect.
         throw new ExecutionOutcomeUnknownError(receipt.id);
       }
       return receipt;
     } catch (error) {
-      if (!completedReceipt) {
+      if (error instanceof ExecutionOutcomeUnknownError || error instanceof ExecutionInProgressError) {
+        await approvals.uncertain({ approvalId, receiptId: error.receiptId, now: this.now() })
+          .catch(() => undefined);
+      } else {
         await approvals.fail({ approvalId, now: this.now() }).catch(() => undefined);
       }
       throw error;
