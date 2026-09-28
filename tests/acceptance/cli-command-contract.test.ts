@@ -82,6 +82,13 @@ async function fixture() {
       expiresInSeconds: 5, pollIntervalSeconds: 0,
     });
     if (path === "/api/device/token" && deviceLost) { request.socket.destroy(); return; }
+    if (path === "/api/device/token") {
+      const failure = failureReply.get(path);
+      if (failure) {
+        if (failure.committed) committedMutations.push({ path, identity: body?.deviceCode });
+        return answer(failure.status, failure.body);
+      }
+    }
     if (path === "/api/device/token") return answer(200, deviceReply ?? {
       credential: nextGrantKey, clientId: "client_1", grantId: "grant_1", workspaceId: grantWorkspace,
     });
@@ -284,6 +291,22 @@ describe("cli-command-contract", () => {
     for (const path of leftovers) expect(existsSync(path)).toBe(false);
     expect(readFileSync(live, "utf8")).toBe("live_private_secret");
     expect(readFileSync(unrelated, "utf8")).toBe("retain");
+  });
+
+  it("consumes option values without treating positional arguments or terminators as options", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    const search = await f.run(["tools", "search", "--query=issue", "--provider", "linear", "--json"], env);
+    expect(search.code).toBe(0);
+    expect(JSON.parse(search.stdout).tools[0].id).toBe("linear.read");
+    const before = f.calls.length;
+    const duplicate = await f.run(["tools", "search", "--query", "issue", "--query=again", "--json"], env);
+    expect(duplicate.code).toBe(2);
+    expect(lastError(duplicate.stderr).error).toBe("INPUT_INVALID");
+    const terminator = await f.run(["tools", "list", "--", "--unknown", "another", "--json"], env);
+    expect(terminator.code).toBe(2);
+    expect(lastError(terminator.stderr).error).toBe("INPUT_INVALID");
+    expect(f.calls).toHaveLength(before);
   });
 
   it("logs in, switches profiles, selects grant-scoped workspace, and stores no printed secret", async () => {
@@ -1302,6 +1325,31 @@ syncBuiltinESMExports();
     expect(JSON.parse(result.stderr.trim().split("\n").at(-1)!)).toMatchObject({ error: "DEVICE_DELIVERY_UNCERTAIN" });
     expect(result.stdout + result.stderr).not.toContain("omr_fixture_secret");
     expect(JSON.parse((await f.run(["profiles", "list", "--json"])).stdout)).toEqual([]);
+  });
+
+  it("guides recovery after a consumed device code receives a gateway error", async () => {
+    const f = await fixture();
+    f.failAfterCommit("/api/device/token", 502, { error: "BAD_GATEWAY", message: "omr_fixture_secret" });
+    const response = await f.run(["login", "--url", f.url, "--json"]);
+    expect(response.code).toBe(1);
+    expect(lastError(response.stderr)).toMatchObject({ error: "DEVICE_DELIVERY_UNCERTAIN" });
+    expect(response.stderr).toContain("/app/clients");
+    expect(response.stdout + response.stderr).not.toContain("omr_fixture_secret");
+    expect(f.committedMutations).toEqual([{ path: "/api/device/token", identity: "private-device-code" }]);
+    expect(JSON.parse((await f.run(["profiles", "list", "--json"])).stdout)).toEqual([]);
+  });
+
+  it("preserves known device-token errors even when the server returns 5xx", async () => {
+    for (const [code, exit] of [["DEVICE_AUTHORIZATION_EXPIRED", 22],
+      ["DEVICE_AUTHORIZATION_INVALID", 1]] as const) {
+      const f = await fixture();
+      f.failureResponse("/api/device/token", 500, { error: code });
+      const response = await f.run(["login", "--url", f.url, "--json"]);
+      expect(response.code).toBe(exit);
+      expect(lastError(response.stderr).error).toBe(code);
+      expect(response.stderr).not.toContain("/app/clients");
+      expect(JSON.parse((await f.run(["profiles", "list", "--json"])).stdout)).toEqual([]);
+    }
   });
 
   it("does not save malformed successful one-time device grants", async () => {

@@ -234,7 +234,8 @@ export class OMRProfileStore {
 
   private cleanupTemp(directory: string, entry: string): void {
     const match = /^(active-profile|credentials(?:\.lock)?|[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\.json)\.([1-9]\d*)\.[0-9a-f-]{36}\.tmp$/.exec(entry);
-    if (!match?.[1] || (directory === this.profiles) !== match[1].endsWith(".json")) return;
+    const [, target, ownerPid] = match ?? [];
+    if (!target || (directory === this.profiles) !== target.endsWith(".json")) return;
     const path = join(directory, entry);
     let stats;
     try { stats = lstatSync(path); }
@@ -242,7 +243,7 @@ export class OMRProfileStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
       throw error;
     }
-    if (!stats.isFile() || stats.isSymbolicLink() || processAlive(Number(match[2]))) return;
+    if (!stats.isFile() || stats.isSymbolicLink() || processAlive(Number(ownerPid))) return;
     try { rmSync(path); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;

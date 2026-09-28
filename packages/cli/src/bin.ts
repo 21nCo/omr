@@ -22,11 +22,13 @@ class CLIError extends Error {
 function parse(argv: string[]): Parsed {
   const options = new Map<string, string | true>();
   const positionals: string[] = [];
-  for (let i = 0; i < argv.length; i++) {
+  let i = 0;
+  while (i < argv.length) {
     const arg = argv[i]!;
     if (arg === "--") { positionals.push(...argv.slice(i + 1)); break; }
-    if (!arg.startsWith("--")) { positionals.push(arg); continue; }
-    i = parseOption(argv, i, options);
+    if (arg.startsWith("--")) i = parseOption(argv, i, options);
+    else positionals.push(arg);
+    i++;
   }
   return { options, positionals };
 }
@@ -305,6 +307,13 @@ function saveDeviceGrant(name: string, baseUrl: string,
 function handleDevicePollError(error: unknown): boolean {
   if (error instanceof OMRHttpError &&
       (error.body as { error?: unknown } | null)?.error === "DEVICE_AUTHORIZATION_PENDING") return true;
+  if (error instanceof OMRHttpError && error.path === "/api/device/token" && error.status >= 500) {
+    const code = (error.body as { error?: unknown } | null)?.error;
+    if (!["DEVICE_AUTHORIZATION_INVALID", "DEVICE_AUTHORIZATION_EXPIRED"].includes(String(code))) {
+      throw new CLIError("DEVICE_DELIVERY_UNCERTAIN",
+        "Device token response cannot prove whether a grant was issued; check /app/clients for a grant to revoke before trying again", 1);
+    }
+  }
   if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) &&
       error.path === "/api/device/token") {
     throw new CLIError("DEVICE_DELIVERY_UNCERTAIN",
