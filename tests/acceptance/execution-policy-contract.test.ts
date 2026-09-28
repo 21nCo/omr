@@ -142,7 +142,7 @@ describe("execution-policy-contract", () => {
       expect(web.status).toBe(504);
       await expect(web.json()).resolves.toEqual({ error: "EXECUTION_INVOCATION_TIMEOUT" });
       for (const error of [cliRead, cliBefore]) {
-        expect(error.code).toBe(1);
+        expect(error.code).toBe(24);
         expect(error.stdout + error.stderr).toContain("EXECUTION_INVOCATION_TIMEOUT");
       }
       expect(cliAfter.stdout + cliAfter.stderr).toContain("EXECUTION_OUTCOME_UNKNOWN");
@@ -195,7 +195,7 @@ describe("execution-policy-contract", () => {
         client.callTool({ name: "omr.approvals.execute", arguments: { approvalId: "after-dispatch" } }),
       ]);
       for (const error of [cliRead, cliBefore]) {
-        expect(error.code).toBe(1);
+        expect(error.code).toBe(24);
         expect(error.stdout + error.stderr).toContain("EXECUTION_INVOCATION_TIMEOUT");
         expect(error.stdout + error.stderr).not.toContain("AbortError");
       }
@@ -239,12 +239,12 @@ describe("execution-policy-contract", () => {
         ["approvals", "execute", "before-dispatch"],
       ]) {
         const error = await runCli(args);
-        expect(error.code).toBe(1);
+        expect(error.code).toBe(24);
         expect(error.stdout + error.stderr).toContain("EXECUTION_INVOCATION_TIMEOUT");
         expect(error.stdout + error.stderr).not.toContain("receipt_after_dispatch");
       }
       const uncertain = await runCli(["approvals", "execute", "after-dispatch"]);
-      expect(uncertain.code).toBe(1);
+      expect(uncertain.code).toBe(23);
       expect(uncertain.stdout + uncertain.stderr).toContain("EXECUTION_OUTCOME_UNKNOWN");
       expect(uncertain.stdout + uncertain.stderr).toContain("receipt_after_dispatch");
     } finally {
@@ -402,15 +402,15 @@ describe("execution-policy-contract", () => {
         expect(opaquePending.stdout).not.toContain("opaque-cli-secret");
         expect(approvalStore.approvals.size).toBe(1);
         await expect(runCli(["tools", "run", "linear.write", "--params", JSON.stringify(request.params)]))
-          .rejects.toMatchObject({ code: 1 });
+          .rejects.toMatchObject({ code: 20 });
         expect(provider).toHaveBeenCalledTimes(1);
         await expect(runCli(["approvals", "request", "linear.write", "--params",
-          JSON.stringify(request.params)])).rejects.toMatchObject({ code: 1 });
-        expect(approvalStore.approvals.size).toBe(1);
+          JSON.stringify(request.params)])).rejects.toMatchObject({ code: 2 });
+        expect(approvalStore.approvals.size).toBe(2);
         await expect(runCli(["approvals", "request", "linear.noncanonical", "--params",
           JSON.stringify({ items: [{ pin: "noncanonical-secret" }] }), "--idempotency", "bad-selector-cli"]))
-          .rejects.toMatchObject({ code: 1 });
-        expect(approvalStore.approvals.size).toBe(1);
+          .rejects.toMatchObject({ code: 2 });
+        expect(approvalStore.approvals.size).toBe(2);
         expect(provider).toHaveBeenCalledTimes(1);
         const pending = await runCli(["approvals", "request", "linear.write", "--params",
           JSON.stringify(request.params), "--idempotency", request.idempotencyKey]);
@@ -454,7 +454,7 @@ describe("execution-policy-contract", () => {
           () => { throw new Error("An uncertain approval replay unexpectedly succeeded"); },
           (error: { code: number; stdout: string; stderr: string }) => error,
         );
-        expect(replay.code).toBe(1);
+        expect(replay.code).toBe(23);
         expect(replay.stdout + replay.stderr).toContain("EXECUTION_OUTCOME_UNKNOWN");
         expect(replay.stdout + replay.stderr).toContain(receiptId);
         expect(provider).toHaveBeenCalledTimes(4);
@@ -463,7 +463,7 @@ describe("execution-policy-contract", () => {
             () => { throw new Error("A stale effect retry unexpectedly succeeded"); },
             (error: { code: number; stdout: string; stderr: string }) => error,
           );
-          expect(retry.code).toBe(1);
+          expect(retry.code).toBe(23);
           expect(retry.stdout + retry.stderr).toContain("EXECUTION_OUTCOME_UNKNOWN");
           expect(retry.stdout + retry.stderr).toContain(stale.receiptId);
           assertSettled(stale.approvalId, stale.receiptId, stale.status);

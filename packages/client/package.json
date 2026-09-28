@@ -12,6 +12,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./profile-store": {
+      "types": "./dist/profile-store.d.ts",
+      "import": "./dist/profile-store.js"
     }
   },
   "dependencies": {

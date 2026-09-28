@@ -1,0 +1,219 @@
+import { execFile, spawn } from "node:child_process";
+import { createServer } from "node:http";
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { promisify } from "node:util";
+import { afterEach, describe, expect, it } from "vitest";
+
+const exec = promisify(execFile);
+const binary = resolve("packages/cli/dist/bin.js");
+const roots: string[] = [];
+const servers: ReturnType<typeof createServer>[] = [];
+
+afterEach(async () => {
+  await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+  roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true }));
+});
+
+async function fixture() {
+  const calls: { path: string; body: unknown; authorization: string | undefined }[] = [];
+  let revoked = false;
+  let deviceLost = false;
+  let approvalStatus: string = "pending";
+  let expiresAt = Date.now() + 600_000;
+  const server = createServer(async (request, response) => {
+    const path = new URL(request.url!, "http://localhost").pathname;
+    let raw = "";
+    for await (const chunk of request) raw += chunk.toString();
+    const body = raw ? JSON.parse(raw) as Record<string, unknown> : undefined;
+    calls.push({ path, body, authorization: request.headers.authorization });
+    const answer = (status: number, value: unknown) => {
+      response.writeHead(status, { "content-type": "application/json" });
+      response.end(JSON.stringify(value));
+    };
+    if (path === "/api/device/authorization") return answer(201, {
+      deviceCode: "private-device-code", userCode: "ABCD-EFGH", verificationUriComplete: "http://localhost/device",
+      expiresInSeconds: 5, pollIntervalSeconds: 0,
+    });
+    if (path === "/api/device/token" && deviceLost) { request.socket.destroy(); return; }
+    if (path === "/api/device/token") return answer(200, {
+      credential: "omr_fixture_secret", clientId: "client_1", grantId: "grant_1", workspaceId: "workspace_1",
+    });
+    if (request.headers.authorization !== "Bearer omr_fixture_secret" &&
+        request.headers.authorization !== "Bearer headless_secret") return answer(401, { error: "CLIENT_CREDENTIAL_INVALID" });
+    if (revoked) return answer(401, { error: "CLIENT_CREDENTIAL_INVALID" });
+    if (path === "/api/client-grants/revoke-self") { revoked = true; return answer(200, { revoked: true }); }
+    if (path === "/api/tools") {
+      if (new URL(request.url!, "http://localhost").searchParams.get("workspaceId") !== "workspace_1")
+        return answer(403, { error: "CONNECTION_ACCESS_DENIED" });
+      return answer(200, { tools: [{ id: "linear.read" }], cursor: null });
+    }
+    if (path === "/api/tools/manifest") return answer(200, { id: "linear.read", hash: "v1" });
+    if (path === "/api/connections/list") return answer(200, [{ id: "connection_1" }]);
+    if (path === "/api/connections/select") return answer(200, { selected: body?.connectionId });
+    if (path === "/api/tools/execute") {
+      if (body?.toolId === "linear.lost") { request.socket.destroy(); return; }
+      if (body?.toolId === "linear.truncated") {
+        response.writeHead(200, { "content-type": "application/json", "content-length": "100" });
+        response.write('{"status":"succeeded"}');
+        response.socket?.destroy();
+        return;
+      }
+      if (body?.toolId === "linear.bad-error") return answer(500, {
+        error: "omr_fixture_secret", message: "omr_fixture_secret", receiptId: "omr_fixture_secret",
+      });
+      if (body?.toolId === "linear.write") return answer(409, { error: "EXECUTION_APPROVAL_REQUIRED" });
+      if (body?.toolId === "linear.uncertain") return answer(502, { error: "EXECUTION_OUTCOME_UNKNOWN", receiptId: "receipt_1" });
+      return answer(200, { status: "succeeded", result: body?.params });
+    }
+    if (path === "/api/approvals") return answer(201, { id: "approval_1", status: "pending", expiresAt });
+    if (path === "/api/approvals/status") return answer(200, { id: "approval_1", status: approvalStatus, expiresAt });
+    if (path === "/api/approvals/execute") {
+      if (approvalStatus !== "approved" || expiresAt <= Date.now()) return answer(409, { error: "APPROVAL_UNAVAILABLE" });
+      return answer(200, { status: "succeeded", result: { ok: true } });
+    }
+    return answer(404, { error: "NOT_FOUND" });
+  });
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Missing listener");
+  const root = mkdtempSync(join(tmpdir(), "omr-cli-contract-"));
+  roots.push(root);
+  const config = join(root, "config");
+  const url = `http://127.0.0.1:${address.port}`;
+  async function run(args: string[], env: Record<string, string | undefined> = {}) {
+    try {
+      const { stdout, stderr } = await exec(process.execPath, [binary, ...args], {
+        cwd: root, env: { ...process.env, OMR_CONFIG_DIR: config, OMR_BACKEND: undefined,
+          OMR_API_KEY: undefined, OMR_WORKSPACE_ID: undefined, OMR_PROFILE: undefined, ...env },
+      });
+      return { code: 0, stdout, stderr };
+    } catch (error) {
+      const result = error as { code: number; stdout: string; stderr: string };
+      return { code: result.code, stdout: result.stdout, stderr: result.stderr };
+    }
+  }
+  return { run, url, root, config, calls, loseDevice: () => { deviceLost = true; },
+    setApproval: (status: string, expiry = Date.now() + 600_000) => {
+    approvalStatus = status; expiresAt = expiry;
+  }, revoke: () => { revoked = true; } };
+}
+
+describe("cli-command-contract", () => {
+  it("logs in, switches profiles, selects grant-scoped workspace, and stores no printed secret", async () => {
+    const f = await fixture();
+    const login = await f.run(["login", "--url", f.url, "--profile", "work", "--json"]);
+    expect(login.code).toBe(0);
+    expect(JSON.parse(login.stdout)).toMatchObject({ profile: "work", workspaceId: "workspace_1" });
+    expect(login.stdout + login.stderr).not.toContain("omr_fixture_secret");
+    expect(login.stdout + login.stderr).not.toContain("private-device-code");
+    expect(JSON.parse((await f.run(["profiles", "list", "--json"])).stdout)).toMatchObject([
+      { name: "work", active: true, workspaceId: "workspace_1" },
+    ]);
+    expect((await f.run(["profiles", "use", "../../escape", "--json"])).code).toBe(1);
+    expect((await f.run(["workspaces", "use", "workspace_other", "--json"])).code).toBe(1);
+    expect(JSON.parse((await f.run(["workspaces", "show", "--json"])).stdout).workspaceId).toBe("workspace_1");
+    const file = join(f.config, "profiles", "work.json");
+    expect(readFileSync(file, "utf8")).toContain("omr_fixture_secret");
+    if (process.platform !== "win32") {
+      expect(statSync(f.config).mode & 0o777).toBe(0o700);
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+    }
+    expect(readdirSync(f.config)).not.toContain("credentials");
+    expect((await f.run(["logout", "--profile", "work", "--json"])).code).toBe(0);
+    expect((await f.run(["tools", "list", "--profile", "work", "--json"])).code).toBe(1);
+    expect(f.calls.some((call) => call.path === "/api/client-grants/revoke-self")).toBe(true);
+  });
+
+  it("uses the shared catalog, connection and execution endpoints with JSON flag, file and stdin", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    expect(JSON.parse((await f.run(["tools", "search", "--query", "issue", "--provider", "linear", "--json"], env)).stdout).tools[0].id).toBe("linear.read");
+    expect(JSON.parse((await f.run(["tools", "inspect", "linear.read", "--json"], env)).stdout).hash).toBe("v1");
+    expect(JSON.parse((await f.run(["connections", "list", "--json"], env)).stdout)[0].id).toBe("connection_1");
+    expect(JSON.parse((await f.run(["connections", "select", "connection_1", "--provider", "linear", "--json"], env)).stdout).selected).toBe("connection_1");
+    const path = join(f.root, "params.json"); writeFileSync(path, '{"id":"from-file"}');
+    expect(JSON.parse((await f.run(["tools", "run", "linear.read", "--params-file", path, "--json"], env)).stdout).result).toEqual({ id: "from-file" });
+    // Supply stdin through a shell-free child process to cover the actual pipe contract.
+    const fromStdin = await new Promise<{ code: number; stdout: string }>((resolve, reject) => {
+      const child = spawn(process.execPath, [binary, "tools", "run", "linear.read", "--params", "-", "--json"],
+        { cwd: f.root, env: { ...process.env, ...env, OMR_CONFIG_DIR: f.config } });
+      let stdout = ""; child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+      child.on("error", reject); child.on("close", (code) => resolve({ code: code ?? -1, stdout }));
+      child.stdin.end('{"id":"from-stdin"}');
+    });
+    expect(fromStdin.code).toBe(0);
+    expect(JSON.parse(fromStdin.stdout).result).toEqual({ id: "from-stdin" });
+    expect(f.calls.filter((call) => call.path === "/api/tools/execute").map((call) => (call.body as { params: unknown }).params))
+      .toEqual([{ id: "from-file" }, { id: "from-stdin" }]);
+  });
+
+  it("distinguishes pending, denied, expired, uncertain and invalid input without echoing parameters", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    const pending = await f.run(["tools", "run", "linear.write", "--params", '{"secret":"sensitive"}', "--json"], env);
+    expect(pending.code).toBe(20);
+    expect(JSON.parse(pending.stdout)).toMatchObject({ id: "approval_1", status: "pending" });
+    expect(pending.stdout + pending.stderr).not.toContain("sensitive");
+    expect((await f.run(["approvals", "status", "approval_1", "--json"], env)).code).toBe(20);
+    f.setApproval("rejected");
+    expect((await f.run(["approvals", "execute", "approval_1", "--json"], env)).code).toBe(21);
+    f.setApproval("approved", Date.now() - 1000);
+    expect((await f.run(["approvals", "execute", "approval_1", "--json"], env)).code).toBe(22);
+    f.setApproval("approved");
+    expect((await f.run(["approvals", "execute", "approval_1", "--json"], env)).code).toBe(0);
+    f.setApproval("failed");
+    expect((await f.run(["approvals", "execute", "approval_1", "--json"], env)).code).toBe(1);
+    f.setApproval("executing");
+    expect((await f.run(["approvals", "status", "approval_1", "--json"], env)).code).toBe(23);
+    const uncertain = await f.run(["tools", "run", "linear.uncertain", "--json"], env);
+    expect(uncertain.code).toBe(23);
+    expect(JSON.parse(uncertain.stderr).details.receiptId).toBe("receipt_1");
+    const lost = await f.run(["tools", "run", "linear.lost", "--idempotency", "retry-this-key", "--json"], env);
+    expect(lost.code).toBe(23);
+    expect(JSON.parse(lost.stderr)).toMatchObject({ error: "EXECUTION_EFFECT_UNCERTAIN",
+      details: { idempotencyKey: "retry-this-key" } });
+    const truncated = await f.run(["tools", "run", "linear.truncated", "--idempotency", "retry-truncated-key", "--json"], env);
+    expect(truncated.code).toBe(23);
+    expect(JSON.parse(truncated.stderr)).toMatchObject({ error: "EXECUTION_EFFECT_UNCERTAIN",
+      details: { idempotencyKey: "retry-truncated-key" } });
+    const badError = await f.run(["tools", "run", "linear.bad-error", "--json"], env);
+    expect(badError.code).toBe(1);
+    expect(badError.stdout + badError.stderr).not.toContain("omr_fixture_secret");
+    expect((await f.run(["tools", "run", "linear.read", "--params", "{bad secret}", "--json"], env)).code).toBe(2);
+    expect((await f.run(["tools", "list", "--json"], { OMR_BACKEND: f.url })).code).toBe(2);
+    f.revoke();
+    expect((await f.run(["tools", "list", "--json"], env)).code).toBe(3);
+  });
+
+  it("refuses symlinked profile targets", async () => {
+    const f = await fixture();
+    expect((await f.run(["login", "--url", f.url, "--json"])).code).toBe(0);
+    const profile = join(f.config, "profiles", "default.json");
+    rmSync(profile);
+    symlinkSync(join(f.root, "outside"), profile);
+    expect((await f.run(["profiles", "show", "--json"])).code).toBe(1);
+  });
+
+  it("reports uncertain one-time device delivery without storing or printing a credential", async () => {
+    const f = await fixture();
+    f.loseDevice();
+    const result = await f.run(["login", "--url", f.url, "--json"]);
+    expect(result.code).toBe(1);
+    expect(JSON.parse(result.stderr.trim().split("\n").at(-1)!)).toMatchObject({ error: "DEVICE_DELIVERY_UNCERTAIN" });
+    expect(result.stdout + result.stderr).not.toContain("omr_fixture_secret");
+    expect(JSON.parse((await f.run(["profiles", "list", "--json"])).stdout)).toEqual([]);
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a credential file readable by other users", async () => {
+    const f = await fixture();
+    expect((await f.run(["login", "--url", f.url, "--json"])).code).toBe(0);
+    const profile = join(f.config, "profiles", "default.json");
+    chmodSync(profile, 0o644);
+    const result = await f.run(["tools", "list", "--json"]);
+    expect(result.code).toBe(1);
+    expect(result.stdout + result.stderr).not.toContain("omr_fixture_secret");
+  });
+});

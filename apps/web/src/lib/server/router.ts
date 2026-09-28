@@ -120,6 +120,7 @@ export interface ExecutionRouteServices {
   approve(request: Request, approvalId: string): Promise<unknown>;
   reject(request: Request, approvalId: string): Promise<unknown>;
   executeApproved(request: Request, approvalId: string): Promise<unknown>;
+  approvalStatus?(request: Request, approvalId: string): Promise<unknown>;
 }
 
 export interface ControlPlaneRouteServices {
@@ -127,6 +128,7 @@ export interface ControlPlaneRouteServices {
   createTeam(request: Request, name: string): Promise<unknown>;
   listManualGrants(request: Request, cursor?: string): Promise<unknown>;
   revokeManualClient(request: Request, clientId: string): Promise<unknown>;
+  revokeSelf?(request: Request): Promise<unknown>;
 }
 
 class RequestInputError extends Error {
@@ -461,6 +463,14 @@ export function createOMRRouter(
       },
       {
         method: "POST",
+        path: "/api/client-grants/revoke-self",
+        handler: async (request) => {
+          if (!controlPlaneServices.revokeSelf) throw new RuntimeUnavailableError("Client revocation is unavailable");
+          return Response.json(await controlPlaneServices.revokeSelf(request), { headers: PRIVATE_RESPONSE });
+        },
+      },
+      {
+        method: "POST",
         path: "/api/device/authorization",
         handler: async (_request, context) => {
           const body = objectBody(await context.json());
@@ -657,6 +667,17 @@ export function createOMRRouter(
             ...(connectionId ? { connectionId } : {}),
             idempotencyKey,
           }), { status: 201, headers: PRIVATE_RESPONSE });
+        },
+      },
+      {
+        method: "GET",
+        path: "/api/approvals/status",
+        handler: async (request) => {
+          const approvalId = new URL(request.url).searchParams.get("approvalId");
+          if (!approvalId) throw new RequestInputError("approvalId is required");
+          if (!executionServices.approvalStatus) throw new RuntimeUnavailableError("Approval status is unavailable");
+          return Response.json(await executionServices.approvalStatus(request, approvalId),
+            { headers: PRIVATE_RESPONSE });
         },
       },
       ...(["approve", "reject", "execute"] as const).map((operation) => ({

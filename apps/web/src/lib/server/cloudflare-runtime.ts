@@ -1,5 +1,5 @@
 import type { RequestEvent } from "@superfunctions/http-sveltekit";
-import type { ClientCapability } from "@oh-my-router/client-access";
+import { ClientAccessDeniedError, type ClientCapability } from "@oh-my-router/client-access";
 import {
   connectPostgresClientAccess,
   connectPostgresDeviceLogin,
@@ -195,6 +195,19 @@ function requireSameOrigin(request: Request): void {
 /** Mutating cookie requests need origin proof; bearer clients have explicit credentials. */
 export function requireExecutionOrigin(request: Request): void {
   if (!bearerCredential(request) || request.headers.has("cookie")) requireSameOrigin(request);
+}
+
+/** A CLI can revoke only the client authenticated by its own bearer grant. */
+export async function revokeOwnBearerClient(
+  request: Request,
+  authenticateClient: () => Promise<ExecutionPrincipal>,
+  revoke: (actorUserId: string, clientId: string) => Promise<void>,
+): Promise<{ revoked: true }> {
+  if (!bearerCredential(request) || request.headers.has("cookie")) throw new ClientAccessDeniedError();
+  const principal = await authenticateClient();
+  if (principal.kind !== "client") throw new ClientAccessDeniedError();
+  await revoke(principal.userId, principal.clientId);
+  return { revoked: true };
 }
 
 /** A saved selection affects later actions from every client of the same user. */
@@ -659,9 +672,24 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
       const principal = await authenticate(event, request, undefined);
       return withExecution(async (service) => publicReceipt(await service.executeApproved(principal, approvalId)));
     },
+    async approvalStatus(request, approvalId) {
+      const principal = await authenticate(event, request, undefined, "approvals:create");
+      return withExecution(async (service, catalog) => {
+        const approval = await service.approvalStatus(principal, approvalId);
+        return publicApproval(approval, catalog.get(approval.toolId));
+      });
+    },
   };
 
   const controlPlane: ControlPlaneRouteServices = {
+    async revokeSelf(request) {
+      return revokeOwnBearerClient(request, () => authenticate(event, request, undefined),
+        async (actorUserId, clientId) => {
+          const access = await connectPostgresClientAccess({ connectionString: databaseConnectionString(event) });
+          try { await access.clients.revokeClient(actorUserId, clientId); }
+          finally { await access.close(); }
+        });
+    },
     /** Assemble the private workspace overview for a current member. */
     async overview(request, requestedWorkspaceId) {
       const identity = await connectPostgresIdentityRuntime({
