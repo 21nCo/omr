@@ -10,7 +10,12 @@ const exec = promisify(execFile);
 const binary = resolve("packages/cli/dist/bin.js");
 const roots: string[] = [];
 const servers: ReturnType<typeof createServer>[] = [];
-const lastError = (stderr: string): Record<string, any> => JSON.parse(stderr.trim().split("\n").at(-1)!);
+const lastError = (stderr: string): Record<string, unknown> => JSON.parse(stderr.trim().split("\n").at(-1)!);
+const errorDetails = (stderr: string): Record<string, unknown> => {
+  const details = lastError(stderr).details;
+  if (!details || typeof details !== "object" || Array.isArray(details)) throw new Error("Missing error details");
+  return details as Record<string, unknown>;
+};
 const toolManifest = {
   catalogSchemaVersion: "1.0.0", id: "linear.read", provider: "linear", providerVersion: "1.0.0",
   action: "read", displayName: "Read", description: "Read a Linear item", hash: "v1",
@@ -386,7 +391,7 @@ describe("cli-command-contract", () => {
     expect(lostAutomatic.code).toBe(23);
     expect(lastError(lostAutomatic.stderr)).toMatchObject({ error: "APPROVAL_DELIVERY_UNCERTAIN",
       details: { idempotencyKey: expect.any(String) } });
-    expect(lastError(lostAutomatic.stderr).details.idempotencyKey).toMatch(/^[a-f0-9-]{36}$/);
+    expect(errorDetails(lostAutomatic.stderr).idempotencyKey).toMatch(/^[a-f0-9-]{36}$/);
   });
 
   it("emits a generated retry key before dispatch and replays it after an interrupted run", async () => {
@@ -670,6 +675,118 @@ describe("cli-command-contract", () => {
     expect(JSON.parse((await f.run(["profiles", "list", "--json"])).stdout)).toHaveLength(2);
     expect((await f.run(["logout", "--local", "--json"])).code).toBe(0);
     expect(readFileSync(credentials, "utf8")).toContain("other_secret");
+  });
+
+  it("flushes the unified grant and its directory before removing the legacy copy", async () => {
+    const f = await fixture();
+    mkdirSync(join(f.config, "profiles"), { recursive: true });
+    const profile = join(f.config, "profiles", "default.json");
+    const credentials = join(f.config, "credentials");
+    const events = join(f.root, "storage-events");
+    const preload = join(f.root, "trace-storage.cjs");
+    writeFileSync(profile, '{"workspaceId":"workspace_1"}\n', { mode: 0o600 });
+    writeFileSync(credentials, `[default]\nbackend=${f.url}\nkey=omr_fixture_secret\n`, { mode: 0o600 });
+    writeFileSync(preload, `
+const fs = require("node:fs");
+const { syncBuiltinESMExports } = require("node:module");
+const profile = ${JSON.stringify(profile)}, credentials = ${JSON.stringify(credentials)};
+const directory = ${JSON.stringify(join(f.config, "profiles"))}, events = ${JSON.stringify(events)};
+const handles = new Map();
+const open = fs.openSync, close = fs.closeSync, flush = fs.fsyncSync, rename = fs.renameSync;
+fs.openSync = function(path, ...rest) { const fd = open.call(this, path, ...rest); handles.set(fd, path); return fd; };
+fs.closeSync = function(fd) { handles.delete(fd); return close.call(this, fd); };
+fs.fsyncSync = function(fd) {
+  const path = handles.get(fd);
+  if (path === directory) fs.appendFileSync(events, "profile-dir-flush\\n");
+  if (typeof path === "string" && path.startsWith(profile + ".")) fs.appendFileSync(events, "profile-file-flush\\n");
+  return flush.call(this, fd);
+};
+fs.renameSync = function(source, target) {
+  if (target === profile) fs.appendFileSync(events, "profile-publish\\n");
+  if (target === credentials) fs.appendFileSync(events, "legacy-remove\\n");
+  return rename.call(this, source, target);
+};
+syncBuiltinESMExports();
+`);
+    const selected = await f.run(["workspaces", "use", "workspace_1", "--json"], {
+      NODE_OPTIONS: `--require=${preload}`,
+    });
+    expect(selected.code, selected.stderr).toBe(0);
+    const order = readFileSync(events, "utf8").trim().split("\n");
+    expect(order).toContain("profile-file-flush");
+    expect(order.indexOf("profile-file-flush")).toBeLessThan(order.indexOf("profile-publish"));
+    expect(order.indexOf("profile-publish")).toBeLessThan(order.indexOf("profile-dir-flush"));
+    expect(order.indexOf("profile-dir-flush")).toBeLessThan(order.indexOf("legacy-remove"));
+    expect(readFileSync(credentials, "utf8")).not.toContain("omr_fixture_secret");
+  });
+
+  it("keeps an orphaned legacy grant visible and prevents login from shadowing it", async () => {
+    const f = await fixture();
+    mkdirSync(join(f.config, "profiles"), { recursive: true });
+    const credentials = join(f.config, "credentials");
+    writeFileSync(credentials, `[work]\nbackend=${f.url}\nkey=omr_fixture_secret\n`, { mode: 0o600 });
+    const listed = await f.run(["profiles", "list", "--json"]);
+    expect(listed.code).toBe(0);
+    expect(JSON.parse(listed.stdout)).toEqual([]);
+    expect(lastError(listed.stderr)).toMatchObject({ warning: "PROFILE_UNREADABLE", file: "credentials" });
+    const priorCalls = f.calls.length;
+    const blocked = await f.run(["login", "--url", f.url, "--profile", "work", "--json"]);
+    expect(blocked.code).toBe(2);
+    expect(lastError(blocked.stderr).error).toBe("PROFILE_EXISTS");
+    expect(f.calls.slice(priorCalls)).toHaveLength(0);
+    const recovery = await f.run(["profiles", "show", "--profile", "work", "--json"]);
+    expect(recovery.code).toBe(1);
+    expect(lastError(recovery.stderr).error).toBe("PROFILE_RECOVERY_REQUIRED");
+    expect(lastError(recovery.stderr).message).toContain("/app/clients");
+    expect(recovery.stderr).not.toContain("omr_fixture_secret");
+    expect((await f.run(["logout", "--local", "--profile", "work", "--json"])).code).toBe(0);
+    expect(readFileSync(credentials, "utf8")).not.toContain("omr_fixture_secret");
+  });
+
+  it("rejects a profile name with a trailing newline before issuing a grant", async () => {
+    const f = await fixture();
+    const response = await f.run(["login", "--url", f.url, "--profile", "work\n", "--json"]);
+    expect(response.code).toBe(2);
+    expect(lastError(response.stderr).error).toBe("INPUT_INVALID");
+    expect(f.calls).toHaveLength(0);
+  });
+
+  it("keeps a grant discoverable when active profile publication fails", async () => {
+    const f = await fixture();
+    mkdirSync(f.config, { recursive: true });
+    symlinkSync(join(f.root, "outside"), join(f.config, "active-profile"));
+    const first = await f.run(["login", "--url", f.url, "--profile", "work", "--json"]);
+    expect(first.code).toBe(1);
+    expect(lastError(first.stderr).error).toBe("LOCAL_STORAGE_FAILED");
+    expect(JSON.parse(readFileSync(join(f.config, "profiles", "work.json"), "utf8"))).toMatchObject({
+      key: "omr_fixture_secret", workspaceId: "workspace_1",
+    });
+    const second = await f.run(["login", "--url", f.url, "--profile", "work", "--json"]);
+    expect(lastError(second.stderr).error).toBe("PROFILE_EXISTS");
+    expect(f.calls.filter((call) => call.path === "/api/device/authorization")).toHaveLength(1);
+  });
+
+  it("preserves a primary credential error when lock cleanup also fails", async () => {
+    const f = await fixture();
+    const lock = join(f.config, "credentials.lock");
+    const preload = join(f.root, "fail-lock-cleanup.cjs");
+    writeFileSync(preload, `
+const fs = require("node:fs");
+const { syncBuiltinESMExports } = require("node:module");
+const remove = fs.rmSync;
+fs.rmSync = function(path, ...rest) {
+  if (path === ${JSON.stringify(lock)}) throw new Error("secondary cleanup failure");
+  return remove.call(this, path, ...rest);
+};
+syncBuiltinESMExports();
+`);
+    const response = await f.run(["logout", "--local", "--profile", "missing", "--json"], {
+      NODE_OPTIONS: `--require=${preload}`,
+    });
+    expect(response.code).toBe(1);
+    expect(lastError(response.stderr).message).toContain("Profile missing is missing");
+    expect(response.stderr).not.toContain("secondary cleanup failure");
+    expect(existsSync(lock)).toBe(true);
   });
 
   it("recovers interrupted legacy cleanup for workspace migration and confirmed revocation", async () => {
@@ -1034,10 +1151,10 @@ syncBuiltinESMExports();
     f.setApproval("failed");
     expect((await f.run(["approvals", "execute", "approval_1", "--json"], env)).code).toBe(1);
     f.setApproval("executing");
-    expect((await f.run(["approvals", "status", "approval_1", "--json"], env)).code).toBe(23);
+    expect((await f.run(["approvals", "status", "approval_1", "--json"], env)).code).toBe(25);
     const uncertain = await f.run(["tools", "run", "linear.uncertain", "--json"], env);
     expect(uncertain.code).toBe(23);
-    expect(lastError(uncertain.stderr).details.receiptId).toBe("receipt_1");
+    expect(errorDetails(uncertain.stderr).receiptId).toBe("receipt_1");
     const lost = await f.run(["tools", "run", "linear.lost", "--idempotency", "retry-this-key", "--json"], env);
     expect(lost.code).toBe(23);
     expect(JSON.parse(lost.stderr)).toMatchObject({ error: "EXECUTION_EFFECT_UNCERTAIN",
@@ -1064,6 +1181,12 @@ syncBuiltinESMExports();
     expect(pendingRun.stdout).toBe("");
     expect(lastError(pendingRun.stderr)).toMatchObject({ error: "EXECUTION_IN_PROGRESS",
       details: { receiptId: "receipt_running", idempotencyKey: "same-run-key" } });
+    for (const status of ["reserved", "running"]) {
+      f.successReply("/api/tools/execute", { id: "receipt_running", workspaceId: "workspace_1",
+        toolId: "linear.in-progress", status, result: null });
+      expect((await f.run(runArgs, env)).code).toBe(25);
+      f.clearSuccessReply();
+    }
     for (const [status, exit] of [["succeeded", 0], ["failed", 1], ["uncertain", 23]] as const) {
       f.successReply("/api/tools/execute", { id: "receipt_running", workspaceId: "workspace_1",
         toolId: "linear.in-progress", status, result: null });
@@ -1081,6 +1204,12 @@ syncBuiltinESMExports();
     expect(lastError(pendingApproval.stderr)).toMatchObject({ error: "EXECUTION_IN_PROGRESS",
       details: { receiptId: "receipt_approved_running", approvalId: "approval_1" } });
     f.setApproval("approved");
+    for (const status of ["reserved", "running"]) {
+      f.successReply("/api/approvals/execute", { id: "receipt_approved_running", approvalId: "approval_1",
+        workspaceId: "workspace_1", toolId: "linear.write", status, result: null });
+      expect((await f.run(executeArgs, env)).code).toBe(25);
+      f.clearSuccessReply();
+    }
     for (const [status, exit] of [["succeeded", 0], ["failed", 1], ["uncertain", 23]] as const) {
       f.successReply("/api/approvals/execute", { id: "receipt_approved_running", approvalId: "approval_1",
         workspaceId: "workspace_1", toolId: "linear.write", status, result: null });
@@ -1089,6 +1218,17 @@ syncBuiltinESMExports();
       expect(JSON.parse(resolved.stdout)).toMatchObject({ id: "receipt_approved_running", status });
       f.clearSuccessReply();
     }
+  });
+
+  it("preserves an unavailable approval error when its status lookup also fails", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    f.setApproval("pending");
+    f.failureResponse("/api/approvals/status", 503, { error: "SERVER_UNAVAILABLE" });
+    const response = await f.run(["approvals", "execute", "approval_1", "--json"], env);
+    expect(response.code).toBe(1);
+    expect(lastError(response.stderr).error).toBe("APPROVAL_UNAVAILABLE");
+    expect(response.stdout).toBe("");
   });
 
   it("keeps retry identities when a gateway fails after mutation, while preserving known outcomes", async () => {

@@ -3,7 +3,7 @@ import { readFileSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { OMRProfileStore, InvalidProfileNameError, assertProfileName } from "@oh-my-router/client/profile-store";
+import { OMRProfileStore, InvalidProfileNameError, ProfileRecoveryRequiredError, assertProfileName } from "@oh-my-router/client/profile-store";
 import { beginDeviceAuthorization, OMRClient, OMRHttpError, OMRProtocolError, OMRTransportError, pollDeviceAuthorization } from "@oh-my-router/client";
 import type { ClientCapability } from "@oh-my-router/client-access";
 import type { JsonValue, ToolEffect } from "@oh-my-router/tools";
@@ -32,11 +32,12 @@ function parse(argv: string[]): Parsed {
     if (flagOptions.has(name)) {
       if (equal >= 0) throw new CLIError("INPUT_INVALID", `--${name} takes no value`, 2);
       options.set(name, true);
-    } else if (valueOptions.has(name)) {
-      const value = equal >= 0 ? arg.slice(equal + 1) : argv[++i];
-      if (!value || value.startsWith("--")) throw new CLIError("INPUT_INVALID", `--${name} requires a value`, 2);
-      options.set(name, value);
-    } else throw new CLIError("INPUT_INVALID", `Unknown option --${name}`, 2);
+      continue;
+    }
+    if (!valueOptions.has(name)) throw new CLIError("INPUT_INVALID", `Unknown option --${name}`, 2);
+    const value = equal >= 0 ? arg.slice(equal + 1) : argv[++i];
+    if (!value || value.startsWith("--")) throw new CLIError("INPUT_INVALID", `--${name} requires a value`, 2);
+    options.set(name, value);
   }
   return { options, positionals };
 }
@@ -58,12 +59,13 @@ function info(value: string): void { process.stderr.write(`${value}\n`); }
 function listProfiles(json: boolean): ReturnType<OMRProfileStore["list"]> {
   return store.list((file) => info(json
     ? JSON.stringify({ warning: "PROFILE_UNREADABLE", file })
-    : `PROFILE_UNREADABLE: Cannot read ${JSON.stringify(file)}; inspect or remove that profile file`));
+    : `PROFILE_UNREADABLE: Cannot read ${JSON.stringify(file)}; inspect and recover that local file`));
 }
 function recordRetryKey(key: string, json: boolean): void {
   // Complete this small write before dispatch. A signal after the server sees
   // the request must not erase the only retry identity available to the caller.
-  writeSync(2, `${json ? JSON.stringify({ event: "IDEMPOTENCY_KEY", idempotencyKey: key }) : `Idempotency key: ${key}`}\n`);
+  const line = json ? JSON.stringify({ event: "IDEMPOTENCY_KEY", idempotencyKey: key }) : `Idempotency key: ${key}`;
+  writeSync(2, `${line}\n`);
 }
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -81,40 +83,48 @@ function webUrl(value: unknown): boolean {
 function invalidResponse(path: string): never {
   throw new OMRProtocolError(path);
 }
+function validPagination(value: unknown): boolean {
+  return object(value) && ["none", "cursor", "offset", "page"].includes(String(value.kind)) &&
+    (value.maxPageSize === undefined || (Number.isInteger(value.maxPageSize) && Number(value.maxPageSize) > 0)) &&
+    (value.cursorParameter === undefined || filled(value.cursorParameter));
+}
+function validResource(value: unknown): boolean {
+  return object(value) && filled(value.kind) && (value.parameter === undefined || filled(value.parameter));
+}
+function validContract(value: unknown): boolean {
+  return object(value) && filled(value.version) &&
+    ["read", "write", "destructive", "unknown"].includes(String(value.effect)) &&
+    Array.isArray(value.requiredScopes) && value.requiredScopes.every(filled) &&
+    Array.isArray(value.resources) && value.resources.every(validResource) &&
+    Array.isArray(value.sensitiveKeys) && value.sensitiveKeys.every(filled) &&
+    ["never", "safe", "provider-key"].includes(String(value.retry)) &&
+    (value.idempotencyKeyParameter === undefined || filled(value.idempotencyKeyParameter)) &&
+    validPagination(value.pagination);
+}
 function validManifest(value: unknown): value is Record<string, unknown> {
-  if (!object(value) || value.catalogSchemaVersion !== "1.0.0" ||
-      !filled(value.id) || !filled(value.provider) || !filled(value.providerVersion) ||
-      !filled(value.action) || value.id !== `${value.provider}.${value.action}` ||
-      !filled(value.displayName) || typeof value.description !== "string" || !filled(value.hash) ||
-      !Object.hasOwn(value, "inputSchema") || !Object.hasOwn(value, "outputSchema")) return false;
-  const contract = value.contract;
-  if (!object(contract) || !filled(contract.version) ||
-      !["read", "write", "destructive", "unknown"].includes(String(contract.effect)) ||
-      !Array.isArray(contract.requiredScopes) || !contract.requiredScopes.every(filled) ||
-      !Array.isArray(contract.resources) || !contract.resources.every((item: unknown) =>
-        object(item) && filled(item.kind) && (item.parameter === undefined || filled(item.parameter))) ||
-      !Array.isArray(contract.sensitiveKeys) || !contract.sensitiveKeys.every(filled) ||
-      !["never", "safe", "provider-key"].includes(String(contract.retry)) ||
-      (contract.idempotencyKeyParameter !== undefined && !filled(contract.idempotencyKeyParameter))) return false;
-  const pagination = contract.pagination;
-  return object(pagination) && ["none", "cursor", "offset", "page"].includes(String(pagination.kind)) &&
-    (pagination.maxPageSize === undefined ||
-      (Number.isInteger(pagination.maxPageSize) && Number(pagination.maxPageSize) > 0)) &&
-    (pagination.cursorParameter === undefined || filled(pagination.cursorParameter));
+  return object(value) && value.catalogSchemaVersion === "1.0.0" &&
+    filled(value.id) && filled(value.provider) && filled(value.providerVersion) &&
+    filled(value.action) && value.id === `${value.provider}.${value.action}` &&
+    filled(value.displayName) && typeof value.description === "string" && filled(value.hash) &&
+    Object.hasOwn(value, "inputSchema") && Object.hasOwn(value, "outputSchema") && validContract(value.contract);
+}
+function validProvider(value: unknown): boolean {
+  return object(value) && filled(value.provider) && filled(value.displayName) &&
+    (value.providerVersion === null || filled(value.providerVersion)) &&
+    typeof value.description === "string" &&
+    ["oauth", "api_key", "jwt", "basic", "none", "unknown"].includes(String(value.authMode)) &&
+    Number.isInteger(value.actionCount) && Number(value.actionCount) >= 0 &&
+    ["unsupported", "unconfigured", "disconnected", "expired", "ready"].includes(String(value.state)) &&
+    typeof value.available === "boolean";
 }
 function discovery(value: unknown, provider?: string): unknown {
   if (!object(value) || value.catalogSchemaVersion !== "1.0.0" || !filled(value.revision) ||
       !Array.isArray(value.tools) || !value.tools.every((tool: unknown) =>
         validManifest(tool) && (!provider || tool.provider === provider)) ||
       (value.nextCursor !== undefined && !filled(value.nextCursor)) ||
-      (value.providers !== undefined && (!Array.isArray(value.providers) ||
-        !value.providers.every((item: unknown) => object(item) && filled(item.provider) &&
-          filled(item.displayName) && (item.providerVersion === null || filled(item.providerVersion)) &&
-          typeof item.description === "string" &&
-          ["oauth", "api_key", "jwt", "basic", "none", "unknown"].includes(String(item.authMode)) &&
-          Number.isInteger(item.actionCount) && Number(item.actionCount) >= 0 &&
-          ["unsupported", "unconfigured", "disconnected", "expired", "ready"].includes(String(item.state)) &&
-          typeof item.available === "boolean")))) invalidResponse("/api/tools");
+      (value.providers !== undefined && (!Array.isArray(value.providers) || !value.providers.every(validProvider)))) {
+    invalidResponse("/api/tools");
+  }
   return value;
 }
 function manifest(value: unknown, toolId: string): unknown {
@@ -145,7 +155,8 @@ function receiptResult(value: unknown, path: string,
   expected: { workspaceId: string; toolId?: string; connectionId?: string; approvalId?: string }): void {
   const checked = receipt(value, path, expected);
   result(checked);
-  if (["reserved", "running", "uncertain"].includes(String(checked.status))) process.exitCode = 23;
+  if (checked.status === "reserved" || checked.status === "running") process.exitCode = 25;
+  else if (checked.status === "uncertain") process.exitCode = 23;
   else if (checked.status === "failed") process.exitCode = 1;
 }
 function executionInProgress(error: unknown, identity: { idempotencyKey: string } | { approvalId: string }): never {
@@ -170,43 +181,62 @@ function ambiguousMutationResponse(error: unknown,
   if (operation !== "approval request" &&
       ((error.status === 502 && body.error === "EXECUTION_FAILED" && validReceiptId) ||
        (error.status === 504 && body.error === "EXECUTION_INVOCATION_TIMEOUT"))) throw error;
-  throw new CLIError(body.error === "EXECUTION_OUTCOME_UNKNOWN"
-    ? "EXECUTION_OUTCOME_UNKNOWN" : operation === "approval request"
-      ? "APPROVAL_DELIVERY_UNCERTAIN" : "EXECUTION_EFFECT_UNCERTAIN",
+  let code = "EXECUTION_EFFECT_UNCERTAIN";
+  if (body.error === "EXECUTION_OUTCOME_UNKNOWN") code = "EXECUTION_OUTCOME_UNKNOWN";
+  else if (operation === "approval request") code = "APPROVAL_DELIVERY_UNCERTAIN";
+  throw new CLIError(code,
   `${operation} response cannot prove whether the request committed; recover with the original request identity`,
   23, { ...identity, ...receiptId });
 }
+function httpBody(error: unknown): { error?: unknown; receiptId?: unknown } | null {
+  return error instanceof OMRHttpError ? error.body as { error?: unknown; receiptId?: unknown } | null : null;
+}
+function failureCode(error: unknown, body: ReturnType<typeof httpBody>): string {
+  if (error instanceof CLIError) return error.code;
+  if (error instanceof InvalidProfileNameError) return "INPUT_INVALID";
+  if (error instanceof ProfileRecoveryRequiredError) return "PROFILE_RECOVERY_REQUIRED";
+  if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) &&
+      ["/api/tools/execute", "/api/approvals/execute"].includes(error.path)) return "EXECUTION_EFFECT_UNCERTAIN";
+  if (typeof body?.error === "string" &&
+      /^(?:EXECUTION|APPROVAL|CLIENT|DEVICE|CONNECTION|TOOL|WORKSPACE|REQUEST|AUTHFN|PROVIDER|RUNTIME)_[A-Z0-9_]{1,64}$/.test(body.error)) {
+    return body.error;
+  }
+  return error instanceof OMRHttpError ? "HTTP_ERROR" : "CLI_ERROR";
+}
+function failureExit(error: unknown, code: string): number {
+  if (error instanceof CLIError) return error.exitCode;
+  if (error instanceof InvalidProfileNameError) return 2;
+  if (code === "EXECUTION_APPROVAL_REQUIRED" || code === "DEVICE_AUTHORIZATION_PENDING") return 20;
+  if (code === "EXECUTION_OUTCOME_UNKNOWN" || code === "EXECUTION_EFFECT_UNCERTAIN") return 23;
+  if (code === "DEVICE_AUTHORIZATION_EXPIRED") return 22;
+  if (code === "EXECUTION_INVOCATION_TIMEOUT") return 24;
+  if (error instanceof OMRHttpError && error.status === 401) return 3;
+  if (error instanceof OMRHttpError && error.status === 400) return 2;
+  return 1;
+}
+function failureMessage(error: unknown): string {
+  if (error instanceof CLIError) return error.message;
+  if (error instanceof OMRHttpError) return `OMR request failed (${error.status})`;
+  if (error instanceof OMRTransportError) return "OMR transport failed";
+  if (error instanceof OMRProtocolError) return "Invalid OMR response";
+  if (error instanceof SyntaxError) return "Invalid JSON input";
+  if (error instanceof Error) return error.message;
+  return "CLI failed";
+}
+function failureDetails(error: unknown, body: ReturnType<typeof httpBody>): unknown {
+  if (error instanceof CLIError) return error.details;
+  if (typeof body?.receiptId === "string" &&
+      /^(?:execution|receipt)_[A-Za-z0-9_-]{1,100}$/.test(body.receiptId)) return { receiptId: body.receiptId };
+  return undefined;
+}
 function fail(error: unknown, json: boolean): void {
-  const body = error instanceof OMRHttpError ? error.body as { error?: unknown; receiptId?: unknown } | null : null;
-  const remoteCode = typeof body?.error === "string" &&
-    /^(?:EXECUTION|APPROVAL|CLIENT|DEVICE|CONNECTION|TOOL|WORKSPACE|REQUEST|AUTHFN|PROVIDER|RUNTIME)_[A-Z0-9_]{1,64}$/.test(body.error)
-      ? body.error : undefined;
-  const code = error instanceof CLIError ? error.code :
-    error instanceof InvalidProfileNameError ? "INPUT_INVALID" :
-    (error instanceof OMRTransportError || error instanceof OMRProtocolError) &&
-      ["/api/tools/execute", "/api/approvals/execute"].includes(error.path)
-      ? "EXECUTION_EFFECT_UNCERTAIN" :
-    remoteCode ?? (error instanceof OMRHttpError ? "HTTP_ERROR" : "CLI_ERROR");
-  const exit = error instanceof CLIError ? error.exitCode :
-    error instanceof InvalidProfileNameError ? 2 :
-    code === "EXECUTION_APPROVAL_REQUIRED" || code === "DEVICE_AUTHORIZATION_PENDING" ? 20 :
-    code === "EXECUTION_OUTCOME_UNKNOWN" || code === "EXECUTION_EFFECT_UNCERTAIN" ? 23 :
-    code === "DEVICE_AUTHORIZATION_EXPIRED" ? 22 :
-    code === "EXECUTION_INVOCATION_TIMEOUT" ? 24 :
-    error instanceof OMRHttpError && error.status === 401 ? 3 :
-    error instanceof OMRHttpError && error.status === 400 ? 2 : 1;
-  const message = error instanceof CLIError ? error.message :
-    error instanceof OMRHttpError ? `OMR request failed (${error.status})` :
-    error instanceof OMRTransportError ? "OMR transport failed" :
-    error instanceof OMRProtocolError ? "Invalid OMR response" :
-    error instanceof SyntaxError ? "Invalid JSON input" :
-    error instanceof Error ? error.message : "CLI failed";
-  const details = error instanceof CLIError ? error.details :
-    typeof body?.receiptId === "string" && /^(?:execution|receipt)_[A-Za-z0-9_-]{1,100}$/.test(body.receiptId)
-      ? { receiptId: body.receiptId } : undefined;
-  info(json ? JSON.stringify({ error: code, message, ...(details ? { details } : {}) }) :
-    `${code}: ${message}${details ? ` ${JSON.stringify(details)}` : ""}`);
-  process.exitCode = exit;
+  const body = httpBody(error);
+  const code = failureCode(error, body);
+  const message = failureMessage(error);
+  const details = failureDetails(error, body);
+  if (json) info(JSON.stringify({ error: code, message, ...(details ? { details } : {}) }));
+  else info(`${code}: ${message}${details ? ` ${JSON.stringify(details)}` : ""}`);
+  process.exitCode = failureExit(error, code);
 }
 
 function current(parsed: Parsed): { api: OMRClient; workspaceId: string; profile?: string;
@@ -278,7 +308,7 @@ async function login(parsed: Parsed): Promise<void> {
       }
       try { store.save(name, { backend: baseUrl, key: grant.credential, workspaceId: grant.workspaceId }); }
       catch { throw new CLIError("LOCAL_STORAGE_FAILED",
-        "Device grant was issued but could not be stored; revoke it at /app/clients before trying again", 1); }
+        `Device grant could not be fully activated; inspect --profile ${name} and /app/clients before trying again`, 1); }
       result({ profile: name, workspaceId: grant.workspaceId, status: "saved" });
       return;
     } catch (error) {
@@ -299,7 +329,8 @@ function approvalResult(value: unknown, expected: { id?: string; workspaceId: st
   const approval = checkedApproval(value, "/api/approvals/status", expected);
   result(approval);
   if (approval.status === "rejected") process.exitCode = 21;
-  else if (approval.status === "uncertain" || approval.status === "executing") process.exitCode = 23;
+  else if (approval.status === "executing") process.exitCode = 25;
+  else if (approval.status === "uncertain") process.exitCode = 23;
   else if (approval.status === "expired" ||
       ((approval.status === "pending" || approval.status === "approved") &&
       typeof approval.expiresAt === "number" && approval.expiresAt <= Date.now())) process.exitCode = 22;
@@ -320,6 +351,215 @@ async function requestApproval(api: OMRClient, input: Parameters<OMRClient["requ
   }
 }
 
+type CommandAction = "none" | "subject";
+const commandActions: Record<string, Record<string, CommandAction>> = {
+  login: { "": "none" }, logout: { "": "none" },
+  profiles: { list: "none", show: "none", use: "subject" },
+  workspaces: { list: "none", show: "none", use: "subject" },
+  connections: { list: "none", select: "subject" },
+  tools: { list: "none", search: "none", inspect: "subject", get: "subject", run: "subject" },
+  approvals: { request: "subject", status: "subject", execute: "subject" },
+};
+
+function validateCommand(command: string, action: string | undefined, subject: string | undefined): void {
+  const shape = commandActions[command]?.[action ?? ""];
+  if (!shape || (shape === "subject" && !subject) || (shape === "none" && subject)) {
+    throw new CLIError("USAGE", "Unknown or incomplete command; run omr --help", 2);
+  }
+}
+
+function profileCommand(parsed: Parsed, action: string, subject?: string): void {
+  if (action === "list") return result(listProfiles(parsed.options.has("json")));
+  if (action === "show") {
+    const name = profileName(parsed);
+    const { backend, workspaceId } = store.get(name);
+    return result({ name, backend, workspaceId });
+  }
+  store.use(subject!);
+  result({ active: subject });
+}
+
+function headlessEnvironment(): string[] | undefined {
+  const env = [process.env.OMR_BACKEND, process.env.OMR_API_KEY, process.env.OMR_WORKSPACE_ID];
+  if (!env.some(Boolean)) return undefined;
+  if (!env.every(Boolean)) {
+    throw new CLIError("HEADLESS_INCOMPLETE", "Set OMR_BACKEND, OMR_API_KEY, and OMR_WORKSPACE_ID together", 2);
+  }
+  return env as string[];
+}
+
+function workspaceList(parsed: Parsed): void {
+  const env = headlessEnvironment();
+  if (env) return result([{ workspaceId: env[2], source: "environment" }]);
+  const selected = opt(parsed, "profile") ?? process.env.OMR_PROFILE;
+  if (selected) store.get(assertProfileName(selected));
+  result(listProfiles(parsed.options.has("json")).map(({ name, backend, workspaceId, active }) =>
+    ({ profile: name, backend, workspaceId, active })));
+}
+
+async function logout(parsed: Parsed): Promise<void> {
+  if (headlessEnvironment()) {
+    throw new CLIError("HEADLESS_READ_ONLY", "Headless credentials have no local profile; unset them to log out a saved profile", 2);
+  }
+  const name = profileName(parsed);
+  let revokedGrant: { backend: string; key: string } | undefined;
+  if (!parsed.options.has("local")) {
+    const { backend, key } = store.get(name);
+    revokedGrant = { backend, key };
+    try {
+      const response = await new OMRClient({ baseUrl: backend, credential: key }).revokeSelf();
+      if (!object(response) || response.revoked !== true) invalidResponse("/api/client-grants/revoke-self");
+    } catch (error) {
+      if (error instanceof OMRHttpError || error instanceof OMRTransportError || error instanceof OMRProtocolError) {
+        throw new CLIError("REVOCATION_UNVERIFIED",
+          "The server could not verify revocation; keep this profile and revoke the grant in /app/clients, or use logout --local after doing so", 3);
+      }
+      throw error;
+    }
+  }
+  if (revokedGrant) {
+    if (!store.removeIfGrantMatches(name, revokedGrant)) {
+      throw new CLIError("PROFILE_CHANGED",
+        "The revoked profile was removed or replaced while logout was in progress; inspect the current profile before retrying", 1);
+    }
+  } else store.remove(name);
+  result({ profile: name, revoked: !!revokedGrant });
+}
+
+async function workspaceCommand(parsed: Parsed, action: string, subject: string | undefined,
+  api: OMRClient, savedWorkspace: string, profile?: string, grant?: { backend: string; key: string }): Promise<void> {
+  if (action === "show") return result({ workspaceId: savedWorkspace, profile: profile ?? null });
+  if (!profile || !grant) throw new CLIError("HEADLESS_READ_ONLY", "Headless workspace is set by OMR_WORKSPACE_ID", 2);
+  discovery(await api.discoverTools({ workspaceId: subject!, limit: 1 }));
+  if (!store.setWorkspaceIfGrantMatches(profile, subject!, grant)) {
+    throw new CLIError("PROFILE_CHANGED",
+      "The profile was removed or replaced while workspace selection was in progress; inspect the current profile before retrying", 1);
+  }
+  result({ workspaceId: subject, profile });
+}
+
+async function connectionCommand(parsed: Parsed, action: string, subject: string | undefined,
+  api: OMRClient, workspaceId: string): Promise<void> {
+  if (action === "list") {
+    const response = await api.listConnections(workspaceId, opt(parsed, "provider"));
+    if (!Array.isArray(response) || !response.every((connection: unknown) =>
+      object(connection) && nonempty(connection.id) && connection.workspaceId === workspaceId &&
+      nonempty(connection.provider) && (!opt(parsed, "provider") || connection.provider === opt(parsed, "provider")))) {
+      invalidResponse("/api/connections/list");
+    }
+    return result(response);
+  }
+  const provider = required(parsed, "provider");
+  const response = await api.selectConnection({ workspaceId, provider, connectionId: subject! });
+  if (!object(response) || response.workspaceId !== workspaceId || response.provider !== provider ||
+      response.connectionId !== subject || !nonempty(response.userId)) invalidResponse("/api/connections/select");
+  result(response);
+}
+
+async function toolList(parsed: Parsed, action: string, api: OMRClient, workspaceId: string): Promise<void> {
+  if (action === "search") required(parsed, "query");
+  const effect = opt(parsed, "effect");
+  if (effect && !["read", "write", "destructive", "unknown"].includes(effect)) {
+    throw new CLIError("INPUT_INVALID", "Invalid --effect", 2);
+  }
+  const limit = opt(parsed, "limit") ? Number(opt(parsed, "limit")) : 100;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new CLIError("INPUT_INVALID", "--limit must be 1..100", 2);
+  }
+  result(discovery(await api.discoverTools({ workspaceId, provider: opt(parsed, "provider"),
+    query: opt(parsed, "query"), effect: effect as ToolEffect | undefined, limit, cursor: opt(parsed, "cursor") }),
+  opt(parsed, "provider")));
+}
+
+async function toolRun(parsed: Parsed, subject: string, api: OMRClient, workspaceId: string): Promise<void> {
+  const input = params(parsed);
+  const idempotencyKey = opt(parsed, "idempotency") ?? randomUUID();
+  if (!opt(parsed, "idempotency")) recordRetryKey(idempotencyKey, parsed.options.has("json"));
+  const connectionId = opt(parsed, "connection");
+  try {
+    return receiptResult(await api.execute({ workspaceId, toolId: subject, params: input,
+      ...(connectionId ? { connectionId } : {}), idempotencyKey }),
+    "/api/tools/execute", { workspaceId, toolId: subject, connectionId });
+  } catch (error) {
+    if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) && error.path === "/api/tools/execute") {
+      throw new CLIError("EXECUTION_EFFECT_UNCERTAIN", "Execution response is missing or invalid; retry only with the same idempotency key", 23,
+        { idempotencyKey });
+    }
+    if (error instanceof OMRHttpError &&
+        (error.body as { error?: unknown } | null)?.error === "EXECUTION_IN_PROGRESS") {
+      executionInProgress(error, { idempotencyKey });
+    }
+    if (error instanceof OMRHttpError && error.status >= 500) {
+      ambiguousMutationResponse(error, { idempotencyKey }, "tool execution");
+    }
+    if (!(error instanceof OMRHttpError) ||
+        (error.body as { error?: unknown } | null)?.error !== "EXECUTION_APPROVAL_REQUIRED") throw error;
+    const approval = await requestApproval(api, { workspaceId, toolId: subject, params: input,
+      ...(connectionId ? { connectionId } : {}), idempotencyKey });
+    return approvalResult({ ...approval, idempotencyKey }, { workspaceId, toolId: subject, connectionId });
+  }
+}
+
+async function toolCommand(parsed: Parsed, action: string, subject: string | undefined,
+  api: OMRClient, workspaceId: string): Promise<void> {
+  if (action === "list" || action === "search") return toolList(parsed, action, api, workspaceId);
+  if (action === "inspect" || action === "get") {
+    return result(manifest(await api.getTool(subject!, workspaceId), subject!));
+  }
+  return toolRun(parsed, subject!, api, workspaceId);
+}
+
+function reportableUnavailableStatus(status: Record<string, unknown>): boolean {
+  if (["rejected", "pending", "uncertain", "executing", "failed"].includes(String(status.status))) return true;
+  return typeof status.expiresAt === "number" && status.expiresAt <= Date.now() && status.status !== "consumed";
+}
+
+async function reportUnavailableApproval(subject: string, api: OMRClient, workspaceId: string): Promise<boolean> {
+  try {
+    const status = checkedApproval(await api.approvalStatus(subject), "/api/approvals/status",
+      { id: subject, workspaceId });
+    if (!reportableUnavailableStatus(status)) return false;
+    approvalResult(status, { id: subject, workspaceId });
+    return true;
+  } catch { return false; }
+}
+
+async function approvalExecute(subject: string, api: OMRClient, workspaceId: string): Promise<void> {
+  try {
+    return receiptResult(await api.executeApproved(subject), "/api/approvals/execute",
+      { workspaceId, approvalId: subject });
+  } catch (error) {
+    if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) && error.path === "/api/approvals/execute") {
+      throw new CLIError("EXECUTION_EFFECT_UNCERTAIN", "Approved execution response is missing or invalid; check the approval status before retrying", 23,
+        { approvalId: subject });
+    }
+    if (error instanceof OMRHttpError &&
+        (error.body as { error?: unknown } | null)?.error === "EXECUTION_IN_PROGRESS") {
+      executionInProgress(error, { approvalId: subject });
+    }
+    if (error instanceof OMRHttpError && error.status >= 500) {
+      ambiguousMutationResponse(error, { approvalId: subject }, "approved execution");
+    }
+    if (error instanceof OMRHttpError &&
+        (error.body as { error?: unknown } | null)?.error === "APPROVAL_UNAVAILABLE") {
+      if (await reportUnavailableApproval(subject, api, workspaceId)) return;
+    }
+    throw error;
+  }
+}
+
+async function approvalCommand(parsed: Parsed, action: string, subject: string,
+  api: OMRClient, workspaceId: string): Promise<void> {
+  if (action === "status") {
+    return approvalResult(await api.approvalStatus(subject), { id: subject, workspaceId });
+  }
+  if (action === "execute") return approvalExecute(subject, api, workspaceId);
+  const connectionId = opt(parsed, "connection");
+  const approval = await requestApproval(api, { workspaceId, toolId: subject, params: params(parsed),
+    ...(connectionId ? { connectionId } : {}), idempotencyKey: required(parsed, "idempotency") });
+  return approvalResult(approval, { workspaceId, toolId: subject, connectionId });
+}
+
 async function main(parsed: Parsed): Promise<void> {
   const [command, action, subject, ...extra] = parsed.positionals;
   if (parsed.options.has("help") || !command || command === "help") {
@@ -327,178 +567,23 @@ async function main(parsed: Parsed): Promise<void> {
     return;
   }
   if (extra.length) throw new CLIError("INPUT_INVALID", "Too many positional arguments", 2);
-  const valid = (command === "login" && !action) || (command === "logout" && !action) ||
-    (command === "profiles" && ((["list", "show"].includes(action ?? "") && !subject) ||
-      (action === "use" && !!subject))) ||
-    (command === "workspaces" && ((["list", "show"].includes(action ?? "") && !subject) ||
-      (action === "use" && !!subject))) ||
-    (command === "connections" && ((action === "list" && !subject) ||
-      (action === "select" && !!subject))) ||
-    (command === "tools" && ((["list", "search"].includes(action ?? "") && !subject) ||
-      (["inspect", "get", "run"].includes(action ?? "") && !!subject))) ||
-    (command === "approvals" && (["request", "status", "execute"].includes(action ?? "") && !!subject));
-  if (!valid) throw new CLIError("USAGE", "Unknown or incomplete command; run omr --help", 2);
-  if (command === "login" && !action) return login(parsed);
-  if (command === "profiles") {
-    if (action === "list" && !subject) return result(listProfiles(parsed.options.has("json")));
-    if (action === "show" && !subject) {
-      const name = profileName(parsed); const { backend, workspaceId } = store.get(name);
-      return result({ name, backend, workspaceId });
-    }
-    if (action === "use" && subject) { store.use(subject); return result({ active: subject }); }
-  }
-  if (command === "workspaces" && action === "list" && !subject) {
-    const env = [process.env.OMR_BACKEND, process.env.OMR_API_KEY, process.env.OMR_WORKSPACE_ID];
-    if (env.some(Boolean)) {
-      if (!env.every(Boolean)) throw new CLIError("HEADLESS_INCOMPLETE", "Set OMR_BACKEND, OMR_API_KEY, and OMR_WORKSPACE_ID together", 2);
-      return result([{ workspaceId: env[2], source: "environment" }]);
-    }
-    const selected = opt(parsed, "profile") ?? process.env.OMR_PROFILE;
-    if (selected) store.get(assertProfileName(selected));
-    return result(listProfiles(parsed.options.has("json")).map(({ name, backend, workspaceId, active }) =>
-      ({ profile: name, backend, workspaceId, active })));
-  }
-  if (command === "logout" && !action) {
-    const env = [process.env.OMR_BACKEND, process.env.OMR_API_KEY, process.env.OMR_WORKSPACE_ID];
-    if (env.some(Boolean)) {
-      if (!env.every(Boolean)) throw new CLIError("HEADLESS_INCOMPLETE", "Set OMR_BACKEND, OMR_API_KEY, and OMR_WORKSPACE_ID together", 2);
-      throw new CLIError("HEADLESS_READ_ONLY", "Headless credentials have no local profile; unset them to log out a saved profile", 2);
-    }
-    const name = profileName(parsed);
-    let revokedGrant: { backend: string; key: string } | undefined;
-    if (!parsed.options.has("local")) {
-      const { backend, key } = store.get(name);
-      revokedGrant = { backend, key };
-      try {
-        const response = await new OMRClient({ baseUrl: backend, credential: key }).revokeSelf();
-        if (!object(response) || response.revoked !== true) invalidResponse("/api/client-grants/revoke-self");
-      }
-      catch (error) {
-        if (error instanceof OMRHttpError || error instanceof OMRTransportError || error instanceof OMRProtocolError) {
-          throw new CLIError("REVOCATION_UNVERIFIED",
-            "The server could not verify revocation; keep this profile and revoke the grant in /app/clients, or use logout --local after doing so", 3);
-        }
-        throw error;
-      }
-    }
-    if (revokedGrant) {
-      if (!store.removeIfGrantMatches(name, revokedGrant)) {
-        throw new CLIError("PROFILE_CHANGED",
-          "The revoked profile was removed or replaced while logout was in progress; inspect the current profile before retrying", 1);
-      }
-    } else store.remove(name);
-    result({ profile: name, revoked: !!revokedGrant }); return;
-  }
+  validateCommand(command, action, subject);
+  if (command === "login") return login(parsed);
+  if (command === "profiles") return profileCommand(parsed, action!, subject);
+  if (command === "workspaces" && action === "list") return workspaceList(parsed);
+  if (command === "logout") return logout(parsed);
   const { api, workspaceId: savedWorkspace, profile, grant } = current(parsed);
   const workspaceId = workspace(parsed, savedWorkspace);
   if (command === "workspaces") {
-    if (action === "show" && !subject) return result({ workspaceId: savedWorkspace, profile: profile ?? null });
-    if (action === "use" && subject) {
-      if (!profile || !grant) throw new CLIError("HEADLESS_READ_ONLY", "Headless workspace is set by OMR_WORKSPACE_ID", 2);
-      discovery(await api.discoverTools({ workspaceId: subject, limit: 1 }));
-      if (!store.setWorkspaceIfGrantMatches(profile, subject, grant)) {
-        throw new CLIError("PROFILE_CHANGED",
-          "The profile was removed or replaced while workspace selection was in progress; inspect the current profile before retrying", 1);
-      }
-      return result({ workspaceId: subject, profile });
-    }
+    return workspaceCommand(parsed, action!, subject, api, savedWorkspace, profile, grant);
   }
-  if (command === "connections") {
-    if (action === "list" && !subject) {
-      const response = await api.listConnections(workspaceId, opt(parsed, "provider"));
-      if (!Array.isArray(response) || !response.every((connection: unknown) =>
-        object(connection) && nonempty(connection.id) && connection.workspaceId === workspaceId &&
-        nonempty(connection.provider) && (!opt(parsed, "provider") || connection.provider === opt(parsed, "provider"))))
-        invalidResponse("/api/connections/list");
-      return result(response);
-    }
-    if (action === "select" && subject) {
-      const provider = required(parsed, "provider");
-      const response = await api.selectConnection({ workspaceId,
-        provider, connectionId: subject });
-      if (!object(response) || response.workspaceId !== workspaceId || response.provider !== provider ||
-          response.connectionId !== subject || !nonempty(response.userId)) invalidResponse("/api/connections/select");
-      return result(response);
-    }
-  }
-  if (command === "tools") {
-    if ((action === "list" || action === "search") && !subject) {
-      if (action === "search") required(parsed, "query");
-      const effect = opt(parsed, "effect");
-      if (effect && !["read", "write", "destructive", "unknown"].includes(effect))
-        throw new CLIError("INPUT_INVALID", "Invalid --effect", 2);
-      const limit = opt(parsed, "limit") ? Number(opt(parsed, "limit")) : 100;
-      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new CLIError("INPUT_INVALID", "--limit must be 1..100", 2);
-      return result(discovery(await api.discoverTools({ workspaceId, provider: opt(parsed, "provider"),
-        query: opt(parsed, "query"), effect: effect as ToolEffect | undefined, limit, cursor: opt(parsed, "cursor") }),
-        opt(parsed, "provider")));
-    }
-    if ((action === "inspect" || action === "get") && subject) return result(manifest(await api.getTool(subject, workspaceId), subject));
-    if (action === "run" && subject) {
-      const input = params(parsed);
-      const idempotencyKey = opt(parsed, "idempotency") ?? randomUUID();
-      if (!opt(parsed, "idempotency")) recordRetryKey(idempotencyKey, parsed.options.has("json"));
-      try {
-        return receiptResult(await api.execute({ workspaceId, toolId: subject, params: input,
-          ...(opt(parsed, "connection") ? { connectionId: opt(parsed, "connection") } : {}), idempotencyKey }),
-          "/api/tools/execute", { workspaceId, toolId: subject, connectionId: opt(parsed, "connection") });
-      } catch (error) {
-        if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) && error.path === "/api/tools/execute") {
-          throw new CLIError("EXECUTION_EFFECT_UNCERTAIN", "Execution response is missing or invalid; retry only with the same idempotency key", 23,
-            { idempotencyKey });
-        }
-        if (error instanceof OMRHttpError &&
-            (error.body as { error?: unknown } | null)?.error === "EXECUTION_IN_PROGRESS")
-          executionInProgress(error, { idempotencyKey });
-        if (error instanceof OMRHttpError && error.status >= 500)
-          ambiguousMutationResponse(error, { idempotencyKey }, "tool execution");
-        if (!(error instanceof OMRHttpError) ||
-            (error.body as { error?: unknown } | null)?.error !== "EXECUTION_APPROVAL_REQUIRED") throw error;
-        const approval = await requestApproval(api, { workspaceId, toolId: subject, params: input,
-          ...(opt(parsed, "connection") ? { connectionId: opt(parsed, "connection") } : {}), idempotencyKey });
-        return approvalResult({ ...approval, idempotencyKey }, { workspaceId, toolId: subject,
-          connectionId: opt(parsed, "connection") });
-      }
-    }
-  }
-  if (command === "approvals") {
-    if (action === "request" && subject) {
-      const approval = await requestApproval(api, { workspaceId, toolId: subject, params: params(parsed),
-        ...(opt(parsed, "connection") ? { connectionId: opt(parsed, "connection") } : {}),
-        idempotencyKey: required(parsed, "idempotency") });
-      return approvalResult(approval, { workspaceId, toolId: subject, connectionId: opt(parsed, "connection") });
-    }
-    if (action === "status" && subject) return approvalResult(await api.approvalStatus(subject),
-      { id: subject, workspaceId });
-    if (action === "execute" && subject) {
-      try { return receiptResult(await api.executeApproved(subject), "/api/approvals/execute",
-        { workspaceId, approvalId: subject }); }
-      catch (error) {
-        if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) && error.path === "/api/approvals/execute") {
-          throw new CLIError("EXECUTION_EFFECT_UNCERTAIN", "Approved execution response is missing or invalid; check the approval status before retrying", 23,
-            { approvalId: subject });
-        }
-        if (error instanceof OMRHttpError &&
-            (error.body as { error?: unknown } | null)?.error === "EXECUTION_IN_PROGRESS")
-          executionInProgress(error, { approvalId: subject });
-        if (error instanceof OMRHttpError && error.status >= 500)
-          ambiguousMutationResponse(error, { approvalId: subject }, "approved execution");
-        if (error instanceof OMRHttpError &&
-            (error.body as { error?: unknown } | null)?.error === "APPROVAL_UNAVAILABLE") {
-          const status = checkedApproval(await api.approvalStatus(subject), "/api/approvals/status",
-            { id: subject, workspaceId });
-          if (["rejected", "pending", "uncertain", "executing", "failed"].includes(String(status.status)) ||
-              (typeof status.expiresAt === "number" && status.expiresAt <= Date.now() &&
-                status.status !== "consumed")) return approvalResult(status, { id: subject, workspaceId });
-        }
-        throw error;
-      }
-    }
-  }
-  throw new CLIError("USAGE", "Unknown or incomplete command; run omr --help", 2);
+  if (command === "connections") return connectionCommand(parsed, action!, subject, api, workspaceId);
+  if (command === "tools") return toolCommand(parsed, action!, subject, api, workspaceId);
+  return approvalCommand(parsed, action!, subject!, api, workspaceId);
 }
-
-let parsed: Parsed;
-try { parsed = parse(process.argv.slice(2)); }
-catch (error) { fail(error, process.argv.includes("--json")); process.exit(); }
-main(parsed).catch((error) => fail(error, parsed.options.has("json")));
+try {
+  const parsed = parse(process.argv.slice(2));
+  await main(parsed);
+} catch (error) {
+  fail(error, process.argv.includes("--json"));
+}

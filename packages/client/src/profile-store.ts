@@ -1,6 +1,6 @@
 import { closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, chmodSync, readdirSync, linkSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import ini from "ini";
 
 export interface OMRProfile { backend: string; key: string; workspaceId: string }
@@ -9,13 +9,17 @@ const waitArray = new Int32Array(new SharedArrayBuffer(4));
 
 export class InvalidProfileNameError extends Error {}
 export class InvalidActiveProfileError extends Error {}
+export class ProfileMissingError extends Error {}
+export class ProfileRecoveryRequiredError extends Error {}
 
 export function profileRoot(): string {
   return process.env.OMR_CONFIG_DIR ?? join(homedir(), ".config", "oh-my-router");
 }
 
 export function assertProfileName(name: string): string {
-  if (!NAME.test(name)) throw new InvalidProfileNameError("Invalid profile name (use letters, digits, _ or -)");
+  if (NAME.exec(name)?.[0] !== name) {
+    throw new InvalidProfileNameError("Invalid profile name (use letters, digits, _ or -)");
+  }
   return name;
 }
 
@@ -55,7 +59,25 @@ function safeProfileFile(path: string): void {
 
 function lstatExists(path: string): boolean {
   try { lstatSync(path); return true; }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function withCleanup<T>(operation: () => T, cleanup: () => void): T {
+  let value: T | undefined;
+  let primary: unknown;
+  let failed = false;
+  try { value = operation(); }
+  catch (error) { primary = error; failed = true; }
+  try { cleanup(); }
+  catch (cleanupError) {
+    if (!failed) throw cleanupError;
+    if (primary instanceof Error && primary.cause === undefined) primary.cause = cleanupError;
+  }
+  if (failed) throw primary;
+  return value as T;
 }
 
 function writePrivate(path: string, contents: string, exclusive = false): void {
@@ -65,16 +87,53 @@ function writePrivate(path: string, contents: string, exclusive = false): void {
   try {
     writeFileSync(fd, contents, "utf8");
     if (process.platform !== "win32") chmodSync(temp, 0o600);
-    if (exclusive) fsyncSync(fd);
+    // The next operation may erase the only other copy of a live grant.
+    // Persist both contents and the published directory entry first.
+    fsyncSync(fd);
     closeSync(fd);
     if (exclusive) {
       linkSync(temp, path);
       rmSync(temp);
     } else renameSync(temp, path);
+    if (process.platform !== "win32") {
+      const parent = openSync(dirname(path), "r");
+      try { fsyncSync(parent); }
+      finally { closeSync(parent); }
+    }
   } catch (error) {
     try { closeSync(fd); } catch { /* already closed */ }
-    rmSync(temp, { force: true });
+    try { rmSync(temp, { force: true }); }
+    catch (cleanupError) {
+      if (error instanceof Error && error.cause === undefined) error.cause = cleanupError;
+    }
     throw error;
+  }
+}
+
+function processAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
+}
+
+function removeStaleLock(lock: string): void {
+  let stats;
+  let contents;
+  try {
+    stats = lstatSync(lock);
+    if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("Credential lock must be a regular file");
+    contents = readFileSync(lock, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  const owner = /^([1-9]\d*)\n$/.exec(contents);
+  if ((owner && processAlive(Number(owner[1]))) ||
+      (!owner && Date.now() - stats.mtimeMs <= 250)) return;
+  try {
+    const again = lstatSync(lock);
+    if (again.dev === stats.dev && again.ino === stats.ino && again.mtimeMs === stats.mtimeMs) rmSync(lock);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 }
 
@@ -102,79 +161,58 @@ export class OMRProfileStore {
       : {};
   }
 
-  // The old credential file contains every profile. Serialize updates to it and profile
-  // transitions so two CLI processes cannot restore a removed grant from stale input.
-  private locked<T>(operation: () => T): T {
-    this.prepare();
+  private acquireCredentialLock(): { fd: number; lock: string } {
     const lock = `${this.legacyCredentials}.lock`;
-    const reclaim = `${lock}.reclaim`;
     const deadline = Date.now() + 3_000;
-    let fd: number;
     for (;;) {
       try {
         // Publish a complete owner record in one filesystem operation. A live
         // process paused here must never expose an empty lock as stale.
         writePrivate(lock, `${process.pid}\n`, true);
-        fd = openSync(lock, "r");
-        break;
+        return { fd: openSync(lock, "r"), lock };
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        // Only one process may inspect and remove a stale lock at a time.
-        // Without this guard, an inode check followed by unlink can delete a
-        // replacement lock installed by another reclaimer in between.
-        try {
-          writePrivate(reclaim, `${process.pid}\n`, true);
-        } catch (cause) {
-          if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
-          if (Date.now() >= deadline) throw new Error("Credential recovery is busy; inspect credentials.lock.reclaim before retrying");
-          Atomics.wait(waitArray, 0, 0, 25);
-          continue;
-        }
-        try {
-          let stats;
-          let contents;
-          try {
-            stats = lstatSync(lock);
-            if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("Credential lock must be a regular file");
-            contents = readFileSync(lock, "utf8");
-          } catch (cause) {
-            if ((cause as NodeJS.ErrnoException).code === "ENOENT") continue;
-            throw cause;
-          }
-          const owner = /^([1-9]\d*)\n$/.exec(contents);
-          let alive = false;
-          if (owner) {
-            try { process.kill(Number(owner[1]), 0); alive = true; }
-            catch (cause) { alive = (cause as NodeJS.ErrnoException).code !== "ESRCH"; }
-          }
-          // Only older empty locks from an interrupted previous CLI need a grace period.
-          if (!alive && (owner || Date.now() - stats.mtimeMs > 250)) {
-            try {
-              const again = lstatSync(lock);
-              if (again.dev === stats.dev && again.ino === stats.ino && again.mtimeMs === stats.mtimeMs) rmSync(lock);
-            } catch (cause) {
-              if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
-            }
-          }
-        } finally {
-          rmSync(reclaim);
-        }
+        this.reclaimCredentialLock(lock, deadline);
         if (Date.now() >= deadline) throw new Error("Credential store is busy; retry the command");
         Atomics.wait(waitArray, 0, 0, 25);
       }
     }
+  }
+
+  private reclaimCredentialLock(lock: string, deadline: number): void {
+    const reclaim = `${lock}.reclaim`;
+    // Serialize stale-lock removal so a second reclaimer cannot unlink a new owner.
+    try { writePrivate(reclaim, `${process.pid}\n`, true); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (Date.now() >= deadline) {
+        throw new Error("Credential recovery is busy; inspect credentials.lock.reclaim before retrying");
+      }
+      return;
+    }
+    withCleanup(() => removeStaleLock(lock), () => rmSync(reclaim));
+  }
+
+  private releaseCredentialLock(fd: number, lock: string): void {
+    const owned = fstatSync(fd);
+    closeSync(fd);
     try {
+      const current = lstatSync(lock);
+      if (current.dev === owned.dev && current.ino === owned.ino) rmSync(lock);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+
+  // The old credential file contains every profile. Serialize updates to it and profile
+  // transitions so two CLI processes cannot restore a removed grant from stale input.
+  private locked<T>(operation: () => T): T {
+    this.prepare();
+    const { fd, lock } = this.acquireCredentialLock();
+    return withCleanup(() => {
       this.cleanupInterruptedWrites();
       return operation();
-    } finally {
-      const owned = fstatSync(fd);
-      closeSync(fd);
-      try {
-        const current = lstatSync(lock);
-        if (current.dev === owned.dev && current.ino === owned.ino) rmSync(lock);
-      }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-    }
+    }, () => this.releaseCredentialLock(fd, lock));
   }
 
   private removeLegacy(name: string): void {
@@ -187,26 +225,27 @@ export class OMRProfileStore {
   }
 
   // A killed writer can leave a private copy of a grant beside its destination.
-  // Only remove our own temp naming pattern after taking the credential lock,
-  // and leave files belonging to a process that may still be writing.
+  // Only remove our own temp naming pattern after taking the credential lock.
   private cleanupInterruptedWrites(): void {
     for (const directory of [this.root, this.profiles]) {
-      for (const entry of readdirSync(directory)) {
-        const match = /^(active-profile|credentials(?:\.lock)?|[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\.json)\.([1-9]\d*)\.[0-9a-f-]{36}\.tmp$/.exec(entry);
-        if (!match || (directory === this.profiles) !== match[1]!.endsWith(".json")) continue;
-        const path = join(directory, entry);
-        let stats;
-        try { stats = lstatSync(path); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
-        if (!stats.isFile() || stats.isSymbolicLink()) continue;
-        let alive = false;
-        try { process.kill(Number(match[2]), 0); alive = true; }
-        catch (error) { alive = (error as NodeJS.ErrnoException).code !== "ESRCH"; }
-        if (!alive) {
-          try { rmSync(path); }
-          catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-        }
-      }
+      for (const entry of readdirSync(directory)) this.cleanupTemp(directory, entry);
+    }
+  }
+
+  private cleanupTemp(directory: string, entry: string): void {
+    const match = /^(active-profile|credentials(?:\.lock)?|[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\.json)\.([1-9]\d*)\.[0-9a-f-]{36}\.tmp$/.exec(entry);
+    if (!match || (directory === this.profiles) !== match[1]!.endsWith(".json")) return;
+    const path = join(directory, entry);
+    let stats;
+    try { stats = lstatSync(path); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    if (!stats.isFile() || stats.isSymbolicLink() || processAlive(Number(match[2]))) return;
+    try { rmSync(path); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
 
@@ -224,7 +263,7 @@ export class OMRProfileStore {
 
   has(name: string): boolean {
     this.prepare();
-    return lstatExists(this.file(name));
+    return lstatExists(this.file(name)) || Object.hasOwn(this.legacy(), assertProfileName(name));
   }
 
   list(onUnreadable?: (file: string) => void): { name: string; backend: string; workspaceId: string; active: boolean }[] {
@@ -245,6 +284,10 @@ export class OMRProfileStore {
         onUnreadable?.(file);
       }
     }
+    try {
+      if (Object.keys(this.legacy()).some((name) => NAME.exec(name)?.[0] === name &&
+          !lstatExists(this.file(name)))) onUnreadable?.("credentials");
+    } catch { onUnreadable?.("credentials"); }
     return profiles;
   }
 
@@ -252,11 +295,22 @@ export class OMRProfileStore {
     this.prepare();
     const file = this.file(name);
     try { safeProfileFile(file); }
-    catch (error) { if (error instanceof SyntaxError) throw new Error(`Profile ${name} has invalid JSON in ${name}.json`); throw error; }
-    if (!existsSync(file)) throw new Error(`Profile ${name} is missing; run omr login`);
+    catch (error) {
+      if (error instanceof SyntaxError) throw new Error(`Profile ${name} has invalid JSON in ${name}.json`);
+      throw error;
+    }
+    if (!existsSync(file)) {
+      if (Object.hasOwn(this.legacy(), name)) {
+        throw new ProfileRecoveryRequiredError(`Profile ${name} has a legacy grant without workspace metadata; revoke it at /app/clients before logout --local`);
+      }
+      throw new ProfileMissingError(`Profile ${name} is missing; run omr login`);
+    }
     let value: Partial<OMRProfile>;
     try { value = JSON.parse(readFileSync(file, "utf8")) as Partial<OMRProfile>; }
-    catch (error) { if (error instanceof SyntaxError) throw new Error(`Profile ${name} has invalid JSON in ${name}.json`); throw error; }
+    catch (error) {
+      if (error instanceof SyntaxError) throw new Error(`Profile ${name} has invalid JSON in ${name}.json`);
+      throw error;
+    }
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Profile ${name} is invalid`);
     if (typeof value.key !== "string" || typeof value.backend !== "string") {
       const legacy = this.legacy()[name];
@@ -270,10 +324,12 @@ export class OMRProfileStore {
         typeof value.workspaceId !== "string" || !value.backend || !value.key || !value.workspaceId) {
       throw new Error(`Profile ${name} is invalid`);
     }
-    try {
-      const backend = new URL(value.backend);
-      if (backend.username || backend.password || backend.search || backend.hash) throw new Error();
-    } catch { throw new Error(`Profile ${name} has an invalid backend URL`); }
+    let backend: URL;
+    try { backend = new URL(value.backend); }
+    catch { throw new Error(`Profile ${name} has an invalid backend URL`); }
+    if (backend.username || backend.password || backend.search || backend.hash) {
+      throw new Error(`Profile ${name} has an invalid backend URL`);
+    }
     return value as OMRProfile;
   }
 
@@ -281,11 +337,22 @@ export class OMRProfileStore {
     this.prepare();
     const file = this.file(name);
     try { safeProfileFile(file); }
-    catch (error) { if (error instanceof SyntaxError) throw new Error(`Profile ${name} has invalid JSON in ${name}.json`); throw error; }
-    if (!existsSync(file)) throw new Error(`Profile ${name} is missing; run omr login`);
+    catch (error) {
+      if (error instanceof SyntaxError) throw new Error(`Profile ${name} has invalid JSON in ${name}.json`);
+      throw error;
+    }
+    if (!existsSync(file)) {
+      if (Object.hasOwn(this.legacy(), name)) {
+        throw new ProfileRecoveryRequiredError(`Profile ${name} has a legacy grant without workspace metadata; revoke it at /app/clients before logout --local`);
+      }
+      throw new ProfileMissingError(`Profile ${name} is missing; run omr login`);
+    }
     let value: { workspaceId?: unknown };
     try { value = JSON.parse(readFileSync(file, "utf8")) as { workspaceId?: unknown }; }
-    catch (error) { if (error instanceof SyntaxError) throw new Error(`Profile ${name} has invalid JSON in ${name}.json`); throw error; }
+    catch (error) {
+      if (error instanceof SyntaxError) throw new Error(`Profile ${name} has invalid JSON in ${name}.json`);
+      throw error;
+    }
     if (typeof value?.workspaceId !== "string" || !value.workspaceId)
       throw new Error(`Profile ${name} is invalid`);
     return value.workspaceId;
@@ -294,7 +361,9 @@ export class OMRProfileStore {
   save(name: string, profile: OMRProfile): void {
     this.locked(() => {
       const file = this.file(name);
-      if (existsSync(file)) throw new Error(`Profile ${name} already exists; log out first`);
+      if (existsSync(file) || Object.hasOwn(this.legacy(), name)) {
+        throw new Error(`Profile ${name} already exists; log out first`);
+      }
       writePrivate(file, JSON.stringify(profile), true);
       writePrivate(this.active, `${name}\n`);
     });
@@ -323,9 +392,11 @@ export class OMRProfileStore {
     this.locked(() => {
       const file = this.file(name);
       safeProfileFile(file);
-      if (!existsSync(file)) throw new Error(`Profile ${name} is missing`);
+      if (!existsSync(file) && !Object.hasOwn(this.legacy(), name)) {
+        throw new ProfileMissingError(`Profile ${name} is missing`);
+      }
       this.removeLegacy(name);
-      rmSync(file);
+      if (existsSync(file)) rmSync(file);
       if (this.activeMatches(name)) rmSync(this.active, { force: true });
     });
   }

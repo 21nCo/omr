@@ -197,16 +197,16 @@ export function requireExecutionOrigin(request: Request): void {
   if (!bearerCredential(request) || request.headers.has("cookie")) requireSameOrigin(request);
 }
 
-/** A CLI can revoke only the client authenticated by its own bearer grant. */
+/** A CLI can revoke only the grant authenticated by its own bearer credential. */
 export async function revokeOwnBearerClient(
   request: Request,
   authenticateClient: () => Promise<ExecutionPrincipal>,
-  revoke: (actorUserId: string, clientId: string) => Promise<void>,
+  revoke: (actorUserId: string, grantId: string) => Promise<void>,
 ): Promise<{ revoked: true }> {
   if (!bearerCredential(request) || request.headers.has("cookie")) throw new ClientAccessDeniedError();
   const principal = await authenticateClient();
   if (principal.kind !== "client") throw new ClientAccessDeniedError();
-  await revoke(principal.userId, principal.clientId);
+  await revoke(principal.userId, principal.grantId);
   return { revoked: true };
 }
 
@@ -684,9 +684,9 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
   const controlPlane: ControlPlaneRouteServices = {
     async revokeSelf(request) {
       return revokeOwnBearerClient(request, () => authenticate(event, request, undefined),
-        async (actorUserId, clientId) => {
+        async (actorUserId, grantId) => {
           const access = await connectPostgresClientAccess({ connectionString: databaseConnectionString(event) });
-          try { await access.clients.revokeClient(actorUserId, clientId); }
+          try { await access.clients.revokeGrant(actorUserId, grantId); }
           finally { await access.close(); }
         });
     },

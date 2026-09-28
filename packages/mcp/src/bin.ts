@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { OMRProfileStore } from "@oh-my-router/client/profile-store";
+import { OMRProfileStore, ProfileMissingError } from "@oh-my-router/client/profile-store";
 
 import { createOMRMcpServer } from "./server.js";
 
@@ -15,8 +15,7 @@ let workspaceId = process.env.OMR_WORKSPACE_ID ?? ("workspaceId" in stored ? sto
 if (!workspaceId) {
   try { workspaceId = profiles.workspaceId(profile); }
   catch (error) {
-    if (process.env.OMR_BACKEND && process.env.OMR_API_KEY && error instanceof Error &&
-        error.message === `Profile ${profile} is missing; run omr login`) {
+    if (process.env.OMR_BACKEND && process.env.OMR_API_KEY && error instanceof ProfileMissingError) {
       throw new Error("OMR_WORKSPACE_ID is required for headless MCP when no saved profile supplies a workspace");
     }
     throw error;

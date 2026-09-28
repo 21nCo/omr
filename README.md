@@ -96,10 +96,13 @@ this default flow.
 Build and install the portable CLI archive as documented in [the CLI command contract](packages/cli/README.md).
 Its `omr` command supports device login, profiles, workspace and provider-account selection,
 tool search and execution, JSON input, approval status, and remote-revoking logout. A logged-in
-profile also powers `omr-mcp`. `OMR_BACKEND`, `OMR_API_KEY`, and `OMR_WORKSPACE_ID` provide an
+profile also powers `omr-mcp` when it is run from a repository checkout; the CLI archive does
+not contain `omr-mcp`. `OMR_BACKEND`, `OMR_API_KEY`, and `OMR_WORKSPACE_ID` provide an
 explicit headless alternative. Browser-controlled approvals still use the same execution policy.
 
-For a remote MCP client, issue a separate workspace-scoped device grant:
+For a remote MCP client, issue a separate workspace-scoped device grant. From a repository
+checkout use `npm exec` as below; after installing the CLI archive, run the same arguments
+with `omr` directly:
 
 ```sh
 npm exec -- omr login --url https://your-omr-worker.example --kind mcp_remote
