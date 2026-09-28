@@ -22,6 +22,7 @@ omr logout
 If the one-time device credential response is lost or local storage fails, check `/app/clients` for a grant to revoke before logging in again.
 
 Headless processes set **all three** environment variables: `OMR_BACKEND`, `OMR_API_KEY`, and `OMR_WORKSPACE_ID`. These bypass profiles. Set `OMR_PROFILE` or `--profile` for a stored profile. Never pass credentials as command arguments. `OMR_CONFIG_DIR` changes the local profile directory.
+`logout` and `logout --local` refuse to touch saved profiles while any headless credential variable is set. Unset all three variables to revoke or remove a saved profile; headless credentials are managed by their issuer.
 
 ## Tools, accounts and approvals
 
@@ -61,3 +62,4 @@ Approval status is bound to the requesting client grant. An approval from anothe
 ## Credential storage and platform evidence
 
 Profiles live in `~/.config/oh-my-router/profiles/<name>.json`, with only an active profile name in `active-profile`. On POSIX, the profile directories are mode `0700` and files mode `0600`. Writes use a temporary file and rename; symlinked profile targets are rejected. The files contain bearer credentials: protect backups and home-directory access. Windows file permissions inherit the user's ACL; clean-install and ACL evidence on Windows, Linux and macOS is deferred to OMR-15, as are live staged login, provider execution and approval handoff. Local fixture tests do not establish those live boundaries.
+Profiles created by the prior CLI/MCP release are also readable: it kept the bearer grant in `credentials` and only `workspaceId` in `profiles/<name>.json`. The CLI tightens permissions on that metadata file when first read. An authorized `workspaces use` writes the unified profile and removes its old credential entry; logout removes both formats after confirmed revocation. Keep the old credential file private until every profile has been migrated or removed.

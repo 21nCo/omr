@@ -102,8 +102,12 @@ function params(parsed: Parsed): JsonValue {
   const file = opt(parsed, "params-file");
   if (inline !== undefined && file !== undefined) throw new CLIError("INPUT_INVALID", "Use one JSON input source", 2);
   let raw = inline ?? "{}";
-  if (file) raw = readFileSync(file, "utf8");
-  else if (inline === "-" || inline?.startsWith("@")) raw = readFileSync(inline === "-" ? 0 : inline.slice(1), "utf8");
+  try {
+    if (file) raw = readFileSync(file, "utf8");
+    else if (inline === "-" || inline?.startsWith("@")) raw = readFileSync(inline === "-" ? 0 : inline.slice(1), "utf8");
+  } catch {
+    throw new CLIError("INPUT_INVALID", "Cannot read JSON input", 2);
+  }
   if (Buffer.byteLength(raw) > 16 * 1024) throw new CLIError("INPUT_INVALID", "JSON input exceeds 16 KiB", 2);
   try { return JSON.parse(raw) as JsonValue; }
   catch { throw new CLIError("INPUT_INVALID", "Invalid JSON input", 2); }
@@ -186,6 +190,17 @@ async function main(parsed: Parsed): Promise<void> {
     return;
   }
   if (extra.length) throw new CLIError("INPUT_INVALID", "Too many positional arguments", 2);
+  const valid = (command === "login" && !action) || (command === "logout" && !action) ||
+    (command === "profiles" && ((["list", "show"].includes(action ?? "") && !subject) ||
+      (action === "use" && !!subject))) ||
+    (command === "workspaces" && ((["list", "show"].includes(action ?? "") && !subject) ||
+      (action === "use" && !!subject))) ||
+    (command === "connections" && ((action === "list" && !subject) ||
+      (action === "select" && !!subject))) ||
+    (command === "tools" && ((["list", "search"].includes(action ?? "") && !subject) ||
+      (["inspect", "get", "run"].includes(action ?? "") && !!subject))) ||
+    (command === "approvals" && (["request", "status", "execute"].includes(action ?? "") && !!subject));
+  if (!valid) throw new CLIError("USAGE", "Unknown or incomplete command; run omr --help", 2);
   if (command === "login" && !action) return login(parsed);
   if (command === "profiles") {
     if (action === "list" && !subject) return result(store.list());
@@ -196,6 +211,11 @@ async function main(parsed: Parsed): Promise<void> {
     if (action === "use" && subject) { store.use(subject); return result({ active: subject }); }
   }
   if (command === "logout" && !action) {
+    const env = [process.env.OMR_BACKEND, process.env.OMR_API_KEY, process.env.OMR_WORKSPACE_ID];
+    if (env.some(Boolean)) {
+      if (!env.every(Boolean)) throw new CLIError("HEADLESS_INCOMPLETE", "Set OMR_BACKEND, OMR_API_KEY, and OMR_WORKSPACE_ID together", 2);
+      throw new CLIError("HEADLESS_READ_ONLY", "Headless credentials have no local profile; unset them to log out a saved profile", 2);
+    }
     const name = profileName(parsed);
     if (!parsed.options.has("local")) {
       const { backend, key } = store.get(name);

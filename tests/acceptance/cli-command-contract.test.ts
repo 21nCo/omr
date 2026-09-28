@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import { chmodSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, statSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -239,6 +239,124 @@ describe("cli-command-contract", () => {
       expect((await f.run(["logout", "--local", "--json"])).code).toBe(0);
       expect((await f.run(["profiles", "show", "--json"])).code).toBe(1);
     }
+  });
+
+  it("uses and removes a prior CLI/MCP credential profile without issuing a second grant", async () => {
+    const f = await fixture();
+    mkdirSync(join(f.config, "profiles"), { recursive: true });
+    const oldProfile = join(f.config, "profiles", "default.json");
+    writeFileSync(oldProfile, '{"workspaceId":"workspace_1"}\n', { mode: 0o644 });
+    const oldCredentials = join(f.config, "credentials");
+    writeFileSync(oldCredentials, `[default]\nbackend=${f.url}\nkey=omr_fixture_secret\n`, { mode: 0o600 });
+    const list = await f.run(["profiles", "list", "--json"]);
+    expect(list.code).toBe(0);
+    expect(JSON.parse(list.stdout)).toMatchObject([{ name: "default", workspaceId: "workspace_1" }]);
+    expect((await f.run(["tools", "list", "--json"])).code).toBe(0);
+    const login = await f.run(["login", "--url", f.url, "--json"]);
+    expect(JSON.parse(login.stderr).error).toBe("PROFILE_EXISTS");
+    expect(f.calls.filter((call) => call.path === "/api/device/authorization")).toHaveLength(0);
+    if (process.platform !== "win32") expect(statSync(oldProfile).mode & 0o777).toBe(0o600);
+
+    const mcp = spawn(process.execPath, [resolve("packages/mcp/dist/bin.js")], {
+      cwd: f.root, env: { ...process.env, OMR_CONFIG_DIR: f.config, OMR_PROFILE: undefined,
+        OMR_BACKEND: undefined, OMR_API_KEY: undefined, OMR_WORKSPACE_ID: undefined },
+    });
+    let mcpError = "";
+    mcp.stderr.on("data", (chunk: Buffer) => { mcpError += chunk.toString(); });
+    try {
+      for (let n = 0; n < 100 && !f.calls.some((call) => call.path === "/api/tools" &&
+        call.authorization === "Bearer omr_fixture_secret"); n++) await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(f.calls.some((call) => call.path === "/api/tools" &&
+        call.authorization === "Bearer omr_fixture_secret")).toBe(true);
+      expect(mcpError).toBe("");
+    } finally { mcp.kill(); }
+
+    const logout = await f.run(["logout", "--json"]);
+    expect(logout.code).toBe(0);
+    expect(JSON.parse(logout.stdout).revoked).toBe(true);
+    expect(readFileSync(oldCredentials, "utf8")).not.toContain("omr_fixture_secret");
+    expect((await f.run(["profiles", "show", "--json"])).code).toBe(1);
+  });
+
+  it("moves a selected legacy profile to private unified storage without dropping sibling grants", async () => {
+    const f = await fixture();
+    mkdirSync(join(f.config, "profiles"), { recursive: true });
+    for (const name of ["default", "other"]) {
+      writeFileSync(join(f.config, "profiles", `${name}.json`), '{"workspaceId":"workspace_1"}\n');
+    }
+    const credentials = join(f.config, "credentials");
+    writeFileSync(credentials, `[default]\nbackend=${f.url}\nkey=omr_fixture_secret\n[other]\nbackend=${f.url}\nkey=other_secret\n`, { mode: 0o600 });
+    const selection = await f.run(["workspaces", "use", "workspace_1", "--json"]);
+    expect(selection.code).toBe(0);
+    expect(JSON.parse(readFileSync(join(f.config, "profiles", "default.json"), "utf8"))).toMatchObject({
+      backend: f.url, key: "omr_fixture_secret", workspaceId: "workspace_1",
+    });
+    expect(readFileSync(credentials, "utf8")).not.toContain("omr_fixture_secret");
+    expect(readFileSync(credentials, "utf8")).toContain("other_secret");
+    expect(JSON.parse((await f.run(["profiles", "list", "--json"])).stdout)).toHaveLength(2);
+    expect((await f.run(["logout", "--local", "--json"])).code).toBe(0);
+    expect(readFileSync(credentials, "utf8")).toContain("other_secret");
+  });
+
+  it("never changes a saved profile while headless logout is configured", async () => {
+    for (const saved of [false, true]) {
+      const f = await fixture();
+      if (saved) expect((await f.run(["login", "--url", f.url, "--json"])).code).toBe(0);
+      const complete = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+      for (const env of [complete, { OMR_BACKEND: f.url }]) {
+        for (const local of [false, true]) {
+          const response = await f.run(["logout", ...(local ? ["--local"] : []), "--json"], env);
+          expect(response.code).toBe(2);
+          expect(JSON.parse(response.stderr).error).toBe(env === complete ? "HEADLESS_READ_ONLY" : "HEADLESS_INCOMPLETE");
+        }
+      }
+      expect(f.calls.filter((call) => call.path === "/api/client-grants/revoke-self")).toHaveLength(0);
+      expect((await f.run(["profiles", "list", "--json"])).code).toBe(0);
+      expect(JSON.parse((await f.run(["profiles", "list", "--json"])).stdout)).toHaveLength(saved ? 1 : 0);
+    }
+  });
+
+  it("classifies command shape and unreadable JSON input before profile or network access", async () => {
+    const f = await fixture();
+    for (const args of [["bogus"], ["tools"], ["approvals", "request"], ["connections", "select"]]) {
+      const response = await f.run([...args, "--json"]);
+      expect(response.code).toBe(2);
+      expect(JSON.parse(response.stderr).error).toBe("USAGE");
+    }
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    for (const args of [["--params", "@missing.json"], ["--params-file", "missing.json"]]) {
+      const response = await f.run(["tools", "run", "linear.read", ...args, "--json"], env);
+      expect(response.code).toBe(2);
+      expect(JSON.parse(response.stderr).error).toBe("INPUT_INVALID");
+      expect(response.stdout).toBe("");
+    }
+    const stdin = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve, reject) => {
+      const child = spawn(process.execPath, [binary, "tools", "run", "linear.read", "--params", "-", "--json"],
+        { cwd: f.root, env: { ...process.env, ...env, OMR_CONFIG_DIR: f.config } });
+      let stdout = ""; let stderr = "";
+      child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+      child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+      child.on("error", reject);
+      child.on("close", (code) => resolve({ code: code ?? -1, stdout, stderr }));
+      child.stdin.end();
+    });
+    expect(stdin.code).toBe(2);
+    expect(JSON.parse(stdin.stderr).error).toBe("INPUT_INVALID");
+    if (process.platform !== "win32") {
+      const fd = openSync(f.root, "r");
+      const unreadable = await new Promise<{ code: number; stderr: string }>((resolve, reject) => {
+        const child = spawn(process.execPath, [binary, "tools", "run", "linear.read", "--params", "-", "--json"],
+          { cwd: f.root, env: { ...process.env, ...env, OMR_CONFIG_DIR: f.config }, stdio: [fd, "ignore", "pipe"] });
+        let stderr = "";
+        child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+        child.on("error", reject);
+        child.on("close", (code) => resolve({ code: code ?? -1, stderr }));
+      });
+      closeSync(fd);
+      expect(unreadable.code).toBe(2);
+      expect(JSON.parse(unreadable.stderr).error).toBe("INPUT_INVALID");
+    }
+    expect(f.calls).toHaveLength(0);
   });
 
   it("distinguishes pending, denied, expired, uncertain and invalid input without echoing parameters", async () => {

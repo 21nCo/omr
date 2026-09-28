@@ -1,6 +1,7 @@
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, chmodSync, readdirSync, linkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import ini from "ini";
 
 export interface OMRProfile { backend: string; key: string; workspaceId: string }
 const NAME = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
@@ -31,6 +32,23 @@ function safeFile(path: string): void {
   }
 }
 
+function safeProfileFile(path: string): void {
+  if (lstatExists(path)) {
+    const stats = lstatSync(path);
+    if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("Profile file must be a regular file");
+    if (process.platform !== "win32" && (stats.mode & 0o077)) {
+      // The prior CLI wrote workspace-only metadata with the default umask.
+      const value = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+      if (!value || Array.isArray(value) || typeof value !== "object" ||
+          typeof value.workspaceId !== "string" || Object.keys(value).some((key) => key !== "workspaceId")) {
+        throw new Error("Profile file permissions are too broad");
+      }
+      chmodSync(path, 0o600);
+    }
+  }
+  safeFile(path);
+}
+
 function lstatExists(path: string): boolean {
   try { lstatSync(path); return true; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
@@ -58,9 +76,11 @@ function writePrivate(path: string, contents: string, exclusive = false): void {
 export class OMRProfileStore {
   private readonly profiles: string;
   private readonly active: string;
+  private readonly legacyCredentials: string;
   constructor(private readonly root = profileRoot()) {
     this.profiles = join(root, "profiles");
     this.active = join(root, "active-profile");
+    this.legacyCredentials = join(root, "credentials");
   }
 
   private prepare(): void {
@@ -69,6 +89,29 @@ export class OMRProfileStore {
   }
 
   private file(name: string): string { return join(this.profiles, `${assertProfileName(name)}.json`); }
+
+  private legacy(): Record<string, unknown> {
+    safeFile(this.legacyCredentials);
+    return existsSync(this.legacyCredentials)
+      ? ini.parse(readFileSync(this.legacyCredentials, "utf8")) as Record<string, unknown>
+      : {};
+  }
+
+  private removeLegacy(name: string): void {
+    if (!existsSync(this.legacyCredentials)) return;
+    const lock = `${this.legacyCredentials}.lock`;
+    const fd = openSync(lock, "wx", 0o600);
+    try {
+      const profiles = this.legacy();
+      if (Object.hasOwn(profiles, name)) {
+        delete profiles[name];
+        writePrivate(this.legacyCredentials, ini.stringify(profiles));
+      }
+    } finally {
+      closeSync(fd);
+      rmSync(lock);
+    }
+  }
 
   activeName(): string {
     this.prepare();
@@ -89,9 +132,17 @@ export class OMRProfileStore {
   get(name: string): OMRProfile {
     this.prepare();
     const file = this.file(name);
-    safeFile(file);
+    safeProfileFile(file);
     if (!existsSync(file)) throw new Error(`Profile ${name} is missing; run omr login`);
     const value = JSON.parse(readFileSync(file, "utf8")) as Partial<OMRProfile>;
+    if (typeof value.key !== "string" || typeof value.backend !== "string") {
+      const legacy = this.legacy()[name];
+      if (legacy && typeof legacy === "object") {
+        const { backend, key } = legacy as Partial<OMRProfile>;
+        value.backend = backend;
+        value.key = key;
+      }
+    }
     if (typeof value.backend !== "string" || typeof value.key !== "string" ||
         typeof value.workspaceId !== "string" || !value.backend || !value.key || !value.workspaceId) {
       throw new Error(`Profile ${name} is invalid`);
@@ -119,13 +170,15 @@ export class OMRProfileStore {
   setWorkspace(name: string, workspaceId: string): void {
     const profile = this.get(name);
     writePrivate(this.file(name), JSON.stringify({ ...profile, workspaceId }));
+    this.removeLegacy(name);
   }
 
   remove(name: string): void {
     const file = this.file(name);
     this.prepare();
-    safeFile(file);
+    safeProfileFile(file);
     if (!existsSync(file)) throw new Error(`Profile ${name} is missing`);
+    this.removeLegacy(name);
     rmSync(file);
     if (this.activeName() === name) rmSync(this.active, { force: true });
   }
