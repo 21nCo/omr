@@ -1,0 +1,16 @@
+packages/client/src/profile-store.ts
+  h_a39f9495f9ec1d 67,113-116,136
+tests/acceptance/cli-command-contract.test.ts
+  h_a39f9495f9ec1d 622-696
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3264757c32c59514420039ce5cdf61dc2e1f78a4",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
