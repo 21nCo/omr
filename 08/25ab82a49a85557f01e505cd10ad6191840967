@@ -1,0 +1,21 @@
+packages/cli/README.md
+  s_ad6b4afbe2edd7::t_297b196d6be4e7 50,73
+packages/client/src/profile-store.ts
+  s_ad6b4afbe2edd7::t_94b018b6922d5b 110,122-124,126,128-131,133-135,137-139,141-142,144-160
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0825ab82a49a85557f01e505cd10ad6191840967",
+  "prompts": {},
+  "sessions": {
+    "s_ad6b4afbe2edd7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0e6ae-9497-7823-aebf-e23e3aefe166",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
