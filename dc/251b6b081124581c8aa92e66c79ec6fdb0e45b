@@ -1,0 +1,16 @@
+packages/cli/README.md
+  h_a39f9495f9ec1d 74
+tests/acceptance/cli-command-contract.test.ts
+  h_a39f9495f9ec1d 788-800,1386-1387,1396
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "dc251b6b081124581c8aa92e66c79ec6fdb0e45b",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
