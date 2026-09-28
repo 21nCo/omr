@@ -1,0 +1,22 @@
+packages/cli/README.md
+  h_a39f9495f9ec1d 20,48
+packages/cli/src/bin.ts
+  h_a39f9495f9ec1d 70-73,76-77,80-81,84-87,90-91,94-97,100-102,223-224,237,291,325-328,349-350,352,359-360,370-371,380,382-383,385-386,394-396,398
+packages/execution/src/execution.test.ts
+  h_a39f9495f9ec1d 1027-1028
+packages/execution/src/projection.ts
+  h_a39f9495f9ec1d 156-159
+tests/acceptance/cli-command-contract.test.ts
+  h_a39f9495f9ec1d 27,40,61,77,85,87-88,126,129,157,160-161,357-417,423-424,495,501,503-504
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d9d626f31dff10e7ef95c12870b633e209c83a02",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
