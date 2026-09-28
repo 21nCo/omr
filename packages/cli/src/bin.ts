@@ -69,17 +69,56 @@ function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function nonempty(value: unknown): value is string { return typeof value === "string" && value.length > 0; }
+function filled(value: unknown): value is string { return nonempty(value) && value.trim().length > 0; }
+function webUrl(value: unknown): boolean {
+  if (!filled(value) || /[\u0000-\u0020\u007f]/.test(value)) return false;
+  try {
+    const url = new URL(value);
+    return (url.protocol === "https:" || url.protocol === "http:") && !!url.hostname &&
+      !url.username && !url.password;
+  } catch { return false; }
+}
 function invalidResponse(path: string): never {
   throw new OMRProtocolError(path);
 }
+function validManifest(value: unknown): value is Record<string, unknown> {
+  if (!object(value) || value.catalogSchemaVersion !== "1.0.0" ||
+      !filled(value.id) || !filled(value.provider) || !filled(value.providerVersion) ||
+      !filled(value.action) || value.id !== `${value.provider}.${value.action}` ||
+      !filled(value.displayName) || typeof value.description !== "string" || !filled(value.hash) ||
+      !Object.hasOwn(value, "inputSchema") || !Object.hasOwn(value, "outputSchema")) return false;
+  const contract = value.contract;
+  if (!object(contract) || !filled(contract.version) ||
+      !["read", "write", "destructive", "unknown"].includes(String(contract.effect)) ||
+      !Array.isArray(contract.requiredScopes) || !contract.requiredScopes.every(filled) ||
+      !Array.isArray(contract.resources) || !contract.resources.every((item: unknown) =>
+        object(item) && filled(item.kind) && (item.parameter === undefined || filled(item.parameter))) ||
+      !Array.isArray(contract.sensitiveKeys) || !contract.sensitiveKeys.every(filled) ||
+      !["never", "safe", "provider-key"].includes(String(contract.retry)) ||
+      (contract.idempotencyKeyParameter !== undefined && !filled(contract.idempotencyKeyParameter))) return false;
+  const pagination = contract.pagination;
+  return object(pagination) && ["none", "cursor", "offset", "page"].includes(String(pagination.kind)) &&
+    (pagination.maxPageSize === undefined ||
+      (Number.isInteger(pagination.maxPageSize) && Number(pagination.maxPageSize) > 0)) &&
+    (pagination.cursorParameter === undefined || filled(pagination.cursorParameter));
+}
 function discovery(value: unknown, provider?: string): unknown {
-  if (!object(value) || !Array.isArray(value.tools) ||
-      !value.tools.every((tool: unknown) => object(tool) && nonempty(tool.id) &&
-        (!provider || tool.provider === provider))) invalidResponse("/api/tools");
+  if (!object(value) || value.catalogSchemaVersion !== "1.0.0" || !filled(value.revision) ||
+      !Array.isArray(value.tools) || !value.tools.every((tool: unknown) =>
+        validManifest(tool) && (!provider || tool.provider === provider)) ||
+      (value.nextCursor !== undefined && !filled(value.nextCursor)) ||
+      (value.providers !== undefined && (!Array.isArray(value.providers) ||
+        !value.providers.every((item: unknown) => object(item) && filled(item.provider) &&
+          filled(item.displayName) && (item.providerVersion === null || filled(item.providerVersion)) &&
+          typeof item.description === "string" &&
+          ["oauth", "api_key", "jwt", "basic", "none", "unknown"].includes(String(item.authMode)) &&
+          Number.isInteger(item.actionCount) && Number(item.actionCount) >= 0 &&
+          ["unsupported", "unconfigured", "disconnected", "expired", "ready"].includes(String(item.state)) &&
+          typeof item.available === "boolean")))) invalidResponse("/api/tools");
   return value;
 }
 function manifest(value: unknown, toolId: string): unknown {
-  if (!object(value) || value.id !== toolId || !nonempty(value.hash)) invalidResponse("/api/tools/manifest");
+  if (!validManifest(value) || value.id !== toolId) invalidResponse("/api/tools/manifest");
   return value;
 }
 function checkedApproval(value: unknown, path: string,
@@ -187,12 +226,15 @@ async function login(parsed: Parsed): Promise<void> {
   const capabilities: ClientCapability[] = ["connections:read", "tools:discover", "tools:read", "tools:write", "approvals:create"];
   const auth = await beginDeviceAuthorization({ baseUrl, clientKind: kind,
     clientName: opt(parsed, "name") ?? `OMR ${kind} on ${hostname()}`, requestedCapabilities: capabilities });
-  info(`Open ${auth.verificationUriComplete}`);
-  info(`Confirm device code ${auth.userCode}`);
-  if (!Number.isFinite(auth.pollIntervalSeconds) || auth.pollIntervalSeconds < 0 ||
+  if (!object(auth) || !filled(auth.deviceCode) || !filled(auth.userCode) ||
+      /[\u0000-\u001f\u007f]/.test(auth.userCode) ||
+      !webUrl(auth.verificationUri) || !webUrl(auth.verificationUriComplete) ||
+      !Number.isFinite(auth.pollIntervalSeconds) || auth.pollIntervalSeconds < 0 ||
       !Number.isFinite(auth.expiresInSeconds) || auth.expiresInSeconds <= 0) {
     throw new CLIError("DEVICE_RESPONSE_INVALID", "Invalid device authorization response", 1);
   }
+  info(`Open ${auth.verificationUriComplete}`);
+  info(`Confirm device code ${auth.userCode}`);
   const deadline = Date.now() + auth.expiresInSeconds * 1000;
   while (Date.now() < deadline) {
     await delay(Math.min(auth.pollIntervalSeconds * 1000, Math.max(0, deadline - Date.now())));

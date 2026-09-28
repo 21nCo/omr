@@ -11,6 +11,15 @@ const binary = resolve("packages/cli/dist/bin.js");
 const roots: string[] = [];
 const servers: ReturnType<typeof createServer>[] = [];
 const lastError = (stderr: string): Record<string, any> => JSON.parse(stderr.trim().split("\n").at(-1)!);
+const toolManifest = {
+  catalogSchemaVersion: "1.0.0", id: "linear.read", provider: "linear", providerVersion: "1.0.0",
+  action: "read", displayName: "Read", description: "Read a Linear item", hash: "v1",
+  contract: { version: "1.0.0", effect: "read", requiredScopes: [], resources: [],
+    sensitiveKeys: [], pagination: { kind: "none" }, retry: "safe" },
+  inputSchema: { type: "object" }, outputSchema: { type: "object" },
+};
+const catalogPage = { catalogSchemaVersion: "1.0.0", revision: "revision-1",
+  tools: [toolManifest] };
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
@@ -58,9 +67,11 @@ async function fixture() {
       response.end(malformed === "json" ? "{broken" : malformed === "empty" ? "" : JSON.stringify(partial));
       return;
     }
-    if (successOverride.has(path)) return answer(200, successOverride.get(path));
+    if (successOverride.has(path)) return answer(path === "/api/device/authorization" ? 201 : 200,
+      successOverride.get(path));
     if (path === "/api/device/authorization") return answer(201, {
-      deviceCode: "private-device-code", userCode: "ABCD-EFGH", verificationUriComplete: "http://localhost/device",
+      deviceCode: "private-device-code", userCode: "ABCD-EFGH", verificationUri: "http://localhost/device",
+      verificationUriComplete: "http://localhost/device",
       expiresInSeconds: 5, pollIntervalSeconds: 0,
     });
     if (path === "/api/device/token" && deviceLost) { request.socket.destroy(); return; }
@@ -82,9 +93,9 @@ async function fixture() {
       if (catalogHeld) await new Promise<void>((resolve) => { releaseCatalog = resolve; });
       if (new URL(request.url!, "http://localhost").searchParams.get("workspaceId") !== grantWorkspace)
         return answer(403, { error: "CONNECTION_ACCESS_DENIED" });
-      return answer(200, { tools: emptyCatalog ? [] : [{ id: "linear.read", provider: "linear" }], cursor: null });
+      return answer(200, { ...catalogPage, tools: emptyCatalog ? [] : [toolManifest] });
     }
-    if (path === "/api/tools/manifest") return answer(200, { id: "linear.read", provider: "linear", hash: "v1" });
+    if (path === "/api/tools/manifest") return answer(200, toolManifest);
     if (path === "/api/connections/list") return answer(200, [{ id: "connection_1", workspaceId: "workspace_1", provider: "linear" }]);
     if (path === "/api/connections/select") return answer(200, selectionOverride ?? {
       workspaceId: body?.workspaceId, provider: body?.provider, connectionId: body?.connectionId,
@@ -919,6 +930,63 @@ syncBuiltinESMExports();
       expect(response.stderr).not.toContain("omr_fixture_secret");
       expect(JSON.parse((await f.run(["profiles", "list", "--json"])).stdout)).toEqual([]);
     }
+  });
+
+  it("rejects malformed successful device authorization before displaying or polling it", async () => {
+    for (const broken of [
+      { userCode: undefined }, { userCode: 42 }, { deviceCode: undefined },
+      { deviceCode: { value: "private-device-code" } },
+      { verificationUri: undefined }, { verificationUriComplete: "javascript:alert(1)" },
+      { verificationUriComplete: "http://localhost/device\nINJECTED" },
+      { userCode: "ABCD\nINJECTED" },
+    ]) {
+      const f = await fixture();
+      f.successReply("/api/device/authorization", {
+        deviceCode: "private-device-code", userCode: "ABCD-EFGH",
+        verificationUri: "http://localhost/device",
+        verificationUriComplete: "http://localhost/device?user_code=ABCD-EFGH",
+        expiresInSeconds: 5, pollIntervalSeconds: 0, ...broken,
+      });
+      const response = await f.run(["login", "--url", f.url, "--json"]);
+      expect(response.code).toBe(1);
+      expect(response.stdout).toBe("");
+      expect(lastError(response.stderr).error).toBe("DEVICE_RESPONSE_INVALID");
+      expect(response.stderr).not.toContain("Open ");
+      expect(response.stderr).not.toContain("Confirm device code");
+      expect(f.calls.map(({ path }) => path)).toEqual(["/api/device/authorization"]);
+      expect(JSON.parse((await f.run(["profiles", "list", "--json"])).stdout)).toEqual([]);
+    }
+  });
+
+  it("rejects incomplete catalog pages and manifests across discovery commands", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    for (const [reply, args] of [
+      [{ tools: [toolManifest] }, ["tools", "list"]],
+      [{ ...catalogPage, tools: [{ id: "linear.read", provider: "linear" }] }, ["tools", "search", "--query", "read"]],
+      [{ ...catalogPage, tools: [{ ...toolManifest, contract: undefined }] }, ["tools", "list"]],
+    ] as const) {
+      f.successReply("/api/tools", reply);
+      const response = await f.run([...args, "--json"], env);
+      expect(response.code).toBe(1);
+      expect(response.stdout).toBe("");
+      f.clearSuccessReply();
+    }
+    f.successReply("/api/tools/manifest", { id: "linear.read", hash: "v1" });
+    const inspect = await f.run(["tools", "inspect", "linear.read", "--json"], env);
+    expect(inspect.code).toBe(1);
+    expect(inspect.stdout).toBe("");
+    f.clearSuccessReply();
+
+    expect((await f.run(["login", "--url", f.url, "--json"])).code).toBe(0);
+    const profileFile = join(f.config, "profiles", "default.json");
+    writeFileSync(profileFile, JSON.stringify({ ...JSON.parse(readFileSync(profileFile, "utf8")),
+      workspaceId: "workspace_old" }));
+    f.successReply("/api/tools", { tools: [] });
+    const selection = await f.run(["workspaces", "use", "workspace_1", "--json"]);
+    expect(selection.code).toBe(1);
+    expect(selection.stdout).toBe("");
+    expect(JSON.parse((await f.run(["workspaces", "show", "--json"])).stdout).workspaceId).toBe("workspace_old");
   });
 
   it.skipIf(process.platform === "win32")("refuses a credential file readable by other users", async () => {
