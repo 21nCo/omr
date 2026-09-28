@@ -43,6 +43,8 @@ omr approvals execute <approval-id> --json
 
 Tool catalog, account selection, execution and approvals use the same authenticated backend routes as the web control plane. `tools run` requests approval when the backend says the effect requires one, then reports the returned approval state and idempotency key. `approvals request` requires an explicit idempotency key so an interrupted script can retry safely. If an approval response is lost, the CLI exits 23 and prints the key in the error details. Retry the same request with that key to recover the existing approval. A workspace member decides in the browser control plane; `approvals status` checks its state and `approvals execute` runs an approved request. `--connection` selects an account for one request. `--cursor` continues a catalog page. The server owns manifest visibility, capabilities, account access, effects, idempotency, and retry policy. Never retry an uncertain write with a new idempotency key.
 
+When `tools run` generates a key, it writes an `IDEMPOTENCY_KEY` event to stderr **before** sending the request. Capture that key in automation, or supply `--idempotency` yourself. If the process is interrupted after dispatch, repeat the same command and parameters with that key. A malformed successful response is treated as uncertain for execution and approval delivery; the error carries the retry key or approval ID. Read-only commands reject malformed responses as protocol failures.
+
 Successful commands write one JSON value to stdout. Informational device-login instructions and errors go to stderr. `--json` makes errors JSON too. The CLI never prints a bearer credential or raw server error body. JSON input is limited to 16 KiB, matching the server request limit.
 
 | Exit | Meaning |

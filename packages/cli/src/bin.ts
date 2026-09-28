@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-import { readFileSync } from "node:fs";
+import { readFileSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { OMRProfileStore, InvalidProfileNameError, assertProfileName } from "@oh-my-router/client/profile-store";
-import { beginDeviceAuthorization, OMRClient, OMRHttpError, OMRTransportError, pollDeviceAuthorization } from "@oh-my-router/client";
+import { beginDeviceAuthorization, OMRClient, OMRHttpError, OMRProtocolError, OMRTransportError, pollDeviceAuthorization } from "@oh-my-router/client";
 import type { ClientCapability } from "@oh-my-router/client-access";
 import type { JsonValue, ToolEffect } from "@oh-my-router/tools";
 
@@ -55,6 +55,44 @@ function profileName(parsed: Parsed): string {
 }
 function result(value: unknown): void { process.stdout.write(`${JSON.stringify(value)}\n`); }
 function info(value: string): void { process.stderr.write(`${value}\n`); }
+function recordRetryKey(key: string, json: boolean): void {
+  // Complete this small write before dispatch. A signal after the server sees
+  // the request must not erase the only retry identity available to the caller.
+  writeSync(2, `${json ? JSON.stringify({ event: "IDEMPOTENCY_KEY", idempotencyKey: key }) : `Idempotency key: ${key}`}\n`);
+}
+function object(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function nonempty(value: unknown): value is string { return typeof value === "string" && value.length > 0; }
+function invalidResponse(path: string): never {
+  throw new OMRProtocolError(path);
+}
+function discovery(value: unknown): unknown {
+  if (!object(value) || !Array.isArray(value.tools)) invalidResponse("/api/tools");
+  return value;
+}
+function manifest(value: unknown): unknown {
+  if (!object(value) || !nonempty(value.id) || !nonempty(value.hash)) invalidResponse("/api/tools/manifest");
+  return value;
+}
+function checkedApproval(value: unknown, path: string): Record<string, unknown> {
+  if (!object(value) || !nonempty(value.id) || !nonempty(value.workspaceId) || !nonempty(value.toolId) ||
+      !["pending", "approved", "rejected", "executing", "uncertain", "consumed", "failed", "expired"].includes(String(value.status)) ||
+      typeof value.expiresAt !== "number" || !Number.isFinite(value.expiresAt)) invalidResponse(path);
+  return value;
+}
+function receipt(value: unknown, path: string): Record<string, unknown> {
+  if (!object(value) || !nonempty(value.id) || !nonempty(value.workspaceId) || !nonempty(value.toolId) ||
+      !["reserved", "running", "succeeded", "failed", "uncertain"].includes(String(value.status)) ||
+      !Object.hasOwn(value, "result")) invalidResponse(path);
+  return value;
+}
+function receiptResult(value: unknown, path: string): void {
+  const checked = receipt(value, path);
+  result(checked);
+  if (["reserved", "running", "uncertain"].includes(String(checked.status))) process.exitCode = 23;
+  else if (checked.status === "failed") process.exitCode = 1;
+}
 function fail(error: unknown, json: boolean): void {
   const body = error instanceof OMRHttpError ? error.body as { error?: unknown; receiptId?: unknown } | null : null;
   const remoteCode = typeof body?.error === "string" &&
@@ -62,7 +100,8 @@ function fail(error: unknown, json: boolean): void {
       ? body.error : undefined;
   const code = error instanceof CLIError ? error.code :
     error instanceof InvalidProfileNameError ? "INPUT_INVALID" :
-    error instanceof OMRTransportError && ["/api/tools/execute", "/api/approvals/execute"].includes(error.path)
+    (error instanceof OMRTransportError || error instanceof OMRProtocolError) &&
+      ["/api/tools/execute", "/api/approvals/execute"].includes(error.path)
       ? "EXECUTION_EFFECT_UNCERTAIN" :
     remoteCode ?? (error instanceof OMRHttpError ? "HTTP_ERROR" : "CLI_ERROR");
   const exit = error instanceof CLIError ? error.exitCode :
@@ -76,6 +115,7 @@ function fail(error: unknown, json: boolean): void {
   const message = error instanceof CLIError ? error.message :
     error instanceof OMRHttpError ? `OMR request failed (${error.status})` :
     error instanceof OMRTransportError ? "OMR transport failed" :
+    error instanceof OMRProtocolError ? "Invalid OMR response" :
     error instanceof SyntaxError ? "Invalid JSON input" :
     error instanceof Error ? error.message : "CLI failed";
   const details = error instanceof CLIError ? error.details :
@@ -161,8 +201,8 @@ async function login(parsed: Parsed): Promise<void> {
 }
 
 function approvalResult(value: unknown): void {
-  result(value);
-  const approval = value as { status?: unknown; expiresAt?: unknown };
+  const approval = checkedApproval(value, "/api/approvals/status");
+  result(approval);
   if (approval.status === "rejected") process.exitCode = 21;
   else if (approval.status === "uncertain" || approval.status === "executing") process.exitCode = 23;
   else if (approval.status === "expired" ||
@@ -173,10 +213,10 @@ function approvalResult(value: unknown): void {
       !["approved", "consumed"].includes(String(approval.status))) process.exitCode = 1;
 }
 
-async function requestApproval(api: OMRClient, input: Parameters<OMRClient["requestApproval"]>[0]): Promise<unknown> {
-  try { return await api.requestApproval(input); }
+async function requestApproval(api: OMRClient, input: Parameters<OMRClient["requestApproval"]>[0]): Promise<Record<string, unknown>> {
+  try { return checkedApproval(await api.requestApproval(input), "/api/approvals"); }
   catch (error) {
-    if (error instanceof OMRTransportError && error.path === "/api/approvals") {
+    if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) && error.path === "/api/approvals") {
       throw new CLIError("APPROVAL_DELIVERY_UNCERTAIN",
         "Approval response was lost; retry the same request with this idempotency key", 23,
         { idempotencyKey: input.idempotencyKey });
@@ -221,7 +261,10 @@ async function main(parsed: Parsed): Promise<void> {
     const name = profileName(parsed);
     if (!parsed.options.has("local")) {
       const { backend, key } = store.get(name);
-      try { await new OMRClient({ baseUrl: backend, credential: key }).revokeSelf(); }
+      try {
+        const response = await new OMRClient({ baseUrl: backend, credential: key }).revokeSelf();
+        if (!object(response) || response.revoked !== true) invalidResponse("/api/client-grants/revoke-self");
+      }
       catch (error) {
         if (error instanceof OMRHttpError && error.status === 401) {
           throw new CLIError("REVOCATION_UNVERIFIED",
@@ -240,15 +283,23 @@ async function main(parsed: Parsed): Promise<void> {
     if (action === "show" && !subject) return result({ workspaceId: savedWorkspace, profile: profile ?? null });
     if (action === "use" && subject) {
       if (!profile) throw new CLIError("HEADLESS_READ_ONLY", "Headless workspace is set by OMR_WORKSPACE_ID", 2);
-      await api.discoverTools({ workspaceId: subject, limit: 1 });
+      discovery(await api.discoverTools({ workspaceId: subject, limit: 1 }));
       store.setWorkspace(profile, subject);
       return result({ workspaceId: subject, profile });
     }
   }
   if (command === "connections") {
-    if (action === "list" && !subject) return result(await api.listConnections(workspaceId, opt(parsed, "provider")));
-    if (action === "select" && subject) return result(await api.selectConnection({ workspaceId,
-      provider: required(parsed, "provider"), connectionId: subject }));
+    if (action === "list" && !subject) {
+      const response = await api.listConnections(workspaceId, opt(parsed, "provider"));
+      if (!Array.isArray(response)) invalidResponse("/api/connections/list");
+      return result(response);
+    }
+    if (action === "select" && subject) {
+      const response = await api.selectConnection({ workspaceId,
+        provider: required(parsed, "provider"), connectionId: subject });
+      if (!object(response)) invalidResponse("/api/connections/select");
+      return result(response);
+    }
   }
   if (command === "tools") {
     if ((action === "list" || action === "search") && !subject) {
@@ -258,26 +309,27 @@ async function main(parsed: Parsed): Promise<void> {
         throw new CLIError("INPUT_INVALID", "Invalid --effect", 2);
       const limit = opt(parsed, "limit") ? Number(opt(parsed, "limit")) : 100;
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new CLIError("INPUT_INVALID", "--limit must be 1..100", 2);
-      return result(await api.discoverTools({ workspaceId, provider: opt(parsed, "provider"),
-        query: opt(parsed, "query"), effect: effect as ToolEffect | undefined, limit, cursor: opt(parsed, "cursor") }));
+      return result(discovery(await api.discoverTools({ workspaceId, provider: opt(parsed, "provider"),
+        query: opt(parsed, "query"), effect: effect as ToolEffect | undefined, limit, cursor: opt(parsed, "cursor") })));
     }
-    if ((action === "inspect" || action === "get") && subject) return result(await api.getTool(subject, workspaceId));
+    if ((action === "inspect" || action === "get") && subject) return result(manifest(await api.getTool(subject, workspaceId)));
     if (action === "run" && subject) {
       const input = params(parsed);
       const idempotencyKey = opt(parsed, "idempotency") ?? randomUUID();
+      if (!opt(parsed, "idempotency")) recordRetryKey(idempotencyKey, parsed.options.has("json"));
       try {
-        return result(await api.execute({ workspaceId, toolId: subject, params: input,
-          ...(opt(parsed, "connection") ? { connectionId: opt(parsed, "connection") } : {}), idempotencyKey }));
+        return receiptResult(await api.execute({ workspaceId, toolId: subject, params: input,
+          ...(opt(parsed, "connection") ? { connectionId: opt(parsed, "connection") } : {}), idempotencyKey }), "/api/tools/execute");
       } catch (error) {
-        if (error instanceof OMRTransportError && error.path === "/api/tools/execute") {
-          throw new CLIError("EXECUTION_EFFECT_UNCERTAIN", "Execution response was lost; check the same idempotency key before retrying", 23,
+        if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) && error.path === "/api/tools/execute") {
+          throw new CLIError("EXECUTION_EFFECT_UNCERTAIN", "Execution response is missing or invalid; retry only with the same idempotency key", 23,
             { idempotencyKey });
         }
         if (!(error instanceof OMRHttpError) ||
             (error.body as { error?: unknown } | null)?.error !== "EXECUTION_APPROVAL_REQUIRED") throw error;
         const approval = await requestApproval(api, { workspaceId, toolId: subject, params: input,
           ...(opt(parsed, "connection") ? { connectionId: opt(parsed, "connection") } : {}), idempotencyKey });
-        return approvalResult({ ...(approval as object), idempotencyKey });
+        return approvalResult({ ...approval, idempotencyKey });
       }
     }
   }
@@ -290,8 +342,12 @@ async function main(parsed: Parsed): Promise<void> {
     }
     if (action === "status" && subject) return approvalResult(await api.approvalStatus(subject));
     if (action === "execute" && subject) {
-      try { return result(await api.executeApproved(subject)); }
+      try { return receiptResult(await api.executeApproved(subject), "/api/approvals/execute"); }
       catch (error) {
+        if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) && error.path === "/api/approvals/execute") {
+          throw new CLIError("EXECUTION_EFFECT_UNCERTAIN", "Approved execution response is missing or invalid; check the approval status before retrying", 23,
+            { approvalId: subject });
+        }
         if (error instanceof OMRHttpError &&
             (error.body as { error?: unknown } | null)?.error === "APPROVAL_UNAVAILABLE") {
           const status = await api.approvalStatus(subject) as { status?: string; expiresAt?: number };

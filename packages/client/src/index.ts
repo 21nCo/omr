@@ -50,6 +50,14 @@ export class OMRTransportError extends Error {
   }
 }
 
+export class OMRProtocolError extends Error {
+  readonly code = "OMR_PROTOCOL_ERROR";
+  constructor(readonly path: string) {
+    super(`Invalid OMR response for ${path}`);
+    this.name = "OMRProtocolError";
+  }
+}
+
 function normalizedBaseUrl(value: string): string {
   const url = new URL(value);
   if (url.username || url.password || url.search || url.hash) {
@@ -98,6 +106,9 @@ async function request<T>(input: {
     try { body = await responseBody(response); }
     catch { throw new OMRTransportError(input.path.split("?", 1)[0]!); }
     if (!response.ok) throw new OMRHttpError(response.status, input.path, body);
+    if (body === null || typeof body !== "object") {
+      throw new OMRProtocolError(input.path.split("?", 1)[0]!);
+    }
     return body as T;
   } finally {
     clearTimeout(timeout);

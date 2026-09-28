@@ -10,6 +10,7 @@ const exec = promisify(execFile);
 const binary = resolve("packages/cli/dist/bin.js");
 const roots: string[] = [];
 const servers: ReturnType<typeof createServer>[] = [];
+const lastError = (stderr: string): Record<string, any> => JSON.parse(stderr.trim().split("\n").at(-1)!);
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
@@ -27,6 +28,8 @@ async function fixture() {
   let grantWorkspace = "workspace_1";
   let approvalStatus: string = "pending";
   let expiresAt = Date.now() + 600_000;
+  const malformedSuccess = new Map<string, "json" | "empty" | "shape">();
+  const interrupted = new Map<string, string>();
   const server = createServer(async (request, response) => {
     const path = new URL(request.url!, "http://localhost").pathname;
     let raw = "";
@@ -37,6 +40,15 @@ async function fixture() {
       response.writeHead(status, { "content-type": "application/json" });
       response.end(JSON.stringify(value));
     };
+    const malformed = malformedSuccess.get(path);
+    if (malformed) {
+      response.writeHead(path === "/api/approvals" ? 201 : 200, { "content-type": "application/json" });
+      const partial = path === "/api/tools/execute" || path === "/api/approvals/execute"
+        ? { id: "receipt_partial", status: "succeeded", result: {} }
+        : path === "/api/approvals" ? { id: "approval_partial", status: "pending", expiresAt } : {};
+      response.end(malformed === "json" ? "{broken" : malformed === "empty" ? "" : JSON.stringify(partial));
+      return;
+    }
     if (path === "/api/device/authorization") return answer(201, {
       deviceCode: "private-device-code", userCode: "ABCD-EFGH", verificationUriComplete: "http://localhost/device",
       expiresInSeconds: 5, pollIntervalSeconds: 0,
@@ -62,6 +74,13 @@ async function fixture() {
     if (path === "/api/connections/list") return answer(200, [{ id: "connection_1" }]);
     if (path === "/api/connections/select") return answer(200, { selected: body?.connectionId });
     if (path === "/api/tools/execute") {
+      if (body?.toolId === "linear.interrupted") {
+        const key = String(body.idempotencyKey);
+        const prior = interrupted.get(key);
+        if (!prior) { interrupted.set(key, `receipt_${interrupted.size + 1}`); return; }
+        return answer(200, { id: prior, workspaceId: "workspace_1", toolId: "linear.interrupted",
+          status: "succeeded", result: { ok: true } });
+      }
       if (body?.toolId === "linear.lost") { request.socket.destroy(); return; }
       if (body?.toolId === "linear.truncated") {
         response.writeHead(200, { "content-type": "application/json", "content-length": "100" });
@@ -74,16 +93,24 @@ async function fixture() {
       });
       if (body?.toolId === "linear.write") return answer(409, { error: "EXECUTION_APPROVAL_REQUIRED" });
       if (body?.toolId === "linear.uncertain") return answer(502, { error: "EXECUTION_OUTCOME_UNKNOWN", receiptId: "receipt_1" });
-      return answer(200, { status: "succeeded", result: body?.params });
+      if (body?.toolId === "linear.receipt-uncertain") return answer(200,
+        { id: "receipt_pending", workspaceId: "workspace_1", toolId: body.toolId, status: "uncertain", result: null });
+      if (body?.toolId === "linear.receipt-failed") return answer(200,
+        { id: "receipt_failed", workspaceId: "workspace_1", toolId: body.toolId, status: "failed", result: null });
+      return answer(200, { id: "receipt_1", workspaceId: "workspace_1", toolId: body?.toolId,
+        status: "succeeded", result: body?.params });
     }
     if (path === "/api/approvals") {
       if (approvalLost) { request.socket.destroy(); return; }
-      return answer(201, { id: "approval_1", status: approvalStatus, expiresAt });
+      return answer(201, { id: "approval_1", workspaceId: "workspace_1", toolId: body?.toolId,
+        status: approvalStatus, expiresAt });
     }
-    if (path === "/api/approvals/status") return answer(200, { id: "approval_1", status: approvalStatus, expiresAt });
+    if (path === "/api/approvals/status") return answer(200, { id: "approval_1", workspaceId: "workspace_1",
+      toolId: "linear.write", status: approvalStatus, expiresAt });
     if (path === "/api/approvals/execute") {
       if (approvalStatus !== "approved" || expiresAt <= Date.now()) return answer(409, { error: "APPROVAL_UNAVAILABLE" });
-      return answer(200, { status: "succeeded", result: { ok: true } });
+      return answer(200, { id: "receipt_approved", workspaceId: "workspace_1", toolId: "linear.write",
+        status: "succeeded", result: { ok: true } });
     }
     return answer(404, { error: "NOT_FOUND" });
   });
@@ -110,6 +137,9 @@ async function fixture() {
   return { run, url, root, config, calls, loseDevice: () => { deviceLost = true; },
     loseApproval: () => { approvalLost = true; }, formerMember: () => { formerMember = true; },
     loseRevoke: () => { revokeLost = true; },
+    malformedSuccess: (path: string, kind: "json" | "empty" | "shape") => { malformedSuccess.set(path, kind); },
+    clearMalformed: () => malformedSuccess.clear(),
+    interrupted,
     emptyCatalog: () => { emptyCatalog = true; },
     setGrantWorkspace: (value: string) => { grantWorkspace = value; },
     setApproval: (status: string, expiry = Date.now() + 600_000) => {
@@ -221,9 +251,89 @@ describe("cli-command-contract", () => {
       details: { idempotencyKey: "stable-key" } });
     const lostAutomatic = await f.run(["tools", "run", "linear.write", "--json"], env);
     expect(lostAutomatic.code).toBe(23);
-    expect(JSON.parse(lostAutomatic.stderr)).toMatchObject({ error: "APPROVAL_DELIVERY_UNCERTAIN",
+    expect(lastError(lostAutomatic.stderr)).toMatchObject({ error: "APPROVAL_DELIVERY_UNCERTAIN",
       details: { idempotencyKey: expect.any(String) } });
-    expect(JSON.parse(lostAutomatic.stderr).details.idempotencyKey).toMatch(/^[a-f0-9-]{36}$/);
+    expect(lastError(lostAutomatic.stderr).details.idempotencyKey).toMatch(/^[a-f0-9-]{36}$/);
+  });
+
+  it("emits a generated retry key before dispatch and replays it after an interrupted run", async () => {
+    const f = await fixture();
+    const env = { ...process.env, OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret",
+      OMR_WORKSPACE_ID: "workspace_1", OMR_CONFIG_DIR: f.config };
+    const child = spawn(process.execPath, [binary, "tools", "run", "linear.interrupted", "--json"],
+      { cwd: f.root, env });
+    const closed = new Promise<void>((resolve) => child.on("close", () => resolve()));
+    let stderr = ""; let stdout = "";
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+    try {
+      for (let n = 0; n < 100 && !f.calls.some((call) => call.path === "/api/tools/execute"); n++)
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(f.calls.some((call) => call.path === "/api/tools/execute")).toBe(true);
+    } finally { child.kill("SIGTERM"); }
+    await closed;
+    expect(stdout).toBe("");
+    const event = JSON.parse(stderr.trim());
+    expect(event).toMatchObject({ event: "IDEMPOTENCY_KEY", idempotencyKey: expect.any(String) });
+    const first = f.calls.find((call) => call.path === "/api/tools/execute")!.body as { idempotencyKey: string };
+    expect(event.idempotencyKey).toBe(first.idempotencyKey);
+    const replay = await f.run(["tools", "run", "linear.interrupted", "--idempotency", event.idempotencyKey, "--json"],
+      { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" });
+    expect(replay.code).toBe(0);
+    expect(JSON.parse(replay.stdout)).toMatchObject({ id: "receipt_1", status: "succeeded" });
+    expect(f.interrupted.size).toBe(1);
+  });
+
+  it("rejects malformed successful responses and preserves recovery identities", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    for (const kind of ["json", "empty", "shape"] as const) {
+      f.malformedSuccess("/api/tools/execute", kind);
+      const run = await f.run(["tools", "run", "linear.read", "--idempotency", `retry-${kind}`, "--json"], env);
+      expect(run.code).toBe(23);
+      expect(run.stdout).toBe("");
+      expect(JSON.parse(run.stderr)).toMatchObject({ error: "EXECUTION_EFFECT_UNCERTAIN",
+        details: { idempotencyKey: `retry-${kind}` } });
+      f.clearMalformed();
+
+      f.malformedSuccess("/api/approvals", kind);
+      const approval = await f.run(["approvals", "request", "linear.write", "--idempotency", `approval-${kind}`, "--json"], env);
+      expect(approval.code).toBe(23);
+      expect(JSON.parse(approval.stderr)).toMatchObject({ error: "APPROVAL_DELIVERY_UNCERTAIN",
+        details: { idempotencyKey: `approval-${kind}` } });
+      f.clearMalformed();
+
+      f.malformedSuccess("/api/approvals/execute", kind);
+      const execute = await f.run(["approvals", "execute", "approval_1", "--json"], env);
+      expect(execute.code).toBe(23);
+      expect(JSON.parse(execute.stderr)).toMatchObject({ error: "EXECUTION_EFFECT_UNCERTAIN",
+        details: { approvalId: "approval_1" } });
+      f.clearMalformed();
+    }
+    for (const [path, args] of [
+      ["/api/tools", ["tools", "list"]],
+      ["/api/tools/manifest", ["tools", "inspect", "linear.read"]],
+      ["/api/connections/list", ["connections", "list"]],
+      ["/api/approvals/status", ["approvals", "status", "approval_1"]],
+    ] as const) {
+      f.malformedSuccess(path, "shape");
+      const read = await f.run([...args, "--json"], env);
+      expect(read.code).toBe(1);
+      expect(read.stdout).toBe("");
+      expect(JSON.parse(read.stderr).error).toBe("CLI_ERROR");
+      f.clearMalformed();
+    }
+    expect((await f.run(["tools", "run", "linear.receipt-uncertain", "--idempotency", "uncertain-receipt", "--json"], env)).code).toBe(23);
+    expect((await f.run(["tools", "run", "linear.receipt-failed", "--idempotency", "failed-receipt", "--json"], env)).code).toBe(1);
+  });
+
+  it("keeps a saved grant when a successful revocation reply is invalid", async () => {
+    const f = await fixture();
+    expect((await f.run(["login", "--url", f.url, "--json"])).code).toBe(0);
+    f.malformedSuccess("/api/client-grants/revoke-self", "shape");
+    const logout = await f.run(["logout", "--json"]);
+    expect(logout.code).toBe(1);
+    expect((await f.run(["profiles", "show", "--json"])).code).toBe(0);
   });
 
   it("keeps the credential when logout cannot prove revocation", async () => {
@@ -469,7 +579,7 @@ describe("cli-command-contract", () => {
     expect((await f.run(["approvals", "status", "approval_1", "--json"], env)).code).toBe(23);
     const uncertain = await f.run(["tools", "run", "linear.uncertain", "--json"], env);
     expect(uncertain.code).toBe(23);
-    expect(JSON.parse(uncertain.stderr).details.receiptId).toBe("receipt_1");
+    expect(lastError(uncertain.stderr).details.receiptId).toBe("receipt_1");
     const lost = await f.run(["tools", "run", "linear.lost", "--idempotency", "retry-this-key", "--json"], env);
     expect(lost.code).toBe(23);
     expect(JSON.parse(lost.stderr)).toMatchObject({ error: "EXECUTION_EFFECT_UNCERTAIN",
