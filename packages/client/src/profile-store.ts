@@ -234,8 +234,10 @@ export class OMRProfileStore {
 
   private cleanupTemp(directory: string, entry: string): void {
     const match = /^(active-profile|credentials(?:\.lock)?|[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\.json)\.([1-9]\d*)\.[0-9a-f-]{36}\.tmp$/.exec(entry);
-    const [, target, ownerPid] = match ?? [];
-    if (!target || (directory === this.profiles) !== target.endsWith(".json")) return;
+    if (match === null) return;
+    const [, target, ownerPid] = match;
+    if (target === undefined) return;
+    if ((directory === this.profiles) !== target.endsWith(".json")) return;
     const path = join(directory, entry);
     let stats;
     try { stats = lstatSync(path); }

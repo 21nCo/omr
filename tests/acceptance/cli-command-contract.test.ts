@@ -285,11 +285,15 @@ describe("cli-command-contract", () => {
     for (const path of leftovers) writeFileSync(path, "orphan_private_secret", { mode: 0o600 });
     const live = join(f.config, "profiles", `live.json.${process.pid}.12345678-1234-1234-1234-123456789abc.tmp`);
     writeFileSync(live, "live_private_secret", { mode: 0o600 });
+    const wrongDirectory = [join(f.config, `bad.json.${orphan}`),
+      join(f.config, "profiles", `credentials.${orphan}`)];
+    for (const path of wrongDirectory) writeFileSync(path, "retain", { mode: 0o600 });
     const unrelated = join(f.config, "profiles", "notes.tmp");
     writeFileSync(unrelated, "retain");
     expect((await f.run(["login", "--url", f.url, "--profile", "new", "--json"])).code).toBe(0);
     for (const path of leftovers) expect(existsSync(path)).toBe(false);
     expect(readFileSync(live, "utf8")).toBe("live_private_secret");
+    for (const path of wrongDirectory) expect(readFileSync(path, "utf8")).toBe("retain");
     expect(readFileSync(unrelated, "utf8")).toBe("retain");
   });
 
