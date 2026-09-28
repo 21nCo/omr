@@ -1,0 +1,23 @@
+packages/cli/README.md
+  s_ad6b4afbe2edd7::t_2aa9836c1659c2 23,70
+packages/cli/src/bin.ts
+  s_ad6b4afbe2edd7::t_825522e262bcec 58-62,181,273,314
+tests/acceptance/cli-command-contract.test.ts
+  s_ad6b4afbe2edd7::t_757f4a6970a1c2 178-222,651-654
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ef3b1f0f491d2daaf28ab1e18b9c1822981e1501",
+  "prompts": {},
+  "sessions": {
+    "s_ad6b4afbe2edd7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0e6ae-9497-7823-aebf-e23e3aefe166",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
