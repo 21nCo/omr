@@ -64,6 +64,7 @@ function writePrivate(path: string, contents: string, exclusive = false): void {
   try {
     writeFileSync(fd, contents, "utf8");
     if (process.platform !== "win32") chmodSync(temp, 0o600);
+    if (exclusive) fsyncSync(fd);
     closeSync(fd);
     if (exclusive) {
       linkSync(temp, path);
@@ -109,7 +110,10 @@ export class OMRProfileStore {
     let fd: number;
     for (;;) {
       try {
-        fd = openSync(lock, "wx", 0o600);
+        // Publish a complete owner record in one filesystem operation. A live
+        // process paused here must never expose an empty lock as stale.
+        writePrivate(lock, `${process.pid}\n`, true);
+        fd = openSync(lock, "r");
         break;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
@@ -129,7 +133,7 @@ export class OMRProfileStore {
           try { process.kill(Number(owner[1]), 0); alive = true; }
           catch (cause) { alive = (cause as NodeJS.ErrnoException).code !== "ESRCH"; }
         }
-        // A new owner may not have written its PID yet. Give it a short grace period.
+        // Only older empty locks from an interrupted previous CLI need a grace period.
         if (!alive && (owner || Date.now() - stats.mtimeMs > 250)) {
           try {
             const again = lstatSync(lock);
@@ -144,8 +148,6 @@ export class OMRProfileStore {
       }
     }
     try {
-      writeFileSync(fd, `${process.pid}\n`);
-      fsyncSync(fd);
       return operation();
     } finally {
       const owned = fstatSync(fd);

@@ -619,6 +619,81 @@ describe("cli-command-contract", () => {
     expect(existsSync(lock)).toBe(false);
   });
 
+  it("keeps a live lock exclusive while legacy workspace migration overlaps logout", async () => {
+    const f = await fixture();
+    mkdirSync(join(f.config, "profiles"), { recursive: true });
+    for (const name of ["default", "other"])
+      writeFileSync(join(f.config, "profiles", `${name}.json`), '{"workspaceId":"workspace_1"}\n');
+    const credentials = join(f.config, "credentials");
+    writeFileSync(credentials, `[default]\nbackend=${f.url}\nkey=omr_fixture_secret\n[other]\nbackend=${f.url}\nkey=other_secret\n`, { mode: 0o600 });
+    const lock = `${credentials}.lock`;
+    const marker = join(f.root, "lock-held");
+    const release = join(f.root, "release-lock");
+    const preload = join(f.root, "pause-lock.cjs");
+    // Pause immediately after the lock name becomes visible. The old open(wx)
+    // path exposed an empty file here; the atomic publication path has a PID.
+    writeFileSync(preload, `
+const fs = require("node:fs");
+const { syncBuiltinESMExports } = require("node:module");
+const lock = ${JSON.stringify(lock)}, marker = ${JSON.stringify(marker)}, release = ${JSON.stringify(release)};
+const sleep = new Int32Array(new SharedArrayBuffer(4));
+function pause() {
+  fs.writeFileSync(marker, "held");
+  while (!fs.existsSync(release)) Atomics.wait(sleep, 0, 0, 20);
+}
+const open = fs.openSync;
+fs.openSync = function(path, flags, ...rest) {
+  const fd = open.call(this, path, flags, ...rest);
+  if (path === lock && flags === "wx") pause();
+  return fd;
+};
+const link = fs.linkSync;
+fs.linkSync = function(source, target) {
+  const result = link.call(this, source, target);
+  if (target === lock) pause();
+  return result;
+};
+syncBuiltinESMExports();
+`);
+    const first = spawn(process.execPath, [binary, "workspaces", "use", "workspace_1", "--json"], {
+      cwd: f.root, env: { ...process.env, OMR_CONFIG_DIR: f.config,
+        OMR_BACKEND: undefined, OMR_API_KEY: undefined, OMR_WORKSPACE_ID: undefined,
+        OMR_PROFILE: undefined, NODE_OPTIONS: `--require=${preload}` },
+    });
+    let firstOut = "", firstErr = "";
+    first.stdout.on("data", (chunk) => { firstOut += chunk.toString(); });
+    first.stderr.on("data", (chunk) => { firstErr += chunk.toString(); });
+    const firstDone = new Promise<number | null>((resolve, reject) => {
+      first.once("error", reject);
+      first.once("exit", (code) => resolve(code));
+    });
+    let secondDone: ReturnType<typeof f.run> | undefined;
+    try {
+      const deadline = Date.now() + 5_000;
+      while (!existsSync(marker) && Date.now() < deadline)
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(existsSync(marker)).toBe(true);
+      secondDone = f.run(["logout", "--local", "--profile", "other", "--json"]);
+      const completedEarly = await Promise.race([
+        secondDone.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 600)),
+      ]);
+      expect(completedEarly).toBe(false);
+      expect(readFileSync(lock, "utf8")).toBe(`${first.pid}\n`);
+    } finally {
+      writeFileSync(release, "go");
+    }
+    expect(await firstDone, firstErr).toBe(0);
+    expect(JSON.parse(firstOut).workspaceId).toBe("workspace_1");
+    expect((await secondDone!).code).toBe(0);
+    expect(existsSync(lock)).toBe(false);
+    expect(readFileSync(credentials, "utf8")).not.toMatch(/omr_fixture_secret|other_secret/);
+    expect(JSON.parse(readFileSync(join(f.config, "profiles", "default.json"), "utf8"))).toMatchObject({
+      key: "omr_fixture_secret", workspaceId: "workspace_1",
+    });
+    expect(existsSync(join(f.config, "profiles", "other.json"))).toBe(false);
+  }, 10_000);
+
   it("preserves MCP headless workspace fallback from legacy metadata and explicit override", async () => {
     const f = await fixture();
     f.emptyCatalog();
