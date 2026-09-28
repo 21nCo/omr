@@ -451,7 +451,7 @@ export class ExecutionService {
   private async replayApprovedReceipt(principal: ExecutionPrincipal, approvalId: string,
     deadlineAt: number): Promise<ExecutionReceipt | null> {
     const approvals = this.requiredApprovals();
-    const prior = await withinInvocationDeadline(deadlineAt,
+    let prior = await withinInvocationDeadline(deadlineAt,
       () => approvals.getForActor(approvalId, principal.userId, deadlineAt));
     if (prior.principalKey !== principalKey(principal) ||
         (principal.workspaceId !== prior.workspaceId &&
@@ -465,14 +465,13 @@ export class ExecutionService {
         principalKey: prior.principalKey, idempotencyKey: prior.idempotencyKey, deadlineAt }));
     // A claim can commit before its response or reservation reaches this
     // process. Predispatch states still need the store's stale reconciliation.
-    if (prior.status === "executing" &&
-        (!receipt || receipt.status === "reserved" || receipt.status === "failed")) return null;
+    if (needsApprovalClaim(prior, receipt)) return null;
     if (!receipt || !matchesApprovalReceipt(receipt, prior)) {
       throw new ApprovalUnavailableError();
     }
     if (prior.status === "executing" && prior.executionReceiptId === null &&
         this.now() - prior.updatedAt >= EXECUTION_STALE_AFTER_MS) {
-      await this.reconcileStaleEffect(approvals, principal, prior, receipt, deadlineAt);
+      prior = await this.reconcileStaleEffect(approvals, principal, prior, receipt, deadlineAt);
     }
     if (receipt.status === "running" || receipt.status === "uncertain") {
       const manifest = this.approvedManifest(principal, prior);
@@ -504,7 +503,7 @@ export class ExecutionService {
 
   private async reconcileStaleEffect(approvals: ExecutionApprovalStore,
     principal: ExecutionPrincipal, approval: ExecutionApproval, receipt: ExecutionReceipt,
-    deadlineAt: number): Promise<void> {
+    deadlineAt: number): Promise<ExecutionApproval> {
     try {
       await withinInvocationDeadline(deadlineAt, () => approvals.claim({
         approvalId: approval.id, actorUserId: principal.userId,
@@ -512,7 +511,8 @@ export class ExecutionService {
       }));
       throw new ApprovalUnavailableError();
     } catch (error) {
-      if (!(error instanceof ExecutionOutcomeUnknownError) || error.receiptId !== receipt.id) {
+      if (!(error instanceof ApprovalUnavailableError) &&
+          (!(error instanceof ExecutionOutcomeUnknownError) || error.receiptId !== receipt.id)) {
         throw error;
       }
     }
@@ -520,9 +520,11 @@ export class ExecutionService {
     // exposes an uncertain outcome. A concurrent claim may perform the commit.
     const settled = await withinInvocationDeadline(deadlineAt,
       () => approvals.getForActor(approval.id, principal.userId, deadlineAt));
-    if (settled.status !== "uncertain" || settled.executionReceiptId !== receipt.id) {
+    if ((settled.status !== "uncertain" && settled.status !== "consumed") ||
+        settled.executionReceiptId !== receipt.id) {
       throw new ApprovalUnavailableError();
     }
+    return settled;
   }
 
   private async approvedReplayOutcome(approvals: ExecutionApprovalStore,
@@ -784,6 +786,11 @@ function principalKey(principal: ExecutionPrincipal): string {
   return principal.kind === "client"
     ? `client:${principal.clientId}:grant:${principal.grantId}`
     : `web:${principal.userId}`;
+}
+
+function needsApprovalClaim(approval: ExecutionApproval, receipt: ExecutionReceipt | null): boolean {
+  return approval.status === "executing" &&
+    (!receipt || receipt.status === "reserved" || receipt.status === "failed");
 }
 
 function matchesApprovalReceipt(receipt: ExecutionReceipt, approval: ExecutionApproval): boolean {

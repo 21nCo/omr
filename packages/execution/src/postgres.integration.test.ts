@@ -388,7 +388,66 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
         `SELECT status, execution_receipt_id FROM omr_control.execution_approvals WHERE id = $1`,
         [approval.id]);
       expect(state.rows[0]).toMatchObject({ status: "uncertain", execution_receipt_id: receipt.id });
+      const effect = await observer.query<{ status: string; error_code: string }>(
+        `SELECT status, error_code FROM omr_control.execution_receipts WHERE id = $1`, [receipt.id]);
+      expect(effect.rows[0]).toMatchObject({ status: "uncertain", error_code: "stale_approval" });
     } finally {
+      await observer.end();
+    }
+  });
+
+  it("gives concurrent stale claimers the same settled receipt after an approval-lock race", async () => {
+    const now = Date.now();
+    const approval = approvalFixture(now);
+    await runtime.approvals.create(approval);
+    await runtime.approvals.approve({ approvalId: approval.id,
+      actorUserId: approval.actorUserId, now: now + 1 });
+    await runtime.approvals.claim({ approvalId: approval.id, actorUserId: approval.actorUserId,
+      principalKey: approval.principalKey, now: now + 2, deadlineAt: Date.now() + 1_000 });
+    const receipt = receiptFixture(approval, now);
+    await runtime.receipts.reserve(receipt);
+    await runtime.receipts.beginDispatch(receipt.id, now + 3);
+    const blocker = new Client({ connectionString: connectionString! });
+    const observer = new Client({ connectionString: connectionString! });
+    await blocker.connect();
+    await observer.connect();
+    try {
+      await observer.query(`UPDATE omr_control.execution_approvals SET updated_at = $2
+        WHERE id = $1`, [approval.id, Date.now() - EXECUTION_STALE_AFTER_MS - 5_000]);
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT id FROM omr_control.execution_receipts WHERE id = $1 FOR UPDATE", [receipt.id]);
+      const claim = () => runtime.approvals.claim({ approvalId: approval.id,
+        actorUserId: approval.actorUserId, principalKey: approval.principalKey,
+        now: Date.now(), deadlineAt: Date.now() + 5_000 });
+      const first = claim();
+      const second = claim();
+      await vi.waitFor(async () => {
+        const waiting = await observer.query<{ count: string }>(
+          `SELECT count(*) FROM pg_stat_activity
+           WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock'
+             AND (query LIKE 'SELECT receipt.id, receipt.status%'
+               OR query LIKE 'SELECT approval.id%')`);
+        expect(Number(waiting.rows[0]?.count)).toBeGreaterThanOrEqual(2);
+      }, { timeout: 3_000, interval: 20 });
+      await blocker.query("ROLLBACK");
+      const results = await Promise.allSettled([first, second]);
+      for (const result of results) {
+        expect(result).toMatchObject({ status: "rejected", reason: {
+          code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: receipt.id,
+        } });
+      }
+      const state = await observer.query<{ approval_status: string; execution_receipt_id: string;
+        receipt_status: string }>(
+        `SELECT approval.status AS approval_status, approval.execution_receipt_id,
+           receipt.status AS receipt_status
+         FROM omr_control.execution_approvals AS approval
+         JOIN omr_control.execution_receipts AS receipt ON receipt.approval_id = approval.id
+         WHERE approval.id = $1`, [approval.id]);
+      expect(state.rows[0]).toEqual({ approval_status: "uncertain",
+        execution_receipt_id: receipt.id, receipt_status: "uncertain" });
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      await blocker.end();
       await observer.end();
     }
   });
@@ -525,6 +584,9 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
           expect(receiptState.rows[0]).toMatchObject(association === "exact" && status === "reserved"
             ? { status: "failed", error_code: "reservation_expired",
               completed_at: expect.anything() }
+            : association === "exact" && status === "running"
+              ? { status: "uncertain", error_code: "stale_approval",
+                completed_at: expect.anything() }
             : { status, error_code: status === "failed" ? "predispatch" :
               status === "uncertain" ? "provider_outcome_unknown" : null });
         }

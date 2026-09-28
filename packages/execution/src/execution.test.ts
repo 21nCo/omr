@@ -1241,7 +1241,8 @@ describe("execution service", () => {
           status: status === "succeeded" ? "consumed" : age === 0 ? "executing" : "uncertain",
           executionReceiptId: status === "succeeded" || age !== 0 ? receipt.id : null,
         });
-        expect(receipts.receipts.get(receipt.id)?.status).toBe(status);
+        expect(receipts.receipts.get(receipt.id)?.status).toBe(
+          status === "running" && age !== 0 ? "uncertain" : status);
       }
       expect(actionCall).not.toHaveBeenCalled();
     },
@@ -1268,7 +1269,9 @@ describe("execution service", () => {
     expect(approvals.approvals.get(approval.id)).toMatchObject({
       status: "uncertain", executionReceiptId: receipt.id,
     });
-    expect(receipts.receipts.get(receipt.id)?.status).toBe("running");
+    expect(receipts.receipts.get(receipt.id)).toMatchObject({
+      status: "uncertain", errorCode: "stale_approval",
+    });
     expect(actionCall).not.toHaveBeenCalled();
   });
 

@@ -21,6 +21,8 @@ commits on a separate connection **before** calling the provider. It starts as `
 transitions durably to `running` just before dispatch. A crash after either write leaves a
 non-replayable receipt. An ambiguous provider error or a
 receipt persistence failure is `uncertain`, with a stable receipt ID and no automatic replay.
+Stale approval recovery marks an exact `running` receipt and its approval `uncertain`
+in one transaction, preserving the receipt ID for concurrent retries.
 The guard has a 60-second end-to-end deadline. It refreshes PostgreSQL's statement timeout with
 the remaining invocation time before each authorization query and commit. At the deadline it closes
 the dedicated non-pipelined guard connection, canceling an active query and rolling back its

@@ -276,7 +276,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     principalKey: string; deadlineAt: number }, client: Client): Promise<never> {
     const query = <R extends object>(sql: string, values?: unknown[]) =>
       withinInvocationDeadline(input.deadlineAt, () => client.query<R>(sql, values));
-    const prior = await query<Pick<ApprovalRow, "execution_receipt_id">>(
+    const linkedEffect = async () => query<Pick<ApprovalRow, "execution_receipt_id">>(
       `SELECT approval.execution_receipt_id FROM omr_control.execution_approvals AS approval
        WHERE approval.id = $1 AND approval.actor_user_id = $2 AND approval.principal_key = $3
          AND approval.status = 'uncertain' AND approval.execution_receipt_id IS NOT NULL
@@ -287,6 +287,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
              AND receipt.status IN ('running', 'succeeded', 'uncertain'))`,
       [input.approvalId, input.actorUserId, input.principalKey],
     );
+    const prior = await linkedEffect();
     if (prior.rows[0]?.execution_receipt_id) {
       throw new ExecutionOutcomeUnknownError(prior.rows[0].execution_receipt_id);
     }
@@ -328,6 +329,15 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
           );
         } else if (receipt && ["running", "succeeded", "uncertain"].includes(receipt.status)) {
           effectReceiptId = receipt.id;
+          if (receipt.status === "running") {
+            await query(
+              `UPDATE omr_control.execution_receipts
+               SET status = 'uncertain', error_code = 'stale_approval',
+                 completed_at = $2, updated_at = $2
+               WHERE id = $1 AND status = 'running'`,
+              [receipt.id, now],
+            );
+          }
         }
         await query(
           `UPDATE omr_control.execution_approvals
@@ -345,6 +355,12 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
       throw error;
     }
     if (effectReceiptId) throw new ExecutionOutcomeUnknownError(effectReceiptId);
+    // Another retry may have settled the row while this transaction waited
+    // for its approval lock. Read the committed association before declining.
+    const settled = await linkedEffect();
+    if (settled.rows[0]?.execution_receipt_id) {
+      throw new ExecutionOutcomeUnknownError(settled.rows[0].execution_receipt_id);
+    }
     throw new ApprovalUnavailableError();
   }
 

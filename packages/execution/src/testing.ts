@@ -230,6 +230,12 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
       exactReceipt.completedAt = now;
       exactReceipt.updatedAt = now;
     }
+    if (effectReceipt?.status === "running") {
+      effectReceipt.status = "uncertain";
+      effectReceipt.errorCode = "stale_approval";
+      effectReceipt.completedAt = now;
+      effectReceipt.updatedAt = now;
+    }
     approval.status = effectReceipt ? "uncertain" : "failed";
     approval.executionReceiptId = effectReceipt?.id ?? null;
     approval.updatedAt = now;

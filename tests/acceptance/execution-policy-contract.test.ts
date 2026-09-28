@@ -355,7 +355,8 @@ describe("execution-policy-contract", () => {
       expect(approvalStore.approvals.get(approvalId)).toMatchObject({
         status: "uncertain", executionReceiptId: receiptId,
       });
-      expect(receiptStore.receipts.get(receiptId)?.status).toBe(status);
+      expect(receiptStore.receipts.get(receiptId)?.status).toBe(
+        status === "running" ? "uncertain" : status);
     };
 
     if (surface === "cli") {
