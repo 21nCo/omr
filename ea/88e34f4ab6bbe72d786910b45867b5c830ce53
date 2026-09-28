@@ -1,0 +1,33 @@
+README.md
+  s_ad6b4afbe2edd7::t_f07be73ddd3355 96-100
+packages/cli/README.md
+  s_39897b513d47ae::t_d7d153e0116105 1-63
+packages/cli/src/bin.ts
+  s_39897b513d47ae::t_46047a63bb67f2 2-4,6-7,11-14,16-19,22-41,44-50,53-54,56-84,87-91,93-96,99-109,112-130,132,134-135,137-142,146-150,154,157-167,169-173,175-183,185-194,196-207,209-212,214-245,247-267,269,272-275
+tests/acceptance/cli-command-contract.test.ts
+  s_39897b513d47ae::t_50243f7768cd76 1-219
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ea88e34f4ab6bbe72d786910b45867b5c830ce53",
+  "prompts": {},
+  "sessions": {
+    "s_39897b513d47ae": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2620d86b-f241-4172-8aef-fe0f22fbb05d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    },
+    "s_ad6b4afbe2edd7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0e6ae-9497-7823-aebf-e23e3aefe166",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
