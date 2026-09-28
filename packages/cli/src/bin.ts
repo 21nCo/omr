@@ -67,28 +67,39 @@ function nonempty(value: unknown): value is string { return typeof value === "st
 function invalidResponse(path: string): never {
   throw new OMRProtocolError(path);
 }
-function discovery(value: unknown): unknown {
-  if (!object(value) || !Array.isArray(value.tools)) invalidResponse("/api/tools");
+function discovery(value: unknown, provider?: string): unknown {
+  if (!object(value) || !Array.isArray(value.tools) ||
+      !value.tools.every((tool: unknown) => object(tool) && nonempty(tool.id) &&
+        (!provider || tool.provider === provider))) invalidResponse("/api/tools");
   return value;
 }
-function manifest(value: unknown): unknown {
-  if (!object(value) || !nonempty(value.id) || !nonempty(value.hash)) invalidResponse("/api/tools/manifest");
+function manifest(value: unknown, toolId: string): unknown {
+  if (!object(value) || value.id !== toolId || !nonempty(value.hash)) invalidResponse("/api/tools/manifest");
   return value;
 }
-function checkedApproval(value: unknown, path: string): Record<string, unknown> {
+function checkedApproval(value: unknown, path: string,
+  expected?: { id?: string; workspaceId: string; toolId?: string; connectionId?: string }): Record<string, unknown> {
   if (!object(value) || !nonempty(value.id) || !nonempty(value.workspaceId) || !nonempty(value.toolId) ||
       !["pending", "approved", "rejected", "executing", "uncertain", "consumed", "failed", "expired"].includes(String(value.status)) ||
-      typeof value.expiresAt !== "number" || !Number.isFinite(value.expiresAt)) invalidResponse(path);
+      typeof value.expiresAt !== "number" || !Number.isFinite(value.expiresAt) ||
+      (expected && (value.workspaceId !== expected.workspaceId ||
+        (expected.id && value.id !== expected.id) || (expected.toolId && value.toolId !== expected.toolId) ||
+        (expected.connectionId && value.connectionId !== expected.connectionId)))) invalidResponse(path);
   return value;
 }
-function receipt(value: unknown, path: string): Record<string, unknown> {
+function receipt(value: unknown, path: string,
+  expected: { workspaceId: string; toolId?: string; connectionId?: string; approvalId?: string }): Record<string, unknown> {
   if (!object(value) || !nonempty(value.id) || !nonempty(value.workspaceId) || !nonempty(value.toolId) ||
       !["reserved", "running", "succeeded", "failed", "uncertain"].includes(String(value.status)) ||
-      !Object.hasOwn(value, "result")) invalidResponse(path);
+      !Object.hasOwn(value, "result") || value.workspaceId !== expected.workspaceId ||
+      (expected.toolId && value.toolId !== expected.toolId) ||
+      (expected.connectionId && value.connectionId !== expected.connectionId) ||
+      (expected.approvalId && value.approvalId !== expected.approvalId)) invalidResponse(path);
   return value;
 }
-function receiptResult(value: unknown, path: string): void {
-  const checked = receipt(value, path);
+function receiptResult(value: unknown, path: string,
+  expected: { workspaceId: string; toolId?: string; connectionId?: string; approvalId?: string }): void {
+  const checked = receipt(value, path, expected);
   result(checked);
   if (["reserved", "running", "uncertain"].includes(String(checked.status))) process.exitCode = 23;
   else if (checked.status === "failed") process.exitCode = 1;
@@ -209,8 +220,8 @@ async function login(parsed: Parsed): Promise<void> {
   throw new CLIError("DEVICE_AUTHORIZATION_EXPIRED", "Device authorization expired", 22);
 }
 
-function approvalResult(value: unknown): void {
-  const approval = checkedApproval(value, "/api/approvals/status");
+function approvalResult(value: unknown, expected: { id?: string; workspaceId: string; toolId?: string; connectionId?: string }): void {
+  const approval = checkedApproval(value, "/api/approvals/status", expected);
   result(approval);
   if (approval.status === "rejected") process.exitCode = 21;
   else if (approval.status === "uncertain" || approval.status === "executing") process.exitCode = 23;
@@ -223,7 +234,7 @@ function approvalResult(value: unknown): void {
 }
 
 async function requestApproval(api: OMRClient, input: Parameters<OMRClient["requestApproval"]>[0]): Promise<Record<string, unknown>> {
-  try { return checkedApproval(await api.requestApproval(input), "/api/approvals"); }
+  try { return checkedApproval(await api.requestApproval(input), "/api/approvals", input); }
   catch (error) {
     if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) && error.path === "/api/approvals") {
       throw new CLIError("APPROVAL_DELIVERY_UNCERTAIN",
@@ -277,7 +288,7 @@ async function main(parsed: Parsed): Promise<void> {
         if (!object(response) || response.revoked !== true) invalidResponse("/api/client-grants/revoke-self");
       }
       catch (error) {
-        if (error instanceof OMRHttpError && error.status === 401) {
+        if (error instanceof OMRHttpError || error instanceof OMRTransportError || error instanceof OMRProtocolError) {
           throw new CLIError("REVOCATION_UNVERIFIED",
             "The server could not verify revocation; keep this profile and revoke the grant in /app/clients, or use logout --local after doing so", 3);
         }
@@ -311,7 +322,10 @@ async function main(parsed: Parsed): Promise<void> {
   if (command === "connections") {
     if (action === "list" && !subject) {
       const response = await api.listConnections(workspaceId, opt(parsed, "provider"));
-      if (!Array.isArray(response)) invalidResponse("/api/connections/list");
+      if (!Array.isArray(response) || !response.every((connection: unknown) =>
+        object(connection) && nonempty(connection.id) && connection.workspaceId === workspaceId &&
+        nonempty(connection.provider) && (!opt(parsed, "provider") || connection.provider === opt(parsed, "provider"))))
+        invalidResponse("/api/connections/list");
       return result(response);
     }
     if (action === "select" && subject) {
@@ -332,16 +346,18 @@ async function main(parsed: Parsed): Promise<void> {
       const limit = opt(parsed, "limit") ? Number(opt(parsed, "limit")) : 100;
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new CLIError("INPUT_INVALID", "--limit must be 1..100", 2);
       return result(discovery(await api.discoverTools({ workspaceId, provider: opt(parsed, "provider"),
-        query: opt(parsed, "query"), effect: effect as ToolEffect | undefined, limit, cursor: opt(parsed, "cursor") })));
+        query: opt(parsed, "query"), effect: effect as ToolEffect | undefined, limit, cursor: opt(parsed, "cursor") }),
+        opt(parsed, "provider")));
     }
-    if ((action === "inspect" || action === "get") && subject) return result(manifest(await api.getTool(subject, workspaceId)));
+    if ((action === "inspect" || action === "get") && subject) return result(manifest(await api.getTool(subject, workspaceId), subject));
     if (action === "run" && subject) {
       const input = params(parsed);
       const idempotencyKey = opt(parsed, "idempotency") ?? randomUUID();
       if (!opt(parsed, "idempotency")) recordRetryKey(idempotencyKey, parsed.options.has("json"));
       try {
         return receiptResult(await api.execute({ workspaceId, toolId: subject, params: input,
-          ...(opt(parsed, "connection") ? { connectionId: opt(parsed, "connection") } : {}), idempotencyKey }), "/api/tools/execute");
+          ...(opt(parsed, "connection") ? { connectionId: opt(parsed, "connection") } : {}), idempotencyKey }),
+          "/api/tools/execute", { workspaceId, toolId: subject, connectionId: opt(parsed, "connection") });
       } catch (error) {
         if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) && error.path === "/api/tools/execute") {
           throw new CLIError("EXECUTION_EFFECT_UNCERTAIN", "Execution response is missing or invalid; retry only with the same idempotency key", 23,
@@ -351,7 +367,8 @@ async function main(parsed: Parsed): Promise<void> {
             (error.body as { error?: unknown } | null)?.error !== "EXECUTION_APPROVAL_REQUIRED") throw error;
         const approval = await requestApproval(api, { workspaceId, toolId: subject, params: input,
           ...(opt(parsed, "connection") ? { connectionId: opt(parsed, "connection") } : {}), idempotencyKey });
-        return approvalResult({ ...approval, idempotencyKey });
+        return approvalResult({ ...approval, idempotencyKey }, { workspaceId, toolId: subject,
+          connectionId: opt(parsed, "connection") });
       }
     }
   }
@@ -360,11 +377,13 @@ async function main(parsed: Parsed): Promise<void> {
       const approval = await requestApproval(api, { workspaceId, toolId: subject, params: params(parsed),
         ...(opt(parsed, "connection") ? { connectionId: opt(parsed, "connection") } : {}),
         idempotencyKey: required(parsed, "idempotency") });
-      return approvalResult(approval);
+      return approvalResult(approval, { workspaceId, toolId: subject, connectionId: opt(parsed, "connection") });
     }
-    if (action === "status" && subject) return approvalResult(await api.approvalStatus(subject));
+    if (action === "status" && subject) return approvalResult(await api.approvalStatus(subject),
+      { id: subject, workspaceId });
     if (action === "execute" && subject) {
-      try { return receiptResult(await api.executeApproved(subject), "/api/approvals/execute"); }
+      try { return receiptResult(await api.executeApproved(subject), "/api/approvals/execute",
+        { workspaceId, approvalId: subject }); }
       catch (error) {
         if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) && error.path === "/api/approvals/execute") {
           throw new CLIError("EXECUTION_EFFECT_UNCERTAIN", "Approved execution response is missing or invalid; check the approval status before retrying", 23,
@@ -372,10 +391,11 @@ async function main(parsed: Parsed): Promise<void> {
         }
         if (error instanceof OMRHttpError &&
             (error.body as { error?: unknown } | null)?.error === "APPROVAL_UNAVAILABLE") {
-          const status = await api.approvalStatus(subject) as { status?: string; expiresAt?: number };
-          if (["rejected", "pending", "uncertain", "executing", "failed"].includes(status.status ?? "") ||
+          const status = checkedApproval(await api.approvalStatus(subject), "/api/approvals/status",
+            { id: subject, workspaceId });
+          if (["rejected", "pending", "uncertain", "executing", "failed"].includes(String(status.status)) ||
               (typeof status.expiresAt === "number" && status.expiresAt <= Date.now() &&
-                status.status !== "consumed")) return approvalResult(status);
+                status.status !== "consumed")) return approvalResult(status, { id: subject, workspaceId });
         }
         throw error;
       }

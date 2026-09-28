@@ -1024,7 +1024,8 @@ describe("execution service", () => {
     const receipt = await service.executeApproved(principal, approval.id);
     expect(receipt).toMatchObject({ status: "succeeded", toolId: "linear.create_issue" });
     expect(receipt.approvalId).toBe(approval.id);
-    expect(publicReceipt(receipt)).not.toHaveProperty("approvalId");
+    expect(publicReceipt(receipt)).toHaveProperty("approvalId", approval.id);
+    expect(publicReceipt(receipt, false)).not.toHaveProperty("approvalId");
     expect(actionCall).toHaveBeenCalledWith("linear", "create_issue", expect.objectContaining({
       params: { title: "Approved title" },
       retry: { maxAttempts: 1, backoff: "exponential" },

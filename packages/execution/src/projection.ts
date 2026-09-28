@@ -153,5 +153,8 @@ export function publicReceipt(receipt: ExecutionReceipt, includeResult = true) {
   const { principalKey: _principalKey, providerConnectionId: _providerConnectionId,
     requestHash: _requestHash, idempotencyKey: _idempotencyKey,
     approvalId: _approvalId, ...visible } = receipt;
-  return includeResult ? visible : { ...visible, result: null };
+  // Direct approved-execution callers need this identity to bind the result
+  // to the approval they submitted. History continues to omit it.
+  return includeResult ? { ...visible, ...(receipt.approvalId ? { approvalId: receipt.approvalId } : {}) }
+    : { ...visible, result: null };
 }

@@ -24,6 +24,7 @@ async function fixture() {
   let approvalLost = false;
   let formerMember = false;
   let revokeLost = false;
+  let revokeFailureStatus: number | undefined;
   let emptyCatalog = false;
   let grantWorkspace = "workspace_1";
   let nextGrantKey = "omr_fixture_secret";
@@ -36,6 +37,7 @@ async function fixture() {
   let approvalStatus: string = "pending";
   let expiresAt = Date.now() + 600_000;
   const malformedSuccess = new Map<string, "json" | "empty" | "shape">();
+  const successOverride = new Map<string, unknown>();
   const interrupted = new Map<string, string>();
   const server = createServer(async (request, response) => {
     const path = new URL(request.url!, "http://localhost").pathname;
@@ -56,6 +58,7 @@ async function fixture() {
       response.end(malformed === "json" ? "{broken" : malformed === "empty" ? "" : JSON.stringify(partial));
       return;
     }
+    if (successOverride.has(path)) return answer(200, successOverride.get(path));
     if (path === "/api/device/authorization") return answer(201, {
       deviceCode: "private-device-code", userCode: "ABCD-EFGH", verificationUriComplete: "http://localhost/device",
       expiresInSeconds: 5, pollIntervalSeconds: 0,
@@ -71,6 +74,7 @@ async function fixture() {
     if (path === "/api/client-grants/revoke-self") {
       if (revokeHeld) await new Promise<void>((resolve) => { releaseRevoke = resolve; });
       if (revokeLost) { request.socket.destroy(); return; }
+      if (revokeFailureStatus) return answer(revokeFailureStatus, { error: "SERVER_UNAVAILABLE" });
       if (formerMember) return answer(401, { error: "CLIENT_CREDENTIAL_INVALID" });
       revoked = true; return answer(200, { revoked: true });
     }
@@ -78,10 +82,10 @@ async function fixture() {
       if (catalogHeld) await new Promise<void>((resolve) => { releaseCatalog = resolve; });
       if (new URL(request.url!, "http://localhost").searchParams.get("workspaceId") !== grantWorkspace)
         return answer(403, { error: "CONNECTION_ACCESS_DENIED" });
-      return answer(200, { tools: emptyCatalog ? [] : [{ id: "linear.read" }], cursor: null });
+      return answer(200, { tools: emptyCatalog ? [] : [{ id: "linear.read", provider: "linear" }], cursor: null });
     }
-    if (path === "/api/tools/manifest") return answer(200, { id: "linear.read", hash: "v1" });
-    if (path === "/api/connections/list") return answer(200, [{ id: "connection_1" }]);
+    if (path === "/api/tools/manifest") return answer(200, { id: "linear.read", provider: "linear", hash: "v1" });
+    if (path === "/api/connections/list") return answer(200, [{ id: "connection_1", workspaceId: "workspace_1", provider: "linear" }]);
     if (path === "/api/connections/select") return answer(200, selectionOverride ?? {
       workspaceId: body?.workspaceId, provider: body?.provider, connectionId: body?.connectionId,
       userId: "user_1", createdAt: 1, updatedAt: 1,
@@ -119,10 +123,10 @@ async function fixture() {
         status: approvalStatus, expiresAt });
     }
     if (path === "/api/approvals/status") return answer(200, { id: "approval_1", workspaceId: "workspace_1",
-      toolId: "linear.write", status: approvalStatus, expiresAt });
+      toolId: "linear.write", connectionId: "connection_1", status: approvalStatus, expiresAt });
     if (path === "/api/approvals/execute") {
       if (approvalStatus !== "approved" || expiresAt <= Date.now()) return answer(409, { error: "APPROVAL_UNAVAILABLE" });
-      return answer(200, { id: "receipt_approved", workspaceId: "workspace_1", toolId: "linear.write",
+      return answer(200, { id: "receipt_approved", approvalId: "approval_1", workspaceId: "workspace_1", toolId: "linear.write", connectionId: "connection_1",
         status: "succeeded", result: { ok: true } });
     }
     return answer(404, { error: "NOT_FOUND" });
@@ -150,8 +154,11 @@ async function fixture() {
   return { run, url, root, config, calls, loseDevice: () => { deviceLost = true; },
     loseApproval: () => { approvalLost = true; }, formerMember: () => { formerMember = true; },
     loseRevoke: () => { revokeLost = true; },
+    failRevoke: (status: number) => { revokeFailureStatus = status; },
     malformedSuccess: (path: string, kind: "json" | "empty" | "shape") => { malformedSuccess.set(path, kind); },
     clearMalformed: () => malformedSuccess.clear(),
+    successReply: (path: string, value: unknown) => { successOverride.set(path, value); },
+    clearSuccessReply: () => successOverride.clear(),
     interrupted,
     holdRevoke: () => { revokeHeld = true; },
     releaseRevoke: () => { revokeHeld = false; releaseRevoke?.(); },
@@ -347,12 +354,74 @@ describe("cli-command-contract", () => {
     expect((await f.run(["tools", "run", "linear.receipt-failed", "--idempotency", "failed-receipt", "--json"], env)).code).toBe(1);
   });
 
+  it("binds successful execution and approval replies to the requested identity", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    for (const [path, args, wrong, error, detail] of [
+      ["/api/tools/execute", ["tools", "run", "linear.read", "--idempotency", "run-key"],
+        { id: "receipt_other", workspaceId: "workspace_other", toolId: "linear.read", status: "succeeded", result: {} },
+        "EXECUTION_EFFECT_UNCERTAIN", { idempotencyKey: "run-key" }],
+      ["/api/tools/execute", ["tools", "run", "linear.read", "--idempotency", "run-key"],
+        { id: "receipt_other", workspaceId: "workspace_1", toolId: "other.write", status: "succeeded", result: {} },
+        "EXECUTION_EFFECT_UNCERTAIN", { idempotencyKey: "run-key" }],
+      ["/api/tools/execute", ["tools", "run", "linear.read", "--connection", "connection_1", "--idempotency", "run-key"],
+        { id: "receipt_other", workspaceId: "workspace_1", toolId: "linear.read", connectionId: "connection_other", status: "succeeded", result: {} },
+        "EXECUTION_EFFECT_UNCERTAIN", { idempotencyKey: "run-key" }],
+      ["/api/approvals", ["approvals", "request", "linear.write", "--idempotency", "approval-key"],
+        { id: "approval_other", workspaceId: "workspace_other", toolId: "linear.write", status: "pending", expiresAt: Date.now() + 600_000 },
+        "APPROVAL_DELIVERY_UNCERTAIN", { idempotencyKey: "approval-key" }],
+      ["/api/approvals", ["approvals", "request", "linear.write", "--idempotency", "approval-key"],
+        { id: "approval_other", workspaceId: "workspace_1", toolId: "other.write", status: "pending", expiresAt: Date.now() + 600_000 },
+        "APPROVAL_DELIVERY_UNCERTAIN", { idempotencyKey: "approval-key" }],
+      ["/api/approvals", ["approvals", "request", "linear.write", "--connection", "connection_1", "--idempotency", "approval-key"],
+        { id: "approval_other", workspaceId: "workspace_1", toolId: "linear.write", connectionId: "connection_other", status: "pending", expiresAt: Date.now() + 600_000 },
+        "APPROVAL_DELIVERY_UNCERTAIN", { idempotencyKey: "approval-key" }],
+      ["/api/approvals/execute", ["approvals", "execute", "approval_1"],
+        { id: "receipt_other", approvalId: "approval_other", workspaceId: "workspace_1", toolId: "linear.write", status: "succeeded", result: {} },
+        "EXECUTION_EFFECT_UNCERTAIN", { approvalId: "approval_1" }],
+    ] as const) {
+      f.successReply(path, wrong);
+      const response = await f.run([...args, "--json"], env);
+      expect(response.code).toBe(23);
+      expect(response.stdout).toBe("");
+      expect(lastError(response.stderr)).toMatchObject({ error, details: detail });
+      f.clearSuccessReply();
+    }
+  });
+
+  it("rejects cross-request identities in catalog, account and approval reads", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    for (const [path, args, wrong] of [
+      ["/api/tools", ["tools", "list", "--provider", "linear"],
+        { tools: [{ id: "other.read", provider: "github" }] }],
+      ["/api/tools/manifest", ["tools", "inspect", "linear.read"],
+        { id: "other.write", hash: "v1" }],
+      ["/api/connections/list", ["connections", "list", "--provider", "linear"],
+        [{ id: "connection_other", workspaceId: "workspace_other", provider: "linear" }]],
+      ["/api/approvals/status", ["approvals", "status", "approval_1"],
+        { id: "approval_other", workspaceId: "workspace_1", toolId: "linear.write", status: "pending", expiresAt: Date.now() + 600_000 }],
+    ] as const) {
+      f.successReply(path, wrong);
+      const response = await f.run([...args, "--json"], env);
+      expect(response.code).toBe(1);
+      expect(response.stdout).toBe("");
+      f.clearSuccessReply();
+    }
+    f.successReply("/api/approvals/status", { id: "approval_1", workspaceId: "workspace_other",
+      toolId: "linear.write", status: "approved", expiresAt: Date.now() + 600_000 });
+    const status = await f.run(["approvals", "status", "approval_1", "--json"], env);
+    expect(status.code).toBe(1);
+    expect(status.stdout).toBe("");
+  });
+
   it("keeps a saved grant when a successful revocation reply is invalid", async () => {
     const f = await fixture();
     expect((await f.run(["login", "--url", f.url, "--json"])).code).toBe(0);
     f.malformedSuccess("/api/client-grants/revoke-self", "shape");
     const logout = await f.run(["logout", "--json"]);
-    expect(logout.code).toBe(1);
+    expect(logout.code).toBe(3);
+    expect(lastError(logout.stderr).error).toBe("REVOCATION_UNVERIFIED");
     expect((await f.run(["profiles", "show", "--json"])).code).toBe(0);
   });
 
@@ -423,15 +492,16 @@ describe("cli-command-contract", () => {
   });
 
   it("keeps the credential when logout cannot prove revocation", async () => {
-    for (const failure of ["former-member", "revoked", "unreachable"] as const) {
+    for (const failure of ["former-member", "revoked", "unreachable", "server-error"] as const) {
       const f = await fixture();
       expect((await f.run(["login", "--url", f.url, "--json"])).code).toBe(0);
       if (failure === "former-member") f.formerMember();
       if (failure === "revoked") f.revoke();
       if (failure === "unreachable") f.loseRevoke();
+      if (failure === "server-error") f.failRevoke(503);
       const logout = await f.run(["logout", "--json"]);
-      expect(logout.code).toBe(failure === "unreachable" ? 1 : 3);
-      if (failure !== "unreachable") expect(JSON.parse(logout.stderr).error).toBe("REVOCATION_UNVERIFIED");
+      expect(logout.code).toBe(3);
+      expect(JSON.parse(logout.stderr).error).toBe("REVOCATION_UNVERIFIED");
       expect(logout.stdout + logout.stderr).not.toContain("omr_fixture_secret");
       expect(JSON.parse((await f.run(["profiles", "show", "--json"])).stdout).name).toBe("default");
       expect((await f.run(["logout", "--local", "--json"])).code).toBe(0);
