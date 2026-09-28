@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { chmodSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, statSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -17,12 +17,13 @@ afterEach(async () => {
 });
 
 async function fixture() {
-  const calls: { path: string; body: unknown; authorization: string | undefined }[] = [];
+  const calls: { path: string; url: string; body: unknown; authorization: string | undefined }[] = [];
   let revoked = false;
   let deviceLost = false;
   let approvalLost = false;
   let formerMember = false;
   let revokeLost = false;
+  let emptyCatalog = false;
   let grantWorkspace = "workspace_1";
   let approvalStatus: string = "pending";
   let expiresAt = Date.now() + 600_000;
@@ -31,7 +32,7 @@ async function fixture() {
     let raw = "";
     for await (const chunk of request) raw += chunk.toString();
     const body = raw ? JSON.parse(raw) as Record<string, unknown> : undefined;
-    calls.push({ path, body, authorization: request.headers.authorization });
+    calls.push({ path, url: request.url!, body, authorization: request.headers.authorization });
     const answer = (status: number, value: unknown) => {
       response.writeHead(status, { "content-type": "application/json" });
       response.end(JSON.stringify(value));
@@ -55,7 +56,7 @@ async function fixture() {
     if (path === "/api/tools") {
       if (new URL(request.url!, "http://localhost").searchParams.get("workspaceId") !== grantWorkspace)
         return answer(403, { error: "CONNECTION_ACCESS_DENIED" });
-      return answer(200, { tools: [{ id: "linear.read" }], cursor: null });
+      return answer(200, { tools: emptyCatalog ? [] : [{ id: "linear.read" }], cursor: null });
     }
     if (path === "/api/tools/manifest") return answer(200, { id: "linear.read", hash: "v1" });
     if (path === "/api/connections/list") return answer(200, [{ id: "connection_1" }]);
@@ -109,6 +110,7 @@ async function fixture() {
   return { run, url, root, config, calls, loseDevice: () => { deviceLost = true; },
     loseApproval: () => { approvalLost = true; }, formerMember: () => { formerMember = true; },
     loseRevoke: () => { revokeLost = true; },
+    emptyCatalog: () => { emptyCatalog = true; },
     setGrantWorkspace: (value: string) => { grantWorkspace = value; },
     setApproval: (status: string, expiry = Date.now() + 600_000) => {
     approvalStatus = status; expiresAt = expiry;
@@ -126,7 +128,7 @@ describe("cli-command-contract", () => {
     expect(JSON.parse((await f.run(["profiles", "list", "--json"])).stdout)).toMatchObject([
       { name: "work", active: true, workspaceId: "workspace_1" },
     ]);
-    expect((await f.run(["profiles", "use", "../../escape", "--json"])).code).toBe(1);
+    expect((await f.run(["profiles", "use", "../../escape", "--json"])).code).toBe(2);
     expect((await f.run(["workspaces", "use", "workspace_other", "--json"])).code).toBe(1);
     expect(JSON.parse((await f.run(["workspaces", "show", "--json"])).stdout).workspaceId).toBe("workspace_1");
     const file = join(f.config, "profiles", "work.json");
@@ -298,6 +300,88 @@ describe("cli-command-contract", () => {
     expect(readFileSync(credentials, "utf8")).toContain("other_secret");
   });
 
+  it("recovers interrupted legacy cleanup for workspace migration and confirmed revocation", async () => {
+    for (const operation of ["workspace", "revoke"] as const) {
+      const f = await fixture();
+      mkdirSync(join(f.config, "profiles"), { recursive: true });
+      writeFileSync(join(f.config, "profiles", "default.json"), '{"workspaceId":"workspace_1"}\n');
+      const credentials = join(f.config, "credentials");
+      writeFileSync(credentials, `[default]\nbackend=${f.url}\nkey=omr_fixture_secret\n[other]\nbackend=${f.url}\nkey=other_secret\n`, { mode: 0o600 });
+      const lock = `${credentials}.lock`;
+      writeFileSync(lock, "", { mode: 0o600 });
+      utimesSync(lock, new Date(0), new Date(0));
+      const response = await f.run(operation === "workspace"
+        ? ["workspaces", "use", "workspace_1", "--json"] : ["logout", "--json"]);
+      expect(response.code).toBe(0);
+      expect(existsSync(lock)).toBe(false);
+      expect(readFileSync(credentials, "utf8")).not.toContain("omr_fixture_secret");
+      expect(readFileSync(credentials, "utf8")).toContain("other_secret");
+      if (operation === "revoke") {
+        expect(f.calls.some((call) => call.path === "/api/client-grants/revoke-self")).toBe(true);
+        expect(existsSync(join(f.config, "profiles", "default.json"))).toBe(false);
+      }
+    }
+  });
+
+  it("recovers an abandoned lock without a matching legacy entry and waits for a concurrent owner", async () => {
+    const f = await fixture();
+    mkdirSync(join(f.config, "profiles"), { recursive: true });
+    for (const name of ["default", "other"]) {
+      writeFileSync(join(f.config, "profiles", `${name}.json`), '{"workspaceId":"workspace_1"}\n');
+    }
+    const credentials = join(f.config, "credentials");
+    writeFileSync(credentials, `[default]\nbackend=${f.url}\nkey=omr_fixture_secret\n[other]\nbackend=${f.url}\nkey=other_secret\n`, { mode: 0o600 });
+    const lock = `${credentials}.lock`;
+    writeFileSync(lock, `${process.pid}\n`, { mode: 0o600 });
+    const migrating = f.run(["workspaces", "use", "workspace_1", "--json"]);
+    const removing = f.run(["logout", "--local", "--profile", "other", "--json"]);
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    rmSync(lock);
+    expect((await migrating).code).toBe(0);
+    expect((await removing).code).toBe(0);
+    expect(existsSync(lock)).toBe(false);
+    expect(readFileSync(credentials, "utf8")).not.toContain("omr_fixture_secret");
+    expect(readFileSync(credentials, "utf8")).not.toContain("other_secret");
+    expect(JSON.parse(readFileSync(join(f.config, "profiles", "default.json"), "utf8"))).toMatchObject({
+      key: "omr_fixture_secret", workspaceId: "workspace_1",
+    });
+    expect(existsSync(join(f.config, "profiles", "other.json"))).toBe(false);
+
+    writeFileSync(lock, "", { mode: 0o600 });
+    utimesSync(lock, new Date(0), new Date(0));
+    expect((await f.run(["logout", "--local", "--json"])).code).toBe(0);
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it("preserves MCP headless workspace fallback from legacy metadata and explicit override", async () => {
+    const f = await fixture();
+    f.emptyCatalog();
+    mkdirSync(join(f.config, "profiles"), { recursive: true });
+    writeFileSync(join(f.config, "profiles", "default.json"), '{"workspaceId":"workspace_1"}\n');
+    const launch = async (workspaceId?: string) => {
+      const before = f.calls.length;
+      const child = spawn(process.execPath, [resolve("packages/mcp/dist/bin.js")], {
+        cwd: f.root, env: { ...process.env, OMR_CONFIG_DIR: f.config, OMR_PROFILE: undefined,
+          OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: workspaceId },
+      });
+      let stderr = "";
+      child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+      try {
+        for (let n = 0; n < 100 && !f.calls.slice(before).some((call) => call.path === "/api/tools"); n++)
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(f.calls.slice(before).some((call) => call.path === "/api/tools" &&
+          new URL(call.url, f.url).searchParams.get("workspaceId") === (workspaceId ?? "workspace_1") &&
+          call.authorization === "Bearer headless_secret" &&
+          (call.body === undefined))).toBe(true);
+        expect(stderr).toBe("");
+      } finally { child.kill(); }
+    };
+    await launch();
+    f.setGrantWorkspace("workspace_2");
+    rmSync(join(f.config, "profiles", "default.json"));
+    await launch("workspace_2");
+  });
+
   it("never changes a saved profile while headless logout is configured", async () => {
     for (const saved of [false, true]) {
       const f = await fixture();
@@ -322,6 +406,12 @@ describe("cli-command-contract", () => {
       const response = await f.run([...args, "--json"]);
       expect(response.code).toBe(2);
       expect(JSON.parse(response.stderr).error).toBe("USAGE");
+    }
+    for (const args of [["profiles", "use", "../bad"], ["profiles", "show", "--profile", "../bad"],
+      ["login", "--profile", "../bad", "--url", f.url], ["tools", "list", "--profile", "../bad"]]) {
+      const response = await f.run([...args, "--json"]);
+      expect(response.code).toBe(2);
+      expect(JSON.parse(response.stderr).error).toBe("INPUT_INVALID");
     }
     const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
     for (const args of [["--params", "@missing.json"], ["--params-file", "missing.json"]]) {

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { OMRProfileStore, assertProfileName } from "@oh-my-router/client/profile-store";
+import { OMRProfileStore, InvalidProfileNameError, assertProfileName } from "@oh-my-router/client/profile-store";
 import { beginDeviceAuthorization, OMRClient, OMRHttpError, OMRTransportError, pollDeviceAuthorization } from "@oh-my-router/client";
 import type { ClientCapability } from "@oh-my-router/client-access";
 import type { JsonValue, ToolEffect } from "@oh-my-router/tools";
@@ -61,10 +61,12 @@ function fail(error: unknown, json: boolean): void {
     /^(?:EXECUTION|APPROVAL|CLIENT|DEVICE|CONNECTION|TOOL|WORKSPACE|REQUEST|AUTHFN|PROVIDER|RUNTIME)_[A-Z0-9_]{1,64}$/.test(body.error)
       ? body.error : undefined;
   const code = error instanceof CLIError ? error.code :
+    error instanceof InvalidProfileNameError ? "INPUT_INVALID" :
     error instanceof OMRTransportError && ["/api/tools/execute", "/api/approvals/execute"].includes(error.path)
       ? "EXECUTION_EFFECT_UNCERTAIN" :
     remoteCode ?? (error instanceof OMRHttpError ? "HTTP_ERROR" : "CLI_ERROR");
   const exit = error instanceof CLIError ? error.exitCode :
+    error instanceof InvalidProfileNameError ? 2 :
     code === "EXECUTION_APPROVAL_REQUIRED" || code === "DEVICE_AUTHORIZATION_PENDING" ? 20 :
     code === "EXECUTION_OUTCOME_UNKNOWN" || code === "EXECUTION_EFFECT_UNCERTAIN" ? 23 :
     code === "DEVICE_AUTHORIZATION_EXPIRED" ? 22 :
