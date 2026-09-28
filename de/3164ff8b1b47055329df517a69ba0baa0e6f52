@@ -1,0 +1,32 @@
+README.md
+  h_a39f9495f9ec1d 99-100,103-105
+apps/web/src/lib/server/cloudflare-runtime.test.ts
+  h_a39f9495f9ec1d 52,68-90
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 200,204,209,687,689
+packages/cli/README.md
+  h_a39f9495f9ec1d 3,20,25,72
+packages/cli/package.json
+  h_a39f9495f9ec1d 11
+packages/cli/src/bin.ts
+  h_a39f9495f9ec1d 6,35-40,62,67-68,86-103,105-118,125-127,158-159,184-187,191-231,233-239,311,332-333,354-367,369-376,378-386,388-402,404-415,417,420-423,425-448,450-463,465-486,488-490,492-493,495-519,521-545,547,551-589
+packages/client/src/ini.d.ts
+  h_a39f9495f9ec1d 1-9
+packages/client/src/profile-store.ts
+  h_a39f9495f9ec1d 3,12-13,20-22,62-80,90-92,98-102,105-108,113-139,164,172,175,180-198,200-212,215,228,231-248,266,287-290,298-307,310-313,327-332,340-349,352-355,364-366,395-397,399
+packages/mcp/src/bin.ts
+  h_a39f9495f9ec1d 2,18
+tests/acceptance/cli-command-contract.test.ts
+  h_a39f9495f9ec1d 13-18,394,680-791,1154,1157,1184-1189,1207-1212,1223-1233
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "de3164ff8b1b47055329df517a69ba0baa0e6f52",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
