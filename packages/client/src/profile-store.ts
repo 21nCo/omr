@@ -43,7 +43,8 @@ function safeFile(path: string): void {
 function safeProfileFile(path: string): void {
   if (lstatExists(path)) {
     const stats = lstatSync(path);
-    if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("Profile file must be a regular file");
+    if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink !== 1)
+      throw new Error("Profile file must be a private regular file");
     if (process.platform !== "win32" && (stats.mode & 0o077)) {
       // The prior CLI wrote workspace-only metadata with the default umask.
       const value = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
@@ -185,7 +186,10 @@ export class OMRProfileStore {
     try { writePrivate(reclaim, `${process.pid}\n`, true); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if (Date.now() >= deadline) {
+      // A prior reclaimer may have died after publishing its guard. Remove
+      // only that abandoned inode; a live owner keeps exclusive recovery.
+      removeStaleLock(reclaim);
+      if (Date.now() >= deadline && lstatExists(reclaim)) {
         throw new Error("Credential recovery is busy; inspect credentials.lock.reclaim before retrying");
       }
       return;
@@ -265,11 +269,14 @@ export class OMRProfileStore {
   }
 
   has(name: string): boolean {
-    this.prepare();
-    return lstatExists(this.file(name)) || Object.hasOwn(this.legacy(), assertProfileName(name));
+    return this.locked(() => lstatExists(this.file(name)) || Object.hasOwn(this.legacy(), assertProfileName(name)));
   }
 
   list(onUnreadable?: (file: string) => void): { name: string; backend: string; workspaceId: string; active: boolean }[] {
+    return this.locked(() => this.listUnlocked(onUnreadable));
+  }
+
+  private listUnlocked(onUnreadable?: (file: string) => void): { name: string; backend: string; workspaceId: string; active: boolean }[] {
     this.prepare();
     let active: string | undefined;
     try { active = this.activeName(); }
@@ -281,7 +288,7 @@ export class OMRProfileStore {
     for (const file of readdirSync(this.profiles).filter((entry) => entry.endsWith(".json"))) {
       try {
         const name = assertProfileName(file.slice(0, -5));
-        const { backend, workspaceId } = this.get(name);
+        const { backend, workspaceId } = this.getUnlocked(name);
         profiles.push({ name, backend, workspaceId, active: name === active });
       } catch {
         onUnreadable?.(file);
@@ -295,6 +302,10 @@ export class OMRProfileStore {
   }
 
   get(name: string): OMRProfile {
+    return this.locked(() => this.getUnlocked(name));
+  }
+
+  private getUnlocked(name: string): OMRProfile {
     const value = this.readProfile(name) as Partial<OMRProfile>;
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Profile ${name} is invalid`);
     this.restoreLegacyGrant(name, value);
@@ -312,10 +323,12 @@ export class OMRProfileStore {
   }
 
   workspaceId(name: string): string {
-    const value = this.readProfile(name) as { workspaceId?: unknown } | null;
-    if (typeof value?.workspaceId !== "string" || !value.workspaceId)
-      throw new Error(`Profile ${name} is invalid`);
-    return value.workspaceId;
+    return this.locked(() => {
+      const value = this.readProfile(name) as { workspaceId?: unknown } | null;
+      if (typeof value?.workspaceId !== "string" || !value.workspaceId)
+        throw new Error(`Profile ${name} is invalid`);
+      return value.workspaceId;
+    });
   }
 
   private readProfile(name: string): unknown {
@@ -361,7 +374,7 @@ export class OMRProfileStore {
 
   use(name: string): void {
     this.locked(() => {
-      this.get(name);
+      this.getUnlocked(name);
       writePrivate(this.active, `${name}\n`);
     });
   }
@@ -370,7 +383,7 @@ export class OMRProfileStore {
     expected: Pick<OMRProfile, "backend" | "key">): boolean {
     return this.locked(() => {
       if (!existsSync(this.file(name))) return false;
-      const profile = this.get(name);
+      const profile = this.getUnlocked(name);
       if (profile.backend !== expected.backend || profile.key !== expected.key) return false;
       writePrivate(this.file(name), JSON.stringify({ ...profile, workspaceId }));
       this.removeLegacy(name);
@@ -397,7 +410,7 @@ export class OMRProfileStore {
     return this.locked(() => {
       const file = this.file(name);
       if (!existsSync(file)) return false;
-      const current = this.get(name);
+      const current = this.getUnlocked(name);
       if (current.backend !== expected.backend || current.key !== expected.key) return false;
       this.removeLegacy(name);
       rmSync(file);

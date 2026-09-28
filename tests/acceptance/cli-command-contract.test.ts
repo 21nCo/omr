@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, linkSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -783,6 +783,19 @@ syncBuiltinESMExports();
     expect(f.calls).toHaveLength(0);
   });
 
+  it("classifies invalid login URLs before issuing a device request", async () => {
+    const f = await fixture();
+    for (const url of ["not a URL", "ftp://example.test", "http://example.test",
+      "https://user:pass@example.test", "https://example.test?token=private",
+      "https://example.test#fragment", ` ${f.url}`]) {
+      const response = await f.run(["login", "--url", url, "--json"]);
+      expect(response.code, url).toBe(2);
+      expect(lastError(response.stderr).error).toBe("INPUT_INVALID");
+      expect(response.stdout + response.stderr).not.toContain("private");
+    }
+    expect(f.calls).toHaveLength(0);
+  });
+
   it("keeps a grant discoverable when active profile publication fails", async () => {
     const f = await fixture();
     mkdirSync(f.config, { recursive: true });
@@ -876,7 +889,7 @@ syncBuiltinESMExports();
     expect(existsSync(lock)).toBe(false);
   });
 
-  it("fails closed after an interrupted recovery until its guard is inspected", async () => {
+  it("recovers an interrupted reclaim guard without losing the legacy grant", async () => {
     const f = await fixture();
     mkdirSync(join(f.config, "profiles"), { recursive: true });
     const profile = join(f.config, "profiles", "default.json");
@@ -888,15 +901,58 @@ syncBuiltinESMExports();
     utimesSync(lock, new Date(0), new Date(0));
     const guard = `${lock}.reclaim`;
     writeFileSync(guard, "99999999\n", { mode: 0o600 });
-    const blocked = await f.run(["logout", "--local", "--json"]);
-    expect(blocked.code).toBe(1);
-    expect(lastError(blocked.stderr).message).toContain("credentials.lock.reclaim");
-    expect(existsSync(profile)).toBe(true);
-    expect(readFileSync(credentials, "utf8")).toContain("omr_fixture_secret");
-    rmSync(guard);
-    expect((await f.run(["logout", "--local", "--json"])).code).toBe(0);
+    const result = await f.run(["logout", "--local", "--json"]);
+    expect(result.code, result.stderr).toBe(0);
+    expect(existsSync(guard)).toBe(false);
     expect(existsSync(profile)).toBe(false);
     expect(readFileSync(credentials, "utf8")).not.toContain("omr_fixture_secret");
+  }, 10_000);
+
+  it("reads a legacy grant atomically with concurrent workspace migration", async () => {
+    const f = await fixture();
+    mkdirSync(join(f.config, "profiles"), { recursive: true });
+    const profile = join(f.config, "profiles", "default.json");
+    writeFileSync(profile, '{"workspaceId":"workspace_1"}\n', { mode: 0o600 });
+    writeFileSync(join(f.config, "profiles", "other.json"), '{"workspaceId":"workspace_1"}\n', { mode: 0o600 });
+    const credentials = join(f.config, "credentials");
+    writeFileSync(credentials, `[default]\nbackend=${f.url}\nkey=omr_fixture_secret\n[other]\nbackend=${f.url}\nkey=other_secret\n`, { mode: 0o600 });
+    const marker = join(f.root, "reader-held"), release = join(f.root, "release-reader");
+    const preload = join(f.root, "pause-legacy-read.cjs");
+    writeFileSync(preload, `
+const fs = require("node:fs");
+const { syncBuiltinESMExports } = require("node:module");
+const profile = ${JSON.stringify(profile)}, marker = ${JSON.stringify(marker)}, release = ${JSON.stringify(release)};
+const wait = new Int32Array(new SharedArrayBuffer(4));
+let paused = false;
+const read = fs.readFileSync;
+fs.readFileSync = function(path, ...args) {
+  const value = read.call(this, path, ...args);
+  if (!paused && path === profile) {
+    paused = true;
+    fs.writeFileSync(marker, "held");
+    while (!fs.existsSync(release)) Atomics.wait(wait, 0, 0, 10);
+  }
+  return value;
+};
+syncBuiltinESMExports();
+`);
+    const reader = f.run(["profiles", "show", "--json"], { NODE_OPTIONS: `--require=${preload}` });
+    let writer: ReturnType<typeof f.run> | undefined;
+    try {
+      const deadline = Date.now() + 5_000;
+      while (!existsSync(marker) && Date.now() < deadline)
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(existsSync(marker)).toBe(true);
+      writer = f.run(["workspaces", "use", "workspace_1", "--json"]);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    } finally { writeFileSync(release, "go"); }
+    const readResult = await reader;
+    const writeResult = await writer!;
+    expect(readResult.code, readResult.stderr).toBe(0);
+    expect(JSON.parse(readResult.stdout)).toMatchObject({ workspaceId: "workspace_1", backend: f.url });
+    expect(writeResult.code, writeResult.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(profile, "utf8"))).toMatchObject({ key: "omr_fixture_secret" });
+    expect(readFileSync(credentials, "utf8")).toContain("other_secret");
   }, 10_000);
 
   it("keeps a live lock exclusive while legacy workspace migration overlaps logout", async () => {
@@ -1319,6 +1375,20 @@ syncBuiltinESMExports();
     rmSync(profile);
     symlinkSync(join(f.root, "outside"), profile);
     expect((await f.run(["profiles", "show", "--json"])).code).toBe(1);
+  });
+
+  it("rejects hard-linked legacy metadata before changing an outside inode", async () => {
+    if (process.platform === "win32") return;
+    const f = await fixture();
+    mkdirSync(join(f.config, "profiles"), { recursive: true });
+    const outside = join(f.root, "outside.json");
+    writeFileSync(outside, '{"workspaceId":"workspace_1"}\n', { mode: 0o644 });
+    linkSync(outside, join(f.config, "profiles", "default.json"));
+    const result = await f.run(["profiles", "show", "--json"]);
+    expect(result.code).toBe(1);
+    expect(result.stdout + result.stderr).not.toContain("workspace_1");
+    expect(statSync(outside).mode & 0o777).toBe(0o644);
+    expect(statSync(outside).nlink).toBe(2);
   });
 
   it("reports uncertain one-time device delivery without storing or printing a credential", async () => {

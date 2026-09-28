@@ -4,7 +4,7 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { OMRProfileStore, InvalidProfileNameError, ProfileRecoveryRequiredError, assertProfileName } from "@oh-my-router/client/profile-store";
-import { beginDeviceAuthorization, OMRClient, OMRHttpError, OMRProtocolError, OMRTransportError, pollDeviceAuthorization } from "@oh-my-router/client";
+import { beginDeviceAuthorization, normalizedBaseUrl, OMRClient, OMRHttpError, OMRProtocolError, OMRTransportError, pollDeviceAuthorization } from "@oh-my-router/client";
 import type { ClientCapability } from "@oh-my-router/client-access";
 import type { JsonValue, ToolEffect } from "@oh-my-router/tools";
 
@@ -328,7 +328,9 @@ async function login(parsed: Parsed): Promise<void> {
   }
   const name = profileName(parsed);
   if (store.has(name)) throw new CLIError("PROFILE_EXISTS", `Profile ${name} already exists; log out first`, 2);
-  const baseUrl = required(parsed, "url");
+  let baseUrl: string;
+  try { baseUrl = normalizedBaseUrl(required(parsed, "url")); }
+  catch { throw new CLIError("INPUT_INVALID", "Invalid --url; use HTTPS or localhost HTTP without credentials, query, or fragment", 2); }
   const kind = opt(parsed, "kind") ?? "cli";
   if (kind !== "cli" && kind !== "mcp_stdio" && kind !== "mcp_remote") {
     throw new CLIError("INPUT_INVALID", "--kind must be cli, mcp_stdio, or mcp_remote", 2);

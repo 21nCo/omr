@@ -58,7 +58,8 @@ export class OMRProtocolError extends Error {
   }
 }
 
-function normalizedBaseUrl(value: string): string {
+export function normalizedBaseUrl(value: string): string {
+  if (/[\u0000-\u0020\u007f]/.test(value)) throw new Error("OMR backend URL contains invalid whitespace");
   const url = new URL(value);
   if (url.username || url.password || url.search || url.hash) {
     throw new Error("OMR backend URL cannot include credentials, query, or fragment");
