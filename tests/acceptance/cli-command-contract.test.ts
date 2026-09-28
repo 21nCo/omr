@@ -47,6 +47,8 @@ async function fixture() {
   let expiresAt = Date.now() + 600_000;
   const malformedSuccess = new Map<string, "json" | "empty" | "shape">();
   const successOverride = new Map<string, unknown>();
+  const failureReply = new Map<string, { status: number; body: unknown; committed: boolean }>();
+  const committedMutations: { path: string; identity: unknown }[] = [];
   const interrupted = new Map<string, string>();
   const server = createServer(async (request, response) => {
     const path = new URL(request.url!, "http://localhost").pathname;
@@ -82,6 +84,12 @@ async function fixture() {
         request.headers.authorization !== "Bearer replacement_secret" &&
         request.headers.authorization !== "Bearer headless_secret") return answer(401, { error: "CLIENT_CREDENTIAL_INVALID" });
     if (revoked) return answer(401, { error: "CLIENT_CREDENTIAL_INVALID" });
+    const failure = failureReply.get(path);
+    if (failure) {
+      if (failure.committed) committedMutations.push({ path, identity: path === "/api/approvals/execute"
+        ? body?.approvalId : body?.idempotencyKey });
+      return answer(failure.status, failure.body);
+    }
     if (path === "/api/client-grants/revoke-self") {
       if (revokeHeld) await new Promise<void>((resolve) => { releaseRevoke = resolve; });
       if (revokeLost) { request.socket.destroy(); return; }
@@ -174,6 +182,14 @@ async function fixture() {
     clearMalformed: () => malformedSuccess.clear(),
     successReply: (path: string, value: unknown) => { successOverride.set(path, value); },
     clearSuccessReply: () => successOverride.clear(),
+    failAfterCommit: (path: string, status: number, body: unknown) => {
+      failureReply.set(path, { status, body, committed: true });
+    },
+    failureResponse: (path: string, status: number, body: unknown) => {
+      failureReply.set(path, { status, body, committed: false });
+    },
+    clearFailureResponse: () => failureReply.clear(),
+    committedMutations,
     interrupted,
     holdRevoke: () => { revokeHeld = true; },
     releaseRevoke: () => { revokeHeld = false; releaseRevoke?.(); },
@@ -711,6 +727,29 @@ describe("cli-command-contract", () => {
     expect(existsSync(lock)).toBe(false);
   });
 
+  it("fails closed after an interrupted recovery until its guard is inspected", async () => {
+    const f = await fixture();
+    mkdirSync(join(f.config, "profiles"), { recursive: true });
+    const profile = join(f.config, "profiles", "default.json");
+    writeFileSync(profile, '{"workspaceId":"workspace_1"}\n');
+    const credentials = join(f.config, "credentials");
+    writeFileSync(credentials, `[default]\nbackend=${f.url}\nkey=omr_fixture_secret\n`, { mode: 0o600 });
+    const lock = `${credentials}.lock`;
+    writeFileSync(lock, "", { mode: 0o600 });
+    utimesSync(lock, new Date(0), new Date(0));
+    const guard = `${lock}.reclaim`;
+    writeFileSync(guard, "99999999\n", { mode: 0o600 });
+    const blocked = await f.run(["logout", "--local", "--json"]);
+    expect(blocked.code).toBe(1);
+    expect(lastError(blocked.stderr).message).toContain("credentials.lock.reclaim");
+    expect(existsSync(profile)).toBe(true);
+    expect(readFileSync(credentials, "utf8")).toContain("omr_fixture_secret");
+    rmSync(guard);
+    expect((await f.run(["logout", "--local", "--json"])).code).toBe(0);
+    expect(existsSync(profile)).toBe(false);
+    expect(readFileSync(credentials, "utf8")).not.toContain("omr_fixture_secret");
+  }, 10_000);
+
   it("keeps a live lock exclusive while legacy workspace migration overlaps logout", async () => {
     const f = await fixture();
     mkdirSync(join(f.config, "profiles"), { recursive: true });
@@ -785,6 +824,92 @@ syncBuiltinESMExports();
     });
     expect(existsSync(join(f.config, "profiles", "other.json"))).toBe(false);
   }, 10_000);
+
+  it("serializes stale-lock reclamation across replacement, migration, and concurrent logouts", async () => {
+    const f = await fixture();
+    mkdirSync(join(f.config, "profiles"), { recursive: true });
+    for (const name of ["default", "other"])
+      writeFileSync(join(f.config, "profiles", `${name}.json`), '{"workspaceId":"workspace_1"}\n');
+    const credentials = join(f.config, "credentials");
+    writeFileSync(credentials, `[default]\nbackend=${f.url}\nkey=omr_fixture_secret\n[other]\nbackend=${f.url}\nkey=other_secret\n`, { mode: 0o600 });
+    const lock = `${credentials}.lock`;
+    writeFileSync(lock, "", { mode: 0o600 });
+    utimesSync(lock, new Date(0), new Date(0));
+    const before = join(f.root, "before-unlink"), after = join(f.root, "after-unlink");
+    const releaseBefore = join(f.root, "release-before"), releaseAfter = join(f.root, "release-after");
+    const live = join(f.root, "replacement-held"), releaseLive = join(f.root, "release-replacement");
+    const preload = join(f.root, "reclaim-race.cjs");
+    writeFileSync(preload, `
+const fs = require("node:fs");
+const { syncBuiltinESMExports } = require("node:module");
+const lock = ${JSON.stringify(lock)}, before = ${JSON.stringify(before)}, after = ${JSON.stringify(after)};
+const releaseBefore = ${JSON.stringify(releaseBefore)}, releaseAfter = ${JSON.stringify(releaseAfter)};
+const live = ${JSON.stringify(live)}, releaseLive = ${JSON.stringify(releaseLive)};
+const wait = new Int32Array(new SharedArrayBuffer(4));
+function until(path) { while (!fs.existsSync(path)) Atomics.wait(wait, 0, 0, 10); }
+let removed = false;
+const rm = fs.rmSync;
+fs.rmSync = function(path, ...rest) {
+  if (process.env.OMR_RACE_ROLE === "reclaimer" && path === lock && !removed) {
+    removed = true;
+    fs.writeFileSync(before, "ready"); until(releaseBefore);
+    const result = rm.call(this, path, ...rest);
+    fs.writeFileSync(after, "removed"); until(releaseAfter);
+    return result;
+  }
+  return rm.call(this, path, ...rest);
+};
+const link = fs.linkSync;
+fs.linkSync = function(source, target) {
+  const result = link.call(this, source, target);
+  if (process.env.OMR_RACE_ROLE === "replacement" && target === lock) {
+    fs.writeFileSync(live, "held"); until(releaseLive);
+  }
+  return result;
+};
+syncBuiltinESMExports();
+`);
+    const raceEnv = { NODE_OPTIONS: `--require=${preload}` };
+    const waitFor = async (path: string) => {
+      const deadline = Date.now() + 5_000;
+      while (!existsSync(path) && Date.now() < deadline)
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(existsSync(path), `Missing marker ${path}`).toBe(true);
+    };
+    const migrating = f.run(["workspaces", "use", "workspace_1", "--json"],
+      { ...raceEnv, OMR_RACE_ROLE: "reclaimer" });
+    let removingOther: ReturnType<typeof f.run> | undefined;
+    let removingDefault: ReturnType<typeof f.run> | undefined;
+    try {
+      await waitFor(before);
+      expect(readFileSync(lock, "utf8")).toBe("");
+      expect(existsSync(`${lock}.reclaim`)).toBe(true);
+      removingOther = f.run(["logout", "--local", "--profile", "other", "--json"]);
+      const early = await Promise.race([removingOther,
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 250))]);
+      expect(early, JSON.stringify(early)).toBeNull();
+      writeFileSync(releaseBefore, "go");
+      await waitFor(after);
+      removingDefault = f.run(["logout", "--local", "--json"],
+        { ...raceEnv, OMR_RACE_ROLE: "replacement" });
+      await waitFor(live);
+      writeFileSync(releaseAfter, "go");
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(readFileSync(lock, "utf8")).toMatch(/^[1-9]\d*\n$/);
+      expect(existsSync(join(f.config, "profiles", "default.json"))).toBe(true);
+    } finally {
+      writeFileSync(releaseBefore, "go");
+      writeFileSync(releaseAfter, "go");
+      writeFileSync(releaseLive, "go");
+    }
+    expect((await removingDefault!).code).toBe(0);
+    expect((await migrating).code).toBe(1);
+    expect((await removingOther!).code).toBe(0);
+    expect(existsSync(lock)).toBe(false);
+    expect(readFileSync(credentials, "utf8")).not.toMatch(/omr_fixture_secret|other_secret/);
+    expect(existsSync(join(f.config, "profiles", "default.json"))).toBe(false);
+    expect(existsSync(join(f.config, "profiles", "other.json"))).toBe(false);
+  }, 15_000);
 
   it("preserves MCP headless workspace fallback from legacy metadata and explicit override", async () => {
     const f = await fixture();
@@ -922,7 +1047,7 @@ syncBuiltinESMExports();
     expect(JSON.parse(truncated.stderr)).toMatchObject({ error: "EXECUTION_EFFECT_UNCERTAIN",
       details: { idempotencyKey: "retry-truncated-key" } });
     const badError = await f.run(["tools", "run", "linear.bad-error", "--json"], env);
-    expect(badError.code).toBe(1);
+    expect(badError.code).toBe(23);
     expect(badError.stdout + badError.stderr).not.toContain("omr_fixture_secret");
     expect((await f.run(["tools", "run", "linear.read", "--params", "{bad secret}", "--json"], env)).code).toBe(2);
     expect((await f.run(["tools", "list", "--json"], { OMR_BACKEND: f.url })).code).toBe(2);
@@ -964,6 +1089,55 @@ syncBuiltinESMExports();
       expect(JSON.parse(resolved.stdout)).toMatchObject({ id: "receipt_approved_running", status });
       f.clearSuccessReply();
     }
+  });
+
+  it("keeps retry identities when a gateway fails after mutation, while preserving known outcomes", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    const cases = [
+      { path: "/api/tools/execute", args: ["tools", "run", "linear.read", "--idempotency", "run-after-commit", "--json"],
+        identity: { idempotencyKey: "run-after-commit" } },
+      { path: "/api/approvals", args: ["approvals", "request", "linear.write", "--idempotency", "approval-after-commit", "--json"],
+        identity: { idempotencyKey: "approval-after-commit" } },
+      { path: "/api/approvals/execute", args: ["approvals", "execute", "approval_1", "--json"],
+        identity: { approvalId: "approval_1" } },
+    ];
+    for (const { path, args, identity } of cases) {
+      f.failAfterCommit(path, 502, { error: "BAD_GATEWAY", message: "omr_fixture_secret" });
+      const response = await f.run(args, env);
+      expect(response.code).toBe(23);
+      expect(response.stdout).toBe("");
+      expect(lastError(response.stderr)).toMatchObject({ details: identity });
+      expect(response.stderr).not.toContain("omr_fixture_secret");
+      f.clearFailureResponse();
+    }
+    expect(f.committedMutations).toEqual([
+      { path: "/api/tools/execute", identity: "run-after-commit" },
+      { path: "/api/approvals", identity: "approval-after-commit" },
+      { path: "/api/approvals/execute", identity: "approval_1" },
+    ]);
+
+    f.failureResponse("/api/tools/execute", 502, { error: "EXECUTION_FAILED", receiptId: "receipt_failed" });
+    const failed = await f.run(cases[0]!.args, env);
+    expect(failed.code).toBe(1);
+    expect(lastError(failed.stderr)).toMatchObject({ error: "EXECUTION_FAILED", details: { receiptId: "receipt_failed" } });
+    f.failureResponse("/api/tools/execute", 504, { error: "EXECUTION_INVOCATION_TIMEOUT" });
+    const predispatch = await f.run(cases[0]!.args, env);
+    expect(predispatch.code).toBe(24);
+    expect(lastError(predispatch.stderr).error).toBe("EXECUTION_INVOCATION_TIMEOUT");
+    f.failureResponse("/api/tools/execute", 502, { error: "EXECUTION_FAILED" });
+    const incompleteFailure = await f.run(cases[0]!.args, env);
+    expect(incompleteFailure.code).toBe(23);
+    expect(lastError(incompleteFailure.stderr)).toMatchObject({ error: "EXECUTION_EFFECT_UNCERTAIN",
+      details: { idempotencyKey: "run-after-commit" } });
+    f.clearFailureResponse();
+
+    f.failAfterCommit("/api/approvals/execute", 502,
+      { error: "EXECUTION_OUTCOME_UNKNOWN", receiptId: "receipt_approved_uncertain" });
+    const unknown = await f.run(cases[2]!.args, env);
+    expect(unknown.code).toBe(23);
+    expect(lastError(unknown.stderr)).toMatchObject({ error: "EXECUTION_OUTCOME_UNKNOWN",
+      details: { approvalId: "approval_1", receiptId: "receipt_approved_uncertain" } });
   });
 
   it("refuses symlinked profile targets", async () => {

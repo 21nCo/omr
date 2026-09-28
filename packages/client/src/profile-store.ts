@@ -107,6 +107,7 @@ export class OMRProfileStore {
   private locked<T>(operation: () => T): T {
     this.prepare();
     const lock = `${this.legacyCredentials}.lock`;
+    const reclaim = `${lock}.reclaim`;
     const deadline = Date.now() + 3_000;
     let fd: number;
     for (;;) {
@@ -118,31 +119,45 @@ export class OMRProfileStore {
         break;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        let stats;
-        let contents;
+        // Only one process may inspect and remove a stale lock at a time.
+        // Without this guard, an inode check followed by unlink can delete a
+        // replacement lock installed by another reclaimer in between.
         try {
-          stats = lstatSync(lock);
-          if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("Credential lock must be a regular file");
-          contents = readFileSync(lock, "utf8");
+          writePrivate(reclaim, `${process.pid}\n`, true);
         } catch (cause) {
-          if ((cause as NodeJS.ErrnoException).code === "ENOENT") continue;
-          throw cause;
-        }
-        const owner = /^([1-9]\d*)\n$/.exec(contents);
-        let alive = false;
-        if (owner) {
-          try { process.kill(Number(owner[1]), 0); alive = true; }
-          catch (cause) { alive = (cause as NodeJS.ErrnoException).code !== "ESRCH"; }
-        }
-        // Only older empty locks from an interrupted previous CLI need a grace period.
-        if (!alive && (owner || Date.now() - stats.mtimeMs > 250)) {
-          try {
-            const again = lstatSync(lock);
-            if (again.dev === stats.dev && again.ino === stats.ino && again.mtimeMs === stats.mtimeMs) rmSync(lock);
-          } catch (cause) {
-            if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
-          }
+          if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
+          if (Date.now() >= deadline) throw new Error("Credential recovery is busy; inspect credentials.lock.reclaim before retrying");
+          Atomics.wait(waitArray, 0, 0, 25);
           continue;
+        }
+        try {
+          let stats;
+          let contents;
+          try {
+            stats = lstatSync(lock);
+            if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("Credential lock must be a regular file");
+            contents = readFileSync(lock, "utf8");
+          } catch (cause) {
+            if ((cause as NodeJS.ErrnoException).code === "ENOENT") continue;
+            throw cause;
+          }
+          const owner = /^([1-9]\d*)\n$/.exec(contents);
+          let alive = false;
+          if (owner) {
+            try { process.kill(Number(owner[1]), 0); alive = true; }
+            catch (cause) { alive = (cause as NodeJS.ErrnoException).code !== "ESRCH"; }
+          }
+          // Only older empty locks from an interrupted previous CLI need a grace period.
+          if (!alive && (owner || Date.now() - stats.mtimeMs > 250)) {
+            try {
+              const again = lstatSync(lock);
+              if (again.dev === stats.dev && again.ino === stats.ino && again.mtimeMs === stats.mtimeMs) rmSync(lock);
+            } catch (cause) {
+              if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+            }
+          }
+        } finally {
+          rmSync(reclaim);
         }
         if (Date.now() >= deadline) throw new Error("Credential store is busy; retry the command");
         Atomics.wait(waitArray, 0, 0, 25);

@@ -157,6 +157,25 @@ function executionInProgress(error: unknown, identity: { idempotencyKey: string 
     { ...identity, ...(typeof receiptId === "string" && /^(?:execution|receipt)_[A-Za-z0-9_-]{1,100}$/.test(receiptId)
       ? { receiptId } : {}) });
 }
+function ambiguousMutationResponse(error: unknown,
+  identity: { idempotencyKey: string } | { approvalId: string },
+  operation: "tool execution" | "approval request" | "approved execution"): never {
+  if (!(error instanceof OMRHttpError) || error.status < 500) throw error;
+  const body = object(error.body) ? error.body : {};
+  // These server responses identify a terminal failure or a timeout before
+  // dispatch. Other 5xx responses can be generated after the mutation commits.
+  const validReceiptId = typeof body.receiptId === "string" &&
+    /^(?:execution|receipt)_[A-Za-z0-9_-]{1,100}$/.test(body.receiptId);
+  const receiptId = validReceiptId ? { receiptId: body.receiptId } : {};
+  if (operation !== "approval request" &&
+      ((error.status === 502 && body.error === "EXECUTION_FAILED" && validReceiptId) ||
+       (error.status === 504 && body.error === "EXECUTION_INVOCATION_TIMEOUT"))) throw error;
+  throw new CLIError(body.error === "EXECUTION_OUTCOME_UNKNOWN"
+    ? "EXECUTION_OUTCOME_UNKNOWN" : operation === "approval request"
+      ? "APPROVAL_DELIVERY_UNCERTAIN" : "EXECUTION_EFFECT_UNCERTAIN",
+  `${operation} response cannot prove whether the request committed; recover with the original request identity`,
+  23, { ...identity, ...receiptId });
+}
 function fail(error: unknown, json: boolean): void {
   const body = error instanceof OMRHttpError ? error.body as { error?: unknown; receiptId?: unknown } | null : null;
   const remoteCode = typeof body?.error === "string" &&
@@ -297,7 +316,7 @@ async function requestApproval(api: OMRClient, input: Parameters<OMRClient["requ
         "Approval response was lost; retry the same request with this idempotency key", 23,
         { idempotencyKey: input.idempotencyKey });
     }
-    throw error;
+    ambiguousMutationResponse(error, { idempotencyKey: input.idempotencyKey }, "approval request");
   }
 }
 
@@ -431,6 +450,8 @@ async function main(parsed: Parsed): Promise<void> {
         if (error instanceof OMRHttpError &&
             (error.body as { error?: unknown } | null)?.error === "EXECUTION_IN_PROGRESS")
           executionInProgress(error, { idempotencyKey });
+        if (error instanceof OMRHttpError && error.status >= 500)
+          ambiguousMutationResponse(error, { idempotencyKey }, "tool execution");
         if (!(error instanceof OMRHttpError) ||
             (error.body as { error?: unknown } | null)?.error !== "EXECUTION_APPROVAL_REQUIRED") throw error;
         const approval = await requestApproval(api, { workspaceId, toolId: subject, params: input,
@@ -460,6 +481,8 @@ async function main(parsed: Parsed): Promise<void> {
         if (error instanceof OMRHttpError &&
             (error.body as { error?: unknown } | null)?.error === "EXECUTION_IN_PROGRESS")
           executionInProgress(error, { approvalId: subject });
+        if (error instanceof OMRHttpError && error.status >= 500)
+          ambiguousMutationResponse(error, { approvalId: subject }, "approved execution");
         if (error instanceof OMRHttpError &&
             (error.body as { error?: unknown } | null)?.error === "APPROVAL_UNAVAILABLE") {
           const status = checkedApproval(await api.approvalStatus(subject), "/api/approvals/status",
