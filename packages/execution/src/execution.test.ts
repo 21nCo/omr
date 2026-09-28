@@ -1237,12 +1237,63 @@ describe("execution service", () => {
           await expect(service.executeApproved(principal, approval.id))
             .rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: receipt.id });
         }
+        expect(approvals.approvals.get(approval.id)).toMatchObject({
+          status: status === "succeeded" ? "consumed" : age === 0 ? "executing" : "uncertain",
+          executionReceiptId: status === "succeeded" || age !== 0 ? receipt.id : null,
+        });
+        expect(receipts.receipts.get(receipt.id)?.status).toBe(status);
       }
       expect(actionCall).not.toHaveBeenCalled();
-      expect(approvals.approvals.get(approval.id)?.executionReceiptId).toBe(status === "succeeded"
-        ? receipt.id : null);
     },
   );
+
+  it("links one exact receipt under concurrent stale approval retries", async () => {
+    const { actionCall, advance, approvals, receipts, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const approval = await requestApproval(service, { principal, toolId: "linear.create_issue",
+      params: {}, idempotencyKey: "concurrent-stale-effect" });
+    await service.approve(approval.id, principal.userId);
+    approvals.approvals.get(approval.id)!.status = "executing";
+    const receipt = receiptForApproval(approval, "reserved");
+    await receipts.reserve(receipt);
+    receipts.receipts.get(receipt.id)!.status = "running";
+    advance(65_001);
+    const retries = await Promise.allSettled(Array.from({ length: 4 },
+      () => service.executeApproved(principal, approval.id)));
+    for (const retry of retries) {
+      expect(retry).toMatchObject({ status: "rejected", reason: {
+        code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: receipt.id,
+      } });
+    }
+    expect(approvals.approvals.get(approval.id)).toMatchObject({
+      status: "uncertain", executionReceiptId: receipt.id,
+    });
+    expect(receipts.receipts.get(receipt.id)?.status).toBe("running");
+    expect(actionCall).not.toHaveBeenCalled();
+  });
+
+  it("links a stale succeeded receipt without disclosing its result after binding revocation", async () => {
+    const { actionCall, advance, approvals, connections, receipts, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const approval = await requestApproval(service, { principal, toolId: "linear.create_issue",
+      params: {}, idempotencyKey: "revoked-stale-success" });
+    await service.approve(approval.id, principal.userId);
+    approvals.approvals.get(approval.id)!.status = "executing";
+    const receipt = receiptForApproval(approval, "reserved");
+    await receipts.reserve(receipt);
+    Object.assign(receipts.receipts.get(receipt.id)!, { status: "succeeded", result: { id: "issue_1" } });
+    advance(65_001);
+    await connections.revoke(principal.userId, approval.connectionId);
+    await expect(service.executeApproved(principal, approval.id))
+      .rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+    expect(approvals.approvals.get(approval.id)).toMatchObject({
+      status: "uncertain", executionReceiptId: receipt.id,
+    });
+    expect(receipts.receipts.get(receipt.id)).toMatchObject({
+      status: "succeeded", result: { id: "issue_1" },
+    });
+    expect(actionCall).not.toHaveBeenCalled();
+  });
 
   it("rejects a mismatched effect receipt instead of adopting it during stale reconciliation", async () => {
     const { actionCall, advance, approvals, receipts, service, workspace } = await fixture();

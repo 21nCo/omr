@@ -10,6 +10,7 @@ import { ConnectionAuthority } from "@oh-my-router/connections";
 import { MemoryConnectionBindingStore } from "@oh-my-router/connections/testing";
 import { ExecutionService, ExecutionInvocationDeadlineError, ExecutionOutcomeUnknownError,
   publicApproval, publicReceipt, type ExecutionInvocationGuard,
+  type ExecutionReceipt,
   type ExecutionPrincipal } from "@oh-my-router/execution";
 import { PostgresExecutionInvocationGuard } from "@oh-my-router/execution/postgres";
 import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "@oh-my-router/execution/testing";
@@ -326,6 +327,36 @@ describe("execution-policy-contract", () => {
         privateKey: "private-key-secret", items: [{ pin: "array-PIN" }],
         metadata: { first: { pin: "object-PIN" } }, wholeItems: ["whole-array-secret"],
         nested: { rows: [["nested-array-secret"]] } }, idempotencyKey: `${surface}-write` };
+    const seedStaleEffect = async (status: "running" | "uncertain") => {
+      const approval = await service.requestApproval({
+        principal: principal(new Request("https://omr.example")), workspaceId: workspace.id,
+        toolId: "linear.write", params: {}, idempotencyKey: `${surface}-stale-${status}`,
+      });
+      await service.approve(approval.id, "user_1");
+      const stored = approvalStore.approvals.get(approval.id)!;
+      stored.status = "executing";
+      stored.updatedAt = Date.now() - 70_000;
+      const receipt: ExecutionReceipt = {
+        id: `execution_${crypto.randomUUID()}`, workspaceId: stored.workspaceId,
+        actorUserId: stored.actorUserId, principalKey: stored.principalKey,
+        toolId: stored.toolId, manifestHash: stored.manifestHash,
+        connectionId: stored.connectionId, providerConnectionId: stored.providerConnectionId,
+        idempotencyKey: stored.idempotencyKey, requestHash: stored.requestHash!,
+        approvalId: stored.id, status: "reserved", result: null, errorCode: null,
+        startedAt: Date.now(), completedAt: null, createdAt: Date.now(), updatedAt: Date.now(),
+      };
+      await receiptStore.reserve(receipt);
+      await receiptStore.beginDispatch(receipt.id, Date.now());
+      if (status === "uncertain") await receiptStore.uncertain(receipt.id, "unknown", Date.now());
+      return { approvalId: stored.id, receiptId: receipt.id, status };
+    };
+    const assertSettled = (approvalId: string, receiptId: string,
+      status: "running" | "uncertain") => {
+      expect(approvalStore.approvals.get(approvalId)).toMatchObject({
+        status: "uncertain", executionReceiptId: receiptId,
+      });
+      expect(receiptStore.receipts.get(receiptId)?.status).toBe(status);
+    };
 
     if (surface === "cli") {
       const server = createServer(async (incoming, outgoing) => {
@@ -407,6 +438,8 @@ describe("execution-policy-contract", () => {
         const ambiguous = JSON.parse((await runCli(["approvals", "request", "linear.write",
           "--params", "{}", "--idempotency", "cli-ambiguous-effect"])).stdout) as { id: string };
         await webPost("/api/approvals/approve", { approvalId: ambiguous.id });
+        const staleEffects = await Promise.all(
+          (["running", "uncertain"] as const).map(seedStaleEffect));
         provider.mockRejectedValueOnce(Object.assign(new Error("reply lost after effect"), {
           code: "CONNECTION_NOT_FOUND",
         }));
@@ -423,6 +456,17 @@ describe("execution-policy-contract", () => {
         expect(replay.code).toBe(1);
         expect(replay.stdout + replay.stderr).toContain("EXECUTION_OUTCOME_UNKNOWN");
         expect(replay.stdout + replay.stderr).toContain(receiptId);
+        expect(provider).toHaveBeenCalledTimes(4);
+        for (const stale of staleEffects) {
+          const retry = await runCli(["approvals", "execute", stale.approvalId]).then(
+            () => { throw new Error("A stale effect retry unexpectedly succeeded"); },
+            (error: { code: number; stdout: string; stderr: string }) => error,
+          );
+          expect(retry.code).toBe(1);
+          expect(retry.stdout + retry.stderr).toContain("EXECUTION_OUTCOME_UNKNOWN");
+          expect(retry.stdout + retry.stderr).toContain(stale.receiptId);
+          assertSettled(stale.approvalId, stale.receiptId, stale.status);
+        }
         expect(provider).toHaveBeenCalledTimes(4);
       } finally {
         await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -482,6 +526,8 @@ describe("execution-policy-contract", () => {
         } });
         const ambiguousId = (ambiguous.structuredContent as { approvalId: string }).approvalId;
         await webPost("/api/approvals/approve", { approvalId: ambiguousId });
+        const staleEffects = await Promise.all(
+          (["running", "uncertain"] as const).map(seedStaleEffect));
         provider.mockRejectedValueOnce(Object.assign(new Error("reply lost after effect"), {
           code: "CONNECTION_NOT_FOUND",
         }));
@@ -495,6 +541,15 @@ describe("execution-policy-contract", () => {
             error: { details: { error: "EXECUTION_OUTCOME_UNKNOWN",
               receiptId: failedDetails.receiptId } } } });
         expect(failedDetails.receiptId).toMatch(/^execution_/);
+        expect(provider).toHaveBeenCalledTimes(4);
+        for (const stale of staleEffects) {
+          const retry = await client.callTool({ name: "omr.approvals.execute",
+            arguments: { approvalId: stale.approvalId } });
+          expect(retry).toMatchObject({ isError: true, structuredContent: { ok: false,
+            error: { details: { error: "EXECUTION_OUTCOME_UNKNOWN",
+              receiptId: stale.receiptId } } } });
+          assertSettled(stale.approvalId, stale.receiptId, stale.status);
+        }
         expect(provider).toHaveBeenCalledTimes(4);
       } finally {
         await Promise.all([client.close(), server.close()]);
@@ -564,6 +619,8 @@ describe("execution-policy-contract", () => {
     const ambiguous = await client.requestApproval({ workspaceId: workspace.id, toolId: "linear.write",
       params: {}, idempotencyKey: "web-ambiguous-effect" }) as { id: string };
     await client.approve(ambiguous.id);
+    const staleEffects = await Promise.all(
+      (["running", "uncertain"] as const).map(seedStaleEffect));
     provider.mockRejectedValueOnce(Object.assign(new Error("reply lost after effect"), {
       code: "CONNECTION_NOT_FOUND",
     }));
@@ -575,6 +632,12 @@ describe("execution-policy-contract", () => {
     await expect(client.executeApproved(ambiguous.id)).rejects.toMatchObject({ status: 502, body: {
       error: "EXECUTION_OUTCOME_UNKNOWN", receiptId: failed.body.receiptId,
     } });
+    expect(provider).toHaveBeenCalledTimes(4);
+    for (const stale of staleEffects) {
+      await expect(client.executeApproved(stale.approvalId)).rejects.toMatchObject({ status: 502,
+        body: { error: "EXECUTION_OUTCOME_UNKNOWN", receiptId: stale.receiptId } });
+      assertSettled(stale.approvalId, stale.receiptId, stale.status);
+    }
     expect(provider).toHaveBeenCalledTimes(4);
   });
 });

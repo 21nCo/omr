@@ -496,6 +496,14 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
             : { code: "APPROVAL_UNAVAILABLE" });
           await observer.query(`UPDATE omr_control.execution_approvals
             SET status = 'executing', execution_receipt_id = NULL WHERE id = $1`, [approval.id]);
+          await expect(runtime.approvals.claim({ approvalId: approval.id,
+            actorUserId: "execution_owner", principalKey: "web:execution_owner",
+            now: Date.now(), deadlineAt: Date.now() + 2_000 }))
+            .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+          const fresh = await observer.query<{ status: string; execution_receipt_id: string | null }>(
+            `SELECT status, execution_receipt_id FROM omr_control.execution_approvals WHERE id = $1`,
+            [approval.id]);
+          expect(fresh.rows[0]).toEqual({ status: "executing", execution_receipt_id: null });
           await observer.query(`UPDATE omr_control.execution_approvals SET updated_at = $2
             WHERE id = $1`, [approval.id, Date.now() - EXECUTION_STALE_AFTER_MS - 5_000]);
           const expected = exactEffect

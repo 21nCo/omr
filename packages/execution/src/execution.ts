@@ -470,6 +470,10 @@ export class ExecutionService {
     if (!receipt || !matchesApprovalReceipt(receipt, prior)) {
       throw new ApprovalUnavailableError();
     }
+    if (prior.status === "executing" && prior.executionReceiptId === null &&
+        this.now() - prior.updatedAt >= EXECUTION_STALE_AFTER_MS) {
+      await this.reconcileStaleEffect(approvals, principal, prior, receipt, deadlineAt);
+    }
     if (receipt.status === "running" || receipt.status === "uncertain") {
       const manifest = this.approvedManifest(principal, prior);
       const effectivePrincipal: ExecutionPrincipal = { ...principal, workspaceId: prior.workspaceId };
@@ -495,6 +499,29 @@ export class ExecutionService {
     } catch (error) {
       if (authorizedResult) return authorizedResult;
       throw error;
+    }
+  }
+
+  private async reconcileStaleEffect(approvals: ExecutionApprovalStore,
+    principal: ExecutionPrincipal, approval: ExecutionApproval, receipt: ExecutionReceipt,
+    deadlineAt: number): Promise<void> {
+    try {
+      await withinInvocationDeadline(deadlineAt, () => approvals.claim({
+        approvalId: approval.id, actorUserId: principal.userId,
+        principalKey: principalKey(principal), now: this.now(), deadlineAt,
+      }));
+      throw new ApprovalUnavailableError();
+    } catch (error) {
+      if (!(error instanceof ExecutionOutcomeUnknownError) || error.receiptId !== receipt.id) {
+        throw error;
+      }
+    }
+    // A claim must commit the approval/receipt association before this path
+    // exposes an uncertain outcome. A concurrent claim may perform the commit.
+    const settled = await withinInvocationDeadline(deadlineAt,
+      () => approvals.getForActor(approval.id, principal.userId, deadlineAt));
+    if (settled.status !== "uncertain" || settled.executionReceiptId !== receipt.id) {
+      throw new ApprovalUnavailableError();
     }
   }
 
