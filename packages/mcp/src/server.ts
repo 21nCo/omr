@@ -14,12 +14,32 @@ const SELECT_CONNECTION_TOOL = "omr.connections.select";
 const EXECUTE_APPROVAL_TOOL = "omr.approvals.execute";
 const REFRESH_CATALOG_TOOL = "omr.catalog.refresh";
 const PROVIDERS_TOOL = "omr.catalog.providers";
+const IDEMPOTENCY_FIELD = "_omrIdempotencyKey";
 type VisibilityContext = { manifests?: Promise<Map<string, string>> };
 
 function objectSchema(value: unknown): McpFnObjectSchema {
   if (value && typeof value === "object" && !Array.isArray(value) &&
     (value as { type?: unknown }).type === "object") return value as McpFnObjectSchema;
   return { type: "object", properties: {}, additionalProperties: true };
+}
+
+function actionInputSchema(manifest: ToolManifest): McpFnObjectSchema {
+  const schema = objectSchema(manifest.inputSchema);
+  if (IDEMPOTENCY_FIELD in (schema.properties ?? {})) {
+    throw new Error(`OMR catalog tool ${manifest.id} conflicts with the MCP idempotency field`);
+  }
+  if (manifest.contract.effect === "read") return schema;
+  return {
+    ...schema,
+    properties: {
+      ...schema.properties,
+      [IDEMPOTENCY_FIELD]: {
+        type: "string",
+        description: "Caller-generated stable key for this intended action. Reuse it after an uncertain response; use a new key for a new action.",
+      },
+    },
+    required: [...(schema.required ?? []), IDEMPOTENCY_FIELD],
+  };
 }
 
 function structured(value: unknown): Record<string, unknown> {
@@ -78,7 +98,7 @@ export async function createOMRMcpServer(input: {
     name: manifest.id,
     title: manifest.displayName,
     description: manifest.description,
-    inputSchema: objectSchema(manifest.inputSchema),
+    inputSchema: actionInputSchema(manifest),
     annotations: {
       readOnlyHint: manifest.contract.effect === "read",
       destructiveHint: manifest.contract.effect === "destructive",
@@ -93,13 +113,15 @@ export async function createOMRMcpServer(input: {
       approvalMode: manifest.contract.effect === "read" ? "none" : "required",
     },
     async handler(args) {
+      const { [IDEMPOTENCY_FIELD]: idempotencyKey, ...params } = args;
       const execution = {
         workspaceId: input.workspaceId,
         toolId: manifest.id,
-        params: args as JsonValue,
+        params: params as JsonValue,
       };
       if (manifest.contract.effect !== "read") {
-        const approval = await client.requestApproval(execution);
+        if (typeof idempotencyKey !== "string") throw new Error(`${IDEMPOTENCY_FIELD} is required`);
+        const approval = await client.requestApproval({ ...execution, idempotencyKey });
         return structuredResult(approvalSummary(approval, manifest.id));
       }
       return structuredResult(structured(await client.execute(execution)));

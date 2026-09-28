@@ -3,6 +3,7 @@
   import { createOAuthReviewController } from "$lib/oauth-review.js";
   import { connectionActions, connectionStatusLabel, providerRevocationGuidance } from "$lib/connection-ui.js";
   import { createWorkspaceCatalogLoader, providerDisplayState } from "$lib/workspace-catalog.js";
+  import { renderApprovalPreview } from "$lib/approval-preview.js";
   import { V1_PROVIDERS } from "@oh-my-router/tools";
 
   type WorkspaceAccess = {
@@ -26,8 +27,15 @@
   type Approval = {
     id: string;
     toolId: string;
+    action: string;
     status: string;
     params: unknown;
+    effect: string;
+    resources: { kind: string; parameter?: string }[];
+    manifestCurrent: boolean;
+    previewReady: boolean;
+    previewMode: "opaque" | "redacted" | "unavailable";
+    connectionId: string;
     createdAt: number;
     expiresAt: number;
   };
@@ -123,11 +131,6 @@
 
   function timestamp(value: number | null): string {
     return value ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(value) : "—";
-  }
-
-  function preview(value: unknown): string {
-    const serialized = JSON.stringify(value, null, 2) ?? "—";
-    return serialized.length > 520 ? `${serialized.slice(0, 520)}\n…` : serialized;
   }
 
   function providerState(provider: string): Provider["state"] | "unknown" {
@@ -451,10 +454,15 @@
           <div class="panel-heading"><div><p class="kicker">Human in the loop</p><h2>Approvals</h2></div></div>
           {#each overview.approvals.filter((item) => item.status === "pending") as approval}
             <article class="approval-card">
-              <div class="approval-top"><strong>{approval.toolId}</strong><span>Expires {timestamp(approval.expiresAt)}</span></div>
-              <pre>{preview(approval.params)}</pre>
+              <div class="approval-top"><strong>{approval.action} ({approval.toolId})</strong><span>Expires {timestamp(approval.expiresAt)}</span></div>
+              <p class="approval-context">Effect: {approval.effect} · Account: {overview.connections.find((connection) => connection.id === approval.connectionId)?.label ?? "Unavailable"}</p>
+              {#if approval.resources.length}<p class="approval-context">Resources: {approval.resources.map((resource) => resource.parameter ? `${resource.kind} (${resource.parameter})` : resource.kind).join(", ")}</p>{/if}
+              {#if !approval.manifestCurrent}<p class="approval-context">This tool changed. Request a new approval.</p>{/if}
+              {#if !approval.previewReady}<p class="approval-context">A complete, safely redacted preview is unavailable. Request a new approval after this tool has review metadata.</p>{/if}
+              {#if approval.previewMode === "opaque"}<p class="approval-context">This action has no field review metadata. All arguments are hidden; review the action and account before approving.</p>{/if}
+              <pre>{renderApprovalPreview(approval.params)}</pre>
               <div class="actions">
-                <button class="primary compact" disabled={Boolean(busy)} onclick={() => void mutate(`approve:${approval.id}`, "/api/approvals/approve", { approvalId: approval.id }, `Approved ${approval.toolId}.`)}>Approve</button>
+                <button class="primary compact" disabled={Boolean(busy) || !approval.previewReady} onclick={() => void mutate(`approve:${approval.id}`, "/api/approvals/approve", { approvalId: approval.id }, `Approved ${approval.toolId}.`)}>Approve</button>
                 <button class="danger compact" disabled={Boolean(busy)} onclick={() => void mutate(`reject:${approval.id}`, "/api/approvals/reject", { approvalId: approval.id }, `Rejected ${approval.toolId}.`)}>Reject</button>
               </div>
             </article>
@@ -469,7 +477,7 @@
             <div class="timeline">
               {#each overview.executions as execution}
                 <article>
-                  <span class:ready={execution.status === "succeeded"} class:error-dot={execution.status === "failed"} class="dot"></span>
+                  <span class:ready={execution.status === "succeeded"} class:error-dot={execution.status === "failed" || execution.status === "uncertain"} class="dot"></span>
                   <div><strong>{execution.toolId}</strong><span>{timestamp(execution.createdAt)} · {execution.status}</span></div>
                   {#if execution.errorCode}<code>{execution.errorCode}</code>{/if}
                 </article>
@@ -546,6 +554,7 @@
   .approval-card { padding: 0.9rem; border: 1px solid #3a402f; border-radius: 0.75rem; background: #191c15; }
   .approval-card + .approval-card { margin-top: 0.7rem; }
   .approval-top { display: grid; gap: 0.25rem; }
+  .approval-card pre { max-height: none; overflow-wrap: anywhere; }
   pre { max-height: 12rem; overflow: auto; padding: 0.7rem; border-radius: 0.55rem; color: #cdd1c5; background: #0e0f0d; font: 0.72rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
   .actions { display: flex; gap: 0.55rem; }
   .timeline { display: grid; gap: 0.85rem; }

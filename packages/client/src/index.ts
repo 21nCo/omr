@@ -8,6 +8,10 @@ export interface OMRClientOptions {
   timeoutMs?: number;
 }
 
+// The server holds an invocation for up to 60 seconds before returning either a
+// predispatch timeout or an uncertain receipt. Leave time for the response to arrive.
+const MIN_EXECUTION_TIMEOUT_MS = 70_000;
+
 export interface DeviceAuthorization {
   deviceCode: string;
   userCode: string;
@@ -168,7 +172,7 @@ export class OMRClient {
     connectionId?: string;
     idempotencyKey?: string;
   }): Promise<unknown> {
-    return this.post("/api/tools/execute", input);
+    return this.post("/api/tools/execute", input, Math.max(this.timeoutMs, MIN_EXECUTION_TIMEOUT_MS));
   }
 
   requestApproval(input: {
@@ -176,7 +180,7 @@ export class OMRClient {
     toolId: string;
     params: JsonValue;
     connectionId?: string;
-    idempotencyKey?: string;
+    idempotencyKey: string;
   }): Promise<unknown> {
     return this.post("/api/approvals", input);
   }
@@ -190,7 +194,8 @@ export class OMRClient {
   }
 
   executeApproved(approvalId: string): Promise<unknown> {
-    return this.post("/api/approvals/execute", { approvalId });
+    return this.post("/api/approvals/execute", { approvalId },
+      Math.max(this.timeoutMs, MIN_EXECUTION_TIMEOUT_MS));
   }
 
   private get<T>(path: string): Promise<T> {
@@ -203,12 +208,12 @@ export class OMRClient {
     });
   }
 
-  private post<T>(path: string, body: unknown): Promise<T> {
+  private post<T>(path: string, body: unknown, timeoutMs = this.timeoutMs): Promise<T> {
     return request({
       baseUrl: this.baseUrl,
       path,
       fetchImpl: this.fetchImpl,
-      timeoutMs: this.timeoutMs,
+      timeoutMs,
       credential: this.credential,
       method: "POST",
       body,

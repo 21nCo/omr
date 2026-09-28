@@ -59,7 +59,10 @@ describe("OMR MCP server", () => {
         return Response.json({
           catalogSchemaVersion: "1.0.0",
           revision: "revision-1",
-          tools: [manifest("demo.read", "read"), manifest("demo.write", "write")],
+          tools: [{ ...manifest("demo.read", "read"), inputSchema: {
+            type: "object", properties: { value: { type: "string" } },
+            required: ["value"], additionalProperties: true,
+          } }, manifest("demo.write", "write")],
         });
       }
       if (url.pathname === "/api/tools/execute") {
@@ -105,13 +108,17 @@ describe("OMR MCP server", () => {
       "omr.connections.list",
       "omr.connections.select",
     ]);
+    expect(listed.tools.find(({ name }) => name === "demo.write")?.inputSchema.required)
+      .toContain("_omrIdempotencyKey");
 
     await expect(client.callTool({
       name: "demo.read",
-      arguments: { value: "read" },
+      arguments: { value: "read", _omrIdempotencyKey: "optional-read-key" },
     })).resolves.toMatchObject({
       structuredContent: { status: "succeeded", output: { value: "read" } },
     });
+    expect(requests.filter(({ path }) => path === "/api/tools/execute").at(-1)?.body)
+      .toEqual({ workspaceId: "workspace-1", toolId: "demo.read", params: { value: "read" } });
     const discoveryCalls = requests.filter(({ path }) => path === "/api/tools").length;
     await expect(client.callTool({
       name: "omr.connections.list",
@@ -131,7 +138,7 @@ describe("OMR MCP server", () => {
     });
     await expect(client.callTool({
       name: "demo.write",
-      arguments: { value: "write" },
+      arguments: { value: "write", _omrIdempotencyKey: "mcp-write-1" },
     })).resolves.toMatchObject({
       structuredContent: {
         status: "approval_required",
@@ -152,10 +159,14 @@ describe("OMR MCP server", () => {
     });
 
     expect(requests.filter(({ path }) => path === "/api/tools/execute")).toHaveLength(1);
+    expect(requests.find(({ path }) => path === "/api/tools/execute")?.body).toMatchObject({
+      params: { value: "read" },
+    });
     expect(requests.find(({ path }) => path === "/api/approvals")?.body).toEqual({
       workspaceId: "workspace-1",
       toolId: "demo.write",
       params: { value: "write" },
+      idempotencyKey: "mcp-write-1",
     });
     expect(requests.find(({ path }) => path === "/api/approvals/execute")?.body).toEqual({
       approvalId: "approval-1",
@@ -198,6 +209,56 @@ describe("OMR MCP server", () => {
           details: { error: "APPROVAL_UNAVAILABLE" },
         },
       },
+    });
+  });
+
+  it("preserves predispatch timeout and postdispatch uncertainty for projected MCP calls", async () => {
+    const fetchImpl: typeof fetch = async (request, init) => {
+      const path = requestUrl(request).pathname;
+      if (path === "/api/tools") return Response.json({
+        catalogSchemaVersion: "1.0.0", revision: "revision-1",
+        tools: [manifest("demo.read", "read")],
+      });
+      if (path === "/api/tools/execute") return Response.json({
+        error: "EXECUTION_INVOCATION_TIMEOUT",
+      }, { status: 504 });
+      if (path === "/api/approvals/execute") {
+        const body = JSON.parse(String(init?.body)) as { approvalId: string };
+        return body.approvalId === "before-dispatch"
+          ? Response.json({ error: "EXECUTION_INVOCATION_TIMEOUT" }, { status: 504 })
+          : Response.json({ error: "EXECUTION_OUTCOME_UNKNOWN",
+            receiptId: "receipt_after_dispatch" }, { status: 502 });
+      }
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    };
+    const server = await createOMRMcpServer({
+      baseUrl: "https://omr.test", credential: "credential", workspaceId: "workspace-1", fetchImpl,
+    });
+    const client = new Client({ name: "timeout", version: "1.0.0" }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closeables.push(client, server);
+
+    for (const call of [
+      { name: "demo.read", arguments: { value: "read" } },
+      { name: "omr.approvals.execute", arguments: { approvalId: "before-dispatch" } },
+    ]) {
+      await expect(client.callTool(call)).resolves.toMatchObject({
+        isError: true,
+        structuredContent: { ok: false, error: {
+          code: "OMR_HTTP_ERROR", details: { error: "EXECUTION_INVOCATION_TIMEOUT" },
+        } },
+      });
+    }
+    await expect(client.callTool({
+      name: "omr.approvals.execute", arguments: { approvalId: "after-dispatch" },
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { ok: false, error: {
+        code: "OMR_HTTP_ERROR", details: { error: "EXECUTION_OUTCOME_UNKNOWN",
+          receiptId: "receipt_after_dispatch" },
+      } },
     });
   });
 

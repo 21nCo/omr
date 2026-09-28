@@ -5,7 +5,7 @@ import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
 import { ToolCatalog } from "@oh-my-router/tools";
 
-import { assertConnectionWorkspace, checkAuthorizedConnectionHealth, createProviderIntegrationConfig, scopedToolIds, selectAuthorizedConnection } from "./cloudflare-runtime.js";
+import { assertConnectionWorkspace, checkAuthorizedConnectionHealth, createProviderIntegrationConfig, requireExecutionOrigin, scopedToolIds, selectAuthorizedConnection } from "./cloudflare-runtime.js";
 import { createOMRRouter, type ConnectionRouteServices } from "./router.js";
 
 describe("Worker provider OAuth configuration", () => {
@@ -27,6 +27,24 @@ describe("Worker provider OAuth configuration", () => {
     expect(createProviderIntegrationConfig({
       PLUGFN_GITHUB_CLIENT_ID: "sandbox-client",
     }, "https://omr-web-staging.example").github).toBeUndefined();
+  });
+});
+
+describe("execution origin policy", () => {
+  it("requires same-origin proof for cookie mutations and permits explicit bearer clients", () => {
+    const request = (headers: Record<string, string>) => new Request("https://omr.example/api/approvals/execute",
+      { method: "POST", headers });
+    expect(() => requireExecutionOrigin(request({ cookie: "session=fixture" })))
+      .toThrowError(/same-origin/);
+    expect(() => requireExecutionOrigin(request({ cookie: "session=fixture", origin: "https://other.example" })))
+      .toThrowError(/same-origin/);
+    expect(() => requireExecutionOrigin(request({ cookie: "session=fixture", origin: "https://omr.example" })))
+      .not.toThrow();
+    expect(() => requireExecutionOrigin(request({ authorization: "Bearer client-grant" })))
+      .not.toThrow();
+    expect(() => requireExecutionOrigin(request({
+      cookie: "session=fixture", origin: "https://other.example", authorization: "Bearer bogus-grant",
+    }))).toThrowError(/same-origin/);
   });
 });
 

@@ -39,6 +39,8 @@ import {
   ExecutionFailedError,
   ExecutionIdempotencyConflictError,
   ExecutionInProgressError,
+  ExecutionInvocationDeadlineError,
+  ExecutionOutcomeUnknownError,
   ExecutionInputError,
 } from "@oh-my-router/execution";
 
@@ -113,7 +115,7 @@ export interface ExecutionRouteServices {
     toolId: string;
     params: unknown;
     connectionId?: string;
-    idempotencyKey?: string;
+    idempotencyKey: string;
   }): Promise<unknown>;
   approve(request: Request, approvalId: string): Promise<unknown>;
   reject(request: Request, approvalId: string): Promise<unknown>;
@@ -332,6 +334,16 @@ export function createOMRRouter(
           { status: 502 },
         );
       }
+      if (error instanceof ExecutionInvocationDeadlineError) {
+        return Response.json({ error: error.code },
+          { status: 504, headers: PRIVATE_RESPONSE });
+      }
+      if (error instanceof ExecutionOutcomeUnknownError) {
+        return Response.json(
+          { error: error.code, receiptId: error.receiptId },
+          { status: 502, headers: PRIVATE_RESPONSE },
+        );
+      }
       if (error instanceof ApprovalUnavailableError) {
         return Response.json({ error: error.code }, { status: 409 });
       }
@@ -365,9 +377,11 @@ export function createOMRRouter(
       if (authError?.code === "AUTHFN_UNAUTHENTICATED") {
         return Response.json({ error: "AUTHFN_UNAUTHENTICATED" }, { status: 401 });
       }
-      const connectionRequest = new URL(request.url).pathname.startsWith("/api/connections/");
+      const path = new URL(request.url).pathname;
+      const connectionRequest = path.startsWith("/api/connections/");
+      const executionRequest = path === "/api/tools/execute" || path.startsWith("/api/approvals");
       let loggedError: string;
-      if (connectionRequest) {
+      if (connectionRequest || executionRequest) {
         loggedError = error instanceof Error ? error.name : "Unknown connection failure";
       } else {
         loggedError = error instanceof Error ? error.message : String(error);
@@ -375,7 +389,7 @@ export function createOMRRouter(
       console.error(JSON.stringify({
         message: "OMR request failed",
         method: request.method,
-        path: new URL(request.url).pathname,
+        path,
         error: loggedError,
       }));
       return Response.json({ error: "INTERNAL_ERROR" }, { status: 500 });
@@ -625,7 +639,7 @@ export function createOMRRouter(
             params: body.params,
             ...(connectionId ? { connectionId } : {}),
             ...(idempotencyKey ? { idempotencyKey } : {}),
-          }));
+          }), { headers: PRIVATE_RESPONSE });
         },
       },
       {
@@ -634,15 +648,15 @@ export function createOMRRouter(
         handler: async (request, context) => {
           const body = objectBody(await context.json());
           const connectionId = optionalString(body, "connectionId");
-          const idempotencyKey = optionalString(body, "idempotencyKey");
+          const idempotencyKey = requiredString(body, "idempotencyKey");
           if (!("params" in body)) throw new RequestInputError("params is required");
           return Response.json(await executionServices.requestApproval(request, {
             workspaceId: requiredString(body, "workspaceId"),
             toolId: requiredString(body, "toolId"),
             params: body.params,
             ...(connectionId ? { connectionId } : {}),
-            ...(idempotencyKey ? { idempotencyKey } : {}),
-          }), { status: 201 });
+            idempotencyKey,
+          }), { status: 201, headers: PRIVATE_RESPONSE });
         },
       },
       ...(["approve", "reject", "execute"] as const).map((operation) => ({
@@ -653,7 +667,7 @@ export function createOMRRouter(
           const approvalId = requiredString(body, "approvalId");
           return Response.json(await executionServices[
             operation === "execute" ? "executeApproved" : operation
-          ](request, approvalId));
+          ](request, approvalId), { headers: PRIVATE_RESPONSE });
         },
       })),
     ],
