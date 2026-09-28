@@ -126,7 +126,8 @@ function fail(error: unknown, json: boolean): void {
   process.exitCode = exit;
 }
 
-function current(parsed: Parsed): { api: OMRClient; workspaceId: string; profile?: string } {
+function current(parsed: Parsed): { api: OMRClient; workspaceId: string; profile?: string;
+  grant?: { backend: string; key: string } } {
   const env = [process.env.OMR_BACKEND, process.env.OMR_API_KEY, process.env.OMR_WORKSPACE_ID];
   if (env.some(Boolean)) {
     if (!env.every(Boolean)) throw new CLIError("HEADLESS_INCOMPLETE", "Set OMR_BACKEND, OMR_API_KEY, and OMR_WORKSPACE_ID together", 2);
@@ -135,7 +136,8 @@ function current(parsed: Parsed): { api: OMRClient; workspaceId: string; profile
   const name = profileName(parsed);
   const profile = store.get(name);
   return { api: new OMRClient({ baseUrl: profile.backend, credential: profile.key }),
-    workspaceId: profile.workspaceId, profile: name };
+    workspaceId: profile.workspaceId, profile: name,
+    grant: { backend: profile.backend, key: profile.key } };
 }
 
 function workspace(parsed: Parsed, stored: string): string { return opt(parsed, "workspace") ?? stored; }
@@ -181,7 +183,13 @@ async function login(parsed: Parsed): Promise<void> {
     if (Date.now() >= deadline) break;
     try {
       const grant = await pollDeviceAuthorization({ baseUrl, deviceCode: auth.deviceCode });
-      if (!grant.credential || !grant.workspaceId) throw new CLIError("DEVICE_RESPONSE_INVALID", "Invalid device grant", 1);
+      if (!object(grant) || !nonempty(grant.credential) || !grant.credential.trim() ||
+          !nonempty(grant.clientId) || !grant.clientId.trim() ||
+          !nonempty(grant.grantId) || !grant.grantId.trim() ||
+          !nonempty(grant.workspaceId) || !grant.workspaceId.trim()) {
+        throw new CLIError("DEVICE_DELIVERY_UNCERTAIN",
+          "Device grant response is invalid; check /app/clients for a grant to revoke before trying again", 1);
+      }
       try { store.save(name, { backend: baseUrl, key: grant.credential, workspaceId: grant.workspaceId }); }
       catch { throw new CLIError("LOCAL_STORAGE_FAILED",
         "Device grant was issued but could not be stored; revoke it at /app/clients before trying again", 1); }
@@ -190,7 +198,8 @@ async function login(parsed: Parsed): Promise<void> {
     } catch (error) {
       if (error instanceof OMRHttpError &&
           (error.body as { error?: unknown } | null)?.error === "DEVICE_AUTHORIZATION_PENDING") continue;
-      if (error instanceof OMRTransportError && error.path === "/api/device/token") {
+      if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) &&
+          error.path === "/api/device/token") {
         throw new CLIError("DEVICE_DELIVERY_UNCERTAIN",
           "Device token response was lost; check /app/clients for a grant to revoke before trying again", 1);
       }
@@ -283,16 +292,19 @@ async function main(parsed: Parsed): Promise<void> {
     } else store.remove(name);
     result({ profile: name, revoked: !!revokedGrant }); return;
   }
-  const { api, workspaceId: savedWorkspace, profile } = current(parsed);
+  const { api, workspaceId: savedWorkspace, profile, grant } = current(parsed);
   const workspaceId = workspace(parsed, savedWorkspace);
   if (command === "workspaces") {
     if (action === "list" && !subject) return result(profile ? store.list().map(({ name, backend, workspaceId, active }) =>
       ({ profile: name, backend, workspaceId, active })) : [{ workspaceId: savedWorkspace, source: "environment" }]);
     if (action === "show" && !subject) return result({ workspaceId: savedWorkspace, profile: profile ?? null });
     if (action === "use" && subject) {
-      if (!profile) throw new CLIError("HEADLESS_READ_ONLY", "Headless workspace is set by OMR_WORKSPACE_ID", 2);
+      if (!profile || !grant) throw new CLIError("HEADLESS_READ_ONLY", "Headless workspace is set by OMR_WORKSPACE_ID", 2);
       discovery(await api.discoverTools({ workspaceId: subject, limit: 1 }));
-      store.setWorkspace(profile, subject);
+      if (!store.setWorkspaceIfGrantMatches(profile, subject, grant)) {
+        throw new CLIError("PROFILE_CHANGED",
+          "The profile was removed or replaced while workspace selection was in progress; inspect the current profile before retrying", 1);
+      }
       return result({ workspaceId: subject, profile });
     }
   }

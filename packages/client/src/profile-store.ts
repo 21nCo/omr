@@ -235,11 +235,15 @@ export class OMRProfileStore {
     });
   }
 
-  setWorkspace(name: string, workspaceId: string): void {
-    this.locked(() => {
+  setWorkspaceIfGrantMatches(name: string, workspaceId: string,
+    expected: Pick<OMRProfile, "backend" | "key">): boolean {
+    return this.locked(() => {
+      if (!existsSync(this.file(name))) return false;
       const profile = this.get(name);
+      if (profile.backend !== expected.backend || profile.key !== expected.key) return false;
       writePrivate(this.file(name), JSON.stringify({ ...profile, workspaceId }));
       this.removeLegacy(name);
+      return true;
     });
   }
 

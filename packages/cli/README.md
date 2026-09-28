@@ -19,8 +19,9 @@ omr logout
 
 `logout` revokes the remote client before removing its local profile. A 401 cannot prove revocation: it can also occur when workspace membership was removed while the grant remains live. A 401, network error, or server error preserves the profile. Check or revoke the grant in `/app/clients` before using `logout --local` to remove the local profile without contacting the server. A login does not silently replace a profile because that could leave an old grant active.
 If a profile with the same name is replaced while revocation is in progress, logout reports `PROFILE_CHANGED` and keeps the replacement grant.
+If a profile is replaced while `workspaces use` checks authorization, the command reports `PROFILE_CHANGED` and leaves the replacement workspace untouched.
 
-If the one-time device credential response is lost or local storage fails, check `/app/clients` for a grant to revoke before logging in again.
+If the one-time device credential response is lost, malformed, or cannot be stored, check `/app/clients` for a grant to revoke before logging in again.
 
 Headless processes set **all three** environment variables: `OMR_BACKEND`, `OMR_API_KEY`, and `OMR_WORKSPACE_ID`. These bypass profiles. Set `OMR_PROFILE` or `--profile` for a stored profile. Never pass credentials as command arguments. `OMR_CONFIG_DIR` changes the local profile directory.
 `logout` and `logout --local` refuse to touch saved profiles while any headless credential variable is set. Unset all three variables to revoke or remove a saved profile; headless credentials are managed by their issuer.

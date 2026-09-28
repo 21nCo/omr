@@ -27,8 +27,11 @@ async function fixture() {
   let emptyCatalog = false;
   let grantWorkspace = "workspace_1";
   let nextGrantKey = "omr_fixture_secret";
+  let deviceReply: Record<string, unknown> | undefined;
   let releaseRevoke: (() => void) | undefined;
   let revokeHeld = false;
+  let releaseCatalog: (() => void) | undefined;
+  let catalogHeld = false;
   let selectionOverride: Record<string, unknown> | undefined;
   let approvalStatus: string = "pending";
   let expiresAt = Date.now() + 600_000;
@@ -58,7 +61,7 @@ async function fixture() {
       expiresInSeconds: 5, pollIntervalSeconds: 0,
     });
     if (path === "/api/device/token" && deviceLost) { request.socket.destroy(); return; }
-    if (path === "/api/device/token") return answer(200, {
+    if (path === "/api/device/token") return answer(200, deviceReply ?? {
       credential: nextGrantKey, clientId: "client_1", grantId: "grant_1", workspaceId: grantWorkspace,
     });
     if (request.headers.authorization !== "Bearer omr_fixture_secret" &&
@@ -72,6 +75,7 @@ async function fixture() {
       revoked = true; return answer(200, { revoked: true });
     }
     if (path === "/api/tools") {
+      if (catalogHeld) await new Promise<void>((resolve) => { releaseCatalog = resolve; });
       if (new URL(request.url!, "http://localhost").searchParams.get("workspaceId") !== grantWorkspace)
         return answer(403, { error: "CONNECTION_ACCESS_DENIED" });
       return answer(200, { tools: emptyCatalog ? [] : [{ id: "linear.read" }], cursor: null });
@@ -151,7 +155,10 @@ async function fixture() {
     interrupted,
     holdRevoke: () => { revokeHeld = true; },
     releaseRevoke: () => { revokeHeld = false; releaseRevoke?.(); },
+    holdCatalog: () => { catalogHeld = true; },
+    releaseCatalog: () => { catalogHeld = false; releaseCatalog?.(); },
     nextGrant: (key: string) => { nextGrantKey = key; },
+    deviceReply: (value: Record<string, unknown>) => { deviceReply = value; },
     selectionReply: (value: Record<string, unknown>) => { selectionOverride = value; },
     emptyCatalog: () => { emptyCatalog = true; },
     setGrantWorkspace: (value: string) => { grantWorkspace = value; },
@@ -367,6 +374,29 @@ describe("cli-command-contract", () => {
     expect(JSON.parse(response.stderr).error).toBe("PROFILE_CHANGED");
     expect(JSON.parse(readFileSync(join(f.config, "profiles", "default.json"), "utf8")).key)
       .toBe("replacement_secret");
+  });
+
+  it("does not apply an old grant's workspace selection to a replacement profile", async () => {
+    const f = await fixture();
+    expect((await f.run(["login", "--url", f.url, "--json"])).code).toBe(0);
+    f.holdCatalog();
+    const oldSelection = f.run(["workspaces", "use", "workspace_1", "--json"]);
+    try {
+      for (let n = 0; n < 100 && !f.calls.some((call) => call.path === "/api/tools"); n++)
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(f.calls.some((call) => call.path === "/api/tools")).toBe(true);
+      expect((await f.run(["logout", "--local", "--json"])).code).toBe(0);
+      f.nextGrant("replacement_secret");
+      f.setGrantWorkspace("workspace_2");
+      expect((await f.run(["login", "--url", f.url, "--json"])).code).toBe(0);
+      f.setGrantWorkspace("workspace_1");
+    } finally { f.releaseCatalog(); }
+    const response = await oldSelection;
+    expect(response.code).toBe(1);
+    expect(JSON.parse(response.stderr).error).toBe("PROFILE_CHANGED");
+    expect(response.stdout).toBe("");
+    expect(JSON.parse(readFileSync(join(f.config, "profiles", "default.json"), "utf8")))
+      .toMatchObject({ key: "replacement_secret", workspaceId: "workspace_2" });
   });
 
   it("rejects account selection replies without the requested identity", async () => {
@@ -680,6 +710,23 @@ describe("cli-command-contract", () => {
     expect(JSON.parse(result.stderr.trim().split("\n").at(-1)!)).toMatchObject({ error: "DEVICE_DELIVERY_UNCERTAIN" });
     expect(result.stdout + result.stderr).not.toContain("omr_fixture_secret");
     expect(JSON.parse((await f.run(["profiles", "list", "--json"])).stdout)).toEqual([]);
+  });
+
+  it("does not save malformed successful one-time device grants", async () => {
+    for (const reply of [
+      { credential: { secret: "omr_fixture_secret" }, clientId: "client_1", grantId: "grant_1", workspaceId: "workspace_1" },
+      { credential: "omr_fixture_secret", clientId: "client_1", grantId: "grant_1", workspaceId: { id: "workspace_1" } },
+      { credential: "omr_fixture_secret", clientId: "client_1", grantId: "", workspaceId: "workspace_1" },
+    ]) {
+      const f = await fixture();
+      f.deviceReply(reply);
+      const response = await f.run(["login", "--url", f.url, "--json"]);
+      expect(response.code).toBe(1);
+      expect(lastError(response.stderr).error).toBe("DEVICE_DELIVERY_UNCERTAIN");
+      expect(response.stdout).toBe("");
+      expect(response.stderr).not.toContain("omr_fixture_secret");
+      expect(JSON.parse((await f.run(["profiles", "list", "--json"])).stdout)).toEqual([]);
+    }
   });
 
   it.skipIf(process.platform === "win32")("refuses a credential file readable by other users", async () => {
