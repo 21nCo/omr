@@ -1,0 +1,24 @@
+package-lock.json
+  h_a39f9495f9ec1d 2025-2031,3083-3091,5040-5044
+packages/cli/README.md
+  h_a39f9495f9ec1d 25,65
+packages/cli/src/bin.ts
+  h_a39f9495f9ec1d 105-110,193-203,214-218
+packages/client/package.json
+  h_a39f9495f9ec1d 23-27
+packages/client/src/profile-store.ts
+  h_a39f9495f9ec1d 4,35-51,79,83,93-115,135,138-145,173,179,181
+tests/acceptance/cli-command-contract.test.ts
+  h_a39f9495f9ec1d 3,244-361
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6a807022448cc9c2fb0596eb0e02946453ff5847",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
