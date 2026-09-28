@@ -1,0 +1,20 @@
+packages/cli/README.md
+  h_a39f9495f9ec1d 22,24
+packages/cli/src/bin.ts
+  h_a39f9495f9ec1d 129-130,139-140,186-192,201-202,295,302,304-307
+packages/client/src/profile-store.ts
+  h_a39f9495f9ec1d 238-241,243,246
+tests/acceptance/cli-command-contract.test.ts
+  h_a39f9495f9ec1d 30,33-34,64,78,158-159,161,379-401,715-731
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8a93bc126802383af757bbf50c6ba65535a2d6d3",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
