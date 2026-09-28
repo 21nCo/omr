@@ -234,7 +234,7 @@ export class OMRProfileStore {
 
   private cleanupTemp(directory: string, entry: string): void {
     const match = /^(active-profile|credentials(?:\.lock)?|[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\.json)\.([1-9]\d*)\.[0-9a-f-]{36}\.tmp$/.exec(entry);
-    if (!match || (directory === this.profiles) !== match[1]!.endsWith(".json")) return;
+    if (!match?.[1] || (directory === this.profiles) !== match[1].endsWith(".json")) return;
     const path = join(directory, entry);
     let stats;
     try { stats = lstatSync(path); }
@@ -292,34 +292,9 @@ export class OMRProfileStore {
   }
 
   get(name: string): OMRProfile {
-    this.prepare();
-    const file = this.file(name);
-    try { safeProfileFile(file); }
-    catch (error) {
-      if (error instanceof SyntaxError) throw new Error(`Profile ${name} has invalid JSON in ${name}.json`);
-      throw error;
-    }
-    if (!existsSync(file)) {
-      if (Object.hasOwn(this.legacy(), name)) {
-        throw new ProfileRecoveryRequiredError(`Profile ${name} has a legacy grant without workspace metadata; revoke it at /app/clients before logout --local`);
-      }
-      throw new ProfileMissingError(`Profile ${name} is missing; run omr login`);
-    }
-    let value: Partial<OMRProfile>;
-    try { value = JSON.parse(readFileSync(file, "utf8")) as Partial<OMRProfile>; }
-    catch (error) {
-      if (error instanceof SyntaxError) throw new Error(`Profile ${name} has invalid JSON in ${name}.json`);
-      throw error;
-    }
+    const value = this.readProfile(name) as Partial<OMRProfile>;
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Profile ${name} is invalid`);
-    if (typeof value.key !== "string" || typeof value.backend !== "string") {
-      const legacy = this.legacy()[name];
-      if (legacy && typeof legacy === "object") {
-        const { backend, key } = legacy as Partial<OMRProfile>;
-        value.backend = backend;
-        value.key = key;
-      }
-    }
+    this.restoreLegacyGrant(name, value);
     if (typeof value.backend !== "string" || typeof value.key !== "string" ||
         typeof value.workspaceId !== "string" || !value.backend || !value.key || !value.workspaceId) {
       throw new Error(`Profile ${name} is invalid`);
@@ -334,6 +309,13 @@ export class OMRProfileStore {
   }
 
   workspaceId(name: string): string {
+    const value = this.readProfile(name) as { workspaceId?: unknown } | null;
+    if (typeof value?.workspaceId !== "string" || !value.workspaceId)
+      throw new Error(`Profile ${name} is invalid`);
+    return value.workspaceId;
+  }
+
+  private readProfile(name: string): unknown {
     this.prepare();
     const file = this.file(name);
     try { safeProfileFile(file); }
@@ -347,15 +329,20 @@ export class OMRProfileStore {
       }
       throw new ProfileMissingError(`Profile ${name} is missing; run omr login`);
     }
-    let value: { workspaceId?: unknown };
-    try { value = JSON.parse(readFileSync(file, "utf8")) as { workspaceId?: unknown }; }
+    try { return JSON.parse(readFileSync(file, "utf8")) as unknown; }
     catch (error) {
       if (error instanceof SyntaxError) throw new Error(`Profile ${name} has invalid JSON in ${name}.json`);
       throw error;
     }
-    if (typeof value?.workspaceId !== "string" || !value.workspaceId)
-      throw new Error(`Profile ${name} is invalid`);
-    return value.workspaceId;
+  }
+
+  private restoreLegacyGrant(name: string, value: Partial<OMRProfile>): void {
+    if (typeof value.key === "string" && typeof value.backend === "string") return;
+    const legacy = this.legacy()[name];
+    if (!legacy || typeof legacy !== "object") return;
+    const { backend, key } = legacy as Partial<OMRProfile>;
+    value.backend = backend;
+    value.key = key;
   }
 
   save(name: string, profile: OMRProfile): void {

@@ -26,20 +26,26 @@ function parse(argv: string[]): Parsed {
     const arg = argv[i]!;
     if (arg === "--") { positionals.push(...argv.slice(i + 1)); break; }
     if (!arg.startsWith("--")) { positionals.push(arg); continue; }
-    const equal = arg.indexOf("=");
-    const name = arg.slice(2, equal < 0 ? undefined : equal);
-    if (options.has(name)) throw new CLIError("INPUT_INVALID", `Duplicate --${name}`, 2);
-    if (flagOptions.has(name)) {
-      if (equal >= 0) throw new CLIError("INPUT_INVALID", `--${name} takes no value`, 2);
-      options.set(name, true);
-      continue;
-    }
-    if (!valueOptions.has(name)) throw new CLIError("INPUT_INVALID", `Unknown option --${name}`, 2);
-    const value = equal >= 0 ? arg.slice(equal + 1) : argv[++i];
-    if (!value || value.startsWith("--")) throw new CLIError("INPUT_INVALID", `--${name} requires a value`, 2);
-    options.set(name, value);
+    i = parseOption(argv, i, options);
   }
   return { options, positionals };
+}
+
+function parseOption(argv: string[], index: number, options: Parsed["options"]): number {
+  const arg = argv[index]!;
+  const equal = arg.indexOf("=");
+  const name = arg.slice(2, equal < 0 ? undefined : equal);
+  if (options.has(name)) throw new CLIError("INPUT_INVALID", `Duplicate --${name}`, 2);
+  if (flagOptions.has(name)) {
+    if (equal >= 0) throw new CLIError("INPUT_INVALID", `--${name} takes no value`, 2);
+    options.set(name, true);
+    return index;
+  }
+  if (!valueOptions.has(name)) throw new CLIError("INPUT_INVALID", `Unknown option --${name}`, 2);
+  const value = equal >= 0 ? arg.slice(equal + 1) : argv[++index];
+  if (!value || value.startsWith("--")) throw new CLIError("INPUT_INVALID", `--${name} requires a value`, 2);
+  options.set(name, value);
+  return index;
 }
 
 function opt(parsed: Parsed, name: string): string | undefined {
@@ -235,7 +241,10 @@ function fail(error: unknown, json: boolean): void {
   const message = failureMessage(error);
   const details = failureDetails(error, body);
   if (json) info(JSON.stringify({ error: code, message, ...(details ? { details } : {}) }));
-  else info(`${code}: ${message}${details ? ` ${JSON.stringify(details)}` : ""}`);
+  else {
+    const suffix = details ? ` ${JSON.stringify(details)}` : "";
+    info(`${code}: ${message}${suffix}`);
+  }
   process.exitCode = failureExit(error, code);
 }
 
@@ -270,6 +279,40 @@ function params(parsed: Parsed): JsonValue {
   catch { throw new CLIError("INPUT_INVALID", "Invalid JSON input", 2); }
 }
 
+function checkedDeviceAuthorization(auth: Awaited<ReturnType<typeof beginDeviceAuthorization>>): void {
+  if (!object(auth) || !filled(auth.deviceCode) || !filled(auth.userCode) ||
+      /[\u0000-\u001f\u007f]/.test(auth.userCode) ||
+      !webUrl(auth.verificationUri) || !webUrl(auth.verificationUriComplete) ||
+      !Number.isFinite(auth.pollIntervalSeconds) || auth.pollIntervalSeconds < 0 ||
+      !Number.isFinite(auth.expiresInSeconds) || auth.expiresInSeconds <= 0) {
+    throw new CLIError("DEVICE_RESPONSE_INVALID", "Invalid device authorization response", 1);
+  }
+}
+
+function saveDeviceGrant(name: string, baseUrl: string,
+  grant: Awaited<ReturnType<typeof pollDeviceAuthorization>>): void {
+  if (!object(grant) || !filled(grant.credential) || !filled(grant.clientId) ||
+      !filled(grant.grantId) || !filled(grant.workspaceId)) {
+    throw new CLIError("DEVICE_DELIVERY_UNCERTAIN",
+      "Device grant response is invalid; check /app/clients for a grant to revoke before trying again", 1);
+  }
+  try { store.save(name, { backend: baseUrl, key: grant.credential, workspaceId: grant.workspaceId }); }
+  catch { throw new CLIError("LOCAL_STORAGE_FAILED",
+    `Device grant could not be fully activated; inspect --profile ${name} and /app/clients before trying again`, 1); }
+  result({ profile: name, workspaceId: grant.workspaceId, status: "saved" });
+}
+
+function handleDevicePollError(error: unknown): boolean {
+  if (error instanceof OMRHttpError &&
+      (error.body as { error?: unknown } | null)?.error === "DEVICE_AUTHORIZATION_PENDING") return true;
+  if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) &&
+      error.path === "/api/device/token") {
+    throw new CLIError("DEVICE_DELIVERY_UNCERTAIN",
+      "Device token response was lost; check /app/clients for a grant to revoke before trying again", 1);
+  }
+  throw error;
+}
+
 async function login(parsed: Parsed): Promise<void> {
   if ([process.env.OMR_BACKEND, process.env.OMR_API_KEY, process.env.OMR_WORKSPACE_ID].some(Boolean)) {
     throw new CLIError("INPUT_INVALID", "Device login cannot use headless credentials", 2);
@@ -284,13 +327,7 @@ async function login(parsed: Parsed): Promise<void> {
   const capabilities: ClientCapability[] = ["connections:read", "tools:discover", "tools:read", "tools:write", "approvals:create"];
   const auth = await beginDeviceAuthorization({ baseUrl, clientKind: kind,
     clientName: opt(parsed, "name") ?? `OMR ${kind} on ${hostname()}`, requestedCapabilities: capabilities });
-  if (!object(auth) || !filled(auth.deviceCode) || !filled(auth.userCode) ||
-      /[\u0000-\u001f\u007f]/.test(auth.userCode) ||
-      !webUrl(auth.verificationUri) || !webUrl(auth.verificationUriComplete) ||
-      !Number.isFinite(auth.pollIntervalSeconds) || auth.pollIntervalSeconds < 0 ||
-      !Number.isFinite(auth.expiresInSeconds) || auth.expiresInSeconds <= 0) {
-    throw new CLIError("DEVICE_RESPONSE_INVALID", "Invalid device authorization response", 1);
-  }
+  checkedDeviceAuthorization(auth);
   info(`Open ${auth.verificationUriComplete}`);
   info(`Confirm device code ${auth.userCode}`);
   const deadline = Date.now() + auth.expiresInSeconds * 1000;
@@ -299,27 +336,10 @@ async function login(parsed: Parsed): Promise<void> {
     if (Date.now() >= deadline) break;
     try {
       const grant = await pollDeviceAuthorization({ baseUrl, deviceCode: auth.deviceCode });
-      if (!object(grant) || !nonempty(grant.credential) || !grant.credential.trim() ||
-          !nonempty(grant.clientId) || !grant.clientId.trim() ||
-          !nonempty(grant.grantId) || !grant.grantId.trim() ||
-          !nonempty(grant.workspaceId) || !grant.workspaceId.trim()) {
-        throw new CLIError("DEVICE_DELIVERY_UNCERTAIN",
-          "Device grant response is invalid; check /app/clients for a grant to revoke before trying again", 1);
-      }
-      try { store.save(name, { backend: baseUrl, key: grant.credential, workspaceId: grant.workspaceId }); }
-      catch { throw new CLIError("LOCAL_STORAGE_FAILED",
-        `Device grant could not be fully activated; inspect --profile ${name} and /app/clients before trying again`, 1); }
-      result({ profile: name, workspaceId: grant.workspaceId, status: "saved" });
+      saveDeviceGrant(name, baseUrl, grant);
       return;
     } catch (error) {
-      if (error instanceof OMRHttpError &&
-          (error.body as { error?: unknown } | null)?.error === "DEVICE_AUTHORIZATION_PENDING") continue;
-      if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) &&
-          error.path === "/api/device/token") {
-        throw new CLIError("DEVICE_DELIVERY_UNCERTAIN",
-          "Device token response was lost; check /app/clients for a grant to revoke before trying again", 1);
-      }
-      throw error;
+      if (handleDevicePollError(error)) continue;
     }
   }
   throw new CLIError("DEVICE_AUTHORIZATION_EXPIRED", "Device authorization expired", 22);
@@ -481,23 +501,28 @@ async function toolRun(parsed: Parsed, subject: string, api: OMRClient, workspac
       ...(connectionId ? { connectionId } : {}), idempotencyKey }),
     "/api/tools/execute", { workspaceId, toolId: subject, connectionId });
   } catch (error) {
-    if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) && error.path === "/api/tools/execute") {
-      throw new CLIError("EXECUTION_EFFECT_UNCERTAIN", "Execution response is missing or invalid; retry only with the same idempotency key", 23,
-        { idempotencyKey });
-    }
-    if (error instanceof OMRHttpError &&
-        (error.body as { error?: unknown } | null)?.error === "EXECUTION_IN_PROGRESS") {
-      executionInProgress(error, { idempotencyKey });
-    }
-    if (error instanceof OMRHttpError && error.status >= 500) {
-      ambiguousMutationResponse(error, { idempotencyKey }, "tool execution");
-    }
-    if (!(error instanceof OMRHttpError) ||
-        (error.body as { error?: unknown } | null)?.error !== "EXECUTION_APPROVAL_REQUIRED") throw error;
-    const approval = await requestApproval(api, { workspaceId, toolId: subject, params: input,
+    return handleToolRunError(error, api, { workspaceId, toolId: subject, params: input,
       ...(connectionId ? { connectionId } : {}), idempotencyKey });
-    return approvalResult({ ...approval, idempotencyKey }, { workspaceId, toolId: subject, connectionId });
   }
+}
+
+async function handleToolRunError(error: unknown, api: OMRClient,
+  input: Parameters<OMRClient["requestApproval"]>[0]): Promise<void> {
+  if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) && error.path === "/api/tools/execute") {
+    throw new CLIError("EXECUTION_EFFECT_UNCERTAIN", "Execution response is missing or invalid; retry only with the same idempotency key", 23,
+      { idempotencyKey: input.idempotencyKey });
+  }
+  if (error instanceof OMRHttpError &&
+      (error.body as { error?: unknown } | null)?.error === "EXECUTION_IN_PROGRESS") {
+    executionInProgress(error, { idempotencyKey: input.idempotencyKey });
+  }
+  if (error instanceof OMRHttpError && error.status >= 500) {
+    ambiguousMutationResponse(error, { idempotencyKey: input.idempotencyKey }, "tool execution");
+  }
+  if (!(error instanceof OMRHttpError) ||
+      (error.body as { error?: unknown } | null)?.error !== "EXECUTION_APPROVAL_REQUIRED") throw error;
+  const approval = await requestApproval(api, input);
+  return approvalResult({ ...approval, idempotencyKey: input.idempotencyKey }, input);
 }
 
 async function toolCommand(parsed: Parsed, action: string, subject: string | undefined,
@@ -529,23 +554,27 @@ async function approvalExecute(subject: string, api: OMRClient, workspaceId: str
     return receiptResult(await api.executeApproved(subject), "/api/approvals/execute",
       { workspaceId, approvalId: subject });
   } catch (error) {
-    if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) && error.path === "/api/approvals/execute") {
-      throw new CLIError("EXECUTION_EFFECT_UNCERTAIN", "Approved execution response is missing or invalid; check the approval status before retrying", 23,
-        { approvalId: subject });
-    }
-    if (error instanceof OMRHttpError &&
-        (error.body as { error?: unknown } | null)?.error === "EXECUTION_IN_PROGRESS") {
-      executionInProgress(error, { approvalId: subject });
-    }
-    if (error instanceof OMRHttpError && error.status >= 500) {
-      ambiguousMutationResponse(error, { approvalId: subject }, "approved execution");
-    }
-    if (error instanceof OMRHttpError &&
-        (error.body as { error?: unknown } | null)?.error === "APPROVAL_UNAVAILABLE") {
-      if (await reportUnavailableApproval(subject, api, workspaceId)) return;
-    }
-    throw error;
+    return handleApprovalExecuteError(error, subject, api, workspaceId);
   }
+}
+
+async function handleApprovalExecuteError(error: unknown, subject: string,
+  api: OMRClient, workspaceId: string): Promise<void> {
+  if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) && error.path === "/api/approvals/execute") {
+    throw new CLIError("EXECUTION_EFFECT_UNCERTAIN", "Approved execution response is missing or invalid; check the approval status before retrying", 23,
+      { approvalId: subject });
+  }
+  if (error instanceof OMRHttpError &&
+      (error.body as { error?: unknown } | null)?.error === "EXECUTION_IN_PROGRESS") {
+    executionInProgress(error, { approvalId: subject });
+  }
+  if (error instanceof OMRHttpError && error.status >= 500) {
+    ambiguousMutationResponse(error, { approvalId: subject }, "approved execution");
+  }
+  if (error instanceof OMRHttpError &&
+      (error.body as { error?: unknown } | null)?.error === "APPROVAL_UNAVAILABLE" &&
+      await reportUnavailableApproval(subject, api, workspaceId)) return;
+  throw error;
 }
 
 async function approvalCommand(parsed: Parsed, action: string, subject: string,

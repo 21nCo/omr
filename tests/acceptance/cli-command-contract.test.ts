@@ -715,8 +715,13 @@ syncBuiltinESMExports();
     const order = readFileSync(events, "utf8").trim().split("\n");
     expect(order).toContain("profile-file-flush");
     expect(order.indexOf("profile-file-flush")).toBeLessThan(order.indexOf("profile-publish"));
-    expect(order.indexOf("profile-publish")).toBeLessThan(order.indexOf("profile-dir-flush"));
-    expect(order.indexOf("profile-dir-flush")).toBeLessThan(order.indexOf("legacy-remove"));
+    if (process.platform !== "win32") {
+      expect(order.indexOf("profile-publish")).toBeLessThan(order.indexOf("profile-dir-flush"));
+      expect(order.indexOf("profile-dir-flush")).toBeLessThan(order.indexOf("legacy-remove"));
+    } else {
+      expect(order).not.toContain("profile-dir-flush");
+      expect(order.indexOf("profile-publish")).toBeLessThan(order.indexOf("legacy-remove"));
+    }
     expect(readFileSync(credentials, "utf8")).not.toContain("omr_fixture_secret");
   });
 
