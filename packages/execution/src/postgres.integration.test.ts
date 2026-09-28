@@ -452,6 +452,42 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     }
   });
 
+  it("exposes a committed completion to a second replay client after its earlier running read", async () => {
+    const now = Date.now();
+    const approval = approvalFixture(now);
+    await runtime.approvals.create(approval);
+    await runtime.approvals.approve({ approvalId: approval.id,
+      actorUserId: approval.actorUserId, now: now + 1 });
+    await runtime.approvals.claim({ approvalId: approval.id, actorUserId: approval.actorUserId,
+      principalKey: approval.principalKey, now: now + 2, deadlineAt: Date.now() + 2_000 });
+    const receipt = receiptFixture(approval, now);
+    await runtime.receipts.reserve(receipt);
+    await runtime.receipts.beginDispatch(receipt.id, now + 3);
+    const prior = await runtime.receipts.findByIdempotency({ workspaceId: approval.workspaceId,
+      principalKey: approval.principalKey, idempotencyKey: approval.idempotencyKey });
+    expect(prior).toMatchObject({ id: receipt.id, status: "running" });
+
+    const producer = await connectPostgresExecutionReceipts({
+      connectionString: connectionString!, resultWrappingKey: new Uint8Array(WRAPPING_KEY),
+    });
+    try {
+      await producer.approvals.succeedWithReceipt({ approvalId: approval.id, receipt: prior!,
+        result: { id: "committed_issue" }, now: Date.now(), deadlineAt: Date.now() + 3_000 });
+      await expect(runtime.approvals.claim({ approvalId: approval.id,
+        actorUserId: approval.actorUserId, principalKey: approval.principalKey,
+        now: Date.now(), deadlineAt: Date.now() + 2_000 }))
+        .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      const settled = await runtime.approvals.getForActor(approval.id, approval.actorUserId);
+      const current = await runtime.receipts.findByIdempotency({ workspaceId: approval.workspaceId,
+        principalKey: approval.principalKey, idempotencyKey: approval.idempotencyKey });
+      expect(settled).toMatchObject({ status: "consumed", executionReceiptId: receipt.id });
+      expect(current).toMatchObject({ id: receipt.id, status: "succeeded",
+        result: { id: "committed_issue" } });
+    } finally {
+      await producer.close();
+    }
+  });
+
   it("does not claim an approval that expires behind a membership lock", async () => {
     const now = Date.now();
     const approval = approvalFixture(now, { expiresAt: now + 300 });

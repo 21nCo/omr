@@ -319,26 +319,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
         );
         const receipt = exact.rows[0];
         const now = Date.now();
-        if (receipt?.status === "reserved") {
-          await query(
-            `UPDATE omr_control.execution_receipts
-             SET status = 'failed', error_code = 'reservation_expired',
-               completed_at = $2, updated_at = $2
-             WHERE id = $1 AND status = 'reserved'`,
-            [receipt.id, now],
-          );
-        } else if (receipt && ["running", "succeeded", "uncertain"].includes(receipt.status)) {
-          effectReceiptId = receipt.id;
-          if (receipt.status === "running") {
-            await query(
-              `UPDATE omr_control.execution_receipts
-               SET status = 'uncertain', error_code = 'stale_approval',
-                 completed_at = $2, updated_at = $2
-               WHERE id = $1 AND status = 'running'`,
-              [receipt.id, now],
-            );
-          }
-        }
+        effectReceiptId = await this.settleStaleReceipt(receipt, now, query);
         await query(
           `UPDATE omr_control.execution_approvals
            SET status = $2, execution_receipt_id = $3, updated_at = $4
@@ -362,6 +343,32 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
       throw new ExecutionOutcomeUnknownError(settled.rows[0].execution_receipt_id);
     }
     throw new ApprovalUnavailableError();
+  }
+
+  private async settleStaleReceipt(receipt: { id: string; status: ExecutionReceipt["status"] } | undefined,
+    now: number, update: (sql: string, values: unknown[]) => Promise<unknown>): Promise<string | null> {
+    if (!receipt) return null;
+    if (receipt.status === "reserved") {
+      await update(
+        `UPDATE omr_control.execution_receipts
+         SET status = 'failed', error_code = 'reservation_expired',
+           completed_at = $2, updated_at = $2
+         WHERE id = $1 AND status = 'reserved'`,
+        [receipt.id, now],
+      );
+      return null;
+    }
+    if (!["running", "succeeded", "uncertain"].includes(receipt.status)) return null;
+    if (receipt.status === "running") {
+      await update(
+        `UPDATE omr_control.execution_receipts
+         SET status = 'uncertain', error_code = 'stale_approval',
+           completed_at = $2, updated_at = $2
+         WHERE id = $1 AND status = 'running'`,
+        [receipt.id, now],
+      );
+    }
+    return receipt.id;
   }
 
   async consume(input: {

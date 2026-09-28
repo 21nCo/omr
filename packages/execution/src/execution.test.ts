@@ -1275,6 +1275,37 @@ describe("execution service", () => {
     expect(actionCall).not.toHaveBeenCalled();
   });
 
+  it("replays a success committed between the stale receipt read and reconciliation", async () => {
+    const { actionCall, advance, approvals, receipts, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const approval = await requestApproval(service, { principal, toolId: "linear.create_issue",
+      params: {}, idempotencyKey: "completion-during-stale-replay" });
+    await service.approve(approval.id, principal.userId);
+    approvals.approvals.get(approval.id)!.status = "executing";
+    const receipt = receiptForApproval(approval, "reserved");
+    await receipts.reserve(receipt);
+    receipts.receipts.get(receipt.id)!.status = "running";
+    advance(65_001);
+
+    const originalClaim = approvals.claim.bind(approvals);
+    vi.spyOn(approvals, "claim").mockImplementationOnce(async (input) => {
+      await approvals.succeedWithReceipt({ approvalId: approval.id, receipt,
+        result: { id: "committed_issue" }, now: input.now, deadlineAt: input.deadlineAt });
+      return originalClaim(input);
+    });
+
+    await expect(service.executeApproved(principal, approval.id)).resolves.toMatchObject({
+      id: receipt.id, status: "succeeded", result: { id: "committed_issue" },
+    });
+    expect(approvals.approvals.get(approval.id)).toMatchObject({
+      status: "consumed", executionReceiptId: receipt.id,
+    });
+    expect(receipts.receipts.get(receipt.id)).toMatchObject({
+      status: "succeeded", result: { id: "committed_issue" },
+    });
+    expect(actionCall).not.toHaveBeenCalled();
+  });
+
   it("links a stale succeeded receipt without disclosing its result after binding revocation", async () => {
     const { actionCall, advance, approvals, connections, receipts, service, workspace } = await fixture();
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };

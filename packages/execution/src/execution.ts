@@ -460,7 +460,7 @@ export class ExecutionService {
     }
     if (prior.status !== "consumed" && prior.status !== "uncertain" &&
         prior.status !== "executing") return null;
-    const receipt = await withinInvocationDeadline(deadlineAt,
+    let receipt = await withinInvocationDeadline(deadlineAt,
       () => this.receipts.findByIdempotency({ workspaceId: prior.workspaceId,
         principalKey: prior.principalKey, idempotencyKey: prior.idempotencyKey, deadlineAt }));
     // A claim can commit before its response or reservation reaches this
@@ -472,6 +472,9 @@ export class ExecutionService {
     if (prior.status === "executing" && prior.executionReceiptId === null &&
         this.now() - prior.updatedAt >= EXECUTION_STALE_AFTER_MS) {
       prior = await this.reconcileStaleEffect(approvals, principal, prior, receipt, deadlineAt);
+      // Completion may have committed while reconciliation waited. Decide from
+      // the current exact receipt, not the snapshot read before that wait.
+      receipt = await this.settledApprovedReceipt(prior, deadlineAt);
     }
     if (receipt.status === "running" || receipt.status === "uncertain") {
       const manifest = this.approvedManifest(principal, prior);
@@ -499,6 +502,15 @@ export class ExecutionService {
       if (authorizedResult) return authorizedResult;
       throw error;
     }
+  }
+
+  private async settledApprovedReceipt(approval: ExecutionApproval,
+    deadlineAt: number): Promise<ExecutionReceipt> {
+    const receipt = await withinInvocationDeadline(deadlineAt,
+      () => this.receipts.findByIdempotency({ workspaceId: approval.workspaceId,
+        principalKey: approval.principalKey, idempotencyKey: approval.idempotencyKey, deadlineAt }));
+    if (!receipt || !matchesApprovalReceipt(receipt, approval)) throw new ApprovalUnavailableError();
+    return receipt;
   }
 
   private async reconcileStaleEffect(approvals: ExecutionApprovalStore,
