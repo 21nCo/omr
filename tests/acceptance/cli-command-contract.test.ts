@@ -785,13 +785,19 @@ syncBuiltinESMExports();
 
   it("classifies invalid login URLs before issuing a device request", async () => {
     const f = await fixture();
-    for (const url of ["not a URL", "ftp://example.test", "http://example.test",
-      "https://user:pass@example.test", "https://example.test?token=private",
-      "https://example.test#fragment", ` ${f.url}`]) {
-      const response = await f.run(["login", "--url", url, "--json"]);
-      expect(response.code, url).toBe(2);
-      expect(lastError(response.stderr).error).toBe("INPUT_INVALID");
-      expect(response.stdout + response.stderr).not.toContain("private");
+    for (const json of [true, false]) {
+      for (const url of ["not a URL", "ftp://example.test", "http://example.test",
+        "https://user:pass@example.test", "https://example.test?token=private",
+        "https://example.test#fragment", ` ${f.url}`]) {
+        const response = await f.run(["login", "--url", url, ...(json ? ["--json"] : [])]);
+        expect(response.code, url).toBe(2);
+        if (json) expect(lastError(response.stderr).error).toBe("INPUT_INVALID");
+        else expect(response.stderr).toContain("INPUT_INVALID:");
+        const output = response.stdout + response.stderr;
+        expect(output).not.toContain("private");
+        expect(output).not.toContain("user:pass");
+        expect(output).not.toContain("https://user:pass@example.test");
+      }
     }
     expect(f.calls).toHaveLength(0);
   });
@@ -1377,8 +1383,8 @@ syncBuiltinESMExports();
     expect((await f.run(["profiles", "show", "--json"])).code).toBe(1);
   });
 
-  it("rejects hard-linked legacy metadata before changing an outside inode", async () => {
-    if (process.platform === "win32") return;
+  it("rejects hard-linked legacy metadata before changing an outside inode", async (context) => {
+    if (process.platform === "win32") context.skip();
     const f = await fixture();
     mkdirSync(join(f.config, "profiles"), { recursive: true });
     const outside = join(f.root, "outside.json");
@@ -1387,6 +1393,7 @@ syncBuiltinESMExports();
     const result = await f.run(["profiles", "show", "--json"]);
     expect(result.code).toBe(1);
     expect(result.stdout + result.stderr).not.toContain("workspace_1");
+    expect(readFileSync(outside, "utf8")).toBe('{"workspaceId":"workspace_1"}\n');
     expect(statSync(outside).mode & 0o777).toBe(0o644);
     expect(statSync(outside).nlink).toBe(2);
   });
