@@ -26,6 +26,10 @@ async function fixture() {
   let revokeLost = false;
   let emptyCatalog = false;
   let grantWorkspace = "workspace_1";
+  let nextGrantKey = "omr_fixture_secret";
+  let releaseRevoke: (() => void) | undefined;
+  let revokeHeld = false;
+  let selectionOverride: Record<string, unknown> | undefined;
   let approvalStatus: string = "pending";
   let expiresAt = Date.now() + 600_000;
   const malformedSuccess = new Map<string, "json" | "empty" | "shape">();
@@ -55,12 +59,14 @@ async function fixture() {
     });
     if (path === "/api/device/token" && deviceLost) { request.socket.destroy(); return; }
     if (path === "/api/device/token") return answer(200, {
-      credential: "omr_fixture_secret", clientId: "client_1", grantId: "grant_1", workspaceId: grantWorkspace,
+      credential: nextGrantKey, clientId: "client_1", grantId: "grant_1", workspaceId: grantWorkspace,
     });
     if (request.headers.authorization !== "Bearer omr_fixture_secret" &&
+        request.headers.authorization !== "Bearer replacement_secret" &&
         request.headers.authorization !== "Bearer headless_secret") return answer(401, { error: "CLIENT_CREDENTIAL_INVALID" });
     if (revoked) return answer(401, { error: "CLIENT_CREDENTIAL_INVALID" });
     if (path === "/api/client-grants/revoke-self") {
+      if (revokeHeld) await new Promise<void>((resolve) => { releaseRevoke = resolve; });
       if (revokeLost) { request.socket.destroy(); return; }
       if (formerMember) return answer(401, { error: "CLIENT_CREDENTIAL_INVALID" });
       revoked = true; return answer(200, { revoked: true });
@@ -72,7 +78,10 @@ async function fixture() {
     }
     if (path === "/api/tools/manifest") return answer(200, { id: "linear.read", hash: "v1" });
     if (path === "/api/connections/list") return answer(200, [{ id: "connection_1" }]);
-    if (path === "/api/connections/select") return answer(200, { selected: body?.connectionId });
+    if (path === "/api/connections/select") return answer(200, selectionOverride ?? {
+      workspaceId: body?.workspaceId, provider: body?.provider, connectionId: body?.connectionId,
+      userId: "user_1", createdAt: 1, updatedAt: 1,
+    });
     if (path === "/api/tools/execute") {
       if (body?.toolId === "linear.interrupted") {
         const key = String(body.idempotencyKey);
@@ -140,6 +149,10 @@ async function fixture() {
     malformedSuccess: (path: string, kind: "json" | "empty" | "shape") => { malformedSuccess.set(path, kind); },
     clearMalformed: () => malformedSuccess.clear(),
     interrupted,
+    holdRevoke: () => { revokeHeld = true; },
+    releaseRevoke: () => { revokeHeld = false; releaseRevoke?.(); },
+    nextGrant: (key: string) => { nextGrantKey = key; },
+    selectionReply: (value: Record<string, unknown>) => { selectionOverride = value; },
     emptyCatalog: () => { emptyCatalog = true; },
     setGrantWorkspace: (value: string) => { grantWorkspace = value; },
     setApproval: (status: string, expiry = Date.now() + 600_000) => {
@@ -179,7 +192,7 @@ describe("cli-command-contract", () => {
     expect(JSON.parse((await f.run(["tools", "search", "--query", "issue", "--provider", "linear", "--json"], env)).stdout).tools[0].id).toBe("linear.read");
     expect(JSON.parse((await f.run(["tools", "inspect", "linear.read", "--json"], env)).stdout).hash).toBe("v1");
     expect(JSON.parse((await f.run(["connections", "list", "--json"], env)).stdout)[0].id).toBe("connection_1");
-    expect(JSON.parse((await f.run(["connections", "select", "connection_1", "--provider", "linear", "--json"], env)).stdout).selected).toBe("connection_1");
+    expect(JSON.parse((await f.run(["connections", "select", "connection_1", "--provider", "linear", "--json"], env)).stdout).connectionId).toBe("connection_1");
     const path = join(f.root, "params.json"); writeFileSync(path, '{"id":"from-file"}');
     expect(JSON.parse((await f.run(["tools", "run", "linear.read", "--params-file", path, "--json"], env)).stdout).result).toEqual({ id: "from-file" });
     // Supply stdin through a shell-free child process to cover the actual pipe contract.
@@ -336,6 +349,49 @@ describe("cli-command-contract", () => {
     expect((await f.run(["profiles", "show", "--json"])).code).toBe(0);
   });
 
+  it("does not delete a replacement profile after revoking the former grant", async () => {
+    const f = await fixture();
+    expect((await f.run(["login", "--url", f.url, "--json"])).code).toBe(0);
+    f.holdRevoke();
+    const oldLogout = f.run(["logout", "--json"]);
+    try {
+      for (let n = 0; n < 100 && !f.calls.some((call) => call.path === "/api/client-grants/revoke-self"); n++)
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(f.calls.some((call) => call.path === "/api/client-grants/revoke-self")).toBe(true);
+      expect((await f.run(["logout", "--local", "--json"])).code).toBe(0);
+      f.nextGrant("replacement_secret");
+      expect((await f.run(["login", "--url", f.url, "--json"])).code).toBe(0);
+    } finally { f.releaseRevoke(); }
+    const response = await oldLogout;
+    expect(response.code).toBe(1);
+    expect(JSON.parse(response.stderr).error).toBe("PROFILE_CHANGED");
+    expect(JSON.parse(readFileSync(join(f.config, "profiles", "default.json"), "utf8")).key)
+      .toBe("replacement_secret");
+  });
+
+  it("rejects account selection replies without the requested identity", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    const args = ["connections", "select", "connection_1", "--provider", "linear", "--json"];
+    for (const reply of [{},
+      { workspaceId: "workspace_other", provider: "linear", connectionId: "connection_1", userId: "user_1" },
+      { workspaceId: "workspace_1", provider: "linear", connectionId: "connection_other", userId: "user_1" },
+      { workspaceId: "workspace_1", provider: "github", connectionId: "connection_1", userId: "user_1" }]) {
+      f.selectionReply(reply);
+      const response = await f.run(args, env);
+      expect(response.code).toBe(1);
+      expect(response.stdout).toBe("");
+      expect(JSON.parse(response.stderr).error).toBe("CLI_ERROR");
+    }
+    for (const kind of ["json", "empty", "shape"] as const) {
+      f.malformedSuccess("/api/connections/select", kind);
+      const response = await f.run(args, env);
+      expect(response.code).toBe(1);
+      expect(response.stdout).toBe("");
+      f.clearMalformed();
+    }
+  });
+
   it("keeps the credential when logout cannot prove revocation", async () => {
     for (const failure of ["former-member", "revoked", "unreachable"] as const) {
       const f = await fixture();
@@ -490,6 +546,16 @@ describe("cli-command-contract", () => {
     f.setGrantWorkspace("workspace_2");
     rmSync(join(f.config, "profiles", "default.json"));
     await launch("workspace_2");
+  });
+
+  it("identifies OMR_WORKSPACE_ID when a headless MCP launch has no saved workspace", async () => {
+    const f = await fixture();
+    const { stderr } = await exec(process.execPath, [resolve("packages/mcp/dist/bin.js")], {
+      cwd: f.root, env: { ...process.env, OMR_CONFIG_DIR: f.config, OMR_PROFILE: undefined,
+        OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: undefined },
+    }).then(() => ({ stderr: "" }), (error: { stderr: string }) => ({ stderr: error.stderr }));
+    expect(stderr).toContain("OMR_WORKSPACE_ID is required");
+    expect(stderr).not.toContain("Profile default is missing");
   });
 
   it("never changes a saved profile while headless logout is configured", async () => {

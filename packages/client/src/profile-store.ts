@@ -253,4 +253,19 @@ export class OMRProfileStore {
       if (this.activeName() === name) rmSync(this.active, { force: true });
     });
   }
+
+  // A remote revoke can take time. Only remove the grant that the caller
+  // actually revoked, even if another process reused the profile name.
+  removeIfGrantMatches(name: string, expected: Pick<OMRProfile, "backend" | "key">): boolean {
+    return this.locked(() => {
+      const file = this.file(name);
+      if (!existsSync(file)) return false;
+      const current = this.get(name);
+      if (current.backend !== expected.backend || current.key !== expected.key) return false;
+      this.removeLegacy(name);
+      rmSync(file);
+      if (this.activeName() === name) rmSync(this.active, { force: true });
+      return true;
+    });
+  }
 }

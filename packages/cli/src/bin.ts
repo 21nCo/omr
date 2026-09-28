@@ -259,8 +259,10 @@ async function main(parsed: Parsed): Promise<void> {
       throw new CLIError("HEADLESS_READ_ONLY", "Headless credentials have no local profile; unset them to log out a saved profile", 2);
     }
     const name = profileName(parsed);
+    let revokedGrant: { backend: string; key: string } | undefined;
     if (!parsed.options.has("local")) {
       const { backend, key } = store.get(name);
+      revokedGrant = { backend, key };
       try {
         const response = await new OMRClient({ baseUrl: backend, credential: key }).revokeSelf();
         if (!object(response) || response.revoked !== true) invalidResponse("/api/client-grants/revoke-self");
@@ -273,7 +275,13 @@ async function main(parsed: Parsed): Promise<void> {
         throw error;
       }
     }
-    store.remove(name); result({ profile: name, revoked: !parsed.options.has("local") }); return;
+    if (revokedGrant) {
+      if (!store.removeIfGrantMatches(name, revokedGrant)) {
+        throw new CLIError("PROFILE_CHANGED",
+          "The revoked profile was removed or replaced while logout was in progress; inspect the current profile before retrying", 1);
+      }
+    } else store.remove(name);
+    result({ profile: name, revoked: !!revokedGrant }); return;
   }
   const { api, workspaceId: savedWorkspace, profile } = current(parsed);
   const workspaceId = workspace(parsed, savedWorkspace);
@@ -295,9 +303,11 @@ async function main(parsed: Parsed): Promise<void> {
       return result(response);
     }
     if (action === "select" && subject) {
+      const provider = required(parsed, "provider");
       const response = await api.selectConnection({ workspaceId,
-        provider: required(parsed, "provider"), connectionId: subject });
-      if (!object(response)) invalidResponse("/api/connections/select");
+        provider, connectionId: subject });
+      if (!object(response) || response.workspaceId !== workspaceId || response.provider !== provider ||
+          response.connectionId !== subject || !nonempty(response.userId)) invalidResponse("/api/connections/select");
       return result(response);
     }
   }
