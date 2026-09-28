@@ -20,6 +20,10 @@ async function fixture() {
   const calls: { path: string; body: unknown; authorization: string | undefined }[] = [];
   let revoked = false;
   let deviceLost = false;
+  let approvalLost = false;
+  let formerMember = false;
+  let revokeLost = false;
+  let grantWorkspace = "workspace_1";
   let approvalStatus: string = "pending";
   let expiresAt = Date.now() + 600_000;
   const server = createServer(async (request, response) => {
@@ -38,14 +42,18 @@ async function fixture() {
     });
     if (path === "/api/device/token" && deviceLost) { request.socket.destroy(); return; }
     if (path === "/api/device/token") return answer(200, {
-      credential: "omr_fixture_secret", clientId: "client_1", grantId: "grant_1", workspaceId: "workspace_1",
+      credential: "omr_fixture_secret", clientId: "client_1", grantId: "grant_1", workspaceId: grantWorkspace,
     });
     if (request.headers.authorization !== "Bearer omr_fixture_secret" &&
         request.headers.authorization !== "Bearer headless_secret") return answer(401, { error: "CLIENT_CREDENTIAL_INVALID" });
     if (revoked) return answer(401, { error: "CLIENT_CREDENTIAL_INVALID" });
-    if (path === "/api/client-grants/revoke-self") { revoked = true; return answer(200, { revoked: true }); }
+    if (path === "/api/client-grants/revoke-self") {
+      if (revokeLost) { request.socket.destroy(); return; }
+      if (formerMember) return answer(401, { error: "CLIENT_CREDENTIAL_INVALID" });
+      revoked = true; return answer(200, { revoked: true });
+    }
     if (path === "/api/tools") {
-      if (new URL(request.url!, "http://localhost").searchParams.get("workspaceId") !== "workspace_1")
+      if (new URL(request.url!, "http://localhost").searchParams.get("workspaceId") !== grantWorkspace)
         return answer(403, { error: "CONNECTION_ACCESS_DENIED" });
       return answer(200, { tools: [{ id: "linear.read" }], cursor: null });
     }
@@ -67,7 +75,10 @@ async function fixture() {
       if (body?.toolId === "linear.uncertain") return answer(502, { error: "EXECUTION_OUTCOME_UNKNOWN", receiptId: "receipt_1" });
       return answer(200, { status: "succeeded", result: body?.params });
     }
-    if (path === "/api/approvals") return answer(201, { id: "approval_1", status: "pending", expiresAt });
+    if (path === "/api/approvals") {
+      if (approvalLost) { request.socket.destroy(); return; }
+      return answer(201, { id: "approval_1", status: approvalStatus, expiresAt });
+    }
     if (path === "/api/approvals/status") return answer(200, { id: "approval_1", status: approvalStatus, expiresAt });
     if (path === "/api/approvals/execute") {
       if (approvalStatus !== "approved" || expiresAt <= Date.now()) return answer(409, { error: "APPROVAL_UNAVAILABLE" });
@@ -96,6 +107,9 @@ async function fixture() {
     }
   }
   return { run, url, root, config, calls, loseDevice: () => { deviceLost = true; },
+    loseApproval: () => { approvalLost = true; }, formerMember: () => { formerMember = true; },
+    loseRevoke: () => { revokeLost = true; },
+    setGrantWorkspace: (value: string) => { grantWorkspace = value; },
     setApproval: (status: string, expiry = Date.now() + 600_000) => {
     approvalStatus = status; expiresAt = expiry;
   }, revoke: () => { revoked = true; } };
@@ -148,6 +162,83 @@ describe("cli-command-contract", () => {
     expect(JSON.parse(fromStdin.stdout).result).toEqual({ id: "from-stdin" });
     expect(f.calls.filter((call) => call.path === "/api/tools/execute").map((call) => (call.body as { params: unknown }).params))
       .toEqual([{ id: "from-file" }, { id: "from-stdin" }]);
+  });
+
+  it("switches between two saved profiles and persists an authorized workspace selection", async () => {
+    const f = await fixture();
+    expect((await f.run(["login", "--url", f.url, "--profile", "work", "--json"])).code).toBe(0);
+    const workFile = join(f.config, "profiles", "work.json");
+    writeFileSync(workFile, JSON.stringify({ ...JSON.parse(readFileSync(workFile, "utf8")), workspaceId: "workspace_old" }));
+    expect((await f.run(["workspaces", "use", "workspace_1", "--json"])).code).toBe(0);
+    expect(JSON.parse(readFileSync(workFile, "utf8")).workspaceId).toBe("workspace_1");
+    f.setGrantWorkspace("workspace_2");
+    expect((await f.run(["login", "--url", f.url, "--profile", "personal", "--json"])).code).toBe(0);
+    expect((await f.run(["workspaces", "use", "workspace_2", "--json"])).code).toBe(0);
+    expect(JSON.parse((await f.run(["workspaces", "show", "--json"])).stdout)).toMatchObject({
+      profile: "personal", workspaceId: "workspace_2",
+    });
+    expect((await f.run(["profiles", "use", "work", "--json"])).code).toBe(0);
+    expect(JSON.parse((await f.run(["workspaces", "show", "--json"])).stdout)).toMatchObject({
+      profile: "work", workspaceId: "workspace_1",
+    });
+    expect(JSON.parse((await f.run(["profiles", "list", "--json"])).stdout)).toMatchObject([
+      { name: "personal", active: false }, { name: "work", active: true },
+    ]);
+  });
+
+  it("maps idempotent approval creation to its actual state and keeps retry keys on lost replies", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    const explicit = ["approvals", "request", "linear.write", "--idempotency", "stable-key", "--json"];
+    for (const [state, expiry, expected] of [
+      ["pending", Date.now() + 600_000, 20],
+      ["rejected", Date.now() + 600_000, 21],
+      ["approved", Date.now() - 1_000, 22],
+      ["consumed", Date.now() + 600_000, 0],
+      ["uncertain", Date.now() + 600_000, 23],
+    ] as const) {
+      f.setApproval(state, expiry);
+      const request = await f.run(explicit, env);
+      expect(request.code).toBe(expected);
+      expect(JSON.parse(request.stdout).status).toBe(state);
+    }
+    for (const [state, expiry, expected] of [
+      ["rejected", Date.now() + 600_000, 21],
+      ["pending", Date.now() - 1_000, 22],
+      ["consumed", Date.now() + 600_000, 0],
+    ] as const) {
+      f.setApproval(state, expiry);
+      const automatic = await f.run(["tools", "run", "linear.write", "--idempotency", "auto-key", "--json"], env);
+      expect(automatic.code).toBe(expected);
+      expect(JSON.parse(automatic.stdout)).toMatchObject({ status: state, idempotencyKey: "auto-key" });
+    }
+    f.loseApproval();
+    const lostExplicit = await f.run(explicit, env);
+    expect(lostExplicit.code).toBe(23);
+    expect(JSON.parse(lostExplicit.stderr)).toMatchObject({ error: "APPROVAL_DELIVERY_UNCERTAIN",
+      details: { idempotencyKey: "stable-key" } });
+    const lostAutomatic = await f.run(["tools", "run", "linear.write", "--json"], env);
+    expect(lostAutomatic.code).toBe(23);
+    expect(JSON.parse(lostAutomatic.stderr)).toMatchObject({ error: "APPROVAL_DELIVERY_UNCERTAIN",
+      details: { idempotencyKey: expect.any(String) } });
+    expect(JSON.parse(lostAutomatic.stderr).details.idempotencyKey).toMatch(/^[a-f0-9-]{36}$/);
+  });
+
+  it("keeps the credential when logout cannot prove revocation", async () => {
+    for (const failure of ["former-member", "revoked", "unreachable"] as const) {
+      const f = await fixture();
+      expect((await f.run(["login", "--url", f.url, "--json"])).code).toBe(0);
+      if (failure === "former-member") f.formerMember();
+      if (failure === "revoked") f.revoke();
+      if (failure === "unreachable") f.loseRevoke();
+      const logout = await f.run(["logout", "--json"]);
+      expect(logout.code).toBe(failure === "unreachable" ? 1 : 3);
+      if (failure !== "unreachable") expect(JSON.parse(logout.stderr).error).toBe("REVOCATION_UNVERIFIED");
+      expect(logout.stdout + logout.stderr).not.toContain("omr_fixture_secret");
+      expect(JSON.parse((await f.run(["profiles", "show", "--json"])).stdout).name).toBe("default");
+      expect((await f.run(["logout", "--local", "--json"])).code).toBe(0);
+      expect((await f.run(["profiles", "show", "--json"])).code).toBe(1);
+    }
   });
 
   it("distinguishes pending, denied, expired, uncertain and invalid input without echoing parameters", async () => {

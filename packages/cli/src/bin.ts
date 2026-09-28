@@ -159,11 +159,24 @@ function approvalResult(value: unknown): void {
   const approval = value as { status?: unknown; expiresAt?: unknown };
   if (approval.status === "rejected") process.exitCode = 21;
   else if (approval.status === "uncertain" || approval.status === "executing") process.exitCode = 23;
-  else if ((approval.status === "pending" || approval.status === "approved") &&
-      typeof approval.expiresAt === "number" && approval.expiresAt <= Date.now()) process.exitCode = 22;
+  else if (approval.status === "expired" ||
+      ((approval.status === "pending" || approval.status === "approved") &&
+      typeof approval.expiresAt === "number" && approval.expiresAt <= Date.now())) process.exitCode = 22;
   else if (approval.status === "pending") process.exitCode = 20;
   else if (approval.status === "failed" ||
       !["approved", "consumed"].includes(String(approval.status))) process.exitCode = 1;
+}
+
+async function requestApproval(api: OMRClient, input: Parameters<OMRClient["requestApproval"]>[0]): Promise<unknown> {
+  try { return await api.requestApproval(input); }
+  catch (error) {
+    if (error instanceof OMRTransportError && error.path === "/api/approvals") {
+      throw new CLIError("APPROVAL_DELIVERY_UNCERTAIN",
+        "Approval response was lost; retry the same request with this idempotency key", 23,
+        { idempotencyKey: input.idempotencyKey });
+    }
+    throw error;
+  }
 }
 
 async function main(parsed: Parsed): Promise<void> {
@@ -188,7 +201,11 @@ async function main(parsed: Parsed): Promise<void> {
       const { backend, key } = store.get(name);
       try { await new OMRClient({ baseUrl: backend, credential: key }).revokeSelf(); }
       catch (error) {
-        if (!(error instanceof OMRHttpError && error.status === 401)) throw error;
+        if (error instanceof OMRHttpError && error.status === 401) {
+          throw new CLIError("REVOCATION_UNVERIFIED",
+            "The server could not verify revocation; keep this profile and revoke the grant in /app/clients, or use logout --local after doing so", 3);
+        }
+        throw error;
       }
     }
     store.remove(name); result({ profile: name, revoked: !parsed.options.has("local") }); return;
@@ -236,20 +253,18 @@ async function main(parsed: Parsed): Promise<void> {
         }
         if (!(error instanceof OMRHttpError) ||
             (error.body as { error?: unknown } | null)?.error !== "EXECUTION_APPROVAL_REQUIRED") throw error;
-        const approval = await api.requestApproval({ workspaceId, toolId: subject, params: input,
+        const approval = await requestApproval(api, { workspaceId, toolId: subject, params: input,
           ...(opt(parsed, "connection") ? { connectionId: opt(parsed, "connection") } : {}), idempotencyKey });
-        result({ ...(approval as object), idempotencyKey });
-        process.exitCode = 20;
-        return;
+        return approvalResult({ ...(approval as object), idempotencyKey });
       }
     }
   }
   if (command === "approvals") {
     if (action === "request" && subject) {
-      const approval = await api.requestApproval({ workspaceId, toolId: subject, params: params(parsed),
+      const approval = await requestApproval(api, { workspaceId, toolId: subject, params: params(parsed),
         ...(opt(parsed, "connection") ? { connectionId: opt(parsed, "connection") } : {}),
         idempotencyKey: required(parsed, "idempotency") });
-      return result(approval);
+      return approvalResult(approval);
     }
     if (action === "status" && subject) return approvalResult(await api.approvalStatus(subject));
     if (action === "execute" && subject) {

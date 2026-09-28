@@ -17,7 +17,7 @@ omr logout
 
 `login` prints a browser verification link and code to stderr, waits for approval, and stores a workspace-scoped device grant. A profile can use only the workspace authorized during login. Log in again under another profile to access another workspace. `--workspace` selects a workspace for one command; the backend rejects a workspace outside the grant. `workspaces use` verifies authorization before saving the selection. `profiles list` and `workspaces list` show local profile metadata, not every workspace available to the browser account.
 
-`logout` revokes the remote client before removing its local profile. If the grant was already revoked, it removes the local profile. A network or server error preserves the local profile so revocation can be retried. `logout --local` removes a local profile without contacting the server; use it when the server is unavailable and revoke the grant later in `/app/clients`. A login does not silently replace a profile because that could leave an old grant active.
+`logout` revokes the remote client before removing its local profile. A 401 cannot prove revocation: it can also occur when workspace membership was removed while the grant remains live. A 401, network error, or server error preserves the profile. Check or revoke the grant in `/app/clients` before using `logout --local` to remove the local profile without contacting the server. A login does not silently replace a profile because that could leave an old grant active.
 
 If the one-time device credential response is lost or local storage fails, check `/app/clients` for a grant to revoke before logging in again.
 
@@ -40,7 +40,7 @@ omr approvals status <approval-id> --json
 omr approvals execute <approval-id> --json
 ```
 
-Tool catalog, account selection, execution and approvals use the same authenticated backend routes as the web control plane. `tools run` requests approval when the backend says the effect requires one, returns its ID and idempotency key, and exits 20. `approvals request` requires an explicit idempotency key so an interrupted script can retry safely. A workspace member decides in the browser control plane; `approvals status` checks its state and `approvals execute` runs an approved request. `--connection` selects an account for one request. `--cursor` continues a catalog page. The server owns manifest visibility, capabilities, account access, effects, idempotency, and retry policy. Never retry an uncertain write with a new idempotency key.
+Tool catalog, account selection, execution and approvals use the same authenticated backend routes as the web control plane. `tools run` requests approval when the backend says the effect requires one, then reports the returned approval state and idempotency key. `approvals request` requires an explicit idempotency key so an interrupted script can retry safely. If an approval response is lost, the CLI exits 23 and prints the key in the error details. Retry the same request with that key to recover the existing approval. A workspace member decides in the browser control plane; `approvals status` checks its state and `approvals execute` runs an approved request. `--connection` selects an account for one request. `--cursor` continues a catalog page. The server owns manifest visibility, capabilities, account access, effects, idempotency, and retry policy. Never retry an uncertain write with a new idempotency key.
 
 Successful commands write one JSON value to stdout. Informational device-login instructions and errors go to stderr. `--json` makes errors JSON too. The CLI never prints a bearer credential or raw server error body. JSON input is limited to 16 KiB, matching the server request limit.
 
@@ -49,11 +49,11 @@ Successful commands write one JSON value to stdout. Informational device-login i
 | 0 | Completed |
 | 1 | Other failure, including missing profile or denied workspace |
 | 2 | Invalid CLI input or incomplete headless configuration |
-| 3 | Invalid or revoked credential |
+| 3 | Invalid credential or revocation unverified |
 | 20 | Approval pending |
 | 21 | Approval rejected |
 | 22 | Approval or device authorization expired |
-| 23 | Execution effect uncertain; inspect the receipt or reuse the same idempotency key |
+| 23 | Execution effect or approval delivery uncertain; inspect the receipt or reuse the same idempotency key |
 | 24 | Execution timed out before dispatch |
 
 Approval status is bound to the requesting client grant. An approval from another profile cannot be inspected or executed with this one.

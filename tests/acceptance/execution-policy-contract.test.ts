@@ -393,9 +393,17 @@ describe("execution-policy-contract", () => {
               OMR_API_KEY: "cli-fixture", OMR_WORKSPACE_ID: workspace.id },
             timeout: 10_000,
           });
+        const requestCliApproval = async (args: string[]) => {
+          const response = await runCli(args).then(
+            () => { throw new Error("Pending approval must exit 20"); },
+            (error: { code: number; stdout: string; stderr: string }) => error,
+          );
+          expect(response.code).toBe(20);
+          return response;
+        };
         const read = await runCli(["tools", "run", "linear.read"]);
         expect(JSON.parse(read.stdout)).toMatchObject({ status: "succeeded" });
-        const opaquePending = await runCli(["approvals", "request", "linear.opaque", "--params",
+        const opaquePending = await requestCliApproval(["approvals", "request", "linear.opaque", "--params",
           JSON.stringify({ body: "opaque-cli-secret" }), "--idempotency", "opaque-cli"]);
         const opaque = JSON.parse(opaquePending.stdout) as { id: string; params: unknown; previewMode: string };
         expect(opaque).toMatchObject({ params: "[REDACTED]", previewMode: "opaque" });
@@ -412,10 +420,10 @@ describe("execution-policy-contract", () => {
           .rejects.toMatchObject({ code: 2 });
         expect(approvalStore.approvals.size).toBe(2);
         expect(provider).toHaveBeenCalledTimes(1);
-        const pending = await runCli(["approvals", "request", "linear.write", "--params",
+        const pending = await requestCliApproval(["approvals", "request", "linear.write", "--params",
           JSON.stringify(request.params), "--idempotency", request.idempotencyKey]);
         const approval = JSON.parse(pending.stdout) as { id: string; params: unknown };
-        const retried = await runCli(["approvals", "request", "linear.write", "--params",
+        const retried = await requestCliApproval(["approvals", "request", "linear.write", "--params",
           JSON.stringify(request.params), "--idempotency", request.idempotencyKey]);
         expect(JSON.parse(retried.stdout)).toMatchObject({ id: approval.id });
         expect(approval.params).toMatchObject({ title: "Review", secretField: "[REDACTED]",
@@ -436,7 +444,7 @@ describe("execution-policy-contract", () => {
         expect(JSON.parse((await runCli(["approvals", "execute", opaque.id])).stdout))
           .toMatchObject({ status: "succeeded" });
         expect(provider).toHaveBeenCalledTimes(3);
-        const ambiguous = JSON.parse((await runCli(["approvals", "request", "linear.write",
+        const ambiguous = JSON.parse((await requestCliApproval(["approvals", "request", "linear.write",
           "--params", "{}", "--idempotency", "cli-ambiguous-effect"])).stdout) as { id: string };
         await webPost("/api/approvals/approve", { approvalId: ambiguous.id });
         const staleEffects = await Promise.all(
