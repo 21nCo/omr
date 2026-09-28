@@ -20,6 +20,7 @@ omr logout
 `logout` revokes the remote client before removing its local profile. A 401 cannot prove revocation: it can also occur when workspace membership was removed while the grant remains live. Any lost, malformed, or failed revoke reply preserves the profile and exits 3 as `REVOCATION_UNVERIFIED`. Check or revoke the grant in `/app/clients` before using `logout --local` to remove the local profile without contacting the server. A login does not silently replace a profile because that could leave an old grant active.
 If a profile with the same name is replaced while revocation is in progress, logout reports `PROFILE_CHANGED` and keeps the replacement grant.
 If a profile is replaced while `workspaces use` checks authorization, the command reports `PROFILE_CHANGED` and leaves the replacement workspace untouched.
+`profiles list` and `workspaces list` skip unreadable profile files and report each filename as `PROFILE_UNREADABLE` on stderr. Select that profile explicitly to see its error; a corrupt sibling does not prevent login under a different name. An existing corrupt profile name cannot be overwritten by login.
 
 If the one-time device credential response is lost, malformed, or cannot be stored, check `/app/clients` for a grant to revoke before logging in again.
 
@@ -66,6 +67,7 @@ Approval status is bound to the requesting client grant. An approval from anothe
 ## Credential storage and platform evidence
 
 Profiles live in `~/.config/oh-my-router/profiles/<name>.json`, with only an active profile name in `active-profile`. On POSIX, the profile directories are mode `0700` and files mode `0600`. Writes use a temporary file and rename; symlinked profile targets are rejected. The files contain bearer credentials: protect backups and home-directory access. Windows file permissions inherit the user's ACL; clean-install and ACL evidence on Windows, Linux and macOS is deferred to OMR-15, as are live staged login, provider execution and approval handoff. Local fixture tests do not establish those live boundaries.
+After an interrupted write, the next profile mutation removes recognized private temporary files whose writer process has exited. Files from a live writer and unrelated files are retained.
 Profiles created by the prior CLI/MCP release are also readable: it kept the bearer grant in `credentials` and only `workspaceId` in `profiles/<name>.json`. The CLI tightens permissions on that metadata file when first read. An authorized `workspaces use` writes the unified profile and removes its old credential entry; logout removes both formats after confirmed revocation. Keep the old credential file private until every profile has been migrated or removed.
 The MCP command also accepts its prior headless setup: `OMR_BACKEND` and `OMR_API_KEY` with a workspace saved in the selected profile (or `default`). Set `OMR_WORKSPACE_ID` to override that selection explicitly. The backend still checks that the supplied grant permits the workspace.
 Without a saved workspace, a headless MCP launch requires `OMR_WORKSPACE_ID`.

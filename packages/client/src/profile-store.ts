@@ -148,6 +148,7 @@ export class OMRProfileStore {
       }
     }
     try {
+      this.cleanupInterruptedWrites();
       return operation();
     } finally {
       const owned = fstatSync(fd);
@@ -169,28 +170,67 @@ export class OMRProfileStore {
     }
   }
 
+  // A killed writer can leave a private copy of a grant beside its destination.
+  // Only remove our own temp naming pattern after taking the credential lock,
+  // and leave files belonging to a process that may still be writing.
+  private cleanupInterruptedWrites(): void {
+    for (const directory of [this.root, this.profiles]) {
+      for (const entry of readdirSync(directory)) {
+        const match = /^(active-profile|credentials(?:\.lock)?|[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\.json)\.([1-9]\d*)\.[0-9a-f-]{36}\.tmp$/.exec(entry);
+        if (!match || (directory === this.profiles) !== match[1]!.endsWith(".json")) continue;
+        const path = join(directory, entry);
+        let stats;
+        try { stats = lstatSync(path); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
+        if (!stats.isFile() || stats.isSymbolicLink()) continue;
+        let alive = false;
+        try { process.kill(Number(match[2]), 0); alive = true; }
+        catch (error) { alive = (error as NodeJS.ErrnoException).code !== "ESRCH"; }
+        if (!alive) {
+          try { rmSync(path); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+        }
+      }
+    }
+  }
+
   activeName(): string {
     this.prepare();
     safeFile(this.active);
     return existsSync(this.active) ? assertProfileName(readFileSync(this.active, "utf8").trim()) : "default";
   }
 
-  list(): { name: string; backend: string; workspaceId: string; active: boolean }[] {
+  has(name: string): boolean {
+    this.prepare();
+    return lstatExists(this.file(name));
+  }
+
+  list(onUnreadable?: (file: string) => void): { name: string; backend: string; workspaceId: string; active: boolean }[] {
     this.prepare();
     const active = this.activeName();
-    return readdirSync(this.profiles).filter((file) => file.endsWith(".json")).map((file) => {
-      const name = assertProfileName(file.slice(0, -5));
-      const { backend, workspaceId } = this.get(name);
-      return { name, backend, workspaceId, active: name === active };
-    });
+    const profiles: { name: string; backend: string; workspaceId: string; active: boolean }[] = [];
+    for (const file of readdirSync(this.profiles).filter((entry) => entry.endsWith(".json"))) {
+      try {
+        const name = assertProfileName(file.slice(0, -5));
+        const { backend, workspaceId } = this.get(name);
+        profiles.push({ name, backend, workspaceId, active: name === active });
+      } catch {
+        onUnreadable?.(file);
+      }
+    }
+    return profiles;
   }
 
   get(name: string): OMRProfile {
     this.prepare();
     const file = this.file(name);
-    safeProfileFile(file);
+    try { safeProfileFile(file); }
+    catch (error) { if (error instanceof SyntaxError) throw new Error(`Profile ${name} has invalid JSON in ${name}.json`); throw error; }
     if (!existsSync(file)) throw new Error(`Profile ${name} is missing; run omr login`);
-    const value = JSON.parse(readFileSync(file, "utf8")) as Partial<OMRProfile>;
+    let value: Partial<OMRProfile>;
+    try { value = JSON.parse(readFileSync(file, "utf8")) as Partial<OMRProfile>; }
+    catch (error) { if (error instanceof SyntaxError) throw new Error(`Profile ${name} has invalid JSON in ${name}.json`); throw error; }
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Profile ${name} is invalid`);
     if (typeof value.key !== "string" || typeof value.backend !== "string") {
       const legacy = this.legacy()[name];
       if (legacy && typeof legacy === "object") {
@@ -213,9 +253,12 @@ export class OMRProfileStore {
   workspaceId(name: string): string {
     this.prepare();
     const file = this.file(name);
-    safeProfileFile(file);
+    try { safeProfileFile(file); }
+    catch (error) { if (error instanceof SyntaxError) throw new Error(`Profile ${name} has invalid JSON in ${name}.json`); throw error; }
     if (!existsSync(file)) throw new Error(`Profile ${name} is missing; run omr login`);
-    const value = JSON.parse(readFileSync(file, "utf8")) as { workspaceId?: unknown };
+    let value: { workspaceId?: unknown };
+    try { value = JSON.parse(readFileSync(file, "utf8")) as { workspaceId?: unknown }; }
+    catch (error) { if (error instanceof SyntaxError) throw new Error(`Profile ${name} has invalid JSON in ${name}.json`); throw error; }
     if (typeof value?.workspaceId !== "string" || !value.workspaceId)
       throw new Error(`Profile ${name} is invalid`);
     return value.workspaceId;

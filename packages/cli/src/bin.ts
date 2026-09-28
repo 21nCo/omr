@@ -55,6 +55,11 @@ function profileName(parsed: Parsed): string {
 }
 function result(value: unknown): void { process.stdout.write(`${JSON.stringify(value)}\n`); }
 function info(value: string): void { process.stderr.write(`${value}\n`); }
+function listProfiles(json: boolean): ReturnType<OMRProfileStore["list"]> {
+  return store.list((file) => info(json
+    ? JSON.stringify({ warning: "PROFILE_UNREADABLE", file })
+    : `PROFILE_UNREADABLE: Cannot read ${JSON.stringify(file)}; inspect or remove that profile file`));
+}
 function recordRetryKey(key: string, json: boolean): void {
   // Complete this small write before dispatch. A signal after the server sees
   // the request must not erase the only retry identity available to the caller.
@@ -173,7 +178,7 @@ async function login(parsed: Parsed): Promise<void> {
     throw new CLIError("INPUT_INVALID", "Device login cannot use headless credentials", 2);
   }
   const name = profileName(parsed);
-  if (store.list().some((item) => item.name === name)) throw new CLIError("PROFILE_EXISTS", `Profile ${name} already exists; log out first`, 2);
+  if (store.has(name)) throw new CLIError("PROFILE_EXISTS", `Profile ${name} already exists; log out first`, 2);
   const baseUrl = required(parsed, "url");
   const kind = opt(parsed, "kind") ?? "cli";
   if (kind !== "cli" && kind !== "mcp_stdio" && kind !== "mcp_remote") {
@@ -265,7 +270,7 @@ async function main(parsed: Parsed): Promise<void> {
   if (!valid) throw new CLIError("USAGE", "Unknown or incomplete command; run omr --help", 2);
   if (command === "login" && !action) return login(parsed);
   if (command === "profiles") {
-    if (action === "list" && !subject) return result(store.list());
+    if (action === "list" && !subject) return result(listProfiles(parsed.options.has("json")));
     if (action === "show" && !subject) {
       const name = profileName(parsed); const { backend, workspaceId } = store.get(name);
       return result({ name, backend, workspaceId });
@@ -306,7 +311,7 @@ async function main(parsed: Parsed): Promise<void> {
   const { api, workspaceId: savedWorkspace, profile, grant } = current(parsed);
   const workspaceId = workspace(parsed, savedWorkspace);
   if (command === "workspaces") {
-    if (action === "list" && !subject) return result(profile ? store.list().map(({ name, backend, workspaceId, active }) =>
+    if (action === "list" && !subject) return result(profile ? listProfiles(parsed.options.has("json")).map(({ name, backend, workspaceId, active }) =>
       ({ profile: name, backend, workspaceId, active })) : [{ workspaceId: savedWorkspace, source: "environment" }]);
     if (action === "show" && !subject) return result({ workspaceId: savedWorkspace, profile: profile ?? null });
     if (action === "use" && subject) {

@@ -175,6 +175,51 @@ async function fixture() {
 }
 
 describe("cli-command-contract", () => {
+  it("isolates a corrupt sibling profile while listing, selecting and creating profiles", async () => {
+    const f = await fixture();
+    expect((await f.run(["login", "--url", f.url, "--profile", "good", "--json"])).code).toBe(0);
+    const bad = join(f.config, "profiles", "bad.json");
+    writeFileSync(bad, '{"key":"corrupt_private_secret",', { mode: 0o600 });
+    const listed = await f.run(["profiles", "list", "--json"]);
+    expect(listed.code).toBe(0);
+    expect(JSON.parse(listed.stdout)).toMatchObject([{ name: "good", workspaceId: "workspace_1" }]);
+    expect(lastError(listed.stderr)).toEqual({ warning: "PROFILE_UNREADABLE", file: "bad.json" });
+    expect(listed.stdout + listed.stderr).not.toContain("corrupt_private_secret");
+    const workspaces = await f.run(["workspaces", "list", "--profile", "good", "--json"]);
+    expect(workspaces.code).toBe(0);
+    expect(JSON.parse(workspaces.stdout)).toHaveLength(1);
+    expect(lastError(workspaces.stderr).file).toBe("bad.json");
+    expect((await f.run(["profiles", "use", "good", "--json"])).code).toBe(0);
+    const explicit = await f.run(["profiles", "show", "--profile", "bad", "--json"]);
+    expect(explicit.code).toBe(1);
+    expect(lastError(explicit.stderr).message).toContain("bad.json");
+    expect(explicit.stdout + explicit.stderr).not.toContain("corrupt_private_secret");
+    const before = f.calls.length;
+    const duplicate = await f.run(["login", "--url", f.url, "--profile", "bad", "--json"]);
+    expect(lastError(duplicate.stderr).error).toBe("PROFILE_EXISTS");
+    expect(f.calls).toHaveLength(before);
+    expect((await f.run(["login", "--url", f.url, "--profile", "new", "--json"])).code).toBe(0);
+    expect(readFileSync(bad, "utf8")).toContain("corrupt_private_secret");
+  });
+
+  it("cleans credential temp files left by an interrupted writer during the next mutation", async () => {
+    const f = await fixture();
+    mkdirSync(join(f.config, "profiles"), { recursive: true });
+    const orphan = "99999999.12345678-1234-1234-1234-123456789abc.tmp";
+    const leftovers = [join(f.config, `credentials.${orphan}`),
+      join(f.config, `credentials.lock.${orphan}`),
+      join(f.config, "profiles", `bad.json.${orphan}`)];
+    for (const path of leftovers) writeFileSync(path, "orphan_private_secret", { mode: 0o600 });
+    const live = join(f.config, "profiles", `live.json.${process.pid}.12345678-1234-1234-1234-123456789abc.tmp`);
+    writeFileSync(live, "live_private_secret", { mode: 0o600 });
+    const unrelated = join(f.config, "profiles", "notes.tmp");
+    writeFileSync(unrelated, "retain");
+    expect((await f.run(["login", "--url", f.url, "--profile", "new", "--json"])).code).toBe(0);
+    for (const path of leftovers) expect(existsSync(path)).toBe(false);
+    expect(readFileSync(live, "utf8")).toBe("live_private_secret");
+    expect(readFileSync(unrelated, "utf8")).toBe("retain");
+  });
+
   it("logs in, switches profiles, selects grant-scoped workspace, and stores no printed secret", async () => {
     const f = await fixture();
     const login = await f.run(["login", "--url", f.url, "--profile", "work", "--json"]);
@@ -603,8 +648,10 @@ describe("cli-command-contract", () => {
     const removing = f.run(["logout", "--local", "--profile", "other", "--json"]);
     await new Promise((resolve) => setTimeout(resolve, 750));
     rmSync(lock);
-    expect((await migrating).code).toBe(0);
-    expect((await removing).code).toBe(0);
+    const migrated = await migrating;
+    expect(migrated.code, migrated.stderr).toBe(0);
+    const removed = await removing;
+    expect(removed.code, removed.stderr).toBe(0);
     expect(existsSync(lock)).toBe(false);
     expect(readFileSync(credentials, "utf8")).not.toContain("omr_fixture_secret");
     expect(readFileSync(credentials, "utf8")).not.toContain("other_secret");
