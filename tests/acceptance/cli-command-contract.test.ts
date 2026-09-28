@@ -120,6 +120,8 @@ async function fixture() {
         error: "omr_fixture_secret", message: "omr_fixture_secret", receiptId: "omr_fixture_secret",
       });
       if (body?.toolId === "linear.write") return answer(409, { error: "EXECUTION_APPROVAL_REQUIRED" });
+      if (body?.toolId === "linear.in-progress") return answer(409,
+        { error: "EXECUTION_IN_PROGRESS", receiptId: "receipt_running" });
       if (body?.toolId === "linear.uncertain") return answer(502, { error: "EXECUTION_OUTCOME_UNKNOWN", receiptId: "receipt_1" });
       if (body?.toolId === "linear.receipt-uncertain") return answer(200,
         { id: "receipt_pending", workspaceId: "workspace_1", toolId: body.toolId, status: "uncertain", result: null });
@@ -136,6 +138,8 @@ async function fixture() {
     if (path === "/api/approvals/status") return answer(200, { id: "approval_1", workspaceId: "workspace_1",
       toolId: "linear.write", connectionId: "connection_1", status: approvalStatus, expiresAt });
     if (path === "/api/approvals/execute") {
+      if (approvalStatus === "executing") return answer(409,
+        { error: "EXECUTION_IN_PROGRESS", receiptId: "receipt_approved_running" });
       if (approvalStatus !== "approved" || expiresAt <= Date.now()) return answer(409, { error: "APPROVAL_UNAVAILABLE" });
       return answer(200, { id: "receipt_approved", approvalId: "approval_1", workspaceId: "workspace_1", toolId: "linear.write", connectionId: "connection_1",
         status: "succeeded", result: { ok: true } });
@@ -186,6 +190,36 @@ async function fixture() {
 }
 
 describe("cli-command-contract", () => {
+  it("isolates a malformed active pointer and lets explicit selection repair the default", async () => {
+    const f = await fixture();
+    expect((await f.run(["login", "--url", f.url, "--profile", "good", "--json"])).code).toBe(0);
+    const active = join(f.config, "active-profile");
+    writeFileSync(active, "../bad\n", { mode: 0o600 });
+    for (const args of [["profiles", "list"], ["workspaces", "list"]]) {
+      const listed = await f.run([...args, "--json"]);
+      expect(listed.code).toBe(0);
+      expect(JSON.parse(listed.stdout)).toMatchObject([{ active: false }]);
+      expect(lastError(listed.stderr)).toEqual({ warning: "PROFILE_UNREADABLE", file: "active-profile" });
+      expect(listed.stdout + listed.stderr).not.toContain("../bad");
+    }
+    const defaultShow = await f.run(["workspaces", "show", "--json"]);
+    expect(defaultShow.code).toBe(1);
+    expect(lastError(defaultShow.stderr).message).toContain("active-profile");
+    expect(defaultShow.stdout + defaultShow.stderr).not.toContain("../bad");
+    expect((await f.run(["profiles", "show", "--profile", "good", "--json"])).code).toBe(0);
+    expect((await f.run(["workspaces", "show", "--profile", "good", "--json"])).code).toBe(0);
+    expect((await f.run(["login", "--url", f.url, "--profile", "new", "--json"])).code).toBe(0);
+    writeFileSync(active, "../bad\n", { mode: 0o600 });
+    expect((await f.run(["logout", "--local", "--profile", "new", "--json"])).code).toBe(0);
+    expect((await f.run(["profiles", "use", "good", "--json"])).code).toBe(0);
+    expect(JSON.parse((await f.run(["workspaces", "show", "--json"])).stdout)).toMatchObject({
+      profile: "good", workspaceId: "workspace_1",
+    });
+    expect(JSON.parse((await f.run(["profiles", "list", "--json"])).stdout)).toMatchObject([
+      { name: "good", active: true },
+    ]);
+  });
+
   it("isolates a corrupt sibling profile while listing, selecting and creating profiles", async () => {
     const f = await fixture();
     expect((await f.run(["login", "--url", f.url, "--profile", "good", "--json"])).code).toBe(0);
@@ -894,6 +928,42 @@ syncBuiltinESMExports();
     expect((await f.run(["tools", "list", "--json"], { OMR_BACKEND: f.url })).code).toBe(2);
     f.revoke();
     expect((await f.run(["tools", "list", "--json"], env)).code).toBe(3);
+  });
+
+  it("reports in-progress execution with a distinct exit and both recovery identities", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    const runArgs = ["tools", "run", "linear.in-progress", "--idempotency", "same-run-key", "--json"];
+    const pendingRun = await f.run(runArgs, env);
+    expect(pendingRun.code).toBe(25);
+    expect(pendingRun.stdout).toBe("");
+    expect(lastError(pendingRun.stderr)).toMatchObject({ error: "EXECUTION_IN_PROGRESS",
+      details: { receiptId: "receipt_running", idempotencyKey: "same-run-key" } });
+    for (const [status, exit] of [["succeeded", 0], ["failed", 1], ["uncertain", 23]] as const) {
+      f.successReply("/api/tools/execute", { id: "receipt_running", workspaceId: "workspace_1",
+        toolId: "linear.in-progress", status, result: null });
+      const resolved = await f.run(runArgs, env);
+      expect(resolved.code).toBe(exit);
+      expect(JSON.parse(resolved.stdout)).toMatchObject({ id: "receipt_running", status });
+      f.clearSuccessReply();
+    }
+
+    f.setApproval("executing");
+    const executeArgs = ["approvals", "execute", "approval_1", "--json"];
+    const pendingApproval = await f.run(executeArgs, env);
+    expect(pendingApproval.code).toBe(25);
+    expect(pendingApproval.stdout).toBe("");
+    expect(lastError(pendingApproval.stderr)).toMatchObject({ error: "EXECUTION_IN_PROGRESS",
+      details: { receiptId: "receipt_approved_running", approvalId: "approval_1" } });
+    f.setApproval("approved");
+    for (const [status, exit] of [["succeeded", 0], ["failed", 1], ["uncertain", 23]] as const) {
+      f.successReply("/api/approvals/execute", { id: "receipt_approved_running", approvalId: "approval_1",
+        workspaceId: "workspace_1", toolId: "linear.write", status, result: null });
+      const resolved = await f.run(executeArgs, env);
+      expect(resolved.code).toBe(exit);
+      expect(JSON.parse(resolved.stdout)).toMatchObject({ id: "receipt_approved_running", status });
+      f.clearSuccessReply();
+    }
   });
 
   it("refuses symlinked profile targets", async () => {

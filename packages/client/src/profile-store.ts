@@ -8,6 +8,7 @@ const NAME = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 const waitArray = new Int32Array(new SharedArrayBuffer(4));
 
 export class InvalidProfileNameError extends Error {}
+export class InvalidActiveProfileError extends Error {}
 
 export function profileRoot(): string {
   return process.env.OMR_CONFIG_DIR ?? join(homedir(), ".config", "oh-my-router");
@@ -197,7 +198,13 @@ export class OMRProfileStore {
   activeName(): string {
     this.prepare();
     safeFile(this.active);
-    return existsSync(this.active) ? assertProfileName(readFileSync(this.active, "utf8").trim()) : "default";
+    if (!existsSync(this.active)) return "default";
+    try { return assertProfileName(readFileSync(this.active, "utf8").trim()); }
+    catch (error) {
+      if (error instanceof InvalidProfileNameError)
+        throw new InvalidActiveProfileError("active-profile contains an invalid profile name; run omr profiles use <name> to repair it");
+      throw error;
+    }
   }
 
   has(name: string): boolean {
@@ -207,7 +214,12 @@ export class OMRProfileStore {
 
   list(onUnreadable?: (file: string) => void): { name: string; backend: string; workspaceId: string; active: boolean }[] {
     this.prepare();
-    const active = this.activeName();
+    let active: string | undefined;
+    try { active = this.activeName(); }
+    catch (error) {
+      if (!(error instanceof InvalidActiveProfileError)) throw error;
+      onUnreadable?.("active-profile");
+    }
     const profiles: { name: string; backend: string; workspaceId: string; active: boolean }[] = [];
     for (const file of readdirSync(this.profiles).filter((entry) => entry.endsWith(".json"))) {
       try {
@@ -299,7 +311,7 @@ export class OMRProfileStore {
       if (!existsSync(file)) throw new Error(`Profile ${name} is missing`);
       this.removeLegacy(name);
       rmSync(file);
-      if (this.activeName() === name) rmSync(this.active, { force: true });
+      if (this.activeMatches(name)) rmSync(this.active, { force: true });
     });
   }
 
@@ -313,8 +325,16 @@ export class OMRProfileStore {
       if (current.backend !== expected.backend || current.key !== expected.key) return false;
       this.removeLegacy(name);
       rmSync(file);
-      if (this.activeName() === name) rmSync(this.active, { force: true });
+      if (this.activeMatches(name)) rmSync(this.active, { force: true });
       return true;
     });
+  }
+
+  private activeMatches(name: string): boolean {
+    try { return this.activeName() === name; }
+    catch (error) {
+      if (error instanceof InvalidActiveProfileError) return false;
+      throw error;
+    }
   }
 }

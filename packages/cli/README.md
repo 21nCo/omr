@@ -21,6 +21,7 @@ omr logout
 If a profile with the same name is replaced while revocation is in progress, logout reports `PROFILE_CHANGED` and keeps the replacement grant.
 If a profile is replaced while `workspaces use` checks authorization, the command reports `PROFILE_CHANGED` and leaves the replacement workspace untouched.
 `profiles list` and `workspaces list` skip unreadable profile files and report each filename as `PROFILE_UNREADABLE` on stderr. Select that profile explicitly to see its error; a corrupt sibling does not prevent login under a different name. An existing corrupt profile name cannot be overwritten by login.
+If `active-profile` contains an invalid name, both list commands report that filename and show healthy profiles as inactive. Commands that need the default selection report the file error. Use `omr profiles use <name>` to repair the selection; `--profile <name>` remains available while it is corrupt.
 
 If the one-time device credential response is lost, malformed, or cannot be stored, check `/app/clients` for a grant to revoke before logging in again.
 
@@ -61,6 +62,7 @@ Successful commands write one JSON value to stdout. Informational device-login i
 | 22 | Approval or device authorization expired |
 | 23 | Execution effect or approval delivery uncertain; inspect the receipt or reuse the same idempotency key |
 | 24 | Execution timed out before dispatch |
+| 25 | Execution is still in progress; use the receipt ID and original idempotency key or approval ID to check or retry |
 
 Approval status is bound to the requesting client grant. An approval from another profile cannot be inspected or executed with this one.
 

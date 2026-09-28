@@ -148,6 +148,15 @@ function receiptResult(value: unknown, path: string,
   if (["reserved", "running", "uncertain"].includes(String(checked.status))) process.exitCode = 23;
   else if (checked.status === "failed") process.exitCode = 1;
 }
+function executionInProgress(error: unknown, identity: { idempotencyKey: string } | { approvalId: string }): never {
+  if (!(error instanceof OMRHttpError) ||
+      (error.body as { error?: unknown } | null)?.error !== "EXECUTION_IN_PROGRESS") throw error;
+  const receiptId = (error.body as { receiptId?: unknown } | null)?.receiptId;
+  throw new CLIError("EXECUTION_IN_PROGRESS",
+    "Execution is still in progress; inspect the receipt or retry with the same request identity", 25,
+    { ...identity, ...(typeof receiptId === "string" && /^(?:execution|receipt)_[A-Za-z0-9_-]{1,100}$/.test(receiptId)
+      ? { receiptId } : {}) });
+}
 function fail(error: unknown, json: boolean): void {
   const body = error instanceof OMRHttpError ? error.body as { error?: unknown; receiptId?: unknown } | null : null;
   const remoteCode = typeof body?.error === "string" &&
@@ -319,6 +328,17 @@ async function main(parsed: Parsed): Promise<void> {
     }
     if (action === "use" && subject) { store.use(subject); return result({ active: subject }); }
   }
+  if (command === "workspaces" && action === "list" && !subject) {
+    const env = [process.env.OMR_BACKEND, process.env.OMR_API_KEY, process.env.OMR_WORKSPACE_ID];
+    if (env.some(Boolean)) {
+      if (!env.every(Boolean)) throw new CLIError("HEADLESS_INCOMPLETE", "Set OMR_BACKEND, OMR_API_KEY, and OMR_WORKSPACE_ID together", 2);
+      return result([{ workspaceId: env[2], source: "environment" }]);
+    }
+    const selected = opt(parsed, "profile") ?? process.env.OMR_PROFILE;
+    if (selected) store.get(assertProfileName(selected));
+    return result(listProfiles(parsed.options.has("json")).map(({ name, backend, workspaceId, active }) =>
+      ({ profile: name, backend, workspaceId, active })));
+  }
   if (command === "logout" && !action) {
     const env = [process.env.OMR_BACKEND, process.env.OMR_API_KEY, process.env.OMR_WORKSPACE_ID];
     if (env.some(Boolean)) {
@@ -353,8 +373,6 @@ async function main(parsed: Parsed): Promise<void> {
   const { api, workspaceId: savedWorkspace, profile, grant } = current(parsed);
   const workspaceId = workspace(parsed, savedWorkspace);
   if (command === "workspaces") {
-    if (action === "list" && !subject) return result(profile ? listProfiles(parsed.options.has("json")).map(({ name, backend, workspaceId, active }) =>
-      ({ profile: name, backend, workspaceId, active })) : [{ workspaceId: savedWorkspace, source: "environment" }]);
     if (action === "show" && !subject) return result({ workspaceId: savedWorkspace, profile: profile ?? null });
     if (action === "use" && subject) {
       if (!profile || !grant) throw new CLIError("HEADLESS_READ_ONLY", "Headless workspace is set by OMR_WORKSPACE_ID", 2);
@@ -410,6 +428,9 @@ async function main(parsed: Parsed): Promise<void> {
           throw new CLIError("EXECUTION_EFFECT_UNCERTAIN", "Execution response is missing or invalid; retry only with the same idempotency key", 23,
             { idempotencyKey });
         }
+        if (error instanceof OMRHttpError &&
+            (error.body as { error?: unknown } | null)?.error === "EXECUTION_IN_PROGRESS")
+          executionInProgress(error, { idempotencyKey });
         if (!(error instanceof OMRHttpError) ||
             (error.body as { error?: unknown } | null)?.error !== "EXECUTION_APPROVAL_REQUIRED") throw error;
         const approval = await requestApproval(api, { workspaceId, toolId: subject, params: input,
@@ -436,6 +457,9 @@ async function main(parsed: Parsed): Promise<void> {
           throw new CLIError("EXECUTION_EFFECT_UNCERTAIN", "Approved execution response is missing or invalid; check the approval status before retrying", 23,
             { approvalId: subject });
         }
+        if (error instanceof OMRHttpError &&
+            (error.body as { error?: unknown } | null)?.error === "EXECUTION_IN_PROGRESS")
+          executionInProgress(error, { approvalId: subject });
         if (error instanceof OMRHttpError &&
             (error.body as { error?: unknown } | null)?.error === "APPROVAL_UNAVAILABLE") {
           const status = checkedApproval(await api.approvalStatus(subject), "/api/approvals/status",
