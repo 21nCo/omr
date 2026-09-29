@@ -218,7 +218,8 @@ async function fixture() {
   }, revoke: () => { revoked = true; } };
 }
 
-describe("cli-command-contract", () => {
+// These contracts launch multiple CLI processes per case; parallel suites can delay their startup.
+describe("cli-command-contract", { timeout: 15_000 }, () => {
   it("isolates a malformed active pointer and lets explicit selection repair the default", async () => {
     const f = await fixture();
     expect((await f.run(["login", "--url", f.url, "--profile", "good", "--json"])).code).toBe(0);
