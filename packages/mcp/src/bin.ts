@@ -2,6 +2,7 @@
 import { OMRProfileStore, ProfileMissingError, assertProfileName } from "@oh-my-router/client/profile-store";
 
 import { createOMRMcpServer } from "./server.js";
+import { authenticatedSessionFetch } from "./session.js";
 
 /** Resolve the host's explicit profile without reading or changing stored credentials. */
 function selectedProfile(args: string[]): string | undefined {
@@ -46,16 +47,9 @@ async function main(): Promise<void> {
   }
 
   let server: Awaited<ReturnType<typeof createOMRMcpServer>> | undefined;
-  let authFailed = false;
-  /** Close the local transport after the server rejects a revoked or expired grant. */
-  const authenticatedFetch: typeof fetch = async (request, init) => {
-    const response = await fetch(request, init);
-    if (response.status === 401 && server && !authFailed) {
-      authFailed = true;
-      setImmediate(() => { void server?.close().catch(() => undefined); });
-    }
-    return response;
-  };
+  const authenticatedFetch = authenticatedSessionFetch(fetch,
+    async () => { await server?.close(); },
+    () => { process.exit(1); });
   server = await createOMRMcpServer({
     baseUrl: selected.backend,
     credential: selected.key,

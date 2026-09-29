@@ -3,15 +3,18 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { ToolManifest } from "@oh-my-router/tools";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createOMRMcpServer } from "./server.js";
+import { authenticatedSessionFetch } from "./session.js";
 
+/** Normalize the request shapes accepted by the mocked backend fetch. */
 function requestUrl(request: RequestInfo | URL): URL {
   if (typeof request === "string") return new URL(request);
   return request instanceof URL ? request : new URL(request.url);
 }
 
+/** Build one catalog manifest with an input constraint shared by both transports. */
 function manifest(id: string, effect: ToolManifest["contract"]["effect"]): ToolManifest {
   const [provider, ...actionParts] = id.split(".");
   return {
@@ -262,6 +265,49 @@ describe("OMR MCP server", () => {
     });
   });
 
+  it("fences every local MCP operation after a backend 401 even if transport close fails", async () => {
+    const paths: string[] = [];
+    const backend: typeof fetch = async (request) => {
+      const path = requestUrl(request).pathname;
+      paths.push(path);
+      if (path === "/api/tools") return Response.json({
+        catalogSchemaVersion: "1.0.0", revision: "test",
+        tools: [manifest("demo.read", "read"), manifest("demo.write", "write")],
+      });
+      return Response.json({ error: "CLIENT_CREDENTIAL_INVALID" }, { status: 401 });
+    };
+    let closeFailures = 0;
+    const fetchImpl = authenticatedSessionFetch(backend,
+      async () => { throw new Error("close failed"); },
+      () => { closeFailures += 1; });
+    const server = await createOMRMcpServer({
+      baseUrl: "https://omr.test", credential: "credential", workspaceId: "workspace-1", fetchImpl,
+    });
+    const client = new Client({ name: "revoked", version: "1.0.0" }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closeables.push(client, server);
+
+    expect((await client.callTool({ name: "demo.read", arguments: { value: "a" } })).isError).toBe(true);
+    const callsAtRevocation = paths.length;
+    await client.listTools();
+    for (const call of [
+      { name: "demo.write", arguments: { value: "a", _omrIdempotencyKey: "key" } },
+      { name: "omr.connections.list", arguments: {} },
+      { name: "omr.connections.select", arguments: { provider: "demo", connectionId: "one" } },
+      { name: "omr.approvals.execute", arguments: { approvalId: "one" } },
+      { name: "omr.catalog.refresh", arguments: {} },
+      { name: "omr.catalog.providers", arguments: {} },
+    ]) {
+      const result = await client.callTool(call).catch(() => undefined);
+      if (result) expect(result.isError).toBe(true);
+    }
+    expect(paths).toHaveLength(callsAtRevocation);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(closeFailures).toBe(1);
+  });
+
   it("keeps control tools callable during discovery failure and fails closed for projected actions", async () => {
     let catalogFails = false;
     let executions = 0;
@@ -376,12 +422,23 @@ describe("OMR MCP server", () => {
       }
       return Response.json({ status: "succeeded", output: { value: "remote" } });
     };
-    const server = await createOMRMcpServer({
-      baseUrl: "https://omr.test",
-      credential: "credential",
-      workspaceId: "workspace-1",
-      fetchImpl: apiFetch,
-    });
+    // A Worker must validate without dynamic code generation.
+    vi.stubGlobal("WebSocketPair", class {});
+    vi.stubGlobal("Function", new Proxy(Function, {
+      apply() { throw new Error("Worker forbids dynamic code generation"); },
+      construct() { throw new Error("Worker forbids dynamic code generation"); },
+    }));
+    let server: Awaited<ReturnType<typeof createOMRMcpServer>>;
+    try {
+      server = await createOMRMcpServer({
+        baseUrl: "https://omr.test",
+        credential: "credential",
+        workspaceId: "workspace-1",
+        fetchImpl: apiFetch,
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
     const handler = await server.createWebStandardHandler({ enableJsonResponse: true });
     const transport = new StreamableHTTPClientTransport(new URL("https://omr.test/mcp"), {
       fetch: async (request, init) => handler(new Request(request, init)),
@@ -397,5 +454,7 @@ describe("OMR MCP server", () => {
       .resolves.toMatchObject({
         structuredContent: { status: "succeeded", output: { value: "remote" } },
       });
+    const invalid = await client.callTool({ name: "demo.read", arguments: { value: 42 } });
+    expect(invalid.isError).toBe(true);
   });
 });

@@ -98,6 +98,10 @@ describe("stdio-mcp-contract", () => {
       .toContain("_omrIdempotencyKey");
     expect((await client.callTool({ name: "demo.read", arguments: { value: "a" } })).structuredContent)
       .toMatchObject({ status: "succeeded" });
+    const validExecutions = f.calls.filter((call) => call.path === "/api/tools/execute").length;
+    const invalid = await client.callTool({ name: "demo.read", arguments: { value: 42 } });
+    expect(invalid.isError).toBe(true);
+    expect(f.calls.filter((call) => call.path === "/api/tools/execute")).toHaveLength(validExecutions);
     expect((await client.callTool({ name: "demo.write", arguments: {
       value: "b", _omrIdempotencyKey: "stable-key",
     } })).structuredContent).toMatchObject({ status: "approval_required", approvalId: "approval-1" });
@@ -221,11 +225,10 @@ describe("stdio-mcp-contract", () => {
     await expect(import(pathToFileURL(join(prefix, "node_modules", "@oh-my-router", "mcp", "dist", "index.js")).href))
       .resolves.toHaveProperty("createOMRMcpServer");
     writeFileSync(join(prefix, "consumer.mts"),
-      'import { createOMRMcpServer, type OMRSchemaCompiler } from "@oh-my-router/mcp";\n' +
+      'import { createOMRMcpServer } from "@oh-my-router/mcp";\n' +
       'const credential = process.env.OMR_API_KEY;\n' +
       'if (!credential) throw new Error("Missing OMR_API_KEY");\n' +
-      'const schemaCompiler: OMRSchemaCompiler = () => () => true;\n' +
-      'const server = await createOMRMcpServer({ baseUrl: "https://omr.example", credential, workspaceId: "test", schemaCompiler });\n' +
+      'const server = await createOMRMcpServer({ baseUrl: "https://omr.example", credential, workspaceId: "test" });\n' +
       'await server.close();\n');
     await exec(process.execPath, [resolve("node_modules/typescript/bin/tsc"), "--noEmit", "--strict",
       "--module", "NodeNext", "--moduleResolution", "NodeNext", "--target", "ES2022",

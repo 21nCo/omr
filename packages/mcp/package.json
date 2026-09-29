@@ -20,7 +20,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@mcpfn/core": "0.0.4"
+    "@mcpfn/core": "0.0.5"
   },
   "devDependencies": {
     "@oh-my-router/client": "0.0.0",

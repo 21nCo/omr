@@ -4,7 +4,6 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@cloudflare/cabidela": "^0.2.4",
     "@cloudflare/workers-oauth-provider": "0.10.3",
     "@oh-my-router/client-access": "0.0.0",
     "@oh-my-router/connections": "0.0.0",
