@@ -14,7 +14,8 @@ workspace choice. Request `tools:discover` plus only the capabilities needed:
 `connections:read`. Hosts that require a refresh scope can also request
 `offline_access`; that scope never becomes an OMR tool capability. Access and
 refresh tokens are bound to the exact `/mcp` resource and the underlying OMR
-grant expires after 30 days.
+grant expires after 30 days. A grant without `offline_access` receives only an
+access token, which expires after one hour.
 
 ## OAuth-capable hosts
 
@@ -102,7 +103,10 @@ OMR lists manual clients under `/app/clients` and OAuth connections under
 `/oauth/manage`. Revoke there to stop subsequent MCP calls immediately. Tool
 calls do not reconnect provider accounts: connect or repair providers in the
 OMR control plane, then call `omr.catalog.refresh` or restart the host session
-when the tool schema changes. Write and destructive calls return an approval ID;
+when the tool schema changes. Remote HTTP is stateless: each request reads the
+current catalog, and `omr.catalog.refresh` sends `tools/list_changed` on its
+response stream so a caching host re-lists after connection changes. Write and
+destructive calls return an approval ID;
 approve it in OMR and call `omr.approvals.execute` from the host.
 
 ## Staging rollback and deferred acceptance

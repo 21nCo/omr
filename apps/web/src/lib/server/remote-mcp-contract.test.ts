@@ -1,5 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "@oh-my-router/execution/testing";
@@ -11,6 +12,7 @@ const fixture = vi.hoisted(() => ({
   expired: false,
   kind: "mcp_remote" as "mcp_remote" | "mcp_stdio",
   capabilities: ["tools:discover", "tools:read", "tools:write", "approvals:create"] as string[],
+  catalogTools: ["fixture.read", "fixture.write"] as string[],
   apiRequests: [] as Array<{ path: string; workspaceId: string | null; credential: string | null; toolId: unknown }>,
 }));
 
@@ -126,7 +128,7 @@ vi.mock("./router.js", () => ({
             sensitiveKeys: [], pagination: { kind: "none" }, retry: "provider-key" },
           inputSchema: { type: "object", properties: {}, additionalProperties: false },
           outputSchema: { type: "object" },
-        }],
+        }].filter(({ id }) => fixture.catalogTools.includes(id)),
       });
       if (url.pathname === "/api/tools/execute") return Response.json({
         status: "succeeded", output: { workspaceId },
@@ -194,6 +196,7 @@ describe("remote-mcp-contract", () => {
     fixture.expired = false;
     fixture.kind = "mcp_remote";
     fixture.capabilities = ["tools:discover", "tools:read", "tools:write", "approvals:create"];
+    fixture.catalogTools = ["fixture.read", "fixture.write"];
     fixture.apiRequests.length = 0;
     approvals.approvals.clear();
   });
@@ -279,6 +282,40 @@ describe("remote-mcp-contract", () => {
     expect(noRefreshBody).toContain("<li>tools:read</li>");
     expect(noRefreshBody).not.toContain("offline_access");
     expect(noRefreshBody).not.toContain("refresh its access");
+    const noRefreshCsrf = noRefreshBody.match(/name="csrf" value="([a-f0-9]{64})"/)?.[1];
+    const noRefreshAllow = await send(noRefreshUrl.pathname + noRefreshUrl.search, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", origin,
+        cookie: noRefreshConsent.headers.get("set-cookie")!.split(";")[0]! },
+      body: new URLSearchParams({ csrf: noRefreshCsrf!, workspaceId: "workspace_one", decision: "allow" }),
+    });
+    expect(noRefreshAllow.status).toBe(302);
+    const noRefreshCode = new URL(noRefreshAllow.headers.get("location")!).searchParams.get("code");
+    const noRefreshToken = await send("/oauth/token", {
+      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ grant_type: "authorization_code", client_id: clientId,
+        code: noRefreshCode!, redirect_uri: "https://host.example/callback", code_verifier: verifier,
+        resource: `${origin}/mcp` }),
+    });
+    expect(noRefreshToken.status).toBe(200);
+    const shortLived = await noRefreshToken.json() as { access_token: string; refresh_token?: string };
+    expect(shortLived.refresh_token).toBeUndefined();
+    expect((await send("/oauth/token", {
+      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ grant_type: "refresh_token", client_id: clientId,
+        refresh_token: "absent", resource: `${origin}/mcp` }),
+    })).status).toBe(400);
+    const shortRequest = new Request(`${origin}/mcp`, { headers: { authorization: `Bearer ${shortLived.access_token}` } });
+    expect((await handleMcpOAuth(event(shortRequest, kv))).status).toBe(406);
+    const shortTokenKey = [...kv.values.keys()].find((key) => key.startsWith("token:"));
+    expect(shortTokenKey).toBeTruthy();
+    const shortTokenRecord = kv.values.get(shortTokenKey!)!;
+    kv.values.set(shortTokenKey!, JSON.stringify({ ...JSON.parse(shortTokenRecord), expiresAt: 0 }));
+    expect((await handleMcpOAuth(event(shortRequest, kv))).status).toBe(401);
+    kv.values.set(shortTokenKey!, shortTokenRecord);
+    fixture.revoked = true;
+    expect((await handleMcpOAuth(event(shortRequest, kv))).status).toBe(401);
+    fixture.revoked = false;
     const csrf = consentBody.match(/name="csrf" value="([a-f0-9]{64})"/)?.[1];
     expect(csrf).toBeTruthy();
     const noPkce = await send("/oauth/authorize?client_id=" + encodeURIComponent(clientId) +
@@ -357,7 +394,7 @@ describe("remote-mcp-contract", () => {
     const oauthRequest = new Request(`${origin}/mcp`, { headers: { authorization: `Bearer ${issued.access_token}` } });
     const oauthAccess = await handleMcpOAuth(event(oauthRequest, kv));
     expect(oauthAccess.status).not.toBe(401);
-    const tokenKey = [...kv.values.keys()].find((key) => key.startsWith("token:"));
+    const tokenKey = [...kv.values.keys()].filter((key) => key.startsWith("token:")).at(-1);
     expect(tokenKey).toBeTruthy();
     const tokenRecord = JSON.parse(kv.values.get(tokenKey!)!) as { expiresAt: number };
     kv.values.set(tokenKey!, JSON.stringify({ ...tokenRecord, expiresAt: 0 }));
@@ -417,6 +454,33 @@ describe("remote-mcp-contract", () => {
       const after = fixture.apiRequests.length;
       await expect(client.listTools()).rejects.toThrow();
       expect(fixture.apiRequests).toHaveLength(after);
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  });
+
+  it("invalidates a remote host's cached tool list across routed HTTP requests", async () => {
+    fixture.catalogTools = ["fixture.read"];
+    const transport = new StreamableHTTPClientTransport(new URL(`${origin}/mcp`), {
+      requestInit: { headers: { authorization: `Bearer ${credential}` } },
+      fetch: async (request, init) => handleRemoteMcp(event(new Request(request, init))),
+    });
+    const client = new Client({ name: "caching-host", version: "1.0.0" }, { capabilities: {} });
+    const notifications: string[] = [];
+    client.setNotificationHandler(ToolListChangedNotificationSchema, () => { notifications.push("changed"); });
+    try {
+      await client.connect(transport);
+      expect((await client.listTools()).tools.map(({ name }) => name)).toContain("fixture.read");
+      fixture.catalogTools = ["fixture.read", "fixture.write"];
+      const added = await client.callTool({ name: "omr.catalog.refresh", arguments: {} });
+      expect(added.structuredContent).toMatchObject({ relistRequired: true, tools: 2 });
+      expect(notifications).toEqual(["changed"]);
+      expect((await client.listTools()).tools.map(({ name }) => name)).toContain("fixture.write");
+      fixture.catalogTools = ["fixture.write"];
+      await client.callTool({ name: "omr.catalog.refresh", arguments: {} });
+      expect(notifications).toEqual(["changed", "changed"]);
+      expect((await client.listTools()).tools.map(({ name }) => name)).not.toContain("fixture.read");
+      await expect(client.callTool({ name: "fixture.read", arguments: {} })).rejects.toThrow(/not found/);
     } finally {
       await client.close().catch(() => undefined);
     }

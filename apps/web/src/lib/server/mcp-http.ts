@@ -150,8 +150,11 @@ export async function handleRemoteMcp(event: RequestEvent): Promise<Response> {
       workspaceId,
       fetchImpl,
       schemaCompiler: compileWorkerSchema,
+      statelessHttp: true,
     });
-    const handler = await server.createWebStandardHandler({ enableJsonResponse: true });
+    // Request-related notifications require an SSE response. JSON response
+    // mode silently discards them in the MCP Web Standard transport.
+    const handler = await server.createWebStandardHandler();
     return noStore(await handler(bounded));
   } catch (error) {
     if (error instanceof InvalidClientCredentialError) return unauthorized();

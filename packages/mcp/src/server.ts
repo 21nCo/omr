@@ -76,6 +76,7 @@ export async function createOMRMcpServer(input: {
   workspaceId: string;
   fetchImpl?: typeof fetch;
   schemaCompiler?: McpFnSchemaCompiler;
+  statelessHttp?: boolean;
 }) {
   const client = new OMRClient(input);
   async function discoverManifests(): Promise<ToolManifest[]> {
@@ -156,7 +157,7 @@ export async function createOMRMcpServer(input: {
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       metadata: { surface: "omr-control-plane" },
-      async handler() {
+      async handler(_args, _context, extra) {
         const fresh = await discoverManifests();
         if (fresh.some(({ id, hash }) => registeredHashes.has(id) && registeredHashes.get(id) !== hash)) {
           throw new Error("OMR catalog schema changed; restart this MCP session");
@@ -172,9 +173,16 @@ export async function createOMRMcpServer(input: {
         const visible = new Set(fresh.map(({ id }) => id));
         const visibilityChanged = visible.size !== visibleAtLastRefresh.size ||
           [...visible].some((id) => !visibleAtLastRefresh.has(id));
-        if (visibilityChanged) await server.sendToolListChanged();
+        if (input.statelessHttp) {
+          // Each HTTP request has a fresh registry. The remote host's cached
+          // list is the only durable baseline, so always invalidate it on an
+          // explicit refresh using the notification's response stream.
+          await extra.sendNotification({ method: "notifications/tools/list_changed" });
+        } else if (visibilityChanged) {
+          await server.sendToolListChanged();
+        }
         visibleAtLastRefresh = visible;
-        return structuredResult({ added, tools: fresh.length });
+        return structuredResult({ added, tools: fresh.length, ...(input.statelessHttp ? { relistRequired: true } : {}) });
       },
     },
     {

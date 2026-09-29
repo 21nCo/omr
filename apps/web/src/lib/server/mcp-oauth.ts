@@ -338,7 +338,11 @@ export async function handleMcpOAuth(event: RequestEvent): Promise<Response> {
     refreshTokenTTL: 30 * 24 * 3600,
     clientRegistrationTTL: 30 * 24 * 3600,
     async tokenExchangeCallback(exchange) {
-      if (exchange.grantType !== "refresh_token") return;
+      if (exchange.grantType === "authorization_code") {
+        // The provider issues refresh tokens by default when the TTL is nonzero.
+        // Consent without offline_access must remain access-token-only.
+        return exchange.scope.includes("offline_access") ? undefined : { refreshTokenTTL: 0 };
+      }
       if (!oauthTokenMatchesGrant(exchange.props, exchange.requestedScope)) {
         throw new OAuthError("invalid_scope", { description: "The refreshed token must retain the authorized OMR capabilities" });
       }
