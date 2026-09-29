@@ -14,6 +14,7 @@ const binary = resolve("packages/mcp/dist/bin.js");
 const roots: string[] = [];
 const servers: Server[] = [];
 const clients: Client[] = [];
+/** Model one server-discovered tool and its read or approval-required policy. */
 const manifest = (effect: "read" | "write") => ({
   catalogSchemaVersion: "1.0.0", id: `demo.${effect}`, provider: "demo",
   providerVersion: "1.0.0", action: effect, displayName: effect, description: effect,
@@ -63,6 +64,7 @@ async function fixture() {
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Missing fixture port");
   const url = `http://127.0.0.1:${address.port}`;
+  /** Persist a grant in the same private profile shape used by the installed CLI. */
   const saveProfile = (name: string, workspaceId = "workspace-1") => {
     mkdirSync(join(config, "profiles"), { recursive: true, mode: 0o700 });
     writeFileSync(join(config, "profiles", `${name}.json`),
@@ -117,7 +119,7 @@ describe("stdio-mcp-contract", () => {
       .rejects.toThrow();
     await closed;
     const callsAfterClose = f.calls.length;
-    await expect(client.listTools()).rejects.toThrow();
+    await expect(client.listTools(undefined, { timeout: 1_000 })).rejects.toThrow();
     expect(f.calls).toHaveLength(callsAfterClose);
     expect(f.calls.filter((call) => call.path === "/api/tools/execute")).toHaveLength(1);
     expect(stderr).not.toContain("local-secret");
@@ -189,8 +191,10 @@ describe("stdio-mcp-contract", () => {
     // npm's JavaScript entry point works with execFile on Windows as well as Unix.
     const npmCli = process.env.npm_execpath ?? resolve(dirname(process.execPath),
       process.platform === "win32" ? "node_modules/npm/bin/npm-cli.js" : "../lib/node_modules/npm/bin/npm-cli.js");
+    /** Run npm's portable JavaScript entry point without a platform-specific shell. */
     const npm = (args: string[], cwd: string) => exec(process.execPath, [npmCli, ...args],
       { cwd, env: cleanEnv() });
+    /** Build one workspace archive for installation in the isolated host prefix. */
     const pack = async (workspace: string) => {
       const { stdout } = await npm(["pack", `--workspace=${workspace}`,
         "--pack-destination", root], resolve("."));
@@ -217,8 +221,11 @@ describe("stdio-mcp-contract", () => {
     await expect(import(pathToFileURL(join(prefix, "node_modules", "@oh-my-router", "mcp", "dist", "index.js")).href))
       .resolves.toHaveProperty("createOMRMcpServer");
     writeFileSync(join(prefix, "consumer.mts"),
-      'import { createOMRMcpServer } from "@oh-my-router/mcp";\n' +
-      'const server = await createOMRMcpServer({ baseUrl: "https://omr.example", credential: "test", workspaceId: "test" });\n' +
+      'import { createOMRMcpServer, type OMRSchemaCompiler } from "@oh-my-router/mcp";\n' +
+      'const credential = process.env.OMR_API_KEY;\n' +
+      'if (!credential) throw new Error("Missing OMR_API_KEY");\n' +
+      'const schemaCompiler: OMRSchemaCompiler = () => () => true;\n' +
+      'const server = await createOMRMcpServer({ baseUrl: "https://omr.example", credential, workspaceId: "test", schemaCompiler });\n' +
       'await server.close();\n');
     await exec(process.execPath, [resolve("node_modules/typescript/bin/tsc"), "--noEmit", "--strict",
       "--module", "NodeNext", "--moduleResolution", "NodeNext", "--target", "ES2022",

@@ -47,9 +47,9 @@ async function main(): Promise<void> {
 
   let server: Awaited<ReturnType<typeof createOMRMcpServer>> | undefined;
   let authFailed = false;
+  /** Close the local transport after the server rejects a revoked or expired grant. */
   const authenticatedFetch: typeof fetch = async (request, init) => {
     const response = await fetch(request, init);
-    // A revoked or expired grant cannot keep an already-open local host session.
     if (response.status === 401 && server && !authFailed) {
       authFailed = true;
       setImmediate(() => { void server?.close().catch(() => undefined); });
