@@ -1,0 +1,18 @@
+README.md
+  h_a39f9495f9ec1d 108-109,112-115
+apps/web/src/lib/server/mcp-oauth.ts
+  h_a39f9495f9ec1d 11,346-347
+apps/web/src/lib/server/remote-mcp-contract.test.ts
+  h_a39f9495f9ec1d 34,39-42,343-356
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b6de7de894c0e3b803b3293e951e26c8ad1d2e6a",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
