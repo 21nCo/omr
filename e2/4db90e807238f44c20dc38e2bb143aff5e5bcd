@@ -1,0 +1,30 @@
+README.md
+  h_a39f9495f9ec1d 128,139-140
+apps/web/src/lib/server/mcp-oauth-policy.test.ts
+  h_a39f9495f9ec1d 3,16-17,34-45
+apps/web/src/lib/server/mcp-oauth-policy.ts
+  h_a39f9495f9ec1d 4,18-21,39-51
+apps/web/src/lib/server/mcp-oauth.ts
+  h_a39f9495f9ec1d 8-12,20,177,275-280,298,325,329,334-357
+apps/web/src/lib/server/remote-mcp-contract.test.ts
+  h_a39f9495f9ec1d 1-333
+apps/web/src/routes/.well-known/[...path]/+server.ts
+  h_a39f9495f9ec1d 5
+docs/remote-mcp-v1.md
+  h_a39f9495f9ec1d 1-97
+tests/fixtures/cloudflare-workers.ts
+  h_a39f9495f9ec1d 1-2
+vitest.config.ts
+  h_a39f9495f9ec1d 1-15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e24db90e807238f44c20dc38e2bb143aff5e5bcd",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
