@@ -1,0 +1,18 @@
+packages/mcp/src/bin.ts
+  h_a39f9495f9ec1d 50
+packages/mcp/src/index.ts
+  h_a39f9495f9ec1d 2
+tests/acceptance/stdio-mcp-contract.test.ts
+  h_a39f9495f9ec1d 17,67,122,194,197,224-228
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9e34b14e75a5d091a929ecf157d5331faec601e2",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
