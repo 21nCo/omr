@@ -1,0 +1,27 @@
+apps/web/src/lib/server/mcp-http.ts
+  s_6126673cc0a89e::t_7f3b95ace19f6c 153,155-157
+apps/web/src/lib/server/mcp-oauth.ts
+  s_6126673cc0a89e::t_03a8c078305315 341-345
+docs/provider-catalog-v1.md
+  s_6126673cc0a89e::t_5ab2f896661703 48-53
+docs/remote-mcp-v1.md
+  s_6126673cc0a89e::t_c7dda92fce5e35 17-18,106-109
+packages/mcp/src/server.ts
+  s_6126673cc0a89e::t_d3caf74edadb0e 79,160,176-183,185
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d2f24b2e6b3f1d60f74a60f06678945302f4f4f8",
+  "prompts": {},
+  "sessions": {
+    "s_6126673cc0a89e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c2bc-9ed5-72b0-a4bd-e7dcb1d6a6eb",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
