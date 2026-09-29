@@ -1,0 +1,19 @@
+tests/acceptance/stdio-mcp-contract.test.ts
+  s_04d5ce4b1d8a53::t_4351cb1d0ccd91 5-6,27,33,111-114,118-121,189-193,195-196,201-202,206,217,219-229
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1b307079ddc6dc8952f109bb5f54f804b6b94898",
+  "prompts": {},
+  "sessions": {
+    "s_04d5ce4b1d8a53": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ed7f-9ac8-7422-ba1b-c8ec5cad5457",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
