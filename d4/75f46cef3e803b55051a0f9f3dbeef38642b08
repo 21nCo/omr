@@ -1,0 +1,35 @@
+apps/web/src/lib/server/mcp-browser-origin.ts
+  s_f064863a80affb::t_17bb5adc787023 32-44,61-62,64,76,79
+apps/web/src/lib/server/mcp-oauth.ts
+  s_f064863a80affb::t_87f3184a55de71 141-142,347-351
+apps/web/src/lib/server/remote-mcp-audience.test.ts
+  s_181bb405165ede::t_b51224322c1e86 26-43,51,92-98,122-125
+apps/web/src/lib/server/remote-mcp-contract.test.ts
+  s_181bb405165ede::t_812f84798cbc46 106-107,410-421,706,709-710,712-713
+packages/cli/src/bin.ts
+  s_181bb405165ede::t_35f9302267b37b 325-344,358
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d475f46cef3e803b55051a0f9f3dbeef38642b08",
+  "prompts": {},
+  "sessions": {
+    "s_181bb405165ede": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0eccb-56ef-7ea0-a2e1-c84027ac735e",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    },
+    "s_f064863a80affb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "dadec429-b257-4387-997f-0a7930a75ff2",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
