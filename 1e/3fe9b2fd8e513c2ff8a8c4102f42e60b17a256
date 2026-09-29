@@ -1,0 +1,21 @@
+packages/mcp/package.json
+  s_43b056a12de861::t_87f8059dc2ac4e 5-6,17-18,23-26
+tests/acceptance/stdio-mcp-contract.test.ts
+  s_43b056a12de861::t_803c1c22caebe9 1-204
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1e3fe9b2fd8e513c2ff8a8c4102f42e60b17a256",
+  "prompts": {},
+  "sessions": {
+    "s_43b056a12de861": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ed5d-b588-7483-b5b8-e907d9952fb2",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
