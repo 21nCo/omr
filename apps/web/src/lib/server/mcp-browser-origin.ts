@@ -23,6 +23,12 @@ export function mcpBrowserOriginDenied(event: RequestEvent): boolean {
   return event.request.headers.has("origin") && !allowedMcpBrowserOrigin(event);
 }
 
+function isMcpDiscoveryPath(path: string): boolean {
+  return path === "/.well-known/oauth-authorization-server" ||
+    path === "/.well-known/oauth-protected-resource" ||
+    path.startsWith("/.well-known/oauth-protected-resource/");
+}
+
 export function mcpCorsResponse(event: RequestEvent, response: Response): Response {
   const headers = new Headers(response.headers);
   const exposed = (headers.get("access-control-expose-headers") ?? "")
@@ -40,8 +46,9 @@ export function mcpCorsResponse(event: RequestEvent, response: Response): Respon
   if (origin) {
     headers.set("access-control-allow-origin", origin);
     headers.set("vary", headers.has("vary") ? `${headers.get("vary")}, Origin` : "Origin");
-    headers.set("access-control-allow-methods", new URL(event.request.url).pathname === "/mcp"
-      ? "GET, POST, DELETE, OPTIONS" : "POST, OPTIONS");
+    const path = new URL(event.request.url).pathname;
+    headers.set("access-control-allow-methods", path === "/mcp"
+      ? "GET, POST, DELETE, OPTIONS" : isMcpDiscoveryPath(path) ? "GET, OPTIONS" : "POST, OPTIONS");
     headers.set("access-control-allow-headers", "Authorization, Content-Type, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID");
     headers.set("access-control-expose-headers", exposed.join(", "));
     headers.set("access-control-max-age", "600");
@@ -54,7 +61,8 @@ export function mcpPreflight(event: RequestEvent): Response {
   const method = event.request.headers.get("access-control-request-method");
   const path = new URL(event.request.url).pathname;
   const methods = path === "/mcp" ? ["GET", "POST", "DELETE"] :
-    path === "/oauth/token" || path === "/oauth/register" ? ["POST"] : [];
+    path === "/oauth/token" || path === "/oauth/register" ? ["POST"] :
+      isMcpDiscoveryPath(path) ? ["GET"] : [];
   if (!method || !methods.includes(method)) return new Response(null, { status: 405 });
   const requested = event.request.headers.get("access-control-request-headers");
   if (requested && requested.split(",").some((header) => ![

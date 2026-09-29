@@ -206,7 +206,29 @@ describe("remote-mcp-contract", () => {
       method: "OPTIONS", headers: { origin: "https://host.example", "access-control-request-method": "GET" },
     }), kv));
     expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("access-control-allow-origin")).toBe("https://host.example");
+    expect(preflight.headers.get("access-control-allow-methods")).toBe("GET, OPTIONS");
+    const browserMetadata = await wellKnownGet(event(new Request(`${origin}/.well-known/oauth-authorization-server`, {
+      headers: { origin: "https://host.example" },
+    }), kv));
+    expect(browserMetadata.status).toBe(200);
+    expect(browserMetadata.headers.get("access-control-allow-origin")).toBe("https://host.example");
+    const deniedMetadata = await wellKnownGet(event(new Request(`${origin}/.well-known/oauth-authorization-server`, {
+      headers: { origin: "https://other.example" },
+    }), kv));
+    const deniedPreflight = await wellKnownOptions(event(new Request(`${origin}/.well-known/oauth-protected-resource/mcp`, {
+      method: "OPTIONS", headers: { origin: "https://other.example", "access-control-request-method": "GET" },
+    }), kv));
+    expect(deniedMetadata.status).toBe(403);
+    expect(deniedMetadata.headers.has("access-control-allow-origin")).toBe(false);
+    expect(deniedPreflight.status).toBe(403);
+    expect(deniedPreflight.headers.has("access-control-allow-origin")).toBe(false);
+    const unsupportedPreflight = await wellKnownOptions(event(new Request(`${origin}/.well-known/oauth-authorization-server`, {
+      method: "OPTIONS", headers: { origin: "https://host.example", "access-control-request-method": "POST" },
+    }), kv));
+    expect(unsupportedPreflight.status).toBe(405);
     expect(resource.status).toBe(200);
+    expect(resource.headers.has("access-control-allow-origin")).toBe(false);
     await expect(resource.json()).resolves.toMatchObject({
       resource: `${origin}/mcp`, authorization_servers: [origin],
       scopes_supported: expect.arrayContaining(["tools:discover", "tools:read", "tools:write", "approvals:create"]),
