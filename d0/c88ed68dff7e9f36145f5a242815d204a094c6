@@ -1,0 +1,25 @@
+apps/web/src/lib/server/mcp-http.ts
+  s_110c7532cf7634::t_de1feb87d02b3b 15,27,38,75
+packages/mcp/package.json
+  s_110c7532cf7634::t_3283e49993af35 23
+packages/mcp/src/server.ts
+  s_110c7532cf7634::t_3a7d5e8614ca09 19,26,46,53,85,102,140-141
+packages/mcp/src/session.ts
+  s_110c7532cf7634::t_d50099c726aa82 1-21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d0c88ed68dff7e9f36145f5a242815d204a094c6",
+  "prompts": {},
+  "sessions": {
+    "s_110c7532cf7634": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ee25-fef3-7643-b3da-8732f3cec764",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
