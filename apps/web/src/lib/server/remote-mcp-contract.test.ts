@@ -267,7 +267,19 @@ describe("remote-mcp-contract", () => {
     })) authorizeUrl.searchParams.set(key, value);
     const consent = await send(authorizeUrl.pathname + authorizeUrl.search);
     expect(consent.status).toBe(200);
-    const csrf = (await consent.text()).match(/name="csrf" value="([a-f0-9]{64})"/)?.[1];
+    const consentBody = await consent.text();
+    expect(consentBody).toContain("<li>offline_access</li>");
+    expect(consentBody).toContain("refresh its access");
+    expect(consentBody).toContain("up to 30 days");
+    const noRefreshUrl = new URL(authorizeUrl);
+    noRefreshUrl.searchParams.set("scope", "tools:discover tools:read");
+    const noRefreshConsent = await send(noRefreshUrl.pathname + noRefreshUrl.search);
+    expect(noRefreshConsent.status).toBe(200);
+    const noRefreshBody = await noRefreshConsent.text();
+    expect(noRefreshBody).toContain("<li>tools:read</li>");
+    expect(noRefreshBody).not.toContain("offline_access");
+    expect(noRefreshBody).not.toContain("refresh its access");
+    const csrf = consentBody.match(/name="csrf" value="([a-f0-9]{64})"/)?.[1];
     expect(csrf).toBeTruthy();
     const noPkce = await send("/oauth/authorize?client_id=" + encodeURIComponent(clientId) +
       "&redirect_uri=https%3A%2F%2Fhost.example%2Fcallback&response_type=code&scope=tools%3Adiscover", {

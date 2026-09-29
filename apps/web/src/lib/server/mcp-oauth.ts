@@ -133,7 +133,12 @@ async function authorize(request: Request, env: OAuthBindings, event: RequestEve
     const options = workspaces.map(({ workspace }) =>
       `<option value="${html(workspace.id)}">${html(workspace.name)} (${html(workspace.kind)})</option>`,
     ).join("");
-    return page(`<h1>Connect ${html(client.clientName ?? "an MCP client")} to OMR?</h1><p>The client supplies this name; OMR has not verified it. After approval, you will return to <code>${html(authRequest.redirectUri)}</code>.</p><p>Choose the workspace this client may access. It requests:</p><ul>${requestedScopes.map((scope) => `<li>${html(scope)}</li>`).join("")}</ul><form method="post"><input type="hidden" name="csrf" value="${csrf}"><fieldset><legend>Workspace</legend><select name="workspaceId" required><option value="" selected disabled>Choose a workspace</option>${options}</select></fieldset><button name="decision" value="allow">Allow access</button> <button name="decision" value="deny" formnovalidate>Deny</button></form>`, 200, oauthCsrfCookie(CONSENT_CSRF_COOKIE, csrf));
+    const refreshRequested = authRequest.scope.includes("offline_access");
+    const displayedScopes = [...requestedScopes, ...(refreshRequested ? ["offline_access"] : [])];
+    const refreshNotice = refreshRequested
+      ? "<p>Offline access permits this client to refresh its access while the OMR grant remains active, for up to 30 days. You can revoke it sooner.</p>"
+      : "";
+    return page(`<h1>Connect ${html(client.clientName ?? "an MCP client")} to OMR?</h1><p>The client supplies this name; OMR has not verified it. After approval, you will return to <code>${html(authRequest.redirectUri)}</code>.</p><p>Choose the workspace this client may access. It requests:</p><ul>${displayedScopes.map((scope) => `<li>${html(scope)}</li>`).join("")}</ul>${refreshNotice}<form method="post"><input type="hidden" name="csrf" value="${csrf}"><fieldset><legend>Workspace</legend><select name="workspaceId" required><option value="" selected disabled>Choose a workspace</option>${options}</select></fieldset><button name="decision" value="allow">Allow access</button> <button name="decision" value="deny" formnovalidate>Deny</button></form>`, 200, oauthCsrfCookie(CONSENT_CSRF_COOKIE, csrf));
   }
 
   if (!request.headers.get("content-type")?.startsWith("application/x-www-form-urlencoded")) {
