@@ -25,6 +25,12 @@ export function mcpBrowserOriginDenied(event: RequestEvent): boolean {
 
 export function mcpCorsResponse(event: RequestEvent, response: Response): Response {
   const headers = new Headers(response.headers);
+  const exposed = (headers.get("access-control-expose-headers") ?? "")
+    .split(",").map((name) => name.trim()).filter(Boolean);
+  const exposedNames = new Set(exposed.map((name) => name.toLowerCase()));
+  for (const name of ["WWW-Authenticate", "Mcp-Session-Id", "Retry-After"]) {
+    if (!exposedNames.has(name.toLowerCase())) exposed.push(name);
+  }
   // The OAuth library reflects any Origin. Publish CORS only for configured hosts.
   for (const name of ["access-control-allow-origin", "access-control-allow-methods",
     "access-control-allow-headers", "access-control-expose-headers", "access-control-max-age"]) {
@@ -37,7 +43,7 @@ export function mcpCorsResponse(event: RequestEvent, response: Response): Respon
     headers.set("access-control-allow-methods", new URL(event.request.url).pathname === "/mcp"
       ? "GET, POST, DELETE, OPTIONS" : "POST, OPTIONS");
     headers.set("access-control-allow-headers", "Authorization, Content-Type, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID");
-    headers.set("access-control-expose-headers", "WWW-Authenticate, Mcp-Session-Id");
+    headers.set("access-control-expose-headers", exposed.join(", "));
     headers.set("access-control-max-age", "600");
   }
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });

@@ -152,6 +152,7 @@ vi.mock("./router.js", () => ({
 
 import { handleRemoteMcp } from "./mcp-http.js";
 import { handleMcpOAuth } from "./mcp-oauth.js";
+import { mcpCorsResponse } from "./mcp-browser-origin.js";
 import { GET as wellKnownGet, OPTIONS as wellKnownOptions } from "../../routes/.well-known/[...path]/+server.js";
 import { GET as mcpGet, POST as mcpPost, OPTIONS as mcpOptions } from "../../routes/mcp/+server.js";
 import { POST as oauthPost, OPTIONS as oauthOptions } from "../../routes/oauth/[...path]/+server.js";
@@ -411,6 +412,26 @@ describe("remote-mcp-contract", () => {
     expect(forged.status).toBe(403);
   });
 
+  it("exposes OAuth retry timing to allowed browser hosts without exposing it to other origins", async () => {
+    const retry = () => new Response(JSON.stringify({ error: "temporarily_unavailable" }), {
+      status: 429, headers: { "Retry-After": "30",
+        "Access-Control-Expose-Headers": "Retry-After, X-OAuth-Provider" },
+    });
+    const allowed = mcpCorsResponse(event(new Request(`${origin}/oauth/token`, {
+      headers: { origin: "https://host.example" },
+    })), retry());
+    expect(allowed.status).toBe(429);
+    expect(allowed.headers.get("retry-after")).toBe("30");
+    expect(allowed.headers.get("access-control-allow-origin")).toBe("https://host.example");
+    expect(allowed.headers.get("access-control-expose-headers")?.split(/,\s*/))
+      .toEqual(expect.arrayContaining(["Retry-After", "X-OAuth-Provider", "WWW-Authenticate"]));
+    const denied = mcpCorsResponse(event(new Request(`${origin}/oauth/token`, {
+      headers: { origin: "https://other.example" },
+    })), retry());
+    expect(denied.headers.has("access-control-allow-origin")).toBe(false);
+    expect(denied.headers.has("access-control-expose-headers")).toBe(false);
+  });
+
   it("keeps MCP grants workspace-bound and checks capabilities and expiry on later calls", async () => {
     seedApproval("approval_workspace_two", "workspace_two");
     seedApproval("approval_same_workspace", "workspace_one");
@@ -432,6 +453,18 @@ describe("remote-mcp-contract", () => {
       } });
       expect(approvals.approvals.get("approval_workspace_two")?.status).toBe("approved");
       expect(fixture.apiRequests.at(-1)?.path).toBe("/api/approvals/execute");
+      fixture.capabilities = ["tools:discover", "tools:read"];
+      expect((await client.listTools()).tools.map((tool) => tool.name)).toContain("fixture.read");
+      const selectedRead = await client.callTool({ name: "fixture.read", arguments: {} });
+      expect(selectedRead.structuredContent).toMatchObject({ status: "succeeded" });
+      const selectedWrite = await client.callTool({ name: "fixture.write",
+        arguments: { _omrIdempotencyKey: "read-only" } });
+      expect(selectedWrite.isError).toBe(true);
+      seedApproval("approval_read_only", "workspace_one");
+      const selectedReceipt = await client.callTool({ name: "omr.approvals.execute",
+        arguments: { approvalId: "approval_read_only" } });
+      expect(selectedReceipt.isError).toBe(true);
+      expect(approvals.approvals.get("approval_read_only")?.status).toBe("approved");
       fixture.capabilities = ["tools:discover"];
       expect((await client.listTools()).tools.map((tool) => tool.name)).toContain("fixture.read");
       const deniedRead = await client.callTool({ name: "fixture.read", arguments: {} });

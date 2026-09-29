@@ -18,11 +18,14 @@ grant expires after 30 days.
 
 ## OAuth-capable hosts
 
-- **Claude and Claude Desktop:** In **Settings → Connectors**, add a custom
-  connector with the canonical endpoint above. Select **Connect**, sign in to
-  OMR, choose the workspace, inspect the requested capabilities, and approve.
+- **Claude and Claude Desktop:** On Pro or Max, use **Customize → Connectors**
+  to add a custom connector with the canonical endpoint above. On Team or
+  Enterprise, an Owner first adds it under **Organization settings →
+  Connectors**; members then use **Customize → Connectors** to select
+  **Connect**. Sign in to OMR, choose the workspace, inspect the requested
+  capabilities, and approve.
   Configure remote connectors in Connectors, rather than in the local
-  `claude_desktop_config.json` file. See [Anthropic's connector instructions](https://support.anthropic.com/en/articles/11175166-getting-started-with-custom-connectors-using-remote-mcp).
+  `claude_desktop_config.json` file. See [Anthropic's connector instructions](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp).
 - **VS Code:** Add this entry to your personal or workspace `mcp.json`, then
   start the server from **MCP: List Servers**. VS Code opens the browser for
   OAuth. Use the same URL in remote development environments. See the
@@ -68,12 +71,16 @@ For hosts that can attach a private `Authorization` header but cannot perform
 OAuth discovery, create a separate `mcp_remote` device grant:
 
 ```sh
-omr login --url https://omr-web-staging.21n.workers.dev --kind mcp_remote
+omr login --url https://omr-web-staging.21n.workers.dev --kind mcp_remote \
+  --capabilities tools:discover,tools:read --profile host
 ```
 
-Approve the device code in OMR, selecting one workspace and the minimum
-capabilities. Configure the host's Streamable HTTP URL as above and set its
-private header to `Authorization: Bearer <device-grant>`. `omr login` saves the
+Choose the minimum capabilities in `--capabilities` before starting the device
+flow. `tools:discover` is required; without this option, a remote grant gets
+only `tools:discover`. Add `tools:read` for read calls, and add `tools:write`
+and `approvals:create` for approval-gated writes. Approve the device code in
+OMR, selecting one workspace. Configure the host's Streamable HTTP URL as above
+and set its private header to `Authorization: Bearer <device-grant>`. `omr login` saves the
 grant in a private profile; it does not print the bearer. On the machine where
 you logged in, retrieve the `key` from
 `${OMR_CONFIG_DIR:-~/.config/oh-my-router}/profiles/default.json` (or

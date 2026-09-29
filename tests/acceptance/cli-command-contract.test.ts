@@ -341,10 +341,11 @@ describe("cli-command-contract", () => {
 
   it("retains a manual remote MCP profile until self-revocation is verified", async () => {
     const f = await fixture();
-    const login = await f.run(["login", "--url", f.url, "--kind", "mcp_remote", "--profile", "host", "--json"]);
+    const login = await f.run(["login", "--url", f.url, "--kind", "mcp_remote",
+      "--capabilities", "tools:discover,tools:read", "--profile", "host", "--json"]);
     expect(login.code).toBe(0);
     expect(f.calls.find((call) => call.path === "/api/device/authorization")?.body)
-      .toMatchObject({ clientKind: "mcp_remote" });
+      .toMatchObject({ clientKind: "mcp_remote", requestedCapabilities: ["tools:discover", "tools:read"] });
     expect(login.stdout + login.stderr).not.toContain("omr_fixture_secret");
 
     f.failRevoke(503);
@@ -363,6 +364,26 @@ describe("cli-command-contract", () => {
     expect((await fetch(`${f.url}/api/tools?workspaceId=workspace_1`, {
       headers: { authorization: "Bearer omr_fixture_secret" },
     })).status).toBe(401);
+  });
+
+  it("defaults manual remote grants to discovery and rejects invalid scope selection before device authorization", async () => {
+    const f = await fixture();
+    const invalid = [
+      ["--kind", "mcp_remote", "--capabilities", "tools:read"],
+      ["--kind", "mcp_remote", "--capabilities", "tools:discover,unknown"],
+      ["--kind", "mcp_remote", "--capabilities", "tools:discover,"],
+      ["--kind", "cli", "--capabilities", "tools:discover"],
+    ];
+    for (const options of invalid) {
+      const result = await f.run(["login", "--url", f.url, ...options, "--json"]);
+      expect(result.code).toBe(2);
+      expect(lastError(result.stderr).error).toBe("INPUT_INVALID");
+    }
+    expect(f.calls.filter((call) => call.path === "/api/device/authorization")).toHaveLength(0);
+    const login = await f.run(["login", "--url", f.url, "--kind", "mcp_remote", "--json"]);
+    expect(login.code).toBe(0);
+    expect(f.calls.find((call) => call.path === "/api/device/authorization")?.body)
+      .toMatchObject({ requestedCapabilities: ["tools:discover"] });
   });
 
   it("uses the shared catalog, connection and execution endpoints with JSON flag, file and stdin", async () => {
