@@ -1,13 +1,19 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { InvalidClientCredentialError } from "@oh-my-router/client-access";
 
 const fixture = vi.hoisted(() => ({
-  kind: "mcp_remote" as "mcp_remote" | "cli",
-  authenticate: vi.fn(async (_credential: string, _capability?: string) => ({
-    kind: "mcp_remote" as "mcp_remote" | "cli", userId: "user_one",
-    workspaceId: "workspace_one", clientId: "client_one", grantId: "grant_one",
-    capabilities: ["tools:discover", "tools:read", "tools:write", "approvals:create"],
-  })),
-  revokeGrant: vi.fn(async () => undefined),
+  revoked: false,
+  authenticate: vi.fn(async (_credential: string, _capability?: string) => {
+    if (fixture.revoked) throw new InvalidClientCredentialError();
+    return {
+      kind: "mcp_remote" as "mcp_remote" | "cli", userId: "user_one",
+      workspaceId: "workspace_one", clientId: "client_one", grantId: "grant_one",
+      capabilities: ["tools:discover", "tools:read", "tools:write", "approvals:create"],
+    };
+  }),
+  revokeGrant: vi.fn(async (_userId: string, grantId: string) => {
+    if (grantId === "grant_one") fixture.revoked = true;
+  }),
 }));
 
 vi.mock("@oh-my-router/client-access/postgres", () => ({
@@ -43,6 +49,11 @@ function request(path: string, body?: Record<string, unknown>) {
 }
 
 describe("remote MCP credential audience", () => {
+  beforeEach(() => {
+    fixture.revoked = false;
+    vi.clearAllMocks();
+  });
+
   it("rejects a remote host grant on direct public catalog, execution, approval, and grant routes", async () => {
     const publicRouter = router(false);
     const calls = [
@@ -51,21 +62,40 @@ describe("remote MCP credential audience", () => {
       request("/api/approvals", { workspaceId: "workspace_one", toolId: "fixture.write", params: {}, idempotencyKey: "one" }),
       request("/api/approvals/execute", { approvalId: "approval_one" }),
       request("/api/approvals/status?approvalId=approval_one"),
-      request("/api/client-grants/revoke-self", {}),
     ];
     for (const call of calls) {
       const response = await publicRouter.handle(call);
       expect(response.status, new URL(call.url).pathname).toBe(403);
       expect(await response.json()).toEqual({ error: "CLIENT_ACCESS_DENIED" });
     }
+    const otherGrant = await publicRouter.handle(request("/api/client-grants/revoke", { clientId: "client_one" }));
+    expect(otherGrant.status).toBe(403);
+    expect(await otherGrant.json()).toEqual({ error: "REQUEST_ORIGIN_DENIED" });
     expect(fixture.revokeGrant).not.toHaveBeenCalled();
+  });
+
+  it("allows only bearer self-revocation for a manual remote grant and invalidates it immediately", async () => {
+    const publicRouter = router(false);
+    const cookie = new Request(`${origin}/api/client-grants/revoke-self`, {
+      method: "POST", headers: { authorization: bearer, cookie: "session=fixture" },
+    });
+    expect((await publicRouter.handle(cookie)).status).toBe(403);
+    expect(fixture.revokeGrant).not.toHaveBeenCalled();
+
+    const selfRevoke = await publicRouter.handle(request("/api/client-grants/revoke-self", {}));
+    expect(selfRevoke.status).toBe(200);
+    expect(await selfRevoke.json()).toEqual({ revoked: true });
+    expect(fixture.revokeGrant).toHaveBeenCalledWith("user_one", "grant_one");
+    const retry = await publicRouter.handle(request("/api/client-grants/revoke-self", {}));
+    expect(retry.status).toBe(401);
+    expect(await retry.json()).toEqual({ error: "CLIENT_CREDENTIAL_INVALID" });
+    expect(fixture.revokeGrant).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the internal MCP adapter's validated grant usable and does not exclude CLI grants from public API", async () => {
     const internal = router(true);
-    const selfRevoke = await internal.handle(request("/api/client-grants/revoke-self", {}));
-    expect(selfRevoke.status).toBe(200);
-    expect(fixture.revokeGrant).toHaveBeenCalledWith("user_one", "grant_one");
+    const internalRevoke = await internal.handle(request("/api/client-grants/revoke-self", {}));
+    expect(internalRevoke.status).toBe(200);
     fixture.authenticate.mockImplementationOnce(async () => ({
       kind: "cli", userId: "user_one", workspaceId: "workspace_one",
       clientId: "client_cli", grantId: "grant_cli",

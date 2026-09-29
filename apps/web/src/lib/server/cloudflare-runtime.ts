@@ -197,7 +197,7 @@ export function requireExecutionOrigin(request: Request): void {
   if (!bearerCredential(request) || request.headers.has("cookie")) requireSameOrigin(request);
 }
 
-/** A CLI can revoke only the grant authenticated by its own bearer credential. */
+/** A bearer client can revoke only the grant authenticated by its own credential. */
 export async function revokeOwnBearerClient(
   request: Request,
   authenticateClient: () => Promise<ExecutionPrincipal>,
@@ -689,7 +689,9 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
 
   const controlPlane: ControlPlaneRouteServices = {
     async revokeSelf(request) {
-      return revokeOwnBearerClient(request, () => authenticate(event, request, undefined, undefined, allowRemoteMcp),
+      // Manual remote MCP grants need this single public cleanup route. Other
+      // public API operations still reject their audience in authenticate().
+      return revokeOwnBearerClient(request, () => authenticate(event, request, undefined, undefined, true),
         async (actorUserId, grantId) => {
           const access = await connectPostgresClientAccess({ connectionString: databaseConnectionString(event) });
           try { await access.clients.revokeGrant(actorUserId, grantId); }
@@ -817,7 +819,7 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
   return { device, connections, tools, execution, controlPlane };
 }
 
-/** Public /api routes never accept remote MCP grants. */
+/** Public /api routes accept remote MCP grants only for self-revocation. */
 export function createCloudflareRouteServices(event: RequestEvent): CloudflareRouteServices {
   return createRouteServices(event, false);
 }

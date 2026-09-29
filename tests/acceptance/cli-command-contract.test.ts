@@ -190,6 +190,7 @@ async function fixture() {
     loseApproval: () => { approvalLost = true; }, formerMember: () => { formerMember = true; },
     loseRevoke: () => { revokeLost = true; },
     failRevoke: (status: number) => { revokeFailureStatus = status; },
+    clearRevokeFailure: () => { revokeFailureStatus = undefined; },
     malformedSuccess: (path: string, kind: "json" | "empty" | "shape") => { malformedSuccess.set(path, kind); },
     clearMalformed: () => malformedSuccess.clear(),
     successReply: (path: string, value: unknown) => { successOverride.set(path, value); },
@@ -336,6 +337,32 @@ describe("cli-command-contract", () => {
     expect((await f.run(["logout", "--profile", "work", "--json"])).code).toBe(0);
     expect((await f.run(["tools", "list", "--profile", "work", "--json"])).code).toBe(1);
     expect(f.calls.some((call) => call.path === "/api/client-grants/revoke-self")).toBe(true);
+  });
+
+  it("retains a manual remote MCP profile until self-revocation is verified", async () => {
+    const f = await fixture();
+    const login = await f.run(["login", "--url", f.url, "--kind", "mcp_remote", "--profile", "host", "--json"]);
+    expect(login.code).toBe(0);
+    expect(f.calls.find((call) => call.path === "/api/device/authorization")?.body)
+      .toMatchObject({ clientKind: "mcp_remote" });
+    expect(login.stdout + login.stderr).not.toContain("omr_fixture_secret");
+
+    f.failRevoke(503);
+    const failed = await f.run(["logout", "--profile", "host", "--json"]);
+    expect(failed.code).toBe(3);
+    expect(lastError(failed.stderr).error).toBe("REVOCATION_UNVERIFIED");
+    expect((await f.run(["profiles", "show", "--profile", "host", "--json"])).code).toBe(0);
+
+    f.clearRevokeFailure();
+    const logout = await f.run(["logout", "--profile", "host", "--json"]);
+    expect(logout.code).toBe(0);
+    expect(JSON.parse(logout.stdout)).toMatchObject({ profile: "host", revoked: true });
+    expect(f.calls.filter((call) => call.path === "/api/client-grants/revoke-self"))
+      .toHaveLength(2);
+    expect((await f.run(["profiles", "show", "--profile", "host", "--json"])).code).toBe(1);
+    expect((await fetch(`${f.url}/api/tools?workspaceId=workspace_1`, {
+      headers: { authorization: "Bearer omr_fixture_secret" },
+    })).status).toBe(401);
   });
 
   it("uses the shared catalog, connection and execution endpoints with JSON flag, file and stdin", async () => {

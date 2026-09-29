@@ -82,7 +82,9 @@ host's private secret/header field. The file must remain private (mode `0600`
 on macOS/Linux; your account ACL on Windows). Keep it out of shell history,
 logs, and shared host configuration. Never commit the credential to a shared
 MCP configuration file. A CLI or local stdio grant will not authenticate at
-`/mcp`.
+`/mcp`. To retire a manual grant, run `omr logout --profile <name>` on the
+machine holding its saved profile. The CLI removes that profile only after the
+server confirms revocation; remove the header from the host as well.
 
 Browser-host cross-origin requests require the host's exact HTTPS origin in
 the staging Worker's `OMR_MCP_BROWSER_ORIGINS` comma-separated allowlist. Native
