@@ -197,7 +197,7 @@ export function requireExecutionOrigin(request: Request): void {
   if (!bearerCredential(request) || request.headers.has("cookie")) requireSameOrigin(request);
 }
 
-/** A CLI can revoke only the grant authenticated by its own bearer credential. */
+/** A bearer client can revoke only the grant authenticated by its own credential. */
 export async function revokeOwnBearerClient(
   request: Request,
   authenticateClient: () => Promise<ExecutionPrincipal>,
@@ -240,6 +240,7 @@ async function authenticate(
   request: Request,
   workspaceId: string | undefined,
   capability?: ClientCapability,
+  allowRemoteMcp = false,
 ): Promise<ExecutionPrincipal> {
   const credential = bearerCredential(request);
   if (credential) {
@@ -248,6 +249,11 @@ async function authenticate(
     });
     try {
       const principal = await runtime.clients.authenticate(credential, capability);
+      // Remote host grants have one public audience: /mcp. Only the MCP
+      // adapter constructs services that may forward them to the shared router.
+      if (principal.kind === "mcp_remote" && !allowRemoteMcp) {
+        throw new ClientAccessDeniedError();
+      }
       if (workspaceId && principal.workspaceId !== workspaceId) {
         throw new ConnectionAccessDeniedError();
       }
@@ -423,7 +429,7 @@ export async function scopedToolIds(
 }
 
 /** Bind authenticated control-plane routes to disposable server-side runtimes. */
-export function createCloudflareRouteServices(event: RequestEvent): CloudflareRouteServices {
+function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): CloudflareRouteServices {
   const device = createCloudflareDeviceServices(event);
 
   /** Close both connection runtimes after each operation, including failures. */
@@ -451,7 +457,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
   const connections: ConnectionRouteServices = {
     /** Read provider setup availability in the caller's workspace context. */
     async providerReadiness(request, provider, workspaceId) {
-      const principal = await authenticate(event, request, workspaceId, "connections:read");
+      const principal = await authenticate(event, request, workspaceId, "connections:read", allowRemoteMcp);
       return withConnections(async (orchestrator, authority) => orchestrator.providerReadiness(
         provider,
         workspaceId ? await authority.listAvailable({
@@ -463,7 +469,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
     },
     /** Project only connections available to the authenticated workspace member. */
     async list(request, input) {
-      const principal = await authenticate(event, request, input.workspaceId, "connections:read");
+      const principal = await authenticate(event, request, input.workspaceId, "connections:read", allowRemoteMcp);
       return withConnections(async (orchestrator, authority) => publicConnections(
         authority, principal.userId, input.workspaceId,
         await orchestrator.listAvailable({
@@ -476,7 +482,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
     /** Save a selection after origin, client scope, and ownership checks. */
     async select(request, input) {
       return selectAuthorizedConnection(request, input,
-        (selectionRequest, workspaceId, capability) => authenticate(event, selectionRequest, workspaceId, capability),
+        (selectionRequest, workspaceId, capability) => authenticate(event, selectionRequest, workspaceId, capability, allowRemoteMcp),
         (selection) => withConnections((orchestrator) => orchestrator.select(selection)));
     },
     /** Start provider authorization for a signed-in same-origin web user. */
@@ -507,7 +513,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
     /** Enforce binding and client workspace access before a provider probe. */
     async checkHealth(request, connectionId) {
       return checkAuthorizedConnectionHealth(request, connectionId,
-        (healthRequest, capability) => authenticate(event, healthRequest, undefined, capability),
+        (healthRequest, capability) => authenticate(event, healthRequest, undefined, capability, allowRemoteMcp),
         (principal, id) => withConnections(async (orchestrator, authority) => {
           const accessible = await authority.getAccessible(principal.userId, id);
           assertConnectionWorkspace(principal, accessible.workspaceId);
@@ -553,7 +559,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
 
   const tools: ToolRouteServices = {
     async discover(request, input) {
-      const principal = await authenticate(event, request, input.workspaceId, "tools:discover");
+      const principal = await authenticate(event, request, input.workspaceId, "tools:discover", allowRemoteMcp);
       return withCatalog(async (catalog, plugfn) => {
         const runtime = await connectPostgresConnections({ connectionString: databaseConnectionString(event) });
         try {
@@ -571,7 +577,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
       });
     },
     async manifest(request, toolId, workspaceId) {
-      const principal = await authenticate(event, request, workspaceId, "tools:discover");
+      const principal = await authenticate(event, request, workspaceId, "tools:discover", allowRemoteMcp);
       return withCatalog(async (catalog, plugfn) => {
         const manifest = catalog.get(toolId);
         if (!manifest || !statuses(plugfn).some((entry) => entry.provider === manifest.provider && entry.available)) {
@@ -632,7 +638,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
   const execution: ExecutionRouteServices = {
     async execute(request, input) {
       requireExecutionOrigin(request);
-      const principal = await authenticate(event, request, input.workspaceId);
+      const principal = await authenticate(event, request, input.workspaceId, undefined, allowRemoteMcp);
       return withExecution(async (service) => publicReceipt(await service.execute({
         principal,
         ...input,
@@ -641,7 +647,7 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
     },
     async requestApproval(request, input) {
       requireExecutionOrigin(request);
-      const principal = await authenticate(event, request, input.workspaceId);
+      const principal = await authenticate(event, request, input.workspaceId, undefined, allowRemoteMcp);
       return withExecution(async (service, catalog) => {
         const approval = await service.requestApproval({
           principal,
@@ -669,11 +675,11 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
     },
     async executeApproved(request, approvalId) {
       requireExecutionOrigin(request);
-      const principal = await authenticate(event, request, undefined);
+      const principal = await authenticate(event, request, undefined, undefined, allowRemoteMcp);
       return withExecution(async (service) => publicReceipt(await service.executeApproved(principal, approvalId)));
     },
     async approvalStatus(request, approvalId) {
-      const principal = await authenticate(event, request, undefined, "approvals:create");
+      const principal = await authenticate(event, request, undefined, "approvals:create", allowRemoteMcp);
       return withExecution(async (service, catalog) => {
         const approval = await service.approvalStatus(principal, approvalId);
         return publicApproval(approval, catalog.get(approval.toolId));
@@ -683,7 +689,9 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
 
   const controlPlane: ControlPlaneRouteServices = {
     async revokeSelf(request) {
-      return revokeOwnBearerClient(request, () => authenticate(event, request, undefined),
+      // Manual remote MCP grants need this single public cleanup route. Other
+      // public API operations still reject their audience in authenticate().
+      return revokeOwnBearerClient(request, () => authenticate(event, request, undefined, undefined, true),
         async (actorUserId, grantId) => {
           const access = await connectPostgresClientAccess({ connectionString: databaseConnectionString(event) });
           try { await access.clients.revokeGrant(actorUserId, grantId); }
@@ -809,4 +817,14 @@ export function createCloudflareRouteServices(event: RequestEvent): CloudflareRo
   };
 
   return { device, connections, tools, execution, controlPlane };
+}
+
+/** Public /api routes accept remote MCP grants only for self-revocation. */
+export function createCloudflareRouteServices(event: RequestEvent): CloudflareRouteServices {
+  return createRouteServices(event, false);
+}
+
+/** The /mcp adapter alone forwards a validated remote grant into the shared router. */
+export function createRemoteMcpRouteServices(event: RequestEvent): CloudflareRouteServices {
+  return createRouteServices(event, true);
 }

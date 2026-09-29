@@ -8,8 +8,9 @@ import {
 import { connectPostgresClientAccess } from "@oh-my-router/client-access/postgres";
 import { createOMRMcpServer } from "@oh-my-router/mcp";
 
-import { createCloudflareRouteServices, databaseConnectionString } from "./cloudflare-runtime.js";
+import { createRemoteMcpRouteServices, databaseConnectionString } from "./cloudflare-runtime.js";
 import { createOMRRouter } from "./router.js";
+import { mcpBrowserOriginDenied } from "./mcp-browser-origin.js";
 
 const MAX_MCP_BODY_BYTES = 64 * 1024;
 
@@ -91,7 +92,7 @@ async function boundedRequest(request: Request): Promise<Request | null> {
 export async function handleRemoteMcp(event: RequestEvent): Promise<Response> {
   const request = event.request;
   const origin = new URL(request.url).origin;
-  if (request.headers.has("origin") && request.headers.get("origin") !== origin) {
+  if (mcpBrowserOriginDenied(event)) {
     return Response.json({ error: "MCP_ORIGIN_DENIED" }, {
       status: 403,
       headers: { "cache-control": "no-store" },
@@ -127,7 +128,7 @@ export async function handleRemoteMcp(event: RequestEvent): Promise<Response> {
         headers: { "cache-control": "no-store" },
       });
     }
-    const services = createCloudflareRouteServices(event);
+    const services = createRemoteMcpRouteServices(event);
     const router = createOMRRouter(
       services.device,
       services.connections,
@@ -149,8 +150,11 @@ export async function handleRemoteMcp(event: RequestEvent): Promise<Response> {
       workspaceId,
       fetchImpl,
       schemaCompiler: compileWorkerSchema,
+      statelessHttp: true,
     });
-    const handler = await server.createWebStandardHandler({ enableJsonResponse: true });
+    // Request-related notifications require an SSE response. JSON response
+    // mode silently discards them in the MCP Web Standard transport.
+    const handler = await server.createWebStandardHandler();
     return noStore(await handler(bounded));
   } catch (error) {
     if (error instanceof InvalidClientCredentialError) return unauthorized();

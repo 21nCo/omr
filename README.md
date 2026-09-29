@@ -105,10 +105,14 @@ checkout use `npm exec` as below; after installing the CLI archive, run the same
 with `omr` directly:
 
 ```sh
-npm exec -- omr login --url https://your-omr-worker.example --kind mcp_remote
+npm exec -- omr login --url https://your-omr-worker.example --kind mcp_remote \
+  --capabilities tools:discover,tools:read --profile host
 ```
 
-Approve the code in OMR, then configure an MCP client that supports custom HTTP headers to
+This example grants discovery and read calls. Select only the capabilities the host needs;
+the [remote MCP host guide](docs/remote-mcp-v1.md#manual-bearer-fallback) explains write and
+approval scopes and how to retrieve the private credential. Approve the code in OMR, then
+configure an MCP client that supports custom HTTP headers to
 connect to `https://your-omr-worker.example/mcp` with `Authorization: Bearer <device-grant>`.
 The remote endpoint checks the grant, its `mcp_remote` client kind, and `tools:discover` on
 every request; individual tool calls still enforce their own capabilities and approval policy.
@@ -125,7 +129,7 @@ uses S256 PKCE, requires `tools:discover`, and shows a consent screen where the 
 workspace and approves the requested OMR capabilities. The OAuth access token is bound to the
 `/mcp` resource; the underlying 30-day OMR grant is checked on every request. Refresh tokens
 and grants expire after 30 days, and revoking the OMR client or grant stops access immediately.
-An OAuth token refreshed with fewer scopes is rejected at `/mcp` rather than given the broader
+An OAuth refresh requesting fewer scopes is rejected at the token endpoint rather than given the broader
 underlying grant; reconnect with the desired scopes instead. The manual bearer flow above remains
 available for hosts that supply custom headers.
 
@@ -136,3 +140,5 @@ it invalidates both the OMR client and associated OAuth tokens. This page does n
 manual bearer grants, which are managed at `/app/clients`. OMR records OAuth-to-client links in
 PostgreSQL so the management listing and client replacement do not depend on Workers KV
 listing consistency; OAuth token storage remains in the provider's KV namespace.
+For Claude, VS Code, Cursor, ChatGPT, manual bearer setup, and staging rollback,
+see the [remote MCP host guide](docs/remote-mcp-v1.md).

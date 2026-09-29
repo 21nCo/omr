@@ -45,6 +45,12 @@ Long-lived stdio MCP sessions initially register the currently usable actions. A
 
 If discovery is temporarily unavailable after session start, `tools/list` retains the reserved control tools and hides projected actions; projected action calls fail closed. Connection listing/selection and approved-execution controls continue to use their own endpoints. Provider readiness and refresh return structured tool errors until discovery recovers.
 
+Remote Streamable HTTP rebuilds its server registry per request. An explicit remote
+`omr.catalog.refresh` therefore sends `tools/list_changed` on its response stream
+and asks the host to re-list, even if the current registry already includes the
+latest tools. This avoids assuming a server-side baseline for a host's cached
+list. Each remote `tools/list` and `tools/call` still checks current readiness.
+
 ## Reproducible local response
 
 Run `node scripts/catalog-example.mjs` after building packages. Against the pinned local PlugFn providers with no OAuth configuration or stored connections, it returned:

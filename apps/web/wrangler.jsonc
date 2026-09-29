@@ -31,7 +31,8 @@
       "name": "omr-web-staging",
       "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
       "vars": {
-        "OMR_PUBLIC_ORIGIN": "https://omr-web-staging.21n.workers.dev"
+        "OMR_PUBLIC_ORIGIN": "https://omr-web-staging.21n.workers.dev",
+        "OMR_MCP_BROWSER_ORIGINS": "https://chatgpt.com,https://claude.ai,https://vscode.dev"
       },
       "kv_namespaces": [
         {

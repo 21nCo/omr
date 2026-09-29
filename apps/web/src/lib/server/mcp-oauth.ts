@@ -5,7 +5,12 @@ import type {
   AuthRequest,
   OAuthHelpers,
 } from "@cloudflare/workers-oauth-provider";
-import { CLIENT_CAPABILITIES } from "@oh-my-router/client-access";
+import {
+  CLIENT_CAPABILITIES,
+  ClientAccessDeniedError,
+  ClientCapabilityDeniedError,
+  InvalidClientCredentialError,
+} from "@oh-my-router/client-access";
 import { connectPostgresClientAccess } from "@oh-my-router/client-access/postgres";
 import { connectPostgresIdentityRuntime } from "@oh-my-router/identity/postgres";
 
@@ -13,6 +18,7 @@ import { databaseConnectionString } from "./cloudflare-runtime.js";
 import { handleRemoteMcp } from "./mcp-http.js";
 import {
   oauthTokenMatchesGrant,
+  oauthRefreshMatchesGrant,
   requestedOAuthCapabilities,
   type OAuthGrantProps,
 } from "./mcp-oauth-policy.js";
@@ -127,7 +133,13 @@ async function authorize(request: Request, env: OAuthBindings, event: RequestEve
     const options = workspaces.map(({ workspace }) =>
       `<option value="${html(workspace.id)}">${html(workspace.name)} (${html(workspace.kind)})</option>`,
     ).join("");
-    return page(`<h1>Connect ${html(client.clientName ?? "an MCP client")} to OMR?</h1><p>The client supplies this name; OMR has not verified it. After approval, you will return to <code>${html(authRequest.redirectUri)}</code>.</p><p>Choose the workspace this client may access. It requests:</p><ul>${requestedScopes.map((scope) => `<li>${html(scope)}</li>`).join("")}</ul><form method="post"><input type="hidden" name="csrf" value="${csrf}"><fieldset><legend>Workspace</legend><select name="workspaceId" required><option value="" selected disabled>Choose a workspace</option>${options}</select></fieldset><button name="decision" value="allow">Allow access</button> <button name="decision" value="deny" formnovalidate>Deny</button></form>`, 200, oauthCsrfCookie(CONSENT_CSRF_COOKIE, csrf));
+    const refreshRequested = authRequest.scope.includes("offline_access");
+    const displayedScopes = [...requestedScopes, ...(refreshRequested ? ["offline_access"] : [])];
+    const refreshNotice = refreshRequested
+      ? "<p>Offline access permits this client to refresh its access while the OMR grant remains active, for up to 30 days. You can revoke it sooner.</p>"
+      : "";
+    const scopeItems = displayedScopes.map((scope) => `<li>${html(scope)}</li>`).join("");
+    return page(`<h1>Connect ${html(client.clientName ?? "an MCP client")} to OMR?</h1><p>The client supplies this name; OMR has not verified it. After approval, you will return to <code>${html(authRequest.redirectUri)}</code>.</p><p>Choose the workspace this client may access. It requests:</p><ul>${scopeItems}</ul>${refreshNotice}<form method="post"><input type="hidden" name="csrf" value="${csrf}"><fieldset><legend>Workspace</legend><select name="workspaceId" required><option value="" selected disabled>Choose a workspace</option>${options}</select></fieldset><button name="decision" value="allow">Allow access</button> <button name="decision" value="deny" formnovalidate>Deny</button></form>`, 200, oauthCsrfCookie(CONSENT_CSRF_COOKIE, csrf));
   }
 
   if (!request.headers.get("content-type")?.startsWith("application/x-www-form-urlencoded")) {
@@ -169,7 +181,7 @@ async function authorize(request: Request, env: OAuthBindings, event: RequestEve
     const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
       request: authRequest,
       userId,
-      scope: requestedScopes,
+      scope: [...requestedScopes, ...(authRequest.scope.includes("offline_access") ? ["offline_access"] : [])],
       revokeExistingGrants: false,
       metadata: {
         kind: OMR_OAUTH_GRANT_KIND,
@@ -267,7 +279,12 @@ async function manage(request: Request, env: OAuthBindings, event: RequestEvent)
   const access = await connectPostgresClientAccess({ connectionString: databaseConnectionString(event) });
   let oauthGrantId: string;
   try {
-    oauthGrantId = await access.oauthGrants.revoke(userId, omrClientId);
+    try {
+      oauthGrantId = await access.oauthGrants.revoke(userId, omrClientId);
+    } catch (error) {
+      if (error instanceof ClientAccessDeniedError) return page("<h1>Grant not found</h1>", 404);
+      throw error;
+    }
   } finally {
     await access.close();
   }
@@ -285,7 +302,7 @@ export async function handleMcpOAuth(event: RequestEvent): Promise<Response> {
   if (!origin || !env?.OAUTH_KV || !event.platform?.ctx || new URL(event.request.url).origin !== origin) {
     return new Response("OAuth is unavailable", { status: 503, headers: { "cache-control": "no-store" } });
   }
-  const { OAuthProvider } = await import("@cloudflare/workers-oauth-provider");
+  const { OAuthError, OAuthProvider } = await import("@cloudflare/workers-oauth-provider");
   const provider = new OAuthProvider<OAuthBindings>({
     apiRoute: "/mcp",
     apiHandler: {
@@ -312,19 +329,59 @@ export async function handleMcpOAuth(event: RequestEvent): Promise<Response> {
     tokenEndpoint: "/oauth/token",
     clientRegistrationEndpoint: "/oauth/register",
     clientIdMetadataDocumentEnabled: true,
-    scopesSupported: [...CLIENT_CAPABILITIES],
+    scopesSupported: [...CLIENT_CAPABILITIES, "offline_access"],
     resourceMetadata: {
       resource: `${origin}/mcp`,
       authorization_servers: [origin],
-      scopes_supported: ["tools:discover"],
+      scopes_supported: [...CLIENT_CAPABILITIES],
     },
     accessTokenTTL: 3600,
     refreshTokenTTL: 30 * 24 * 3600,
     clientRegistrationTTL: 30 * 24 * 3600,
+    async tokenExchangeCallback(exchange) {
+      if (exchange.grantType === "authorization_code") {
+        // The provider issues refresh tokens by default when the TTL is nonzero.
+        // Consent without offline_access must remain access-token-only.
+        return exchange.scope.includes("offline_access") ? undefined : { refreshTokenTTL: 0 };
+      }
+      // Older grants could receive refresh tokens without requesting offline
+      // access. They remain valid for access until expiry, but cannot rotate.
+      if (!exchange.scope.includes("offline_access")) {
+        throw new OAuthError("invalid_grant", { description: "This grant has no offline access" });
+      }
+      if (!oauthTokenMatchesGrant(exchange.props, exchange.requestedScope)) {
+        throw new OAuthError("invalid_scope", { description: "The refreshed token must retain the authorized OMR capabilities" });
+      }
+      const access = await connectPostgresClientAccess({ connectionString: databaseConnectionString(event) });
+      try {
+        let principal;
+        try {
+          principal = await access.clients.authenticate(exchange.props.omrCredential, "tools:discover");
+        } catch (error) {
+          if (error instanceof InvalidClientCredentialError || error instanceof ClientCapabilityDeniedError) {
+            throw new OAuthError("invalid_grant", { description: "The OMR grant has expired, was revoked, or lost authorization" });
+          }
+          throw error;
+        }
+        if (!oauthRefreshMatchesGrant(exchange.props, exchange.requestedScope, principal) ||
+            exchange.userId !== principal.userId) {
+          throw new OAuthError("invalid_grant", { description: "The OMR grant is no longer authorized" });
+        }
+      } finally {
+        await access.close();
+      }
+    },
   });
   try {
     const response = await provider.fetch(event.request, env, event.platform.ctx);
     const headers = new Headers(response.headers);
+    if (new URL(event.request.url).pathname === "/mcp" && response.status === 401 &&
+        headers.has("www-authenticate")) {
+      // The provider treats every advertised optional resource scope as a
+      // challenge requirement. Connecting only requires discovery.
+      const challenge = headers.get("www-authenticate")!;
+      headers.set("www-authenticate", challenge.replace(/, scope="[^"]*"/, ', scope="tools:discover"'));
+    }
     headers.set("cache-control", "no-store");
     return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
   } catch (error) {

@@ -5,11 +5,11 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { OMRProfileStore, InvalidProfileNameError, ProfileRecoveryRequiredError, assertProfileName } from "@oh-my-router/client/profile-store";
 import { beginDeviceAuthorization, normalizedBaseUrl, OMRClient, OMRHttpError, OMRProtocolError, OMRTransportError, pollDeviceAuthorization } from "@oh-my-router/client";
-import type { ClientCapability } from "@oh-my-router/client-access";
+import { CLIENT_CAPABILITIES, type ClientCapability } from "@oh-my-router/client-access";
 import type { JsonValue, ToolEffect } from "@oh-my-router/tools";
 
 type Parsed = { positionals: string[]; options: Map<string, string | true> };
-const valueOptions = new Set(["profile", "url", "kind", "name", "workspace", "provider", "query", "effect", "params", "params-file", "connection", "idempotency", "limit", "cursor"]);
+const valueOptions = new Set(["profile", "url", "kind", "name", "capabilities", "workspace", "provider", "query", "effect", "params", "params-file", "connection", "idempotency", "limit", "cursor"]);
 const flagOptions = new Set(["json", "help", "local"]);
 const store = new OMRProfileStore();
 
@@ -322,6 +322,26 @@ function handleDevicePollError(error: unknown): boolean {
   throw error;
 }
 
+/** Keep remote host grants narrow while preserving existing CLI and stdio defaults. */
+function loginCapabilities(kind: string, selected: string | undefined): ClientCapability[] {
+  if (selected && kind !== "mcp_remote") {
+    throw new CLIError("INPUT_INVALID", "--capabilities is only supported for mcp_remote login", 2);
+  }
+  let capabilities: ClientCapability[];
+  if (selected) {
+    capabilities = selected.split(",").map((capability) => capability.trim()) as ClientCapability[];
+  } else if (kind === "mcp_remote") {
+    capabilities = ["tools:discover"];
+  } else {
+    capabilities = ["connections:read", "tools:discover", "tools:read", "tools:write", "approvals:create"];
+  }
+  if (kind === "mcp_remote" && (!capabilities.includes("tools:discover") ||
+      capabilities.some((capability) => !CLIENT_CAPABILITIES.includes(capability)))) {
+    throw new CLIError("INPUT_INVALID", "Remote MCP capabilities require tools:discover and recognized comma-separated capabilities", 2);
+  }
+  return capabilities;
+}
+
 async function login(parsed: Parsed): Promise<void> {
   if ([process.env.OMR_BACKEND, process.env.OMR_API_KEY, process.env.OMR_WORKSPACE_ID].some(Boolean)) {
     throw new CLIError("INPUT_INVALID", "Device login cannot use headless credentials", 2);
@@ -335,7 +355,7 @@ async function login(parsed: Parsed): Promise<void> {
   if (kind !== "cli" && kind !== "mcp_stdio" && kind !== "mcp_remote") {
     throw new CLIError("INPUT_INVALID", "--kind must be cli, mcp_stdio, or mcp_remote", 2);
   }
-  const capabilities: ClientCapability[] = ["connections:read", "tools:discover", "tools:read", "tools:write", "approvals:create"];
+  const capabilities = loginCapabilities(kind, opt(parsed, "capabilities"));
   const auth = await beginDeviceAuthorization({ baseUrl, clientKind: kind,
     clientName: opt(parsed, "name") ?? `OMR ${kind} on ${hostname()}`, requestedCapabilities: capabilities });
   checkedDeviceAuthorization(auth);
