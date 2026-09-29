@@ -29,6 +29,19 @@ function isMcpDiscoveryPath(path: string): boolean {
     path.startsWith("/.well-known/oauth-protected-resource/");
 }
 
+function responseMethods(path: string): string {
+  if (path === "/mcp") return "GET, POST, DELETE, OPTIONS";
+  if (isMcpDiscoveryPath(path)) return "GET, OPTIONS";
+  return "POST, OPTIONS";
+}
+
+function preflightMethods(path: string): string[] {
+  if (path === "/mcp") return ["GET", "POST", "DELETE"];
+  if (path === "/oauth/token" || path === "/oauth/register") return ["POST"];
+  if (isMcpDiscoveryPath(path)) return ["GET"];
+  return [];
+}
+
 export function mcpCorsResponse(event: RequestEvent, response: Response): Response {
   const headers = new Headers(response.headers);
   const exposed = (headers.get("access-control-expose-headers") ?? "")
@@ -45,10 +58,10 @@ export function mcpCorsResponse(event: RequestEvent, response: Response): Respon
   const origin = allowedMcpBrowserOrigin(event);
   if (origin) {
     headers.set("access-control-allow-origin", origin);
-    headers.set("vary", headers.has("vary") ? `${headers.get("vary")}, Origin` : "Origin");
+    const vary = headers.get("vary");
+    headers.set("vary", vary ? `${vary}, Origin` : "Origin");
     const path = new URL(event.request.url).pathname;
-    headers.set("access-control-allow-methods", path === "/mcp"
-      ? "GET, POST, DELETE, OPTIONS" : isMcpDiscoveryPath(path) ? "GET, OPTIONS" : "POST, OPTIONS");
+    headers.set("access-control-allow-methods", responseMethods(path));
     headers.set("access-control-allow-headers", "Authorization, Content-Type, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID");
     headers.set("access-control-expose-headers", exposed.join(", "));
     headers.set("access-control-max-age", "600");
@@ -60,12 +73,10 @@ export function mcpPreflight(event: RequestEvent): Response {
   if (mcpBrowserOriginDenied(event)) return new Response(null, { status: 403 });
   const method = event.request.headers.get("access-control-request-method");
   const path = new URL(event.request.url).pathname;
-  const methods = path === "/mcp" ? ["GET", "POST", "DELETE"] :
-    path === "/oauth/token" || path === "/oauth/register" ? ["POST"] :
-      isMcpDiscoveryPath(path) ? ["GET"] : [];
+  const methods = preflightMethods(path);
   if (!method || !methods.includes(method)) return new Response(null, { status: 405 });
   const requested = event.request.headers.get("access-control-request-headers");
-  if (requested && requested.split(",").some((header) => ![
+  if (requested?.split(",").some((header) => ![
     "authorization", "content-type", "mcp-session-id", "mcp-protocol-version", "last-event-id",
   ].includes(header.trim().toLowerCase()))) return new Response(null, { status: 403 });
   return mcpCorsResponse(event, new Response(null, { status: 204 }));

@@ -322,6 +322,26 @@ function handleDevicePollError(error: unknown): boolean {
   throw error;
 }
 
+/** Keep remote host grants narrow while preserving existing CLI and stdio defaults. */
+function loginCapabilities(kind: string, selected: string | undefined): ClientCapability[] {
+  if (selected && kind !== "mcp_remote") {
+    throw new CLIError("INPUT_INVALID", "--capabilities is only supported for mcp_remote login", 2);
+  }
+  let capabilities: ClientCapability[];
+  if (selected) {
+    capabilities = selected.split(",").map((capability) => capability.trim()) as ClientCapability[];
+  } else if (kind === "mcp_remote") {
+    capabilities = ["tools:discover"];
+  } else {
+    capabilities = ["connections:read", "tools:discover", "tools:read", "tools:write", "approvals:create"];
+  }
+  if (kind === "mcp_remote" && (!capabilities.includes("tools:discover") ||
+      capabilities.some((capability) => !CLIENT_CAPABILITIES.includes(capability)))) {
+    throw new CLIError("INPUT_INVALID", "Remote MCP capabilities require tools:discover and recognized comma-separated capabilities", 2);
+  }
+  return capabilities;
+}
+
 async function login(parsed: Parsed): Promise<void> {
   if ([process.env.OMR_BACKEND, process.env.OMR_API_KEY, process.env.OMR_WORKSPACE_ID].some(Boolean)) {
     throw new CLIError("INPUT_INVALID", "Device login cannot use headless credentials", 2);
@@ -335,18 +355,7 @@ async function login(parsed: Parsed): Promise<void> {
   if (kind !== "cli" && kind !== "mcp_stdio" && kind !== "mcp_remote") {
     throw new CLIError("INPUT_INVALID", "--kind must be cli, mcp_stdio, or mcp_remote", 2);
   }
-  const selected = opt(parsed, "capabilities");
-  if (selected && kind !== "mcp_remote") {
-    throw new CLIError("INPUT_INVALID", "--capabilities is only supported for mcp_remote login", 2);
-  }
-  const capabilities: ClientCapability[] = selected
-    ? selected.split(",").map((capability) => capability.trim()) as ClientCapability[]
-    : kind === "mcp_remote" ? ["tools:discover"]
-      : ["connections:read", "tools:discover", "tools:read", "tools:write", "approvals:create"];
-  if (kind === "mcp_remote" && (!capabilities.includes("tools:discover") ||
-      capabilities.some((capability) => !CLIENT_CAPABILITIES.includes(capability)))) {
-    throw new CLIError("INPUT_INVALID", "Remote MCP capabilities require tools:discover and recognized comma-separated capabilities", 2);
-  }
+  const capabilities = loginCapabilities(kind, opt(parsed, "capabilities"));
   const auth = await beginDeviceAuthorization({ baseUrl, clientKind: kind,
     clientName: opt(parsed, "name") ?? `OMR ${kind} on ${hostname()}`, requestedCapabilities: capabilities });
   checkedDeviceAuthorization(auth);

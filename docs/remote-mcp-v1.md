@@ -19,7 +19,7 @@ access token, which expires after one hour.
 
 ## OAuth-capable hosts
 
-- **Claude and Claude Desktop:** On Pro or Max, use **Customize → Connectors**
+- **Claude and Claude Desktop:** On Free, Pro, or Max, use **Customize → Connectors**
   to add a custom connector with the canonical endpoint above. On Team or
   Enterprise, an Owner first adds it under **Organization settings →
   Connectors**; members then use **Customize → Connectors** to select

@@ -103,6 +103,8 @@ vi.mock("./router.js", () => ({
         credential: request.headers.get("authorization"),
         toolId: body?.toolId,
       });
+      if (request.headers.get("authorization") !== `Bearer ${credential}`)
+        return Response.json({ error: "CLIENT_CREDENTIAL_INVALID" }, { status: 401 });
       if (workspaceId && workspaceId !== "workspace_one")
         return Response.json({ error: "WORKSPACE_ACCESS_DENIED" }, { status: 403 });
       const required = url.pathname === "/api/tools" ? "tools:discover" :
@@ -405,6 +407,18 @@ describe("remote-mcp-contract", () => {
       body: new URLSearchParams({ grant_type: "refresh_token", client_id: clientId,
         refresh_token: refreshToken, resource: `${origin}/mcp`, ...(scope ? { scope } : {}) }),
     });
+    const legacyGrantKey = `grant:${issued.refresh_token.split(":").slice(0, 2).join(":")}`;
+    const currentGrant = kv.values.get(legacyGrantKey);
+    expect(currentGrant).toBeTruthy();
+    const legacyGrant = JSON.parse(currentGrant!) as { scope: string[] };
+    const legacyRecord = JSON.stringify({ ...legacyGrant,
+      scope: legacyGrant.scope.filter((scope) => scope !== "offline_access") });
+    kv.values.set(legacyGrantKey, legacyRecord);
+    const legacyRefresh = await refresh(issued.refresh_token);
+    expect(legacyRefresh.status).toBe(400);
+    await expect(legacyRefresh.json()).resolves.toMatchObject({ error: "invalid_grant" });
+    expect(kv.values.get(legacyGrantKey)).toBe(legacyRecord);
+    kv.values.set(legacyGrantKey, currentGrant!);
     const narrow = await refresh(issued.refresh_token, "tools:discover");
     expect(narrow.status).toBe(400);
     await expect(narrow.json()).resolves.toMatchObject({ error: "invalid_scope" });
@@ -689,12 +703,14 @@ describe("remote-mcp-contract", () => {
     const config = JSON.parse(readFileSync(new URL("../../../wrangler.jsonc", import.meta.url), "utf8")) as {
       env: { staging: { vars: Record<string, string>; kv_namespaces: Array<{ binding: string }> } };
     };
-    const vars = { ...config.env.staging.vars };
-    delete vars.OMR_PUBLIC_ORIGIN;
+    const vars = { ...config.env.staging.vars, OMR_PUBLIC_ORIGIN: origin };
     const bindings = config.env.staging.kv_namespaces.filter(({ binding }) => binding !== "OAUTH_KV");
     expect(bindings.some(({ binding }) => binding === "OAUTH_KV")).toBe(false);
+    const enabled = await wellKnownGet(event(new Request(`${origin}/.well-known/oauth-protected-resource/mcp`)));
+    expect(enabled.status).toBe(200);
     const rolledBack = (request: Request) => ({
-      request, platform: { env: vars, ctx: { waitUntil() {}, passThroughOnException() {} } },
+      request, platform: { env: { ...vars, ...(bindings.some(({ binding }) => binding === "OAUTH_KV")
+        ? { OAUTH_KV: kvFixture() } : {}) }, ctx: { waitUntil() {}, passThroughOnException() {} } },
     }) as never;
     const metadata = await wellKnownGet(rolledBack(new Request(`${origin}/.well-known/oauth-protected-resource/mcp`)));
     const token = await oauthPost(rolledBack(new Request(`${origin}/oauth/token`, { method: "POST" })));

@@ -23,6 +23,24 @@ vi.mock("@oh-my-router/client-access/postgres", () => ({
   }),
 }));
 
+vi.mock("@oh-my-router/identity/postgres", () => ({
+  connectPostgresIdentityRuntime: async () => ({
+    requireSession: async () => { throw Object.assign(new Error("Sign in required"), { code: "AUTHFN_UNAUTHENTICATED" }); },
+    close: async () => undefined,
+  }),
+}));
+
+vi.mock("@oh-my-router/plugfn-runtime", () => ({
+  connectPostgresPlugFn: async () => ({
+    plugfn: { providers: new Map(), config: { integrations: {} } }, close: async () => undefined,
+  }),
+}));
+
+vi.mock("@oh-my-router/tools", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@oh-my-router/tools")>(),
+  createPlugFnToolCatalog: async () => ({ get: () => null }),
+}));
+
 import { createCloudflareRouteServices, createRemoteMcpRouteServices } from "./cloudflare-runtime.js";
 import { createOMRRouter } from "./router.js";
 
@@ -30,7 +48,7 @@ const origin = "https://omr.example";
 const bearer = "Bearer omr_" + "a".repeat(64);
 function event() {
   return { request: new Request(`${origin}/api/tools`), platform: {
-    env: { DATABASE_URL: "postgres://fixture" },
+    env: { DATABASE_URL: "postgres://fixture", PLUGFN_ENCRYPTION_KEY: "fixture" },
   } } as never;
 }
 
@@ -71,6 +89,13 @@ describe("remote MCP credential audience", () => {
     const otherGrant = await publicRouter.handle(request("/api/client-grants/revoke", { clientId: "client_one" }));
     expect(otherGrant.status).toBe(403);
     expect(await otherGrant.json()).toEqual({ error: "REQUEST_ORIGIN_DENIED" });
+    const sameOrigin = new Request(`${origin}/api/client-grants/revoke`, {
+      method: "POST", headers: { authorization: bearer, origin, "content-type": "application/json" },
+      body: JSON.stringify({ clientId: "client_one" }),
+    });
+    const noSession = await publicRouter.handle(sameOrigin);
+    expect(noSession.status).toBe(401);
+    expect(await noSession.json()).toEqual({ error: "AUTHFN_UNAUTHENTICATED" });
     expect(fixture.revokeGrant).not.toHaveBeenCalled();
   });
 
@@ -94,8 +119,10 @@ describe("remote MCP credential audience", () => {
 
   it("keeps the internal MCP adapter's validated grant usable and does not exclude CLI grants from public API", async () => {
     const internal = router(true);
-    const internalRevoke = await internal.handle(request("/api/client-grants/revoke-self", {}));
-    expect(internalRevoke.status).toBe(200);
+    const internalManifest = await internal.handle(request("/api/tools/manifest?id=missing&workspaceId=workspace_one"));
+    expect(internalManifest.status).toBe(404);
+    expect(await internalManifest.json()).toEqual({ error: "TOOL_NOT_FOUND" });
+    expect(fixture.authenticate).toHaveBeenCalledWith(bearer.slice("Bearer ".length), "tools:discover");
     fixture.authenticate.mockImplementationOnce(async () => ({
       kind: "cli", userId: "user_one", workspaceId: "workspace_one",
       clientId: "client_cli", grantId: "grant_cli",
