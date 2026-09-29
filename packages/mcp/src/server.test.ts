@@ -4,6 +4,10 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { McpError, ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { ToolManifest } from "@oh-my-router/tools";
 import { execFile } from "node:child_process";
+import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -457,8 +461,17 @@ describe("OMR MCP server", () => {
   });
 
   it("validates HTTP tool calls in a fresh Worker-like process without dynamic code generation", async () => {
-    const probe = new URL("../../../tests/fixtures/worker-mcp-http.mjs", import.meta.url);
-    const { stdout } = await promisify(execFile)(process.execPath, [probe.pathname], { timeout: 10_000 });
-    expect(JSON.parse(stdout)).toEqual({ valid: "remote", invalid: "MCPFN_INVALID_ARGUMENTS", executions: 1 });
+    const fixturePath = fileURLToPath(new URL("../../../tests/fixtures/worker-mcp-http.mjs", import.meta.url));
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "omr worker fixture "));
+    try {
+      const linkedRepository = join(temporaryRoot, "repo");
+      await symlink(resolve(dirname(fixturePath), "../.."), linkedRepository,
+        process.platform === "win32" ? "junction" : "dir");
+      const probe = pathToFileURL(join(linkedRepository, "tests/fixtures/worker-mcp-http.mjs"));
+      const { stdout } = await promisify(execFile)(process.execPath, [fileURLToPath(probe)], { timeout: 10_000 });
+      expect(JSON.parse(stdout)).toEqual({ valid: "remote", invalid: "MCPFN_INVALID_ARGUMENTS", executions: 1 });
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
   });
 });

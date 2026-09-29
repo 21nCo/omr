@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 
 // Load the distributable after Worker globals are installed. The MCP SDK's
 // bundled validator selects its CSP-safe path when its module first loads.
-globalThis.WebSocketPair = class {};
+globalThis.WebSocketPair = class {
+  constructor() { throw new Error("WebSocketPair is unavailable in this Worker fixture"); }
+};
 const NativeFunction = globalThis.Function;
 globalThis.Function = new Proxy(NativeFunction, {
   apply() { throw new Error("Worker forbids dynamic code generation"); },
