@@ -5,7 +5,11 @@ import type {
   AuthRequest,
   OAuthHelpers,
 } from "@cloudflare/workers-oauth-provider";
-import { CLIENT_CAPABILITIES } from "@oh-my-router/client-access";
+import {
+  CLIENT_CAPABILITIES,
+  ClientAccessDeniedError,
+  InvalidClientCredentialError,
+} from "@oh-my-router/client-access";
 import { connectPostgresClientAccess } from "@oh-my-router/client-access/postgres";
 import { connectPostgresIdentityRuntime } from "@oh-my-router/identity/postgres";
 
@@ -13,6 +17,7 @@ import { databaseConnectionString } from "./cloudflare-runtime.js";
 import { handleRemoteMcp } from "./mcp-http.js";
 import {
   oauthTokenMatchesGrant,
+  oauthRefreshMatchesGrant,
   requestedOAuthCapabilities,
   type OAuthGrantProps,
 } from "./mcp-oauth-policy.js";
@@ -169,7 +174,7 @@ async function authorize(request: Request, env: OAuthBindings, event: RequestEve
     const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
       request: authRequest,
       userId,
-      scope: requestedScopes,
+      scope: [...requestedScopes, ...(authRequest.scope.includes("offline_access") ? ["offline_access"] : [])],
       revokeExistingGrants: false,
       metadata: {
         kind: OMR_OAUTH_GRANT_KIND,
@@ -267,7 +272,12 @@ async function manage(request: Request, env: OAuthBindings, event: RequestEvent)
   const access = await connectPostgresClientAccess({ connectionString: databaseConnectionString(event) });
   let oauthGrantId: string;
   try {
-    oauthGrantId = await access.oauthGrants.revoke(userId, omrClientId);
+    try {
+      oauthGrantId = await access.oauthGrants.revoke(userId, omrClientId);
+    } catch (error) {
+      if (error instanceof ClientAccessDeniedError) return page("<h1>Grant not found</h1>", 404);
+      throw error;
+    }
   } finally {
     await access.close();
   }
@@ -285,7 +295,7 @@ export async function handleMcpOAuth(event: RequestEvent): Promise<Response> {
   if (!origin || !env?.OAUTH_KV || !event.platform?.ctx || new URL(event.request.url).origin !== origin) {
     return new Response("OAuth is unavailable", { status: 503, headers: { "cache-control": "no-store" } });
   }
-  const { OAuthProvider } = await import("@cloudflare/workers-oauth-provider");
+  const { OAuthError, OAuthProvider } = await import("@cloudflare/workers-oauth-provider");
   const provider = new OAuthProvider<OAuthBindings>({
     apiRoute: "/mcp",
     apiHandler: {
@@ -312,15 +322,39 @@ export async function handleMcpOAuth(event: RequestEvent): Promise<Response> {
     tokenEndpoint: "/oauth/token",
     clientRegistrationEndpoint: "/oauth/register",
     clientIdMetadataDocumentEnabled: true,
-    scopesSupported: [...CLIENT_CAPABILITIES],
+    scopesSupported: [...CLIENT_CAPABILITIES, "offline_access"],
     resourceMetadata: {
       resource: `${origin}/mcp`,
       authorization_servers: [origin],
-      scopes_supported: ["tools:discover"],
+      scopes_supported: [...CLIENT_CAPABILITIES],
     },
     accessTokenTTL: 3600,
     refreshTokenTTL: 30 * 24 * 3600,
     clientRegistrationTTL: 30 * 24 * 3600,
+    async tokenExchangeCallback(exchange) {
+      if (exchange.grantType !== "refresh_token") return;
+      if (!oauthTokenMatchesGrant(exchange.props, exchange.requestedScope)) {
+        throw new OAuthError("invalid_scope", { description: "The refreshed token must retain the authorized OMR capabilities" });
+      }
+      const access = await connectPostgresClientAccess({ connectionString: databaseConnectionString(event) });
+      try {
+        let principal;
+        try {
+          principal = await access.clients.authenticate(exchange.props.omrCredential, "tools:discover");
+        } catch (error) {
+          if (error instanceof InvalidClientCredentialError) {
+            throw new OAuthError("invalid_grant", { description: "The OMR grant has expired or was revoked" });
+          }
+          throw error;
+        }
+        if (!oauthRefreshMatchesGrant(exchange.props, exchange.requestedScope, principal) ||
+            exchange.userId !== principal.userId) {
+          throw new OAuthError("invalid_grant", { description: "The OMR grant is no longer authorized" });
+        }
+      } finally {
+        await access.close();
+      }
+    },
   });
   try {
     const response = await provider.fetch(event.request, env, event.platform.ctx);

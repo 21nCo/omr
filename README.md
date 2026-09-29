@@ -125,7 +125,7 @@ uses S256 PKCE, requires `tools:discover`, and shows a consent screen where the 
 workspace and approves the requested OMR capabilities. The OAuth access token is bound to the
 `/mcp` resource; the underlying 30-day OMR grant is checked on every request. Refresh tokens
 and grants expire after 30 days, and revoking the OMR client or grant stops access immediately.
-An OAuth token refreshed with fewer scopes is rejected at `/mcp` rather than given the broader
+An OAuth refresh requesting fewer scopes is rejected at the token endpoint rather than given the broader
 underlying grant; reconnect with the desired scopes instead. The manual bearer flow above remains
 available for hosts that supply custom headers.
 
@@ -136,3 +136,5 @@ it invalidates both the OMR client and associated OAuth tokens. This page does n
 manual bearer grants, which are managed at `/app/clients`. OMR records OAuth-to-client links in
 PostgreSQL so the management listing and client replacement do not depend on Workers KV
 listing consistency; OAuth token storage remains in the provider's KV namespace.
+For Claude, VS Code, Cursor, ChatGPT, manual bearer setup, and staging rollback,
+see the [remote MCP host guide](docs/remote-mcp-v1.md).
