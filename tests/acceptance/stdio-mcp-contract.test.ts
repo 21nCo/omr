@@ -2,7 +2,8 @@ import { execFile, spawn } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -23,11 +24,13 @@ const manifest = (effect: "read" | "write") => ({
     required: ["value"], additionalProperties: false }, outputSchema: { type: "object" },
 });
 
+/** Keep host fixtures independent of the developer's saved OMR grant. */
 function cleanEnv(extra: Record<string, string> = {}): Record<string, string> {
   return { ...Object.fromEntries(Object.entries(process.env)
     .filter(([key, value]) => !key.startsWith("OMR_") && value !== undefined)), ...extra } as Record<string, string>;
 }
 
+/** Serve policy responses while recording every request that reaches the backend. */
 async function fixture() {
   const root = mkdtempSync(join(tmpdir(), "omr-stdio-"));
   roots.push(root);
@@ -105,9 +108,17 @@ describe("stdio-mcp-contract", () => {
     expect(f.calls.filter((call) => call.path === "/api/tools/execute")).toHaveLength(1);
     expect(stderr).toBe("");
 
+    const closed = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("Revoked stdio host did not exit")), 3_000);
+      client.onclose = () => { clearTimeout(timer); resolve(); };
+    });
     f.revoke();
     await expect(client.callTool({ name: "demo.read", arguments: { value: "after" } }))
       .rejects.toThrow();
+    await closed;
+    const callsAfterClose = f.calls.length;
+    await expect(client.listTools()).rejects.toThrow();
+    expect(f.calls).toHaveLength(callsAfterClose);
     expect(f.calls.filter((call) => call.path === "/api/tools/execute")).toHaveLength(1);
     expect(stderr).not.toContain("local-secret");
   });
@@ -175,19 +186,24 @@ describe("stdio-mcp-contract", () => {
     const hostConfig = join(prefix, "host.json");
     const original = '{"mcpServers":{"other":{"command":"/existing/tool"}}}';
     writeFileSync(hostConfig, original);
-    const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+    // npm's JavaScript entry point works with execFile on Windows as well as Unix.
+    const npmCli = process.env.npm_execpath ?? resolve(dirname(process.execPath),
+      process.platform === "win32" ? "node_modules/npm/bin/npm-cli.js" : "../lib/node_modules/npm/bin/npm-cli.js");
+    const npm = (args: string[], cwd: string) => exec(process.execPath, [npmCli, ...args],
+      { cwd, env: cleanEnv() });
     const pack = async (workspace: string) => {
-      const { stdout } = await exec(npm, ["pack", `--workspace=${workspace}`,
-        "--pack-destination", root], { cwd: resolve("."), env: cleanEnv() });
+      const { stdout } = await npm(["pack", `--workspace=${workspace}`,
+        "--pack-destination", root], resolve("."));
       return join(root, stdout.trim().split("\n").at(-1)!);
     };
     const cliArchive = await pack("@oh-my-router/cli");
     const mcpArchive = await pack("@oh-my-router/mcp");
-    await exec(npm, ["install", "--prefix", prefix, "--ignore-scripts", "--no-package-lock",
-      "--no-audit", "--no-fund", cliArchive, mcpArchive], { cwd: root, env: cleanEnv() });
+    await npm(["install", "--prefix", prefix, "--ignore-scripts", "--no-package-lock",
+      "--no-audit", "--no-fund", cliArchive, mcpArchive], root);
     const installed = join(prefix, "node_modules", "@oh-my-router", "mcp", "dist", "bin.js");
     const binDir = join(prefix, "node_modules", ".bin");
     expect(existsSync(installed)).toBe(true);
+    expect(existsSync(join(prefix, "node_modules", "@mcpfn", "core", "package.json"))).toBe(true);
     expect(existsSync(join(binDir, process.platform === "win32" ? "omr-mcp.cmd" : "omr-mcp"))).toBe(true);
     expect(existsSync(join(binDir, process.platform === "win32" ? "omr.cmd" : "omr"))).toBe(true);
     expect(readFileSync(hostConfig, "utf8")).toBe(original);
@@ -198,7 +214,17 @@ describe("stdio-mcp-contract", () => {
       .then(() => ({ stderr: "" }), (error: { stderr: string }) => ({ stderr: error.stderr }));
     expect(missing.stderr).toContain("run omr login");
     expect(missing.stderr).not.toContain("Cannot find package");
-    await expect(import(join(prefix, "node_modules", "@oh-my-router", "mcp", "dist", "index.js")))
+    await expect(import(pathToFileURL(join(prefix, "node_modules", "@oh-my-router", "mcp", "dist", "index.js")).href))
       .resolves.toHaveProperty("createOMRMcpServer");
-  }, 30_000);
+    writeFileSync(join(prefix, "consumer.mts"),
+      'import { createOMRMcpServer } from "@oh-my-router/mcp";\n' +
+      'const server = await createOMRMcpServer({ baseUrl: "https://omr.example", credential: "test", workspaceId: "test" });\n' +
+      'await server.close();\n');
+    await exec(process.execPath, [resolve("node_modules/typescript/bin/tsc"), "--noEmit", "--strict",
+      "--module", "NodeNext", "--moduleResolution", "NodeNext", "--target", "ES2022",
+      "--typeRoots", resolve("node_modules/@types"), "--types", "node", join(prefix, "consumer.mts")],
+    { cwd: root, env: cleanEnv() }).catch((error: { stdout: string; stderr: string }) => {
+      throw new Error(`Isolated MCP typecheck failed:\n${error.stdout}${error.stderr}`);
+    });
+  }, 60_000);
 });

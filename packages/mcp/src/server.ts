@@ -3,7 +3,6 @@ import {
   McpFnRegistry,
   structuredResult,
   type McpFnObjectSchema,
-  type McpFnSchemaCompiler,
   type McpFnToolDefinition,
 } from "@mcpfn/core";
 import { OMRClient } from "@oh-my-router/client";
@@ -16,6 +15,12 @@ const REFRESH_CATALOG_TOOL = "omr.catalog.refresh";
 const PROVIDERS_TOOL = "omr.catalog.providers";
 const IDEMPOTENCY_FIELD = "_omrIdempotencyKey";
 type VisibilityContext = { manifests?: Promise<Map<string, string>> };
+
+/** Public compiler contract shared with OMR's server without exposing an unpublished core type. */
+export type OMRSchemaCompiler = (schema: object) => {
+  (data: unknown): boolean;
+  errors?: readonly { instancePath?: string; message?: string; keyword: string }[] | null;
+};
 
 function objectSchema(value: unknown): McpFnObjectSchema {
   if (value && typeof value === "object" && !Array.isArray(value) &&
@@ -70,12 +75,13 @@ function approvalSummary(value: unknown, toolId: string): Record<string, unknown
   };
 }
 
+/** Build OMR's policy backed MCP server for local stdio or remote HTTP transport. */
 export async function createOMRMcpServer(input: {
   baseUrl: string;
   credential: string;
   workspaceId: string;
   fetchImpl?: typeof fetch;
-  schemaCompiler?: McpFnSchemaCompiler;
+  schemaCompiler?: OMRSchemaCompiler;
   statelessHttp?: boolean;
 }) {
   const client = new OMRClient(input);

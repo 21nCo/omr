@@ -3,6 +3,7 @@ import { OMRProfileStore, ProfileMissingError, assertProfileName } from "@oh-my-
 
 import { createOMRMcpServer } from "./server.js";
 
+/** Resolve the host's explicit profile without reading or changing stored credentials. */
 function selectedProfile(args: string[]): string | undefined {
   if (args.length === 0) return process.env.OMR_PROFILE;
   if (args.length === 2 && args[0] === "--profile" && args[1]) return assertProfileName(args[1]);
@@ -12,6 +13,7 @@ function selectedProfile(args: string[]): string | undefined {
   throw new Error("Usage: omr-mcp [--profile <name>]");
 }
 
+/** Select one authorized grant, then own the stdio session for this host process. */
 async function main(): Promise<void> {
   const requestedProfile = selectedProfile(process.argv.slice(2));
   const profiles = new OMRProfileStore();
@@ -63,7 +65,9 @@ async function main(): Promise<void> {
   await server.serveStdio();
 }
 
-main().catch((error: unknown) => {
+try {
+  await main();
+} catch (error: unknown) {
   process.stderr.write(`omr-mcp: ${error instanceof Error ? error.message : "launch failed"}\n`);
   process.exitCode = 1;
-});
+}

@@ -19,6 +19,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
+  "dependencies": {
+    "@mcpfn/core": "0.0.4"
+  },
   "devDependencies": {
     "@oh-my-router/client": "0.0.0",
     "@oh-my-router/tools": "0.0.0",
