@@ -1,0 +1,24 @@
+apps/web/src/lib/server/mcp-browser-origin.ts
+  h_a39f9495f9ec1d 28-33,46
+apps/web/src/lib/server/remote-mcp-contract.test.ts
+  h_a39f9495f9ec1d 155,415-434,456-467
+docs/remote-mcp-v1.md
+  h_a39f9495f9ec1d 21-26,28,74-75,78-83
+package.json
+  h_a39f9495f9ec1d 15
+packages/cli/src/bin.ts
+  h_a39f9495f9ec1d 8,12,338-349
+tests/acceptance/cli-command-contract.test.ts
+  h_a39f9495f9ec1d 344-345,348,369-388
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f10b115bf9b43064e64c9d70a586322d33ea52de",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
