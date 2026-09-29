@@ -1,0 +1,16 @@
+apps/web/src/lib/server/mcp-oauth.ts
+  h_a39f9495f9ec1d 136-141
+apps/web/src/lib/server/remote-mcp-contract.test.ts
+  h_a39f9495f9ec1d 270-282
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9788b62e1c1ad62d0cbc4dfe3c153ffaa3411290",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
