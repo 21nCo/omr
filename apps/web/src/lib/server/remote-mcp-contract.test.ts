@@ -2,6 +2,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "@oh-my-router/execution/testing";
+import { ExecutionService, type ExecutionApproval } from "@oh-my-router/execution";
 
 
 const fixture = vi.hoisted(() => ({
@@ -15,6 +17,16 @@ const fixture = vi.hoisted(() => ({
 const credential = `omr_${"a".repeat(64)}`;
 const origin = "https://omr.example";
 const omrClientId = "client_11111111-1111-4111-8111-111111111111";
+const receipts = new MemoryExecutionReceiptStore(() => true);
+const approvals = new MemoryExecutionApprovalStore(() => true, receipts);
+const approvalService = new ExecutionService({} as never, {} as never, {} as never,
+  receipts, async () => [], Date.now, approvals, undefined, new Uint8Array(32));
+function seedApproval(id: string, workspaceId: string, grantId = "grant_one") {
+  approvals.approvals.set(id, {
+    id, workspaceId, actorUserId: "user_one", principalKey: `client:client_one:grant:${grantId}`,
+    status: "approved", expiresAt: Date.now() + 60_000, updatedAt: Date.now(),
+  } as ExecutionApproval);
+}
 
 vi.mock("@oh-my-router/client-access/postgres", () => ({
   connectPostgresClientAccess: async () => ({
@@ -68,7 +80,7 @@ vi.mock("@oh-my-router/identity/postgres", () => ({
 
 vi.mock("./cloudflare-runtime.js", () => ({
   databaseConnectionString: () => "postgres://fixture",
-  createCloudflareRouteServices: () => ({
+  createRemoteMcpRouteServices: () => ({
     device: {}, connections: {}, tools: {}, execution: {}, controlPlane: {},
   }),
 }));
@@ -120,8 +132,16 @@ vi.mock("./router.js", () => ({
         toolId: body?.toolId, expiresAt: Date.now() + 60_000,
       }, { status: 201 });
       if (url.pathname === "/api/approvals/execute") {
-        if (body?.approvalId !== "approval_one")
-          return Response.json({ error: "APPROVAL_ACCESS_DENIED" }, { status: 403 });
+        try {
+          await approvalService.approvalStatus({ kind: "client", userId: "user_one",
+            workspaceId: "workspace_one", clientId: "client_one", grantId: "grant_one",
+            capabilities: fixture.capabilities as never }, String(body?.approvalId));
+          await approvals.claim({ approvalId: String(body?.approvalId), actorUserId: "user_one",
+            principalKey: "client:client_one:grant:grant_one", now: Date.now(),
+            deadlineAt: Date.now() + 60_000 });
+        } catch (error) {
+          return Response.json({ error: (error as { code: string }).code }, { status: 409 });
+        }
         return Response.json({ id: "receipt_one", status: "succeeded", workspaceId: "workspace_one",
           toolId: "fixture.write", result: { ok: true } });
       }
@@ -170,6 +190,7 @@ describe("remote-mcp-contract", () => {
     fixture.kind = "mcp_remote";
     fixture.capabilities = ["tools:discover", "tools:read", "tools:write", "approvals:create"];
     fixture.apiRequests.length = 0;
+    approvals.approvals.clear();
   });
 
   it("serves public OAuth discovery from routed well-known URLs without exposing private data", async () => {
@@ -278,6 +299,7 @@ describe("remote-mcp-contract", () => {
         status: "approval_required", approvalId: "approval_one", executed: false,
       });
       expect(fixture.apiRequests.some((call) => call.path === "/api/approvals")).toBe(true);
+      seedApproval("approval_one", "workspace_one");
       const receipt = await client.callTool({ name: "omr.approvals.execute",
         arguments: { approvalId: "approval_one" } });
       expect(receipt.structuredContent).toMatchObject({ id: "receipt_one", status: "succeeded" });
@@ -390,6 +412,8 @@ describe("remote-mcp-contract", () => {
   });
 
   it("keeps MCP grants workspace-bound and checks capabilities and expiry on later calls", async () => {
+    seedApproval("approval_workspace_two", "workspace_two");
+    seedApproval("approval_same_workspace", "workspace_one");
     const handler = async (request: Request) => handleRemoteMcp(event(request));
     const transport = new StreamableHTTPClientTransport(new URL(`${origin}/mcp`), {
       requestInit: { headers: { authorization: `Bearer ${credential}` } },
@@ -398,20 +422,52 @@ describe("remote-mcp-contract", () => {
     const client = new Client({ name: "scoped-host", version: "1.0.0" }, { capabilities: {} });
     try {
       await client.connect(transport);
+      const sameWorkspace = await client.callTool({ name: "omr.approvals.execute",
+        arguments: { approvalId: "approval_same_workspace" } });
+      expect(sameWorkspace.structuredContent).toMatchObject({ id: "receipt_one", status: "succeeded" });
       const foreign = await client.callTool({ name: "omr.approvals.execute",
         arguments: { approvalId: "approval_workspace_two" } });
       expect(foreign).toMatchObject({ isError: true, structuredContent: {
-        error: { details: { error: "APPROVAL_ACCESS_DENIED" } },
+        error: { details: { error: "APPROVAL_UNAVAILABLE" } },
       } });
+      expect(approvals.approvals.get("approval_workspace_two")?.status).toBe("approved");
       expect(fixture.apiRequests.at(-1)?.path).toBe("/api/approvals/execute");
       fixture.capabilities = ["tools:discover"];
+      expect((await client.listTools()).tools.map((tool) => tool.name)).toContain("fixture.read");
       const deniedRead = await client.callTool({ name: "fixture.read", arguments: {} });
       expect(deniedRead.isError).toBe(true);
       expect(fixture.apiRequests.at(-1)?.path).toBe("/api/tools/execute");
-      fixture.expired = true;
-      const count = fixture.apiRequests.length;
+      const deniedApproval = await client.callTool({ name: "fixture.write",
+        arguments: { _omrIdempotencyKey: "narrowed" } });
+      expect(deniedApproval.isError).toBe(true);
+      seedApproval("approval_narrowed", "workspace_one");
+      const deniedReceipt = await client.callTool({ name: "omr.approvals.execute",
+        arguments: { approvalId: "approval_narrowed" } });
+      expect(deniedReceipt.isError).toBe(true);
+      expect(approvals.approvals.get("approval_narrowed")?.status).toBe("approved");
+      fixture.capabilities = ["tools:read"];
       await expect(client.listTools()).rejects.toThrow();
-      expect(fixture.apiRequests).toHaveLength(count);
+      fixture.capabilities = ["tools:discover", "tools:read", "tools:write", "approvals:create"];
+      const calls = [
+        { method: "tools/list", params: {} },
+        { method: "tools/call", params: { name: "fixture.read", arguments: {} } },
+        { method: "tools/call", params: { name: "fixture.write", arguments: { _omrIdempotencyKey: "late" } } },
+        { method: "tools/call", params: { name: "omr.approvals.execute", arguments: { approvalId: "approval_narrowed" } } },
+      ];
+      for (const state of ["expired", "revoked"] as const) {
+        fixture[state] = true;
+        const count = fixture.apiRequests.length;
+        for (const [index, call] of calls.entries()) {
+          const denied = await handler(new Request(`${origin}/mcp`, {
+            method: "POST", headers: { authorization: `Bearer ${credential}`,
+              "content-type": "application/json", accept: "application/json, text/event-stream" },
+            body: JSON.stringify({ jsonrpc: "2.0", id: index + 1, ...call }),
+          }));
+          expect(denied.status, `${state}: ${JSON.stringify(call)}`).toBe(401);
+        }
+        expect(fixture.apiRequests).toHaveLength(count);
+        fixture[state] = false;
+      }
     } finally {
       await client.close().catch(() => undefined);
     }
@@ -478,5 +534,25 @@ describe("remote-mcp-contract", () => {
     expect(config.env.staging.vars.OMR_MCP_BROWSER_ORIGINS.split(",")).toContain("https://chatgpt.com");
     expect(config.env.staging.kv_namespaces.map((binding) => binding.binding)).toContain("OAUTH_KV");
     expect(config.env.staging.hyperdrive.map((binding) => binding.binding)).toContain("HYPERDRIVE");
+  });
+
+  it("disables OAuth discovery and token routes when the documented staging rollback removes its bindings", async () => {
+    const config = JSON.parse(readFileSync(new URL("../../../wrangler.jsonc", import.meta.url), "utf8")) as {
+      env: { staging: { vars: Record<string, string>; kv_namespaces: Array<{ binding: string }> } };
+    };
+    const vars = { ...config.env.staging.vars };
+    delete vars.OMR_PUBLIC_ORIGIN;
+    const bindings = config.env.staging.kv_namespaces.filter(({ binding }) => binding !== "OAUTH_KV");
+    expect(bindings.some(({ binding }) => binding === "OAUTH_KV")).toBe(false);
+    const rolledBack = (request: Request) => ({
+      request, platform: { env: vars, ctx: { waitUntil() {}, passThroughOnException() {} } },
+    }) as never;
+    const metadata = await wellKnownGet(rolledBack(new Request(`${origin}/.well-known/oauth-protected-resource/mcp`)));
+    const token = await oauthPost(rolledBack(new Request(`${origin}/oauth/token`, { method: "POST" })));
+    const mcp = await mcpGet(rolledBack(new Request(`${origin}/mcp`)));
+    expect(metadata.status).toBe(503);
+    expect(token.status).toBe(503);
+    expect(mcp.status).toBe(401);
+    expect(mcp.headers.get("www-authenticate")).toBe('Bearer realm="OMR MCP"');
   });
 });

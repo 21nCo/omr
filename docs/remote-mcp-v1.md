@@ -100,10 +100,14 @@ approve it in OMR and call `omr.approvals.execute` from the host.
 
 To withdraw staging host access, revoke affected OMR clients in the two
 management pages, including any manual bearer grants. For an OAuth deployment
-rollback, remove the staging `OAUTH_KV` binding and `OMR_PUBLIC_ORIGIN`, or
-redeploy the previous Worker version; then confirm OAuth metadata and tokens
-are unavailable. Manual bearer access is independent and must be revoked
-separately. Do not delete the KV namespace before retaining any needed audit
-record. OMR-15 owns observed checks of the staging endpoint, two real hosts,
-consent and refresh, revocation, and rollback. Local contract tests here are
-code evidence only.
+rollback, remove the staging `OAUTH_KV` binding and `OMR_PUBLIC_ORIGIN` variable
+from `apps/web/wrangler.jsonc`, build, and deploy that configuration with the
+project-local `wrangler deploy --env staging`. Removing bindings from a local
+file alone does not change the deployed Worker. The previous `origin/dev`
+Worker already has both settings, so redeploying it does not disable OAuth.
+Confirm OAuth metadata and token routes return 503 and `/mcp` no longer
+advertises OAuth discovery. Revoke manual bearer grants separately; removing
+OAuth configuration does not revoke them. Retain any needed audit record
+before deleting the KV namespace. OMR-15 owns observed staging rollback,
+endpoint, two-host, consent, refresh, and revocation checks. Local contract
+tests here are code evidence only.

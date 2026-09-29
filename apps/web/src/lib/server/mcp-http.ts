@@ -8,7 +8,7 @@ import {
 import { connectPostgresClientAccess } from "@oh-my-router/client-access/postgres";
 import { createOMRMcpServer } from "@oh-my-router/mcp";
 
-import { createCloudflareRouteServices, databaseConnectionString } from "./cloudflare-runtime.js";
+import { createRemoteMcpRouteServices, databaseConnectionString } from "./cloudflare-runtime.js";
 import { createOMRRouter } from "./router.js";
 import { mcpBrowserOriginDenied } from "./mcp-browser-origin.js";
 
@@ -128,7 +128,7 @@ export async function handleRemoteMcp(event: RequestEvent): Promise<Response> {
         headers: { "cache-control": "no-store" },
       });
     }
-    const services = createCloudflareRouteServices(event);
+    const services = createRemoteMcpRouteServices(event);
     const router = createOMRRouter(
       services.device,
       services.connections,
