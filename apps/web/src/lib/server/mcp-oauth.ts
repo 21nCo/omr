@@ -359,6 +359,13 @@ export async function handleMcpOAuth(event: RequestEvent): Promise<Response> {
   try {
     const response = await provider.fetch(event.request, env, event.platform.ctx);
     const headers = new Headers(response.headers);
+    if (new URL(event.request.url).pathname === "/mcp" && response.status === 401 &&
+        headers.has("www-authenticate")) {
+      // The provider treats every advertised optional resource scope as a
+      // challenge requirement. Connecting only requires discovery.
+      const challenge = headers.get("www-authenticate")!;
+      headers.set("www-authenticate", challenge.replace(/, scope="[^"]*"/, ', scope="tools:discover"'));
+    }
     headers.set("cache-control", "no-store");
     return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
   } catch (error) {

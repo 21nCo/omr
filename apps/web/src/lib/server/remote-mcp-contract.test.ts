@@ -6,8 +6,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const fixture = vi.hoisted(() => ({
   revoked: false,
+  expired: false,
   kind: "mcp_remote" as "mcp_remote" | "mcp_stdio",
-  apiRequests: [] as Array<{ path: string; workspaceId: string | null; credential: string | null }>,
+  capabilities: ["tools:discover", "tools:read", "tools:write", "approvals:create"] as string[],
+  apiRequests: [] as Array<{ path: string; workspaceId: string | null; credential: string | null; toolId: unknown }>,
 }));
 
 const credential = `omr_${"a".repeat(64)}`;
@@ -18,18 +20,21 @@ vi.mock("@oh-my-router/client-access/postgres", () => ({
   connectPostgresClientAccess: async () => ({
     clients: {
       authenticate: async (value: string) => {
-        if (value !== credential || fixture.revoked) {
+        if (value !== credential || fixture.revoked || fixture.expired) {
           const { InvalidClientCredentialError } = await import("@oh-my-router/client-access");
           throw new InvalidClientCredentialError();
         }
         return {
           kind: fixture.kind, userId: "user_one", workspaceId: "workspace_one",
           clientId: "client_one", grantId: "grant_one",
-          capabilities: ["tools:discover", "tools:read", "tools:write", "approvals:create"],
+          capabilities: [...fixture.capabilities],
         };
       },
       registerClient: async () => ({ id: omrClientId }),
-      issueGrant: async () => ({ credential }),
+      issueGrant: async (input: { capabilities: string[] }) => {
+        fixture.capabilities = [...input.capabilities];
+        return { credential };
+      },
       revokeClient: async () => { fixture.revoked = true; },
     },
     oauthGrants: {
@@ -72,13 +77,22 @@ vi.mock("./router.js", () => ({
   createOMRRouter: () => ({
     handle: async (request: Request) => {
       const url = new URL(request.url);
+      const body = request.method === "POST" ? await request.clone().json() as Record<string, unknown> : null;
       const workspaceId = url.searchParams.get("workspaceId") ??
-        (request.method === "POST" ? (await request.clone().json()).workspaceId : null);
+        (typeof body?.workspaceId === "string" ? body.workspaceId : null);
       fixture.apiRequests.push({
         path: url.pathname, workspaceId,
         credential: request.headers.get("authorization"),
+        toolId: body?.toolId,
       });
-      if (workspaceId !== "workspace_one") return Response.json({ error: "WORKSPACE_ACCESS_DENIED" }, { status: 403 });
+      if (workspaceId && workspaceId !== "workspace_one")
+        return Response.json({ error: "WORKSPACE_ACCESS_DENIED" }, { status: 403 });
+      const required = url.pathname === "/api/tools" ? "tools:discover" :
+        url.pathname === "/api/tools/execute" ? "tools:read" :
+        url.pathname === "/api/approvals" || url.pathname === "/api/approvals/execute" ? "approvals:create" :
+        url.pathname === "/api/connections/list" ? "connections:read" : null;
+      if (required && !fixture.capabilities.includes(required))
+        return Response.json({ error: "CLIENT_CAPABILITY_DENIED", capability: required }, { status: 403 });
       if (url.pathname === "/api/tools") return Response.json({
         catalogSchemaVersion: "1.0.0", revision: "one", tools: [{
           catalogSchemaVersion: "1.0.0", id: "fixture.read", provider: "fixture",
@@ -88,11 +102,29 @@ vi.mock("./router.js", () => ({
             sensitiveKeys: [], pagination: { kind: "none" }, retry: "safe" },
           inputSchema: { type: "object", properties: {}, additionalProperties: false },
           outputSchema: { type: "object" },
+        }, {
+          catalogSchemaVersion: "1.0.0", id: "fixture.write", provider: "fixture",
+          providerVersion: "1.0.0", action: "write", displayName: "Fixture write",
+          description: "Write a fixture", hash: "fixture-write-hash",
+          contract: { version: "1.0.0", effect: "write", requiredScopes: [], resources: [],
+            sensitiveKeys: [], pagination: { kind: "none" }, retry: "provider-key" },
+          inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          outputSchema: { type: "object" },
         }],
       });
       if (url.pathname === "/api/tools/execute") return Response.json({
         status: "succeeded", output: { workspaceId },
       });
+      if (url.pathname === "/api/approvals") return Response.json({
+        id: "approval_one", status: "pending", workspaceId: "workspace_one",
+        toolId: body?.toolId, expiresAt: Date.now() + 60_000,
+      }, { status: 201 });
+      if (url.pathname === "/api/approvals/execute") {
+        if (body?.approvalId !== "approval_one")
+          return Response.json({ error: "APPROVAL_ACCESS_DENIED" }, { status: 403 });
+        return Response.json({ id: "receipt_one", status: "succeeded", workspaceId: "workspace_one",
+          toolId: "fixture.write", result: { ok: true } });
+      }
       return Response.json({ error: "NOT_FOUND" }, { status: 404 });
     },
   }),
@@ -101,6 +133,8 @@ vi.mock("./router.js", () => ({
 import { handleRemoteMcp } from "./mcp-http.js";
 import { handleMcpOAuth } from "./mcp-oauth.js";
 import { GET as wellKnownGet, OPTIONS as wellKnownOptions } from "../../routes/.well-known/[...path]/+server.js";
+import { GET as mcpGet, POST as mcpPost, OPTIONS as mcpOptions } from "../../routes/mcp/+server.js";
+import { POST as oauthPost, OPTIONS as oauthOptions } from "../../routes/oauth/[...path]/+server.js";
 
 function kvFixture() {
   const values = new Map<string, string>();
@@ -123,7 +157,7 @@ function event(request: Request, kv = kvFixture()) {
   return {
     request,
     platform: {
-      env: { OAUTH_KV: kv, OMR_PUBLIC_ORIGIN: origin },
+      env: { OAUTH_KV: kv, OMR_PUBLIC_ORIGIN: origin, OMR_MCP_BROWSER_ORIGINS: "https://host.example" },
       ctx: { waitUntil() {}, passThroughOnException() {} },
     },
   } as never;
@@ -132,7 +166,9 @@ function event(request: Request, kv = kvFixture()) {
 describe("remote-mcp-contract", () => {
   afterEach(() => {
     fixture.revoked = false;
+    fixture.expired = false;
     fixture.kind = "mcp_remote";
+    fixture.capabilities = ["tools:discover", "tools:read", "tools:write", "approvals:create"];
     fixture.apiRequests.length = 0;
   });
 
@@ -178,7 +214,7 @@ describe("remote-mcp-contract", () => {
     const authorizeUrl = new URL(`${origin}/oauth/authorize`);
     for (const [key, value] of Object.entries({
       response_type: "code", client_id: clientId, redirect_uri: "https://host.example/callback",
-      scope: "tools:discover tools:read offline_access", state: "host-state", resource: `${origin}/mcp`,
+      scope: "tools:discover tools:read tools:write approvals:create offline_access", state: "host-state", resource: `${origin}/mcp`,
       code_challenge: challenge, code_challenge_method: "S256",
     })) authorizeUrl.searchParams.set(key, value);
     const consent = await send(authorizeUrl.pathname + authorizeUrl.search);
@@ -215,6 +251,48 @@ describe("remote-mcp-contract", () => {
     expect(token.status).toBe(200);
     const issued = await token.json() as { access_token: string; refresh_token: string; resource: string };
     expect(issued.resource).toBe(`${origin}/mcp`);
+    const challengeResponse = await mcpGet(event(new Request(`${origin}/mcp`), kv));
+    expect(challengeResponse.status).toBe(401);
+    expect(challengeResponse.headers.get("www-authenticate")).toContain('scope="tools:discover"');
+    expect(challengeResponse.headers.get("www-authenticate")).not.toContain("tools:write");
+    expect(challengeResponse.headers.get("www-authenticate")).not.toContain("approvals:create");
+    const routedMcp = async (request: Request) => {
+      const response = await mcpPost(event(request, kv));
+      expect(response.headers.get("access-control-allow-origin")).toBe("https://host.example");
+      return response;
+    };
+    const transport = new StreamableHTTPClientTransport(new URL(`${origin}/mcp`), {
+      requestInit: { headers: { authorization: `Bearer ${issued.access_token}`, origin: "https://host.example" } },
+      fetch: async (request, init) => routedMcp(new Request(request, init)),
+    });
+    const client = new Client({ name: "oauth-host", version: "1.0.0" }, { capabilities: {} });
+    try {
+      await client.connect(transport);
+      expect((await client.listTools()).tools.map((tool) => tool.name)).toContain("fixture.read");
+      await expect(client.callTool({ name: "fixture.read", arguments: {} })).resolves.toMatchObject({
+        structuredContent: { status: "succeeded", output: { workspaceId: "workspace_one" } },
+      });
+      const requestedApproval = await client.callTool({ name: "fixture.write",
+        arguments: { _omrIdempotencyKey: "same-intent" } });
+      expect(requestedApproval.structuredContent).toMatchObject({
+        status: "approval_required", approvalId: "approval_one", executed: false,
+      });
+      expect(fixture.apiRequests.some((call) => call.path === "/api/approvals")).toBe(true);
+      const receipt = await client.callTool({ name: "omr.approvals.execute",
+        arguments: { approvalId: "approval_one" } });
+      expect(receipt.structuredContent).toMatchObject({ id: "receipt_one", status: "succeeded" });
+      fixture.capabilities = ["tools:discover", "tools:read"];
+      const deniedApproval = await client.callTool({ name: "fixture.write",
+        arguments: { _omrIdempotencyKey: "new-intent" } });
+      expect(deniedApproval.isError).toBe(true);
+      fixture.capabilities = ["tools:discover", "tools:read", "tools:write", "approvals:create"];
+      expect(fixture.apiRequests.some((call) => call.path === "/api/tools/execute" &&
+        call.workspaceId !== "workspace_one")).toBe(false);
+      expect(fixture.apiRequests.some((call) => call.path === "/api/tools/execute" &&
+        call.toolId === "fixture.write")).toBe(false);
+    } finally {
+      await client.close().catch(() => undefined);
+    }
     const oauthRequest = new Request(`${origin}/mcp`, { headers: { authorization: `Bearer ${issued.access_token}` } });
     const oauthAccess = await handleMcpOAuth(event(oauthRequest, kv));
     expect(oauthAccess.status).not.toBe(401);
@@ -264,6 +342,76 @@ describe("remote-mcp-contract", () => {
       const after = fixture.apiRequests.length;
       await expect(client.listTools()).rejects.toThrow();
       expect(fixture.apiRequests).toHaveLength(after);
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  });
+
+  it("routes browser preflight and authenticated MCP POST only for configured origins", async () => {
+    const kv = kvFixture();
+    const browser = "https://host.example";
+    const preflight = (url: string, method: string, headers: string) => new Request(url, {
+      method: "OPTIONS", headers: { origin: browser, "access-control-request-method": method,
+        "access-control-request-headers": headers },
+    });
+    const mcp = await mcpOptions(event(preflight(`${origin}/mcp`, "POST", "authorization, content-type"), kv));
+    const token = await oauthOptions(event(preflight(`${origin}/oauth/token`, "POST", "content-type"), kv));
+    expect(mcp.status).toBe(204);
+    expect(token.status).toBe(204);
+    expect(mcp.headers.get("access-control-allow-origin")).toBe(browser);
+    expect(token.headers.get("access-control-allow-origin")).toBe(browser);
+    const registration = await oauthPost(event(new Request(`${origin}/oauth/register`, {
+      method: "POST", headers: { origin: browser, "content-type": "application/json" },
+      body: JSON.stringify({ client_name: "Browser fixture", redirect_uris: [`${browser}/callback`],
+        grant_types: ["authorization_code"], response_types: ["code"], token_endpoint_auth_method: "none" }),
+    }), kv));
+    expect(registration.status).toBe(201);
+    expect(registration.headers.get("access-control-allow-origin")).toBe(browser);
+    const post = await mcpPost(event(new Request(`${origin}/mcp`, {
+      method: "POST", headers: { origin: browser, authorization: `Bearer ${credential}`,
+        "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    }), kv));
+    expect(post.status).toBe(200);
+    expect(post.headers.get("access-control-allow-origin")).toBe(browser);
+    expect(fixture.apiRequests.some((call) => call.path === "/api/tools")).toBe(true);
+    const denied = await mcpOptions(event(new Request(`${origin}/mcp`, {
+      method: "OPTIONS", headers: { origin: "https://other.example", "access-control-request-method": "POST" },
+    }), kv));
+    expect(denied.status).toBe(403);
+    expect(denied.headers.has("access-control-allow-origin")).toBe(false);
+    const unsafeHeader = await mcpOptions(event(preflight(`${origin}/mcp`, "POST", "x-unsafe"), kv));
+    expect(unsafeHeader.status).toBe(403);
+    const forged = await oauthPost(event(new Request(`${origin}/oauth/token`, {
+      method: "POST", headers: { origin: "https://other.example", "content-type": "application/x-www-form-urlencoded" },
+      body: "grant_type=refresh_token",
+    }), kv));
+    expect(forged.status).toBe(403);
+  });
+
+  it("keeps MCP grants workspace-bound and checks capabilities and expiry on later calls", async () => {
+    const handler = async (request: Request) => handleRemoteMcp(event(request));
+    const transport = new StreamableHTTPClientTransport(new URL(`${origin}/mcp`), {
+      requestInit: { headers: { authorization: `Bearer ${credential}` } },
+      fetch: async (request, init) => handler(new Request(request, init)),
+    });
+    const client = new Client({ name: "scoped-host", version: "1.0.0" }, { capabilities: {} });
+    try {
+      await client.connect(transport);
+      const foreign = await client.callTool({ name: "omr.approvals.execute",
+        arguments: { approvalId: "approval_workspace_two" } });
+      expect(foreign).toMatchObject({ isError: true, structuredContent: {
+        error: { details: { error: "APPROVAL_ACCESS_DENIED" } },
+      } });
+      expect(fixture.apiRequests.at(-1)?.path).toBe("/api/approvals/execute");
+      fixture.capabilities = ["tools:discover"];
+      const deniedRead = await client.callTool({ name: "fixture.read", arguments: {} });
+      expect(deniedRead.isError).toBe(true);
+      expect(fixture.apiRequests.at(-1)?.path).toBe("/api/tools/execute");
+      fixture.expired = true;
+      const count = fixture.apiRequests.length;
+      await expect(client.listTools()).rejects.toThrow();
+      expect(fixture.apiRequests).toHaveLength(count);
     } finally {
       await client.close().catch(() => undefined);
     }
@@ -321,12 +469,13 @@ describe("remote-mcp-contract", () => {
 
   it("keeps OAuth wiring behind staging configuration with a canonical resource origin", () => {
     const config = JSON.parse(readFileSync(new URL("../../../wrangler.jsonc", import.meta.url), "utf8")) as {
-      env: { staging: { vars: { OMR_PUBLIC_ORIGIN: string }; kv_namespaces: Array<{ binding: string }>;
+      env: { staging: { vars: { OMR_PUBLIC_ORIGIN: string; OMR_MCP_BROWSER_ORIGINS: string }; kv_namespaces: Array<{ binding: string }>;
         hyperdrive: Array<{ binding: string }> } };
       kv_namespaces?: unknown;
     };
     expect(config.kv_namespaces).toBeUndefined();
     expect(config.env.staging.vars.OMR_PUBLIC_ORIGIN).toBe("https://omr-web-staging.21n.workers.dev");
+    expect(config.env.staging.vars.OMR_MCP_BROWSER_ORIGINS.split(",")).toContain("https://chatgpt.com");
     expect(config.env.staging.kv_namespaces.map((binding) => binding.binding)).toContain("OAUTH_KV");
     expect(config.env.staging.hyperdrive.map((binding) => binding.binding)).toContain("HYPERDRIVE");
   });

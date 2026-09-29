@@ -73,9 +73,21 @@ omr login --url https://omr-web-staging.21n.workers.dev --kind mcp_remote
 
 Approve the device code in OMR, selecting one workspace and the minimum
 capabilities. Configure the host's Streamable HTTP URL as above and set its
-private header to `Authorization: Bearer <device-grant>`. Never commit the
-credential to a shared MCP configuration file. A CLI or local stdio grant will
-not authenticate at `/mcp`.
+private header to `Authorization: Bearer <device-grant>`. `omr login` saves the
+grant in a private profile; it does not print the bearer. On the machine where
+you logged in, retrieve the `key` from
+`${OMR_CONFIG_DIR:-~/.config/oh-my-router}/profiles/default.json` (or
+`profiles/<name>.json` if you used `--profile <name>`), then paste it into the
+host's private secret/header field. The file must remain private (mode `0600`
+on macOS/Linux; your account ACL on Windows). Keep it out of shell history,
+logs, and shared host configuration. Never commit the credential to a shared
+MCP configuration file. A CLI or local stdio grant will not authenticate at
+`/mcp`.
+
+Browser-host cross-origin requests require the host's exact HTTPS origin in
+the staging Worker's `OMR_MCP_BROWSER_ORIGINS` comma-separated allowlist. Native
+hosts do not send a browser `Origin` header. Consent and management forms still
+require the OMR origin and their CSRF token.
 
 OMR lists manual clients under `/app/clients` and OAuth connections under
 `/oauth/manage`. Revoke there to stop subsequent MCP calls immediately. Tool

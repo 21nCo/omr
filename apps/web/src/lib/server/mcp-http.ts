@@ -10,6 +10,7 @@ import { createOMRMcpServer } from "@oh-my-router/mcp";
 
 import { createCloudflareRouteServices, databaseConnectionString } from "./cloudflare-runtime.js";
 import { createOMRRouter } from "./router.js";
+import { mcpBrowserOriginDenied } from "./mcp-browser-origin.js";
 
 const MAX_MCP_BODY_BYTES = 64 * 1024;
 
@@ -91,7 +92,7 @@ async function boundedRequest(request: Request): Promise<Request | null> {
 export async function handleRemoteMcp(event: RequestEvent): Promise<Response> {
   const request = event.request;
   const origin = new URL(request.url).origin;
-  if (request.headers.has("origin") && request.headers.get("origin") !== origin) {
+  if (mcpBrowserOriginDenied(event)) {
     return Response.json({ error: "MCP_ORIGIN_DENIED" }, {
       status: 403,
       headers: { "cache-control": "no-store" },
