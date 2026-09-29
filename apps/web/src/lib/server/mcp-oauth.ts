@@ -8,6 +8,7 @@ import type {
 import {
   CLIENT_CAPABILITIES,
   ClientAccessDeniedError,
+  ClientCapabilityDeniedError,
   InvalidClientCredentialError,
 } from "@oh-my-router/client-access";
 import { connectPostgresClientAccess } from "@oh-my-router/client-access/postgres";
@@ -342,8 +343,8 @@ export async function handleMcpOAuth(event: RequestEvent): Promise<Response> {
         try {
           principal = await access.clients.authenticate(exchange.props.omrCredential, "tools:discover");
         } catch (error) {
-          if (error instanceof InvalidClientCredentialError) {
-            throw new OAuthError("invalid_grant", { description: "The OMR grant has expired or was revoked" });
+          if (error instanceof InvalidClientCredentialError || error instanceof ClientCapabilityDeniedError) {
+            throw new OAuthError("invalid_grant", { description: "The OMR grant has expired, was revoked, or lost authorization" });
           }
           throw error;
         }

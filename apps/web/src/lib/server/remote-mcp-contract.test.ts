@@ -31,10 +31,14 @@ function seedApproval(id: string, workspaceId: string, grantId = "grant_one") {
 vi.mock("@oh-my-router/client-access/postgres", () => ({
   connectPostgresClientAccess: async () => ({
     clients: {
-      authenticate: async (value: string) => {
+      authenticate: async (value: string, requiredCapability?: string) => {
         if (value !== credential || fixture.revoked || fixture.expired) {
           const { InvalidClientCredentialError } = await import("@oh-my-router/client-access");
           throw new InvalidClientCredentialError();
+        }
+        if (requiredCapability && !fixture.capabilities.includes(requiredCapability)) {
+          const { ClientCapabilityDeniedError } = await import("@oh-my-router/client-access");
+          throw new ClientCapabilityDeniedError(requiredCapability as never);
         }
         return {
           kind: fixture.kind, userId: "user_one", workspaceId: "workspace_one",
@@ -336,6 +340,20 @@ describe("remote-mcp-contract", () => {
     const renewed = await refresh(issued.refresh_token);
     expect(renewed.status).toBe(200);
     const renewedToken = await renewed.json() as { refresh_token: string };
+    fixture.capabilities = ["tools:read", "tools:write", "approvals:create"];
+    const lostDiscovery = await refresh(renewedToken.refresh_token);
+    expect(lostDiscovery.status).toBe(400);
+    await expect(lostDiscovery.json()).resolves.toMatchObject({ error: "invalid_grant" });
+    fixture.capabilities = ["tools:discover", "tools:write", "approvals:create"];
+    const lostRead = await refresh(renewedToken.refresh_token);
+    expect(lostRead.status).toBe(400);
+    await expect(lostRead.json()).resolves.toMatchObject({ error: "invalid_grant" });
+    fixture.capabilities = ["tools:discover", "tools:read", "tools:write", "approvals:create"];
+    fixture.expired = true;
+    const expired = await refresh(renewedToken.refresh_token);
+    expect(expired.status).toBe(400);
+    await expect(expired.json()).resolves.toMatchObject({ error: "invalid_grant" });
+    fixture.expired = false;
     fixture.revoked = true;
     expect((await handleMcpOAuth(event(oauthRequest, kv))).status).toBe(401);
     const denied = await refresh(renewedToken.refresh_token);

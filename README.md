@@ -105,10 +105,14 @@ checkout use `npm exec` as below; after installing the CLI archive, run the same
 with `omr` directly:
 
 ```sh
-npm exec -- omr login --url https://your-omr-worker.example --kind mcp_remote
+npm exec -- omr login --url https://your-omr-worker.example --kind mcp_remote \
+  --capabilities tools:discover,tools:read --profile host
 ```
 
-Approve the code in OMR, then configure an MCP client that supports custom HTTP headers to
+This example grants discovery and read calls. Select only the capabilities the host needs;
+the [remote MCP host guide](docs/remote-mcp-v1.md#manual-bearer-fallback) explains write and
+approval scopes and how to retrieve the private credential. Approve the code in OMR, then
+configure an MCP client that supports custom HTTP headers to
 connect to `https://your-omr-worker.example/mcp` with `Authorization: Bearer <device-grant>`.
 The remote endpoint checks the grant, its `mcp_remote` client kind, and `tools:discover` on
 every request; individual tool calls still enforce their own capabilities and approval policy.
