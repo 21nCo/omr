@@ -120,7 +120,7 @@ export async function handleRemoteMcp(event: RequestEvent): Promise<Response> {
       services.execution,
       services.controlPlane,
     );
-    const fetchImpl: typeof fetch = async (input, init) => {
+    const fetchImpl: typeof fetch = (input, init) => {
       const internalRequest = new Request(input, init);
       const url = new URL(internalRequest.url);
       if (url.origin !== origin || !url.pathname.startsWith("/api/")) {

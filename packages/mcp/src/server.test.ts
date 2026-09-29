@@ -1,8 +1,10 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
+import { McpError, ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { ToolManifest } from "@oh-my-router/tools";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createOMRMcpServer } from "./server.js";
@@ -291,7 +293,7 @@ describe("OMR MCP server", () => {
 
     expect((await client.callTool({ name: "demo.read", arguments: { value: "a" } })).isError).toBe(true);
     const callsAtRevocation = paths.length;
-    await client.listTools();
+    await expect(client.listTools()).resolves.toMatchObject({ tools: expect.any(Array) });
     for (const call of [
       { name: "demo.write", arguments: { value: "a", _omrIdempotencyKey: "key" } },
       { name: "omr.connections.list", arguments: {} },
@@ -300,8 +302,15 @@ describe("OMR MCP server", () => {
       { name: "omr.catalog.refresh", arguments: {} },
       { name: "omr.catalog.providers", arguments: {} },
     ]) {
-      const result = await client.callTool(call).catch(() => undefined);
-      if (result) expect(result.isError).toBe(true);
+      const operation = (await Promise.allSettled([client.callTool(call)]))[0]!;
+      if (operation.status === "fulfilled") {
+        expect(operation.value.isError, call.name).toBe(true);
+      } else {
+        expect(operation.reason, call.name).toBeInstanceOf(Error);
+        if (!(operation.reason instanceof McpError)) {
+          expect((operation.reason as Error).message, call.name).toMatch(/revoked or expired/);
+        }
+      }
     }
     expect(paths).toHaveLength(callsAtRevocation);
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -422,23 +431,12 @@ describe("OMR MCP server", () => {
       }
       return Response.json({ status: "succeeded", output: { value: "remote" } });
     };
-    // A Worker must validate without dynamic code generation.
-    vi.stubGlobal("WebSocketPair", class {});
-    vi.stubGlobal("Function", new Proxy(Function, {
-      apply() { throw new Error("Worker forbids dynamic code generation"); },
-      construct() { throw new Error("Worker forbids dynamic code generation"); },
-    }));
-    let server: Awaited<ReturnType<typeof createOMRMcpServer>>;
-    try {
-      server = await createOMRMcpServer({
-        baseUrl: "https://omr.test",
-        credential: "credential",
-        workspaceId: "workspace-1",
-        fetchImpl: apiFetch,
-      });
-    } finally {
-      vi.unstubAllGlobals();
-    }
+    const server = await createOMRMcpServer({
+      baseUrl: "https://omr.test",
+      credential: "credential",
+      workspaceId: "workspace-1",
+      fetchImpl: apiFetch,
+    });
     const handler = await server.createWebStandardHandler({ enableJsonResponse: true });
     const transport = new StreamableHTTPClientTransport(new URL("https://omr.test/mcp"), {
       fetch: async (request, init) => handler(new Request(request, init)),
@@ -456,5 +454,11 @@ describe("OMR MCP server", () => {
       });
     const invalid = await client.callTool({ name: "demo.read", arguments: { value: 42 } });
     expect(invalid.isError).toBe(true);
+  });
+
+  it("validates HTTP tool calls in a fresh Worker-like process without dynamic code generation", async () => {
+    const probe = new URL("../../../tests/fixtures/worker-mcp-http.mjs", import.meta.url);
+    const { stdout } = await promisify(execFile)(process.execPath, [probe.pathname], { timeout: 10_000 });
+    expect(JSON.parse(stdout)).toEqual({ valid: "remote", invalid: "MCPFN_INVALID_ARGUMENTS", executions: 1 });
   });
 });
