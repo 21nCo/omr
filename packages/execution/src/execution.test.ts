@@ -149,6 +149,22 @@ function action(name: string, effect: ToolEffect) {
 }
 
 describe("execution service", () => {
+  it("shows approval status only to the exact client grant and current member", async () => {
+    const { service, workspace, workspaceStore } = await fixture();
+    const principal = { kind: "client" as const, userId: "user_1", workspaceId: workspace.id,
+      clientId: "client_1", grantId: "grant_1", capabilities: ["tools:write", "approvals:create"] as
+        ("tools:write" | "approvals:create")[] };
+    const approval = await requestApproval(service, { principal, toolId: "linear.create_issue", params: {} });
+    expect((await service.approvalStatus(principal, approval.id)).status).toBe("pending");
+    await expect(service.approvalStatus({ ...principal, grantId: "grant_2" }, approval.id))
+      .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    await expect(service.approvalStatus({ ...principal, capabilities: ["tools:write"] }, approval.id))
+      .rejects.toMatchObject({ code: "EXECUTION_CAPABILITY_DENIED" });
+    workspaceStore.removeMembership(workspace.id, principal.userId);
+    await expect(service.approvalStatus(principal, approval.id))
+      .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+  });
+
   it("keeps memory approval fingerprints and membership decisions fail closed", async () => {
     const { approvals, service, workspace, workspaceStore } = await fixture();
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
@@ -1008,7 +1024,8 @@ describe("execution service", () => {
     const receipt = await service.executeApproved(principal, approval.id);
     expect(receipt).toMatchObject({ status: "succeeded", toolId: "linear.create_issue" });
     expect(receipt.approvalId).toBe(approval.id);
-    expect(publicReceipt(receipt)).not.toHaveProperty("approvalId");
+    expect(publicReceipt(receipt)).toHaveProperty("approvalId", approval.id);
+    expect(publicReceipt(receipt, false)).not.toHaveProperty("approvalId");
     expect(actionCall).toHaveBeenCalledWith("linear", "create_issue", expect.objectContaining({
       params: { title: "Approved title" },
       retry: { maxAttempts: 1, backoff: "exponential" },

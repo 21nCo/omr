@@ -5,7 +5,7 @@ import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
 import { ToolCatalog } from "@oh-my-router/tools";
 
-import { assertConnectionWorkspace, checkAuthorizedConnectionHealth, createProviderIntegrationConfig, requireExecutionOrigin, scopedToolIds, selectAuthorizedConnection } from "./cloudflare-runtime.js";
+import { assertConnectionWorkspace, checkAuthorizedConnectionHealth, createProviderIntegrationConfig, requireExecutionOrigin, revokeOwnBearerClient, scopedToolIds, selectAuthorizedConnection } from "./cloudflare-runtime.js";
 import { createOMRRouter, type ConnectionRouteServices } from "./router.js";
 
 describe("Worker provider OAuth configuration", () => {
@@ -45,6 +45,49 @@ describe("execution origin policy", () => {
     expect(() => requireExecutionOrigin(request({
       cookie: "session=fixture", origin: "https://other.example", authorization: "Bearer bogus-grant",
     }))).toThrowError(/same-origin/);
+  });
+});
+
+describe("CLI self-revocation", () => {
+  it("rejects cookies and other principals and revokes only the bearer grant", async () => {
+    const revoke = vi.fn(async () => undefined);
+    const principal = { kind: "client" as const, userId: "user_1", workspaceId: "workspace_1",
+      clientId: "client_1", grantId: "grant_1", capabilities: [] };
+    const request = (headers: Record<string, string>) => new Request("https://omr.example/api/client-grants/revoke-self",
+      { method: "POST", headers });
+    await expect(revokeOwnBearerClient(request({ cookie: "session=fixture" }), async () => principal, revoke))
+      .rejects.toMatchObject({ code: "CLIENT_ACCESS_DENIED" });
+    await expect(revokeOwnBearerClient(request({ authorization: "Bearer fixture", cookie: "session=fixture" }),
+      async () => principal, revoke)).rejects.toMatchObject({ code: "CLIENT_ACCESS_DENIED" });
+    await expect(revokeOwnBearerClient(request({ authorization: "Bearer fixture" }),
+      async () => ({ kind: "web", userId: "user_1", workspaceId: "workspace_1" }), revoke))
+      .rejects.toMatchObject({ code: "CLIENT_ACCESS_DENIED" });
+    expect(revoke).not.toHaveBeenCalled();
+    await expect(revokeOwnBearerClient(request({ authorization: "Bearer fixture" }),
+      async () => principal, revoke)).resolves.toEqual({ revoked: true });
+    expect(revoke).toHaveBeenCalledExactlyOnceWith("user_1", "grant_1");
+  });
+
+  it("keeps a sibling grant on the same client usable after self-revocation", async () => {
+    const workspaceStore = new MemoryWorkspaceStore();
+    const workspaces = new WorkspaceAuthority(workspaceStore);
+    const workspaceId = (await workspaces.createTeam({ ownerUserId: "user_owner", name: "CLI Team" })).workspace.id;
+    const clients = new ClientAccessAuthority(new MemoryClientAccessStore(workspaceStore));
+    const client = await clients.registerClient({ actorUserId: "user_owner", workspaceId, kind: "cli", name: "CLI" });
+    const first = await clients.issueGrant({ actorUserId: "user_owner", clientId: client.id,
+      workspaceId, capabilities: ["tools:read"] });
+    const sibling = await clients.issueGrant({ actorUserId: "user_owner", clientId: client.id,
+      workspaceId, capabilities: ["tools:read"] });
+    const request = new Request("https://omr.example/api/client-grants/revoke-self", {
+      method: "POST", headers: { authorization: `Bearer ${first.credential}` },
+    });
+    await revokeOwnBearerClient(request,
+      async () => ({ ...await clients.authenticate(first.credential), kind: "client" }),
+      (userId, grantId) => clients.revokeGrant(userId, grantId));
+    await expect(clients.authenticate(first.credential)).rejects.toMatchObject({ code: "CLIENT_CREDENTIAL_INVALID" });
+    await expect(clients.authenticate(sibling.credential)).resolves.toMatchObject({
+      clientId: client.id, grantId: sibling.grant.id,
+    });
   });
 });
 

@@ -93,21 +93,16 @@ GitHub connections request only the read-only `read:user` profile scope by defau
 PlugFn's write-capable repository scopes. Private repository access is not available through
 this default flow.
 
-Authenticate a local CLI profile with:
+Build and install the portable CLI archive as documented in [the CLI command contract](packages/cli/README.md).
+Its `omr` command supports device login, profiles, workspace and provider-account selection,
+tool search and execution, JSON input, approval status, and remote-revoking logout. A logged-in
+profile also powers `omr-mcp` when it is run from a repository checkout; the CLI archive does
+not contain `omr-mcp`. `OMR_BACKEND`, `OMR_API_KEY`, and `OMR_WORKSPACE_ID` provide an
+explicit headless alternative. Browser-controlled approvals still use the same execution policy.
 
-```sh
-npm exec -- omr login --url http://localhost:5173
-```
-
-The CLI stores credentials under `~/.config/oh-my-router`, outside the repository.
-Run `npm exec -- omr tools list --json` to inspect the workspace-scoped catalog. A logged-in profile also powers
-`npm exec -- omr-mcp`; `OMR_BACKEND`, `OMR_API_KEY`, and `OMR_WORKSPACE_ID` provide an explicit
-headless alternative. The MCP server exposes `omr.connections.list` for workspace connection
-discovery. Read tools execute immediately; write, destructive, and unknown-effect tools create a
-pending approval and return its id without invoking the provider. After a workspace owner approves
-the request in the browser control plane, call `omr.approvals.execute` with that approval id.
-
-For a remote MCP client, issue a separate workspace-scoped device grant:
+For a remote MCP client, issue a separate workspace-scoped device grant. From a repository
+checkout use `npm exec` as below; after installing the CLI archive, run the same arguments
+with `omr` directly:
 
 ```sh
 npm exec -- omr login --url https://your-omr-worker.example --kind mcp_remote

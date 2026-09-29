@@ -391,6 +391,19 @@ export class ExecutionService {
     return this.requiredApprovals().reject({ approvalId, actorUserId, now: this.now() });
   }
 
+  async approvalStatus(principal: ExecutionPrincipal, approvalId: string): Promise<ExecutionApproval> {
+    if (principal.kind === "client" && !principal.capabilities.includes("approvals:create")) {
+      throw new ExecutionCapabilityDeniedError("approvals:create");
+    }
+    const approval = await this.requiredApprovals().getForActor(approvalId, principal.userId);
+    if (approval.principalKey !== principalKey(principal) ||
+        (principal.workspaceId !== approval.workspaceId &&
+          !(principal.kind === "web" && principal.workspaceId === ""))) {
+      throw new ApprovalUnavailableError();
+    }
+    return approval;
+  }
+
   async executeApproved(
     principal: ExecutionPrincipal,
     approvalId: string,

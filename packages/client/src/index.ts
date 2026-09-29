@@ -42,8 +42,28 @@ export class OMRHttpError extends Error {
   }
 }
 
-function normalizedBaseUrl(value: string): string {
+export class OMRTransportError extends Error {
+  readonly code = "OMR_TRANSPORT_ERROR";
+  constructor(readonly path: string) {
+    super(`OMR transport failed for ${path}`);
+    this.name = "OMRTransportError";
+  }
+}
+
+export class OMRProtocolError extends Error {
+  readonly code = "OMR_PROTOCOL_ERROR";
+  constructor(readonly path: string) {
+    super(`Invalid OMR response for ${path}`);
+    this.name = "OMRProtocolError";
+  }
+}
+
+export function normalizedBaseUrl(value: string): string {
+  if (/[\u0000-\u0020\u007f]/.test(value)) throw new Error("OMR backend URL contains invalid whitespace");
   const url = new URL(value);
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error("OMR backend URL cannot include credentials, query, or fragment");
+  }
   if (url.protocol !== "https:" && !(url.protocol === "http:" &&
     ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) {
     throw new Error("OMR backend must use HTTPS or localhost HTTP");
@@ -69,7 +89,9 @@ async function request<T>(input: {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), input.timeoutMs);
   try {
-    const response = await input.fetchImpl(`${input.baseUrl}${input.path}`, {
+    let response: Response;
+    try {
+      response = await input.fetchImpl(`${input.baseUrl}${input.path}`, {
       method: input.method ?? "GET",
       headers: {
         ...(input.credential ? { authorization: `Bearer ${input.credential}` } : {}),
@@ -77,9 +99,17 @@ async function request<T>(input: {
       },
       ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
       signal: controller.signal,
-    });
-    const body = await responseBody(response);
+      });
+    } catch {
+      throw new OMRTransportError(input.path.split("?", 1)[0]!);
+    }
+    let body: unknown;
+    try { body = await responseBody(response); }
+    catch { throw new OMRTransportError(input.path.split("?", 1)[0]!); }
     if (!response.ok) throw new OMRHttpError(response.status, input.path, body);
+    if (body === null || typeof body !== "object") {
+      throw new OMRProtocolError(input.path.split("?", 1)[0]!);
+    }
     return body as T;
   } finally {
     clearTimeout(timeout);
@@ -196,6 +226,14 @@ export class OMRClient {
   executeApproved(approvalId: string): Promise<unknown> {
     return this.post("/api/approvals/execute", { approvalId },
       Math.max(this.timeoutMs, MIN_EXECUTION_TIMEOUT_MS));
+  }
+
+  approvalStatus(approvalId: string): Promise<unknown> {
+    return this.get(`/api/approvals/status?approvalId=${encodeURIComponent(approvalId)}`);
+  }
+
+  revokeSelf(): Promise<unknown> {
+    return this.post("/api/client-grants/revoke-self", {});
   }
 
   private get<T>(path: string): Promise<T> {

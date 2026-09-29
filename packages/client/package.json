@@ -12,10 +12,15 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./profile-store": {
+      "types": "./dist/profile-store.d.ts",
+      "import": "./dist/profile-store.js"
     }
   },
   "dependencies": {
     "@oh-my-router/client-access": "0.0.0",
-    "@oh-my-router/tools": "0.0.0"
+    "@oh-my-router/tools": "0.0.0",
+    "ini": "^5.0.0"
   }
 }
