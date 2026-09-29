@@ -1,0 +1,22 @@
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 243,252-256,432,460,472,485,516,562,580,641,650,678,682,692,819-828
+apps/web/src/lib/server/mcp-http.ts
+  h_a39f9495f9ec1d 11,131
+apps/web/src/lib/server/remote-mcp-audience.test.ts
+  h_a39f9495f9ec1d 1-78
+apps/web/src/lib/server/remote-mcp-contract.test.ts
+  h_a39f9495f9ec1d 5-6,20-29,83,135-144,193,302,415-416,425-427,431,433,436,440-448,450-470,538-557
+docs/remote-mcp-v1.md
+  h_a39f9495f9ec1d 103-113
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1271df4c5ce13dcc1b08fd5ac6cbc37bd3b6c527",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
