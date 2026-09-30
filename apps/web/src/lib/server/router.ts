@@ -231,6 +231,7 @@ function ownership(body: Record<string, unknown>): ConnectionOwnership {
   return value;
 }
 
+/** Accept only the consent tiers exposed by the GitHub v1 connection journey. */
 function githubAccess(body: Record<string, unknown>): GithubAccess | undefined {
   const value = body.githubAccess;
   if (value === undefined) return undefined;

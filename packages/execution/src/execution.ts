@@ -342,6 +342,7 @@ export class GitHubWriteRejectedError extends Error {
 
 const inputValidators = new Map<string, Validator>();
 
+/** Validate the submitted value against the exact manifest schema used for approval. */
 function validToolInput(manifest: ToolManifest, params: JsonValue): boolean {
   let validator = inputValidators.get(manifest.hash);
   if (!validator) {
@@ -394,6 +395,7 @@ export class ExecutionService {
     this.fingerprintKey = fingerprintKey;
   }
 
+  /** Reject unapproved effects and bind a read to its selected workspace connection. */
   async execute(input: {
     principal: ExecutionPrincipal;
     toolId: string;
@@ -520,6 +522,7 @@ export class ExecutionService {
     });
   }
 
+  /** Revalidate the manifest and redacted preview before recording consent. */
   async approve(approvalId: string, actorUserId: string): Promise<ExecutionApproval> {
     const approvals = this.requiredApprovals();
     const approval = await approvals.getForActor(approvalId, actorUserId);
@@ -535,6 +538,7 @@ export class ExecutionService {
     return this.requiredApprovals().reject({ approvalId, actorUserId, now: this.now() });
   }
 
+  /** Disclose approval state only to its original principal and workspace. */
   async approvalStatus(principal: ExecutionPrincipal, approvalId: string): Promise<ExecutionApproval> {
     if (principal.kind === "client" && !principal.capabilities.includes("approvals:create")) {
       throw new ExecutionCapabilityDeniedError("approvals:create");
@@ -663,6 +667,7 @@ export class ExecutionService {
     }
   }
 
+  /** Read back the receipt associated with a claimed approval after reconciliation. */
   private async settledApprovedReceipt(approval: ExecutionApproval,
     deadlineAt: number): Promise<ExecutionReceipt> {
     const receipt = await withinInvocationDeadline(deadlineAt,
@@ -672,6 +677,7 @@ export class ExecutionService {
     return receipt;
   }
 
+  /** Resolve an interrupted claim without treating an entered effect as retryable. */
   private async reconcileStaleEffect(approvals: ExecutionApprovalStore,
     principal: ExecutionPrincipal, approval: ExecutionApproval, receipt: ExecutionReceipt,
     deadlineAt: number): Promise<ExecutionApproval> {
@@ -896,35 +902,11 @@ export class ExecutionService {
   /** Distinguish proven provider denial from transport or settlement ambiguity. */
   private async handleAuthorizedDispatchFailure(error: unknown, input: AuthorizedInput,
     receipt: ExecutionReceipt, cleanupDeadlineAt: number, state: AuthorizedRunState): Promise<never> {
-    if (input.manifest.id === "github.issues.commentPublic" &&
-        error instanceof ProviderPreflightError && error.reason === "remote_connection_missing") {
-      state.missingRemoteAfterInvoke = true;
-      if (await this.failDispatchedReceipt(receipt.id, "connection_unavailable", cleanupDeadlineAt)) {
-        throw new ConnectionUnavailableError();
-      }
-    }
-    if (isMissingRemoteConnection(error)) {
-      state.missingRemoteAfterInvoke = true;
-      // Reads are effect free; an untyped write failure remains uncertain.
-      if (input.manifest.provider === "github" && input.manifest.contract.effect === "read" &&
-          await this.failDispatchedReceipt(receipt.id, "connection_unavailable", cleanupDeadlineAt)) {
-        throw new ConnectionUnavailableError();
-      }
-    }
-    const deniedRead = input.manifest.provider === "github" && input.manifest.contract.effect === "read"
-      ? githubHttpFailure(error) : null;
-    if (deniedRead && await this.failDispatchedReceipt(receipt.id, "github_read_denied", cleanupDeadlineAt)) {
-      throw new GitHubReadError(receipt.id, deniedRead.status, deniedRead.rateLimited,
-        deniedRead.retryAfterSeconds, deniedRead.rateLimitResetAt);
-    }
-    if (input.manifest.id === "github.issues.commentPublic" && error instanceof ProviderPreflightError &&
-        error.reason !== "remote_connection_missing" &&
-        await this.failDispatchedReceipt(receipt.id, "github_write_preflight_failed", cleanupDeadlineAt)) {
-      throw new GitHubWritePreflightError(receipt.id, error);
-    }
-    if (input.manifest.id === "github.issues.commentPublic" && error instanceof ConfirmedGitHubWriteRejection &&
-        await this.failDispatchedReceipt(receipt.id, "github_write_rejected", cleanupDeadlineAt)) {
-      throw new GitHubWriteRejectedError(receipt.id, error.failure);
+    state.missingRemoteAfterInvoke = isMissingRemoteConnection(error) ||
+      isMissingGithubCommentPreflight(error, input.manifest);
+    const confirmed = confirmedDispatchFailure(error, input.manifest, receipt.id);
+    if (confirmed && await this.failDispatchedReceipt(receipt.id, confirmed.code, cleanupDeadlineAt)) {
+      throw confirmed.error;
     }
     await withinInvocationDeadline(cleanupDeadlineAt, () =>
       this.receipts.uncertain(receipt.id, "provider_outcome_unknown", this.now(), cleanupDeadlineAt))
@@ -1007,6 +989,43 @@ export class ExecutionService {
     if (!this.approvals) throw new Error("Execution approval store is not configured");
     return this.approvals;
   }
+}
+
+interface ConfirmedDispatchFailure {
+  code: string;
+  error: Error;
+}
+
+/** A wrapped GitHub preflight proves the comment POST was never entered. */
+function isMissingGithubCommentPreflight(error: unknown, manifest: ToolManifest): boolean {
+  return manifest.id === "github.issues.commentPublic" &&
+    error instanceof ProviderPreflightError && error.reason === "remote_connection_missing";
+}
+
+/** Classify only failures whose provider effect is known to be absent or rejected. */
+function confirmedDispatchFailure(error: unknown, manifest: ToolManifest,
+  receiptId: string): ConfirmedDispatchFailure | null {
+  if (isMissingGithubCommentPreflight(error, manifest)) {
+    return { code: "connection_unavailable", error: new ConnectionUnavailableError() };
+  }
+  // A raw lookup error does not prove that an already dispatched write had no effect.
+  if (isMissingRemoteConnection(error)) {
+    return manifest.provider === "github" && manifest.contract.effect === "read"
+      ? { code: "connection_unavailable", error: new ConnectionUnavailableError() } : null;
+  }
+  if (manifest.provider === "github" && manifest.contract.effect === "read") {
+    const denied = githubHttpFailure(error);
+    if (denied) return { code: "github_read_denied",
+      error: new GitHubReadError(receiptId, denied.status, denied.rateLimited,
+        denied.retryAfterSeconds, denied.rateLimitResetAt) };
+  }
+  if (manifest.id === "github.issues.commentPublic" && error instanceof ProviderPreflightError) {
+    return { code: "github_write_preflight_failed", error: new GitHubWritePreflightError(receiptId, error) };
+  }
+  if (manifest.id === "github.issues.commentPublic" && error instanceof ConfirmedGitHubWriteRejection) {
+    return { code: "github_write_rejected", error: new GitHubWriteRejectedError(receiptId, error.failure) };
+  }
+  return null;
 }
 
 function principalKey(principal: ExecutionPrincipal): string {
