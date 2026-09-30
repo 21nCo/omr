@@ -1,0 +1,33 @@
+docs/github-v1.md
+  s_55d0a6ad53816d::t_d26722fc55306b 57-60
+packages/plugfn-runtime/src/github.ts
+  s_e84a8141b691ce::t_348db83d762b90 15-39,56-57,66-67,74-75,83
+tests/acceptance/github-adapter-contract.test.ts
+  s_e84a8141b691ce::t_88a666dbb9c5f3 51-64
+tests/acceptance/github-rate-limit-chain.test.ts
+  s_55d0a6ad53816d::t_1d27ffef47d059 1-83
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "063d78c727eee5d104e3d0175cefdb1bbd98747c",
+  "prompts": {},
+  "sessions": {
+    "s_55d0a6ad53816d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "302221c7-1aff-43cf-9332-56a7c4a0d50e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    },
+    "s_e84a8141b691ce": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0f22f-b02f-77d3-b84a-24f46d56eb13",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
