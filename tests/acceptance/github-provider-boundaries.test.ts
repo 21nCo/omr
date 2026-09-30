@@ -22,9 +22,9 @@ const failures = [
     "API rate limit exceeded", 429, "GITHUB_RATE_LIMITED"],
 ] as const;
 
-async function fixture(failurePoint: "scope" | "preflight" | "comment" | "transport" | "server", status: number,
+async function fixture(failurePoint: "scope" | "preflight" | "comment" | "transport" | "server" | "read", status: number,
   headers: Record<string, string>, message: string) {
-  let activeFailurePoint: "scope" | "preflight" | "comment" | "transport" | "server" = failurePoint;
+  let activeFailurePoint: typeof failurePoint = failurePoint;
   const calls: string[] = [];
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -40,6 +40,9 @@ async function fixture(failurePoint: "scope" | "preflight" | "comment" | "transp
           { headers: { "X-OAuth-Scopes": "read:user, public_repo" } });
     }
     if (url === "https://api.github.com/repos/org/public") {
+      if (activeFailurePoint === "read") {
+        return Response.json({ message, secret: "provider-private-data" }, { status, headers: new Headers(headers) });
+      }
       return activeFailurePoint === "preflight"
         ? Response.json({ message, secret: "provider-private-data" }, { status, headers: new Headers(headers) })
         : Response.json({ id: 1, private: false });
@@ -51,8 +54,9 @@ async function fixture(failurePoint: "scope" | "preflight" | "comment" | "transp
     }
     throw new Error(`Unexpected provider request: ${url}`);
   }));
+  const database = new MemoryAdapter();
   const runtime = plugFn({
-    database: new MemoryAdapter(), auth: { getUserId: async () => null },
+    database, auth: { getUserId: async () => null },
     baseUrl: "https://omr.local",
     encryptionKey: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     integrations: { github: { type: "oauth2", clientId: "sandbox-client", clientSecret: "sandbox-secret",
@@ -63,7 +67,8 @@ async function fixture(failurePoint: "scope" | "preflight" | "comment" | "transp
   const workspaceStore = new MemoryWorkspaceStore();
   const { workspace } = await new WorkspaceAuthority(workspaceStore)
     .provisionPersonalWorkspace({ userId: "alice" });
-  const connections = new ConnectionAuthority(new MemoryConnectionBindingStore(workspaceStore));
+  const bindingStore = new MemoryConnectionBindingStore(workspaceStore);
+  const connections = new ConnectionAuthority(bindingStore);
   const orchestrator = new PlugFnConnectionOrchestrator(connections, runtime);
   const redirectUri = "https://omr.local/app/oauth/callback";
   const { authUrl } = await orchestrator.startOAuth({ actorUserId: "alice", workspaceId: workspace.id,
@@ -73,7 +78,15 @@ async function fixture(failurePoint: "scope" | "preflight" | "comment" | "transp
     redirectUri, label: "Alice" });
   const receipts = new MemoryExecutionReceiptStore(() => true);
   const approvals = new MemoryExecutionApprovalStore(() => true, receipts);
-  const service = new ExecutionService(await createPlugFnToolCatalog(runtime), connections, runtime, receipts,
+  let deleteBeforeDispatch = false;
+  const dispatch = { action: async (...args: Parameters<typeof runtime.action>) => {
+    if (deleteBeforeDispatch && args[1] !== "account.get") {
+      await database.deleteConnection(binding.connection.providerConnectionId);
+      deleteBeforeDispatch = false;
+    }
+    return runtime.action(...args);
+  } };
+  const service = new ExecutionService(await createPlugFnToolCatalog(runtime), connections, dispatch, receipts,
     (connectionId, _binding, principal) => verifiedGithubScopes(runtime, {
       connectionId, userId: principal.userId, workspaceId: principal.workspaceId,
     }), Date.now, approvals, undefined, new Uint8Array(32).fill(7));
@@ -88,11 +101,92 @@ async function fixture(failurePoint: "scope" | "preflight" | "comment" | "transp
   const post = (path: string, body: object) => router.handle(new Request(`https://omr.invalid${path}`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
   }));
-  return { calls, receipts, approvals, service, principal, workspace, binding, workspaceStore, post,
-    setFailurePoint(value: "scope" | "preflight" | "comment" | "transport" | "server") { activeFailurePoint = value; } };
+  return { calls, receipts, approvals, service, principal, workspace, binding, bindingStore, workspaceStore, post,
+    removeRemote: () => database.deleteConnection(binding.connection.providerConnectionId),
+    removeBeforeDispatch() { deleteBeforeDispatch = true; },
+    setFailurePoint(value: typeof failurePoint) { activeFailurePoint = value; } };
 }
 
 describe("GitHub provider error boundaries through OAuth, PlugFn, execution and HTTP", () => {
+  it.each([
+    ["long 429", 429, { "retry-after": "120", "x-ratelimit-reset": "1800000000" }, "API rate limit exceeded"],
+    ["primary 403", 403, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1800000000" }, "API rate limit exceeded"],
+    ["secondary 403", 403, { "retry-after": "45" }, "secondary rate limit exceeded"],
+  ] as const)("settles %s repository read without long retries or leaking provider text", async (
+    _case, status, headers, message,
+  ) => {
+    const { calls, receipts, workspace, post } = await fixture("read", status, headers, message);
+    const started = Date.now();
+    const response = await post("/api/tools/execute", { workspaceId: workspace.id,
+      toolId: "github.repos.get", params: { owner: "org", repo: "public" } });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(calls.filter((url) => url === "https://api.github.com/repos/org/public")).toHaveLength(1);
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("retry-after" in headers ? headers["retry-after"] : null);
+    expect(response.headers.get("x-ratelimit-reset")).toBe(
+      "x-ratelimit-reset" in headers ? headers["x-ratelimit-reset"] : null);
+    const body = await response.json() as { error: string; receiptId: string; message: string };
+    expect(body).toMatchObject({ error: "GITHUB_RATE_LIMITED", receiptId: expect.any(String),
+      message: expect.stringContaining("Retry after") });
+    expect(JSON.stringify(body)).not.toContain("provider-private-data");
+    expect(receipts.receipts.get(body.receiptId)).toMatchObject({ status: "failed",
+      workspaceId: workspace.id, errorCode: "github_read_denied" });
+  });
+
+  it.each(["read", "approval"] as const)("marks a deleted selected PlugFn connection unavailable during %s scope proof", async (operation) => {
+    const { calls, receipts, approvals, service, principal, workspace, binding, bindingStore,
+      removeRemote, post } = await fixture("read", 404, {}, "Not Found");
+    await removeRemote();
+    if (operation === "read") {
+      const response = await post("/api/tools/execute", { workspaceId: workspace.id,
+        toolId: "github.repos.get", params: { owner: "org", repo: "public" } });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ error: "CONNECTION_UNAVAILABLE" });
+    } else {
+      await expect(service.requestApproval({ principal, toolId: "github.issues.commentPublic",
+        params: { owner: "org", repo: "public", issueNumber: 1, body: "Hello" },
+        idempotencyKey: "deleted-at-approval" })).rejects.toMatchObject({ code: "CONNECTION_UNAVAILABLE" });
+    }
+    expect(bindingStore.connections.get(binding.connection.id)).toMatchObject({
+      status: "needs_reauth", readiness: "unavailable", healthReason: "plugfn_connection_missing" });
+    expect(receipts.receipts.size).toBe(0);
+    expect(approvals.approvals.size).toBe(0);
+    expect(calls.filter((url) => url.includes("/repos/") || url.endsWith("/comments"))).toHaveLength(0);
+  });
+
+  it.each(["read", "approved comment"] as const)("settles a missing remote connection after %s scope proof without a provider write", async (operation) => {
+    const { calls, receipts, approvals, service, principal, workspace, binding, bindingStore,
+      removeBeforeDispatch, post } = await fixture("read", 404, {}, "Not Found");
+    let approvalId: string | undefined;
+    if (operation === "approved comment") {
+      const approval = await service.requestApproval({ principal, toolId: "github.issues.commentPublic",
+        params: { owner: "org", repo: "public", issueNumber: 1, body: "Hello" },
+        idempotencyKey: "deleted-before-dispatch" });
+      approvalId = approval.id;
+      await service.approve(approval.id, principal.userId);
+    }
+    removeBeforeDispatch();
+    const response = operation === "read"
+      ? await post("/api/tools/execute", { workspaceId: workspace.id, toolId: "github.repos.get",
+        params: { owner: "org", repo: "public" } })
+      : await post("/api/approvals/execute", { approvalId });
+    expect(response.status).toBe(operation === "read" ? 409 : 502);
+    expect(await response.json()).toMatchObject({ error: operation === "read"
+      ? "CONNECTION_UNAVAILABLE" : "EXECUTION_OUTCOME_UNKNOWN" });
+    expect(bindingStore.connections.get(binding.connection.id)).toMatchObject({
+      status: "needs_reauth", readiness: "unavailable", healthReason: "plugfn_connection_missing" });
+    expect([...receipts.receipts.values()]).toEqual([expect.objectContaining({
+      status: operation === "read" ? "failed" : "uncertain",
+      errorCode: operation === "read" ? "connection_unavailable" : "provider_outcome_unknown",
+      workspaceId: workspace.id,
+      connectionId: binding.connection.id })]);
+    if (approvalId) {
+      expect(approvals.approvals.get(approvalId)).toMatchObject({ status: "uncertain" });
+      await expect(service.executeApproved(principal, approvalId)).rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN" });
+    }
+    expect(calls.filter((url) => url.includes("/repos/") || url.endsWith("/comments"))).toHaveLength(0);
+  });
+
   it.each(failures)("returns safe %s scope proof errors before a receipt or approval", async (
     _name, status, headers, message, httpStatus, code,
   ) => {

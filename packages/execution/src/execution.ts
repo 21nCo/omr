@@ -48,6 +48,23 @@ export type ExecutionPrincipal =
       capabilities: ClientCapability[];
     };
 
+interface AuthorizedInput {
+  principal: ExecutionPrincipal;
+  manifest: ToolManifest;
+  params: JsonValue;
+  connection: ConnectionBindingRecord;
+  idempotencyKey?: string;
+  approvalId?: string;
+  approvalExpiresAt?: number;
+  deadlineAt: number;
+}
+
+interface AuthorizedRunState {
+  missingRemoteAfterInvoke: boolean;
+  dispatchedReceiptId: string | null;
+  succeededReceipt: ExecutionReceipt | null;
+}
+
 export interface ExecutionReceipt {
   id: string;
   workspaceId: string;
@@ -224,9 +241,10 @@ export class GitHubReadError extends Error {
     "GITHUB_REPOSITORY_UNAVAILABLE" | "GITHUB_RATE_LIMITED";
   constructor(readonly receiptId: string, status: number, rateLimited: boolean,
     readonly retryAfterSeconds?: number, readonly rateLimitResetAt?: number) {
-    const code = status === 401 ? "GITHUB_RECONNECT_REQUIRED"
-      : status === 404 ? "GITHUB_REPOSITORY_UNAVAILABLE"
-      : rateLimited ? "GITHUB_RATE_LIMITED" : "GITHUB_ACCESS_DENIED";
+    let code: GitHubReadError["code"] = "GITHUB_ACCESS_DENIED";
+    if (status === 401) code = "GITHUB_RECONNECT_REQUIRED";
+    else if (status === 404) code = "GITHUB_REPOSITORY_UNAVAILABLE";
+    else if (rateLimited) code = "GITHUB_RATE_LIMITED";
     super({
       GITHUB_RECONNECT_REQUIRED: "GitHub rejected this connection. Reconnect the account.",
       GITHUB_REPOSITORY_UNAVAILABLE: "Repository unavailable. Check its name and private-repository access.",
@@ -246,9 +264,10 @@ export class GitHubScopeProofError extends Error {
   readonly retryAfterSeconds?: number;
   readonly rateLimitResetAt?: number;
   constructor(failure: GitHubHttpFailure) {
-    const code = failure.rateLimited ? "GITHUB_RATE_LIMITED"
-      : failure.status === 401 ? "GITHUB_RECONNECT_REQUIRED"
-      : failure.status === 404 ? "GITHUB_REPOSITORY_UNAVAILABLE" : "GITHUB_ACCESS_DENIED";
+    let code: GitHubScopeProofError["code"] = "GITHUB_ACCESS_DENIED";
+    if (failure.rateLimited) code = "GITHUB_RATE_LIMITED";
+    else if (failure.status === 401) code = "GITHUB_RECONNECT_REQUIRED";
+    else if (failure.status === 404) code = "GITHUB_REPOSITORY_UNAVAILABLE";
     super({
       GITHUB_RECONNECT_REQUIRED: "GitHub rejected this connection. Reconnect the account.",
       GITHUB_REPOSITORY_UNAVAILABLE: "GitHub account unavailable. Check the selected connection.",
@@ -271,13 +290,12 @@ export class GitHubWritePreflightError extends Error {
   readonly retryAfterSeconds?: number;
   readonly rateLimitResetAt?: number;
   constructor(readonly receiptId: string, preflight: ProviderPreflightError) {
-    const code = preflight.reason === "unverified_public_repository"
-      ? "GITHUB_PUBLIC_REPOSITORY_REQUIRED"
-      : preflight.failure?.rateLimited ? "GITHUB_RATE_LIMITED"
-      : preflight.status === 401 ? "GITHUB_RECONNECT_REQUIRED"
-      : preflight.status === 403 ? "GITHUB_ACCESS_DENIED"
-      : preflight.status === 404 ? "GITHUB_REPOSITORY_UNAVAILABLE"
-      : "GITHUB_PREFLIGHT_UNAVAILABLE";
+    let code: GitHubWritePreflightError["code"] = "GITHUB_PREFLIGHT_UNAVAILABLE";
+    if (preflight.reason === "unverified_public_repository") code = "GITHUB_PUBLIC_REPOSITORY_REQUIRED";
+    else if (preflight.failure?.rateLimited) code = "GITHUB_RATE_LIMITED";
+    else if (preflight.status === 401) code = "GITHUB_RECONNECT_REQUIRED";
+    else if (preflight.status === 403) code = "GITHUB_ACCESS_DENIED";
+    else if (preflight.status === 404) code = "GITHUB_REPOSITORY_UNAVAILABLE";
     super({
       GITHUB_PUBLIC_REPOSITORY_REQUIRED: "Public issue comments require a verified public repository. Private repositories are unsupported.",
       GITHUB_RECONNECT_REQUIRED: "GitHub rejected this connection. Reconnect the account.",
@@ -301,11 +319,12 @@ export class GitHubWriteRejectedError extends Error {
   readonly retryAfterSeconds?: number;
   readonly rateLimitResetAt?: number;
   constructor(readonly receiptId: string, failure: GitHubHttpFailure) {
-    const code = failure.rateLimited ? "GITHUB_RATE_LIMITED"
-      : failure.status === 401 ? "GITHUB_RECONNECT_REQUIRED"
-      : failure.status === 404 ? "GITHUB_REPOSITORY_UNAVAILABLE"
-      : failure.status === 410 ? "GITHUB_COMMENT_UNAVAILABLE"
-      : failure.status === 422 ? "GITHUB_COMMENT_REJECTED" : "GITHUB_ACCESS_DENIED";
+    let code: GitHubWriteRejectedError["code"] = "GITHUB_ACCESS_DENIED";
+    if (failure.rateLimited) code = "GITHUB_RATE_LIMITED";
+    else if (failure.status === 401) code = "GITHUB_RECONNECT_REQUIRED";
+    else if (failure.status === 404) code = "GITHUB_REPOSITORY_UNAVAILABLE";
+    else if (failure.status === 410) code = "GITHUB_COMMENT_UNAVAILABLE";
+    else if (failure.status === 422) code = "GITHUB_COMMENT_REJECTED";
     super({
       GITHUB_RECONNECT_REQUIRED: "GitHub rejected this connection. Reconnect the account before requesting a new approval.",
       GITHUB_REPOSITORY_UNAVAILABLE: "GitHub could not find this issue or repository. Check its name, number, and access before requesting a new approval.",
@@ -434,6 +453,7 @@ export class ExecutionService {
     });
   }
 
+  /** Reserve a scoped write intent only after effective grants and schema validation. */
   async requestApproval(input: {
     principal: ExecutionPrincipal;
     toolId: string;
@@ -528,6 +548,7 @@ export class ExecutionService {
     return approval;
   }
 
+  /** Consume one approved intent with receipt-backed, replay-safe settlement. */
   async executeApproved(
     principal: ExecutionPrincipal,
     approvalId: string,
@@ -585,6 +606,7 @@ export class ExecutionService {
     }
   }
 
+  /** Recover an approved attempt from its durable receipt without dispatching again. */
   private async replayApprovedReceipt(principal: ExecutionPrincipal, approvalId: string,
     deadlineAt: number): Promise<ExecutionReceipt | null> {
     const approvals = this.requiredApprovals();
@@ -676,6 +698,7 @@ export class ExecutionService {
     return settled;
   }
 
+  /** Return a proven success or preserve the uncertain result of an earlier effect. */
   private async approvedReplayOutcome(approvals: ExecutionApprovalStore,
     prior: ExecutionApproval, receipt: ExecutionReceipt, deadlineAt: number): Promise<ExecutionReceipt> {
     if (receipt.status === "succeeded") {
@@ -692,6 +715,7 @@ export class ExecutionService {
     throw new ApprovalUnavailableError();
   }
 
+  /** Recheck the exact selected connection and effective scopes before a write. */
   private async authorizeApproved(principal: ExecutionPrincipal, approval: ExecutionApproval,
     deadlineAt: number) {
     const manifest = this.approvedManifest(principal, approval);
@@ -730,22 +754,13 @@ export class ExecutionService {
     return this.invocationGuard.runIdentity({ principal, capability, deadlineAt }, report);
   }
 
-  private async runAuthorized(input: {
-    principal: ExecutionPrincipal;
-    manifest: ToolManifest;
-    params: JsonValue;
-    connection: Awaited<ReturnType<ConnectionAuthority["resolve"]>>;
-    idempotencyKey?: string;
-    approvalId?: string;
-    approvalExpiresAt?: number;
-    deadlineAt: number;
-  }): Promise<ExecutionReceipt> {
+  /** Fence an authorized invocation through reservation, dispatch and settlement. */
+  private async runAuthorized(input: AuthorizedInput): Promise<ExecutionReceipt> {
     const cleanupDeadlineAt = input.deadlineAt + 5_000;
     const settle = (operation: () => Promise<unknown>) =>
       withinInvocationDeadline(cleanupDeadlineAt, operation).catch(() => undefined);
-    let missingRemoteAfterInvoke = false;
-    let dispatchedReceiptId: string | null = null;
-    let succeededReceipt: ExecutionReceipt | null = null;
+    const state: AuthorizedRunState = { missingRemoteAfterInvoke: false,
+      dispatchedReceiptId: null, succeededReceipt: null };
     const invoke = async (assertCanDispatch: () => void): Promise<ExecutionReceipt> => {
       const assertApprovedCanDispatch = () => {
         assertCanDispatch();
@@ -787,31 +802,15 @@ export class ExecutionService {
       if (!reservation.created) {
         const replay = this.replayReceipt(reservation.receipt, expectedReceipt,
           assertApprovedCanDispatch);
-        if (replay.status === "succeeded") succeededReceipt = replay;
+        if (replay.status === "succeeded") state.succeededReceipt = replay;
         return replay;
       }
 
+      await this.beginAuthorizedDispatch(reservation.receipt.id, input.deadlineAt,
+        cleanupDeadlineAt, assertApprovedCanDispatch);
       let result: JsonValue;
       try {
-        assertApprovedCanDispatch();
-      } catch (error) {
-        // Reservation is durable, but the provider was never called.
-        await settle(() => this.receipts.fail(reservation.receipt.id,
-          "authorization_window_closed", this.now(), cleanupDeadlineAt));
-        throw error;
-      }
-      try {
-        await this.receipts.beginDispatch(reservation.receipt.id, this.now(), input.deadlineAt);
-        assertApprovedCanDispatch();
-      } catch (error) {
-        // The provider has not been entered. A late database response may have
-        // committed the transition, so settle either predispatch state if possible.
-        await settle(() => this.receipts.fail(reservation.receipt.id,
-          "authorization_window_closed", this.now(), cleanupDeadlineAt));
-        throw error;
-      }
-      try {
-        dispatchedReceiptId = reservation.receipt.id;
+        state.dispatchedReceiptId = reservation.receipt.id;
         result = jsonResult(await this.plugfn.action(input.manifest.provider, input.manifest.action, {
           userId: input.principal.userId,
           connectionId: input.connection.providerConnectionId,
@@ -828,56 +827,12 @@ export class ExecutionService {
           cache: false,
         }));
       } catch (error) {
-        const missingRemote = isMissingRemoteConnection(error);
-        if (missingRemote) {
-          missingRemoteAfterInvoke = true;
-        }
-        const deniedRead = input.manifest.provider === "github" && input.manifest.contract.effect === "read"
-          ? githubHttpFailure(error) : null;
-        if (deniedRead) {
-          let recorded = false;
-          try {
-            await this.receipts.fail(reservation.receipt.id, "github_read_denied", this.now(), cleanupDeadlineAt);
-            recorded = true;
-          } catch { /* Treat a failed receipt write as an uncertain outcome. */ }
-          if (recorded) throw new GitHubReadError(reservation.receipt.id, deniedRead.status,
-            deniedRead.rateLimited, deniedRead.retryAfterSeconds, deniedRead.rateLimitResetAt);
-        }
-        if (input.manifest.id === "github.issues.commentPublic" && error instanceof ProviderPreflightError) {
-          let recorded = false;
-          try {
-            await this.receipts.fail(reservation.receipt.id, "github_write_preflight_failed", this.now(), cleanupDeadlineAt);
-            recorded = true;
-          } catch { /* Without a durable failure, the receipt remains uncertain. */ }
-          if (recorded) throw new GitHubWritePreflightError(reservation.receipt.id, error);
-        }
-        if (input.manifest.id === "github.issues.commentPublic" && error instanceof ConfirmedGitHubWriteRejection) {
-          let recorded = false;
-          try {
-            await this.receipts.fail(reservation.receipt.id, "github_write_rejected", this.now(), cleanupDeadlineAt);
-            recorded = true;
-          } catch { /* Without a durable failure, the write outcome remains uncertain. */ }
-          if (recorded) throw new GitHubWriteRejectedError(reservation.receipt.id, error.failure);
-        }
-        await settle(() => this.receipts.uncertain(reservation.receipt.id,
-          "provider_outcome_unknown", this.now(), cleanupDeadlineAt));
-        throw new ExecutionOutcomeUnknownError(reservation.receipt.id);
+        return this.handleAuthorizedDispatchFailure(error, input, reservation.receipt,
+          cleanupDeadlineAt, state);
       }
-      try {
-        succeededReceipt = input.approvalId
-          ? await withinInvocationDeadline(input.deadlineAt, () =>
-            this.requiredApprovals().succeedWithReceipt({ approvalId: input.approvalId!,
-            receipt: reservation.receipt, result, now: this.now(),
-            deadlineAt: input.deadlineAt }))
-          : await withinInvocationDeadline(input.deadlineAt,
-            () => this.receipts.succeed(reservation.receipt.id, result, this.now(), input.deadlineAt));
-        return succeededReceipt;
-      } catch {
-        // The upstream call has already returned. A failed receipt write cannot make it safe to retry.
-        await settle(() => this.receipts.uncertain(reservation.receipt.id,
-          "receipt_persist_failed", this.now(), cleanupDeadlineAt));
-        throw new ExecutionOutcomeUnknownError(reservation.receipt.id);
-      }
+      state.succeededReceipt = await this.persistAuthorizedResult(input, reservation.receipt, result,
+        cleanupDeadlineAt);
+      return state.succeededReceipt;
     };
     const run = () => this.invocationGuard ? this.invocationGuard.run({
       principal: input.principal,
@@ -892,17 +847,17 @@ export class ExecutionService {
     try {
       return await run();
     } catch (error) {
-      if (missingRemoteAfterInvoke) {
+      if (state.missingRemoteAfterInvoke) {
         await settle(() => markMissingRemoteConnection(this.connections, input.connection.id));
       }
       // The provider result and (for approved effects) approval transition are
       // already durable. A later guard COMMIT failure cannot erase that result.
-      if (succeededReceipt) return succeededReceipt;
-      if (error instanceof GitHubReadError || error instanceof GitHubWritePreflightError ||
+      if (state.succeededReceipt) return state.succeededReceipt;
+      if (error instanceof ConnectionUnavailableError || error instanceof GitHubReadError || error instanceof GitHubWritePreflightError ||
           error instanceof GitHubWriteRejectedError) throw error;
-      if (dispatchedReceiptId &&
+      if (state.dispatchedReceiptId &&
           !(error instanceof ExecutionOutcomeUnknownError)) {
-        const receiptId = dispatchedReceiptId;
+        const receiptId = state.dispatchedReceiptId;
         await settle(() => this.receipts.uncertain(receiptId,
           "invocation_outcome_unknown", this.now(), cleanupDeadlineAt));
         throw new ExecutionOutcomeUnknownError(receiptId);
@@ -911,6 +866,93 @@ export class ExecutionService {
     }
   }
 
+  /** Close a reserved receipt when authorization expires before provider entry. */
+  private async beginAuthorizedDispatch(receiptId: string, deadlineAt: number,
+    cleanupDeadlineAt: number, assertCanDispatch: () => void): Promise<void> {
+    try {
+      assertCanDispatch();
+      await this.receipts.beginDispatch(receiptId, this.now(), deadlineAt);
+      assertCanDispatch();
+    } catch (error) {
+      // A late begin response may have committed, but no provider call began.
+      await withinInvocationDeadline(cleanupDeadlineAt, () =>
+        this.receipts.fail(receiptId, "authorization_window_closed", this.now(), cleanupDeadlineAt))
+        .catch(() => undefined);
+      throw error;
+    }
+  }
+
+  /** Persist a known failure before exposing it as a retryable client error. */
+  private async failDispatchedReceipt(receiptId: string, code: string,
+    cleanupDeadlineAt: number): Promise<boolean> {
+    try {
+      await this.receipts.fail(receiptId, code, this.now(), cleanupDeadlineAt);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Distinguish proven provider denial from transport or settlement ambiguity. */
+  private async handleAuthorizedDispatchFailure(error: unknown, input: AuthorizedInput,
+    receipt: ExecutionReceipt, cleanupDeadlineAt: number, state: AuthorizedRunState): Promise<never> {
+    if (input.manifest.id === "github.issues.commentPublic" &&
+        error instanceof ProviderPreflightError && error.reason === "remote_connection_missing") {
+      state.missingRemoteAfterInvoke = true;
+      if (await this.failDispatchedReceipt(receipt.id, "connection_unavailable", cleanupDeadlineAt)) {
+        throw new ConnectionUnavailableError();
+      }
+    }
+    if (isMissingRemoteConnection(error)) {
+      state.missingRemoteAfterInvoke = true;
+      // Reads are effect free; an untyped write failure remains uncertain.
+      if (input.manifest.provider === "github" && input.manifest.contract.effect === "read" &&
+          await this.failDispatchedReceipt(receipt.id, "connection_unavailable", cleanupDeadlineAt)) {
+        throw new ConnectionUnavailableError();
+      }
+    }
+    const deniedRead = input.manifest.provider === "github" && input.manifest.contract.effect === "read"
+      ? githubHttpFailure(error) : null;
+    if (deniedRead && await this.failDispatchedReceipt(receipt.id, "github_read_denied", cleanupDeadlineAt)) {
+      throw new GitHubReadError(receipt.id, deniedRead.status, deniedRead.rateLimited,
+        deniedRead.retryAfterSeconds, deniedRead.rateLimitResetAt);
+    }
+    if (input.manifest.id === "github.issues.commentPublic" && error instanceof ProviderPreflightError &&
+        error.reason !== "remote_connection_missing" &&
+        await this.failDispatchedReceipt(receipt.id, "github_write_preflight_failed", cleanupDeadlineAt)) {
+      throw new GitHubWritePreflightError(receipt.id, error);
+    }
+    if (input.manifest.id === "github.issues.commentPublic" && error instanceof ConfirmedGitHubWriteRejection &&
+        await this.failDispatchedReceipt(receipt.id, "github_write_rejected", cleanupDeadlineAt)) {
+      throw new GitHubWriteRejectedError(receipt.id, error.failure);
+    }
+    await withinInvocationDeadline(cleanupDeadlineAt, () =>
+      this.receipts.uncertain(receipt.id, "provider_outcome_unknown", this.now(), cleanupDeadlineAt))
+      .catch(() => undefined);
+    throw new ExecutionOutcomeUnknownError(receipt.id);
+  }
+
+  /** Keep approved success and its receipt atomic; uncertain persistence never authorizes replay. */
+  private async persistAuthorizedResult(input: AuthorizedInput, receipt: ExecutionReceipt,
+    result: JsonValue, cleanupDeadlineAt: number): Promise<ExecutionReceipt> {
+    try {
+      if (input.approvalId) {
+        return await withinInvocationDeadline(input.deadlineAt, () =>
+          this.requiredApprovals().succeedWithReceipt({ approvalId: input.approvalId!,
+            receipt, result, now: this.now(), deadlineAt: input.deadlineAt }));
+      }
+      return await withinInvocationDeadline(input.deadlineAt,
+        () => this.receipts.succeed(receipt.id, result, this.now(), input.deadlineAt));
+    } catch {
+      // The provider has returned; no failed store write makes a retry safe.
+      await withinInvocationDeadline(cleanupDeadlineAt, () =>
+        this.receipts.uncertain(receipt.id, "receipt_persist_failed", this.now(), cleanupDeadlineAt))
+        .catch(() => undefined);
+      throw new ExecutionOutcomeUnknownError(receipt.id);
+    }
+  }
+
+  /** Enforce identity and request equality on any idempotent receipt replay. */
   private replayReceipt(receipt: ExecutionReceipt, expected: ExecutionReceipt,
     assertCanDispatch: () => void): ExecutionReceipt {
     if (receipt.approvalId !== expected.approvalId || receipt.requestHash !== expected.requestHash ||
@@ -941,17 +983,20 @@ export class ExecutionService {
     }
   }
 
+  /** Check verified grants and retire a remotely deleted selected connection. */
   private async assertScopes(manifest: ToolManifest, connection: ConnectionBindingRecord,
     principal: ExecutionPrincipal): Promise<void> {
     let scopes: readonly string[] | undefined;
     try {
       scopes = await this.connectionScopes(connection.providerConnectionId, connection, principal);
     } catch (error) {
+      if (isMissingRemoteConnection(error)) {
+        await markMissingRemoteConnection(this.connections, connection.id);
+        throw new ConnectionUnavailableError();
+      }
       const githubFailure = connection.provider === "github" ? githubHttpFailure(error) : null;
       if (githubFailure) throw new GitHubScopeProofError(githubFailure);
-      if (!isMissingRemoteConnection(error)) throw error;
-      await markMissingRemoteConnection(this.connections, connection.id);
-      throw new ConnectionUnavailableError();
+      throw error;
     }
     if (!hasRequiredScopes(manifest, scopes)) {
       throw new ExecutionInputError(`Connection lacks required action scopes: ${manifest.contract.requiredScopes.join(", ")}`);

@@ -73,6 +73,29 @@ describe("workspace-scoped discovery and manifest grants", () => {
     expect(onMissing).not.toHaveBeenCalled();
   });
 
+  it.each([
+    Object.assign(new Error("GitHub unavailable"), { status: 503 }),
+    new TypeError("fetch failed"),
+    Object.assign(new Error("socket closed"), { code: "ECONNRESET" }),
+  ])("contains an identifiable GitHub proof outage without hiding Linear tools", async (failure) => {
+    const tools = await catalog();
+    const visible = await resolveScopedCatalog(tools, providers,
+      async (provider) => ({ id: provider, providerConnectionId: provider }),
+      async (provider) => {
+        if (provider === "github") throw failure;
+        return ["read"];
+      }, async () => {});
+    expect(tools.discover({ allowedToolIds: visible }).tools.map(({ id }) => id)).toEqual(["linear.read"]);
+  });
+
+  it("propagates a programming failure from GitHub proof", async () => {
+    const tools = await catalog();
+    await expect(resolveScopedCatalog(tools, providers,
+      async (provider) => ({ id: provider, providerConnectionId: provider }),
+      async () => { throw new TypeError("Cannot read properties of undefined"); },
+      async () => {})).rejects.toThrow("Cannot read properties of undefined");
+  });
+
   it("keeps a deleted remote hidden when health persistence fails, then retries the transition", async () => {
     const tools = await catalog();
     const healthError = new Error("health store unavailable");

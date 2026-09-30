@@ -225,11 +225,12 @@ describe("OMR MCP server", () => {
     [429, "GITHUB_RATE_LIMITED"],
     [410, "GITHUB_COMMENT_UNAVAILABLE"],
     [422, "GITHUB_COMMENT_REJECTED"],
-  ] as const)("preserves a confirmed GitHub comment %i denial and receipt in MCP", async (status, code) => {
+    [409, "CONNECTION_UNAVAILABLE"],
+  ] as const)("preserves a GitHub or connection %i denial in MCP", async (status, code) => {
     const fetchImpl: typeof fetch = async (request) => requestUrl(request).pathname === "/api/tools"
       ? Response.json({ catalogSchemaVersion: "1.0.0", revision: "revision-1", tools: [] })
-      : Response.json({ error: code, receiptId: "execution_confirmed",
-        message: "Safe GitHub guidance" },
+      : Response.json({ error: code, ...(status === 409 ? {} : { receiptId: "execution_confirmed" }),
+        ...(status === 409 ? {} : { message: "Safe GitHub guidance" }) },
       { status, headers: status === 429 ? { "retry-after": "120" } : {} });
     const server = await createOMRMcpServer({ baseUrl: "https://omr.test", credential: "credential",
       workspaceId: "workspace-1", fetchImpl });
@@ -243,7 +244,7 @@ describe("OMR MCP server", () => {
       arguments: { approvalId: "approval-1" } })).resolves.toMatchObject({
       isError: true,
       structuredContent: { ok: false, error: { code: "OMR_HTTP_ERROR",
-        details: { error: code, receiptId: "execution_confirmed" } } },
+        details: { error: code, ...(status === 409 ? {} : { receiptId: "execution_confirmed" }) } } },
     });
   });
 

@@ -27,10 +27,21 @@ export async function resolveScopedCatalog(
         await onRemoteMissing(binding.id);
         return null;
       }
-      // A definite GitHub profile denial makes only that provider's grants
-      // unavailable; it must not hide healthy providers in the same catalog.
-      if (provider === "github" && githubHttpFailure(error)) return null;
+      // GitHub profile proof is provider-local. Contain its HTTP denials and
+      // identifiable outages without swallowing unrelated callback failures.
+      if (provider === "github" && githubProofUnavailable(error)) return null;
       throw error;
     }
   });
+}
+
+/** Whether a failed GitHub account proof identifies an unavailable provider. */
+function githubProofUnavailable(error: unknown): boolean {
+  if (githubHttpFailure(error)) return true;
+  if (!(error instanceof Error)) return false;
+  if ("status" in error && typeof error.status === "number" &&
+      error.status >= 500 && error.status <= 599) return true;
+  if ("code" in error && typeof error.code === "string" &&
+      /^(ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN)$/.test(error.code)) return true;
+  return error instanceof TypeError && /fetch failed|network error|load failed/i.test(error.message);
 }

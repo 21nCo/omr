@@ -22,8 +22,9 @@ function grantedScopes(headers: unknown): string[] | null {
   }
   if (typeof value !== "string") return null;
   const scopes = value.split(",").map((scope) => scope.trim());
-  return scopes.length === 1 && scopes[0] === "" ? []
-    : scopes.every((scope) => /^[A-Za-z0-9:_-]+$/.test(scope)) ? scopes : null;
+  if (scopes.length === 1 && scopes[0] === "") return [];
+  if (scopes.every((scope) => /^[A-Za-z0-9:_-]+$/.test(scope))) return scopes;
+  return null;
 }
 
 /** Never use PlugFn's requested-scope fallback as proof of a GitHub grant. */
@@ -61,6 +62,7 @@ class GitHubReadRateLimit extends Error {
   }
 }
 
+/** Preserve a definite read limit before PlugFn can retry past the deadline. */
 async function githubRead<T>(operation: () => Promise<T>): Promise<T> {
   try {
     return await operation();
@@ -72,6 +74,7 @@ async function githubRead<T>(operation: () => Promise<T>): Promise<T> {
   }
 }
 
+/** Restrict OMR's published actions to their declared grants and retry policy. */
 function contract(effect: "read" | "write", scopes: string[], resources: ActionContract["resources"] = []): ActionContract {
   return {
     version: "1.0.0", effect, requiredScopes: scopes, resources,
@@ -134,6 +137,11 @@ const createPublicComment: Action = {
       repository = await githubRead(() => context.http.get(
         `${context.provider.baseUrl}/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}`));
     } catch (error) {
+      // Preserve PlugFn's missing-credential provenance. No repository request
+      // or comment POST was entered when its connection lookup failed.
+      if (error instanceof Error && "code" in error && error.code === "CONNECTION_NOT_FOUND") {
+        throw new ProviderPreflightError("remote_connection_missing");
+      }
       const failure = githubHttpFailure(error);
       // PlugFn's retry layer treats any thrown object with status=429 as a
       // retryable provider error, discarding its headers. The structured

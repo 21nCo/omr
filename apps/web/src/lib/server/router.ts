@@ -152,6 +152,36 @@ export class RequestOriginDeniedError extends Error {
 const CAPABILITIES = new Set<string>(CLIENT_CAPABILITIES);
 const PRIVATE_RESPONSE = { "cache-control": "no-store" };
 
+type GitHubRouteError = GitHubReadError | GitHubScopeProofError |
+  GitHubWritePreflightError | GitHubWriteRejectedError;
+
+/** Map safe GitHub failure codes to the public HTTP contract. */
+function githubStatus(code: GitHubRouteError["code"]): number {
+  switch (code) {
+    case "GITHUB_RATE_LIMITED": return 429;
+    case "GITHUB_RECONNECT_REQUIRED": return 401;
+    case "GITHUB_REPOSITORY_UNAVAILABLE": return 404;
+    case "GITHUB_COMMENT_UNAVAILABLE": return 410;
+    case "GITHUB_COMMENT_REJECTED": return 422;
+    case "GITHUB_PREFLIGHT_UNAVAILABLE": return 503;
+    default: return 403;
+  }
+}
+
+/** Preserve only safe receipt and rate-limit metadata at the HTTP boundary. */
+function githubErrorResponse(error: GitHubRouteError): Response {
+  const body: { error: string; message: string; receiptId?: string } = {
+    error: error.code, message: error.message,
+  };
+  if ("receiptId" in error) body.receiptId = error.receiptId;
+  const headers: Record<string, string> = { ...PRIVATE_RESPONSE };
+  if (error.code === "GITHUB_RATE_LIMITED") {
+    if (error.retryAfterSeconds !== undefined) headers["retry-after"] = String(error.retryAfterSeconds);
+    if (error.rateLimitResetAt !== undefined) headers["x-ratelimit-reset"] = String(error.rateLimitResetAt);
+  }
+  return Response.json(body, { status: githubStatus(error.code), headers });
+}
+
 /** Require a JSON object before reading route-specific fields. */
 function objectBody(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -350,49 +380,16 @@ export function createOMRRouter(
         );
       }
       if (error instanceof GitHubReadError) {
-        return Response.json({ error: error.code, message: error.message, receiptId: error.receiptId },
-          { status: error.code === "GITHUB_RATE_LIMITED" ? 429 : error.code === "GITHUB_REPOSITORY_UNAVAILABLE" ? 404
-            : error.code === "GITHUB_RECONNECT_REQUIRED" ? 401 : 403,
-            headers: { ...PRIVATE_RESPONSE,
-              ...(error.code === "GITHUB_RATE_LIMITED" && error.retryAfterSeconds !== undefined
-                ? { "retry-after": String(error.retryAfterSeconds) } : {}),
-              ...(error.code === "GITHUB_RATE_LIMITED" && error.rateLimitResetAt !== undefined
-                ? { "x-ratelimit-reset": String(error.rateLimitResetAt) } : {}) } });
+        return githubErrorResponse(error);
       }
       if (error instanceof GitHubScopeProofError) {
-        return Response.json({ error: error.code, message: error.message }, {
-          status: error.status,
-          headers: { ...PRIVATE_RESPONSE,
-            ...(error.code === "GITHUB_RATE_LIMITED" && error.retryAfterSeconds !== undefined
-              ? { "retry-after": String(error.retryAfterSeconds) } : {}),
-            ...(error.code === "GITHUB_RATE_LIMITED" && error.rateLimitResetAt !== undefined
-              ? { "x-ratelimit-reset": String(error.rateLimitResetAt) } : {}) },
-        });
+        return githubErrorResponse(error);
       }
       if (error instanceof GitHubWritePreflightError) {
-        return Response.json({ error: error.code, message: error.message, receiptId: error.receiptId },
-          { status: error.code === "GITHUB_RATE_LIMITED" ? 429
-            : error.code === "GITHUB_RECONNECT_REQUIRED" ? 401
-            : error.code === "GITHUB_REPOSITORY_UNAVAILABLE" ? 404
-            : error.code === "GITHUB_PREFLIGHT_UNAVAILABLE" ? 503 : 403,
-            headers: { ...PRIVATE_RESPONSE,
-              ...(error.code === "GITHUB_RATE_LIMITED" && error.retryAfterSeconds !== undefined
-                ? { "retry-after": String(error.retryAfterSeconds) } : {}),
-              ...(error.code === "GITHUB_RATE_LIMITED" && error.rateLimitResetAt !== undefined
-                ? { "x-ratelimit-reset": String(error.rateLimitResetAt) } : {}) } });
+        return githubErrorResponse(error);
       }
       if (error instanceof GitHubWriteRejectedError) {
-        return Response.json({ error: error.code, message: error.message, receiptId: error.receiptId },
-          { status: error.code === "GITHUB_RATE_LIMITED" ? 429
-            : error.code === "GITHUB_RECONNECT_REQUIRED" ? 401
-            : error.code === "GITHUB_COMMENT_UNAVAILABLE" ? 410
-            : error.code === "GITHUB_COMMENT_REJECTED" ? 422
-            : error.code === "GITHUB_REPOSITORY_UNAVAILABLE" ? 404 : 403,
-            headers: { ...PRIVATE_RESPONSE,
-              ...(error.code === "GITHUB_RATE_LIMITED" && error.retryAfterSeconds !== undefined
-                ? { "retry-after": String(error.retryAfterSeconds) } : {}),
-              ...(error.code === "GITHUB_RATE_LIMITED" && error.rateLimitResetAt !== undefined
-                ? { "x-ratelimit-reset": String(error.rateLimitResetAt) } : {}) } });
+        return githubErrorResponse(error);
       }
       if (error instanceof ExecutionInvocationDeadlineError) {
         return Response.json({ error: error.code },

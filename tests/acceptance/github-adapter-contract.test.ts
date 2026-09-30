@@ -218,6 +218,7 @@ describe("github-adapter-contract", () => {
     ["private", { private: true }, null, "GITHUB_PUBLIC_REPOSITORY_REQUIRED"],
     ["malformed", null, null, "GITHUB_PUBLIC_REPOSITORY_REQUIRED"],
     ["denied", null, 403, "GITHUB_ACCESS_DENIED"],
+    ["deleted remote", null, 404, "CONNECTION_UNAVAILABLE"],
   ] as const)("settles a %s comment preflight without posting or crossing workspaces", async (
     _case, repository, status, code,
   ) => {
@@ -233,7 +234,9 @@ describe("github-adapter-contract", () => {
     const receipts = new MemoryExecutionReceiptStore(isMember);
     const approvals = new MemoryExecutionApprovalStore(isMember, receipts);
     const get = vi.fn(async () => {
-      if (status) throw Object.assign(new Error("provider secret"), { status });
+      if (status) throw Object.assign(new Error("provider secret"), {
+        status, ...(status === 404 ? { code: "CONNECTION_NOT_FOUND" } : {}),
+      });
       return repository === null ? null : { data: repository };
     });
     const post = vi.fn(async () => ({ data: { id: 9 } }));
@@ -258,9 +261,13 @@ describe("github-adapter-contract", () => {
     expect(get).toHaveBeenCalledTimes(1);
     expect([...receipts.receipts.values()]).toEqual([expect.objectContaining({
       workspaceId: workspace.id, approvalId: approval.id, status: "failed",
-      errorCode: "github_write_preflight_failed",
+      errorCode: status === 404 ? "connection_unavailable" : "github_write_preflight_failed",
     })]);
     expect(approvals.approvals.get(approval.id)?.status).toBe("failed");
+    if (status === 404) {
+      await expect(connections.resolve({ actorUserId: "alice", workspaceId: workspace.id,
+        provider: "github", connectionId: binding.id })).rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+    }
     await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
     expect(provider).toHaveBeenCalledTimes(1);
   });

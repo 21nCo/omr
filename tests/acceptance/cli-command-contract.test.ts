@@ -1437,6 +1437,12 @@ syncBuiltinESMExports();
       details: { idempotencyKey: "run-after-commit" } });
     f.clearFailureResponse();
 
+    f.failureResponse("/api/tools/execute", 409, { error: "CONNECTION_UNAVAILABLE" });
+    const missingConnection = await f.run(cases[0]!.args, env);
+    expect(missingConnection.code).toBe(1);
+    expect(lastError(missingConnection.stderr).error).toBe("CONNECTION_UNAVAILABLE");
+    f.clearFailureResponse();
+
     f.failAfterCommit("/api/approvals/execute", 502,
       { error: "EXECUTION_OUTCOME_UNKNOWN", receiptId: "receipt_approved_uncertain" });
     const unknown = await f.run(cases[2]!.args, env);
