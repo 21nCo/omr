@@ -221,6 +221,28 @@ describe("OMR MCP server", () => {
     });
   });
 
+  it("preserves a confirmed GitHub comment denial and receipt in MCP", async () => {
+    const fetchImpl: typeof fetch = async (request) => requestUrl(request).pathname === "/api/tools"
+      ? Response.json({ catalogSchemaVersion: "1.0.0", revision: "revision-1", tools: [] })
+      : Response.json({ error: "GITHUB_RATE_LIMITED", receiptId: "execution_confirmed",
+        message: "GitHub rate limit reached" },
+      { status: 429, headers: { "retry-after": "120" } });
+    const server = await createOMRMcpServer({ baseUrl: "https://omr.test", credential: "credential",
+      workspaceId: "workspace-1", fetchImpl });
+    const client = new Client({ name: "github-denial", version: "1.0.0" }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closeables.push(client, server);
+
+    await expect(client.callTool({ name: "omr.approvals.execute",
+      arguments: { approvalId: "approval-1" } })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { ok: false, error: { code: "OMR_HTTP_ERROR",
+        details: { error: "GITHUB_RATE_LIMITED", receiptId: "execution_confirmed" } } },
+    });
+  });
+
   it("preserves predispatch timeout and postdispatch uncertainty for projected MCP calls", async () => {
     const fetchImpl: typeof fetch = async (request, init) => {
       const path = requestUrl(request).pathname;

@@ -1,7 +1,7 @@
 import { githubProvider } from "@plugfn/providers";
 import type { Action, ActionContract, Provider } from "plugfn";
 import { z } from "zod";
-import { githubHttpFailure, ProviderPreflightError } from "@oh-my-router/tools";
+import { ConfirmedGitHubWriteRejection, githubHttpFailure, ProviderPreflightError } from "@oh-my-router/tools";
 
 // OMR v1 deliberately publishes a small journey rather than the upstream action catalog.
 // A new upstream action cannot become executable merely by being registered there.
@@ -144,7 +144,15 @@ const createPublicComment: Action = {
     if (repository?.data?.private !== false) {
       throw new ProviderPreflightError("unverified_public_repository");
     }
-    return upstream["issues.createComment"]!.execute(params, context);
+    try {
+      return await upstream["issues.createComment"]!.execute(params, context);
+    } catch (error) {
+      const failure = githubHttpFailure(error);
+      // Only a confirmed HTTP rejection settles a write. Transport failures and
+      // malformed successful responses leave the POST outcome unknown.
+      if (failure) throw new ConfirmedGitHubWriteRejection(failure);
+      throw error;
+    }
   },
 };
 

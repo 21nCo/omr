@@ -87,9 +87,12 @@ and redacted body. OMR makes zero comment POST requests before approval and
 uses one provider attempt after approval. A preflight repository read refuses
 an unverified public target. A private, malformed, or denied repository
 preflight fails the receipt with an explicit safe error before any comment
-POST. Rate-limited preflight includes available retry and reset timing. If a
-write outcome is uncertain, reconcile the
-receipt and provider state; do not repeat it with a new idempotency key. MCP
+POST. A confirmed comment POST rejection (401, 403, 404, or 429) also fails the
+receipt and approval, with reconnect, access, issue/repository, or rate-limit
+guidance. Rate-limited preflight and POST responses include available retry
+and reset timing; request a new approval only after resolving the rejection.
+If a write outcome is uncertain, reconcile the receipt and provider state; do
+not repeat it with a new idempotency key. MCP
 clients use the same catalog and approval flow and must refresh a long-lived
 catalog after connecting, selecting, or changing grants.
 

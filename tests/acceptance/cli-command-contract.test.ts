@@ -220,6 +220,26 @@ async function fixture() {
 
 // These contracts launch multiple CLI processes per case; parallel suites can delay their startup.
 describe("cli-command-contract", { timeout: 15_000 }, () => {
+  it("reports confirmed GitHub write denial as a failed effect with its receipt", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    for (const [status, code, exitCode] of [
+      [401, "GITHUB_RECONNECT_REQUIRED", 3],
+      [403, "GITHUB_ACCESS_DENIED", 1],
+      [404, "GITHUB_REPOSITORY_UNAVAILABLE", 1],
+      [429, "GITHUB_RATE_LIMITED", 1],
+    ] as const) {
+      f.failureResponse("/api/approvals/execute", status,
+        { error: code, receiptId: "execution_confirmed", message: "Safe GitHub guidance" });
+      const response = await f.run(["approvals", "execute", "approval_1", "--json"], env);
+      expect(response.code).toBe(exitCode);
+      expect(lastError(response.stderr)).toMatchObject({ error: code,
+        details: { receiptId: "execution_confirmed" } });
+      expect(response.stdout + response.stderr).not.toContain("EXECUTION_EFFECT_UNCERTAIN");
+      f.clearFailureResponse();
+    }
+  });
+
   it("isolates a malformed active pointer and lets explicit selection repair the default", async () => {
     const f = await fixture();
     expect((await f.run(["login", "--url", f.url, "--profile", "good", "--json"])).code).toBe(0);

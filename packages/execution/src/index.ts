@@ -6,6 +6,7 @@ export {
   GitHubReadError,
   GitHubScopeProofError,
   GitHubWritePreflightError,
+  GitHubWriteRejectedError,
   ExecutionIdempotencyConflictError,
   ExecutionInProgressError,
   ExecutionOutcomeUnknownError,

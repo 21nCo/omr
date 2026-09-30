@@ -14,7 +14,7 @@ export {
 export { createPlugFnToolCatalog } from "./plugfn.js";
 export { hasRequiredScopes, usableToolIds } from "./scopes.js";
 export { ProviderPreflightError } from "./preflight.js";
-export { githubHttpFailure, type GitHubHttpFailure } from "./github-errors.js";
+export { ConfirmedGitHubWriteRejection, githubHttpFailure, type GitHubHttpFailure } from "./github-errors.js";
 export {
   V1_PROVIDERS,
   isV1Provider,

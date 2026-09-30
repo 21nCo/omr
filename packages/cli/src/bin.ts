@@ -206,7 +206,7 @@ function failureCode(error: unknown, body: ReturnType<typeof httpBody>): string 
   if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) &&
       ["/api/tools/execute", "/api/approvals/execute"].includes(error.path)) return "EXECUTION_EFFECT_UNCERTAIN";
   if (typeof body?.error === "string" &&
-      /^(?:EXECUTION|APPROVAL|CLIENT|DEVICE|CONNECTION|TOOL|WORKSPACE|REQUEST|AUTHFN|PROVIDER|RUNTIME)_[A-Z0-9_]{1,64}$/.test(body.error)) {
+      /^(?:EXECUTION|APPROVAL|CLIENT|DEVICE|CONNECTION|TOOL|WORKSPACE|REQUEST|AUTHFN|PROVIDER|RUNTIME|GITHUB)_[A-Z0-9_]{1,64}$/.test(body.error)) {
     return body.error;
   }
   return error instanceof OMRHttpError ? "HTTP_ERROR" : "CLI_ERROR";

@@ -6,6 +6,14 @@ export interface GitHubHttpFailure {
   rateLimitResetAt?: number;
 }
 
+/** A confirmed GitHub response to the comment POST, without provider body or a retryable status. */
+export class ConfirmedGitHubWriteRejection extends Error {
+  constructor(readonly failure: GitHubHttpFailure) {
+    super("GitHub rejected the comment request");
+    this.name = "ConfirmedGitHubWriteRejection";
+  }
+}
+
 export function githubHttpFailure(error: unknown): GitHubHttpFailure | null {
   if (!error || typeof error !== "object") return null;
   const status = "code" in error && error.code === "GITHUB_READ_RATE_LIMIT" ? 429
