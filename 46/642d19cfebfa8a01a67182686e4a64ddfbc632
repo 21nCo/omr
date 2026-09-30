@@ -1,0 +1,31 @@
+apps/web/src/lib/server/router.ts
+  s_6a334d8ec025e9::t_45fce242541d62 44,384-394
+packages/cli/src/bin.ts
+  s_6a334d8ec025e9::t_65b6e418236305 209
+packages/execution/src/execution.ts
+  s_6a334d8ec025e9::t_00e5ab88218fec 7,296-318,849-856,896-897
+packages/execution/src/index.ts
+  s_6a334d8ec025e9::t_c3a14f342b54af 9
+packages/plugfn-runtime/src/github.ts
+  s_6a334d8ec025e9::t_4a58666526a4a3 4,147-155
+packages/tools/src/github-errors.ts
+  s_6a334d8ec025e9::t_d2fe1f87958855 9-16
+packages/tools/src/index.ts
+  s_6a334d8ec025e9::t_114be37531c98b 17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "46642d19cfebfa8a01a67182686e4a64ddfbc632",
+  "prompts": {},
+  "sessions": {
+    "s_6a334d8ec025e9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "88437992-04d5-438c-806a-28883f2b12e0",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
