@@ -1,0 +1,31 @@
+apps/web/src/lib/oauth-review.test.ts
+  s_2f44717380cda3::t_3e317f0c1f85cb 2,52-72
+apps/web/src/lib/oauth-review.ts
+  s_2f44717380cda3::t_810d845a376c07 19-27
+apps/web/src/lib/server/router.test.ts
+  s_2f44717380cda3::t_11f584037bff19 407-423
+apps/web/src/lib/server/router.ts
+  s_2f44717380cda3::t_52b75919b88322 353-357
+apps/web/src/routes/app/+page.svelte
+  s_2f44717380cda3::t_adb15da840eb48 3,233-237
+packages/execution/src/execution.ts
+  s_2f44717380cda3::t_45dc48487ea19c 225-226,264-265,270-281,287-289,810-811
+packages/plugfn-runtime/src/github.ts
+  s_2f44717380cda3::t_971f23776e7013 9-11
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "982d4b67a130c35d9d7582f84342ec29a9b07276",
+  "prompts": {},
+  "sessions": {
+    "s_2f44717380cda3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eda6820d-8303-4b09-8310-4b0dc7c73079",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
