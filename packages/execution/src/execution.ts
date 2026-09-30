@@ -3,7 +3,7 @@ import {
   ConnectionUnavailableError, isMissingRemoteConnection, markMissingRemoteConnection,
   type ConnectionAuthority, type ConnectionBindingRecord,
 } from "@oh-my-router/connections";
-import { hasRequiredScopes, type JsonValue, type ToolCatalog, type ToolManifest } from "@oh-my-router/tools";
+import { hasRequiredScopes, ProviderPreflightError, type JsonValue, type ToolCatalog, type ToolManifest } from "@oh-my-router/tools";
 import { approvalPreviewReady } from "./projection.js";
 
 export type ExecutionStatus = "reserved" | "running" | "succeeded" | "failed" | "uncertain";
@@ -233,6 +233,29 @@ export class GitHubReadError extends Error {
     }[code]);
     this.code = code;
     this.name = "GitHubReadError";
+  }
+}
+
+/** A GitHub comment was rejected before its POST could be sent. */
+export class GitHubWritePreflightError extends Error {
+  readonly code: "GITHUB_PUBLIC_REPOSITORY_REQUIRED" | "GITHUB_RECONNECT_REQUIRED" |
+    "GITHUB_ACCESS_DENIED" | "GITHUB_REPOSITORY_UNAVAILABLE" | "GITHUB_PREFLIGHT_UNAVAILABLE";
+  constructor(readonly receiptId: string, preflight: ProviderPreflightError) {
+    const code = preflight.reason === "unverified_public_repository"
+      ? "GITHUB_PUBLIC_REPOSITORY_REQUIRED"
+      : preflight.status === 401 ? "GITHUB_RECONNECT_REQUIRED"
+      : preflight.status === 403 ? "GITHUB_ACCESS_DENIED"
+      : preflight.status === 404 ? "GITHUB_REPOSITORY_UNAVAILABLE"
+      : "GITHUB_PREFLIGHT_UNAVAILABLE";
+    super({
+      GITHUB_PUBLIC_REPOSITORY_REQUIRED: "Public issue comments require a verified public repository. Private repositories are unsupported.",
+      GITHUB_RECONNECT_REQUIRED: "GitHub rejected this connection. Reconnect the account.",
+      GITHUB_ACCESS_DENIED: "GitHub denied repository preflight. Check repository access and OAuth scopes.",
+      GITHUB_REPOSITORY_UNAVAILABLE: "Repository unavailable. Check its name and private-repository access.",
+      GITHUB_PREFLIGHT_UNAVAILABLE: "GitHub repository preflight could not be verified. Check the connection before requesting a new approval.",
+    }[code]);
+    this.code = code;
+    this.name = "GitHubWritePreflightError";
   }
 }
 
@@ -745,6 +768,14 @@ export class ExecutionService {
           } catch { /* Treat a failed receipt write as an uncertain outcome. */ }
           if (recorded) throw new GitHubReadError(reservation.receipt.id, deniedRead.status, deniedRead.rateLimited);
         }
+        if (input.manifest.id === "github.issues.commentPublic" && error instanceof ProviderPreflightError) {
+          let recorded = false;
+          try {
+            await this.receipts.fail(reservation.receipt.id, "github_write_preflight_failed", this.now(), cleanupDeadlineAt);
+            recorded = true;
+          } catch { /* Without a durable failure, the receipt remains uncertain. */ }
+          if (recorded) throw new GitHubWritePreflightError(reservation.receipt.id, error);
+        }
         await settle(() => this.receipts.uncertain(reservation.receipt.id,
           "provider_outcome_unknown", this.now(), cleanupDeadlineAt));
         throw new ExecutionOutcomeUnknownError(reservation.receipt.id);
@@ -784,7 +815,7 @@ export class ExecutionService {
       // The provider result and (for approved effects) approval transition are
       // already durable. A later guard COMMIT failure cannot erase that result.
       if (succeededReceipt) return succeededReceipt;
-      if (error instanceof GitHubReadError) throw error;
+      if (error instanceof GitHubReadError || error instanceof GitHubWritePreflightError) throw error;
       if (dispatchedReceiptId &&
           !(error instanceof ExecutionOutcomeUnknownError)) {
         const receiptId = dispatchedReceiptId;

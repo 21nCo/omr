@@ -1,6 +1,7 @@
 import { githubProvider } from "@plugfn/providers";
 import type { Action, ActionContract, Provider } from "plugfn";
 import { z } from "zod";
+import { ProviderPreflightError } from "@oh-my-router/tools";
 
 // OMR v1 deliberately publishes a small journey rather than the upstream action catalog.
 // A new upstream action cannot become executable merely by being registered there.
@@ -60,9 +61,16 @@ const createPublicComment: Action = {
   contract: contract("write", ["public_repo"], [{ kind: "repository", parameter: "repo" },
     { kind: "issue", parameter: "issueNumber" }]),
   execute: async (params, context) => {
-    const repository = await context.http.get(`${context.provider.baseUrl}/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}`);
-    if (repository.data?.private !== false) {
-      throw new Error("Public issue comments require a verified public repository");
+    let repository;
+    try {
+      repository = await context.http.get(`${context.provider.baseUrl}/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}`);
+    } catch (error) {
+      const status = error && typeof error === "object" && "status" in error &&
+        typeof error.status === "number" ? error.status : null;
+      throw new ProviderPreflightError("repository_lookup_failed", status);
+    }
+    if (repository?.data?.private !== false) {
+      throw new ProviderPreflightError("unverified_public_repository");
     }
     return upstream["issues.createComment"]!.execute(params, context);
   },

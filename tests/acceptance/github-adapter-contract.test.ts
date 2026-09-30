@@ -39,7 +39,7 @@ describe("github-adapter-contract", () => {
       http: { get, post } } as never;
     expect(await actions["account.get"]!.execute({}, context)).toMatchObject({ login: "alice" });
     await expect(actions["issues.commentPublic"]!.execute({ owner: "org", repo: "private", issueNumber: 1,
-      body: "Hello" }, context)).rejects.toThrow("verified public repository");
+      body: "Hello" }, context)).rejects.toMatchObject({ reason: "unverified_public_repository" });
     expect(post).not.toHaveBeenCalled();
     get.mockResolvedValueOnce({ data: { private: false } });
     await actions["issues.commentPublic"]!.execute({ owner: "org", repo: "public", issueNumber: 1,
@@ -111,6 +111,84 @@ describe("github-adapter-contract", () => {
         message: expect.stringContaining("private-repository access") });
     expect([...receipts.receipts.values()][0]?.status).toBe("failed");
     expect(provider).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["private", { private: true }, null, "GITHUB_PUBLIC_REPOSITORY_REQUIRED"],
+    ["malformed", null, null, "GITHUB_PUBLIC_REPOSITORY_REQUIRED"],
+    ["denied", null, 403, "GITHUB_ACCESS_DENIED"],
+  ] as const)("settles a %s comment preflight without posting or crossing workspaces", async (
+    _case, repository, status, code,
+  ) => {
+    const workspaceStore = new MemoryWorkspaceStore();
+    const workspaces = new WorkspaceAuthority(workspaceStore);
+    const { workspace } = await workspaces.provisionPersonalWorkspace({ userId: "alice" });
+    const other = await workspaces.createTeam({ ownerUserId: "alice", name: "Other" });
+    const connections = new ConnectionAuthority(new MemoryConnectionBindingStore(workspaceStore));
+    const binding = await connections.attach({ actorUserId: "alice", workspaceId: workspace.id,
+      provider: "github", providerConnectionId: "remote_alice", ownership: "personal", label: "Alice" });
+    const isMember = (workspaceId: string, userId: string) =>
+      [...workspaceStore.memberships.values()].some((member) => member.workspaceId === workspaceId && member.userId === userId);
+    const receipts = new MemoryExecutionReceiptStore(isMember);
+    const approvals = new MemoryExecutionApprovalStore(isMember, receipts);
+    const get = vi.fn(async () => {
+      if (status) throw Object.assign(new Error("provider secret"), { status });
+      return repository === null ? null : { data: repository };
+    });
+    const post = vi.fn(async () => ({ data: { id: 9 } }));
+    const provider = vi.fn(async (_provider: string, _action: string, options: { params: unknown }) =>
+      actions["issues.commentPublic"]!.execute(options.params as never, {
+        provider: { baseUrl: "https://api.github.com" }, http: { get, post },
+      } as never));
+    const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrGithubProvider] } });
+    const service = new ExecutionService(catalog, connections, { action: provider }, receipts,
+      async () => ["read:user", "public_repo"], Date.now, approvals, undefined, new Uint8Array(32).fill(7));
+    const principal = { kind: "web" as const, userId: "alice", workspaceId: workspace.id };
+    const params = { owner: "org", repo: "repo", issueNumber: 1, body: "Hello" };
+    await expect(service.requestApproval({ principal: { ...principal, workspaceId: other.workspace.id },
+      toolId: "github.issues.commentPublic", params, connectionId: binding.id,
+      idempotencyKey: "other-workspace" })).rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+    expect(provider).not.toHaveBeenCalled();
+    const approval = await service.requestApproval({ principal,
+      toolId: "github.issues.commentPublic", params, idempotencyKey: "preflight" });
+    await service.approve(approval.id, "alice");
+    await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({ code });
+    expect(post).not.toHaveBeenCalled();
+    expect(get).toHaveBeenCalledTimes(1);
+    expect([...receipts.receipts.values()]).toEqual([expect.objectContaining({
+      workspaceId: workspace.id, approvalId: approval.id, status: "failed",
+      errorCode: "github_write_preflight_failed",
+    })]);
+    expect(approvals.approvals.get(approval.id)?.status).toBe("failed");
+    await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    expect(provider).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an ambiguous comment POST uncertain after successful preflight", async () => {
+    const workspaceStore = new MemoryWorkspaceStore();
+    const { workspace } = await new WorkspaceAuthority(workspaceStore).provisionPersonalWorkspace({ userId: "alice" });
+    const connections = new ConnectionAuthority(new MemoryConnectionBindingStore(workspaceStore));
+    await connections.attach({ actorUserId: "alice", workspaceId: workspace.id,
+      provider: "github", providerConnectionId: "remote_alice", ownership: "personal", label: "Alice" });
+    const receipts = new MemoryExecutionReceiptStore(() => true);
+    const approvals = new MemoryExecutionApprovalStore(() => true, receipts);
+    const post = vi.fn(async () => { throw new Error("POST outcome unknown"); });
+    const provider = vi.fn(async (_provider: string, _action: string, options: { params: unknown }) =>
+      actions["issues.commentPublic"]!.execute(options.params as never, {
+        provider: { baseUrl: "https://api.github.com" },
+        http: { get: async () => ({ data: { private: false } }), post },
+      } as never));
+    const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrGithubProvider] } });
+    const service = new ExecutionService(catalog, connections, { action: provider }, receipts,
+      async () => ["public_repo"], Date.now, approvals, undefined, new Uint8Array(32).fill(7));
+    const principal = { kind: "web" as const, userId: "alice", workspaceId: workspace.id };
+    const approval = await service.requestApproval({ principal, toolId: "github.issues.commentPublic",
+      params: { owner: "org", repo: "repo", issueNumber: 1, body: "Hello" }, idempotencyKey: "ambiguous" });
+    await service.approve(approval.id, "alice");
+    await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN" });
+    expect(post).toHaveBeenCalledTimes(1);
+    expect([...receipts.receipts.values()][0]?.status).toBe("uncertain");
+    expect(approvals.approvals.get(approval.id)?.status).toBe("uncertain");
   });
 
   it("uses the explicitly selected GitHub account when several are ready", async () => {

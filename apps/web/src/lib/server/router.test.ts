@@ -7,7 +7,9 @@ import {
   ExecutionInvocationDeadlineError,
   ExecutionOutcomeUnknownError,
   GitHubReadError,
+  GitHubWritePreflightError,
 } from "@oh-my-router/execution";
+import { ProviderPreflightError } from "@oh-my-router/tools";
 
 import {
   createOMRRouter,
@@ -397,6 +399,25 @@ describe("OMR Worker HTTP boundary", () => {
       error: "GITHUB_REPOSITORY_UNAVAILABLE", receiptId: "receipt_1",
       message: expect.stringContaining("private-repository access"),
     });
+  });
+
+  it.each([
+    ["unverified_public_repository", null, "GITHUB_PUBLIC_REPOSITORY_REQUIRED", 403],
+    ["repository_lookup_failed", 403, "GITHUB_ACCESS_DENIED", 403],
+    ["repository_lookup_failed", 404, "GITHUB_REPOSITORY_UNAVAILABLE", 404],
+  ] as const)("returns a safe HTTP error for %s comment preflight", async (reason, status, code, httpStatus) => {
+    const execution = { async executeApproved() {
+      throw new GitHubWritePreflightError("receipt_1", new ProviderPreflightError(reason, status));
+    } } as unknown as ExecutionRouteServices;
+    const response = await createOMRRouter(undefined, undefined, undefined, execution).handle(new Request(
+      "https://omr.invalid/api/approvals/execute", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ approvalId: "approval_1" }) },
+    ));
+    expect(response.status).toBe(httpStatus);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const body = await response.json();
+    expect(body).toMatchObject({ error: code, receiptId: "receipt_1" });
+    expect(JSON.stringify(body)).not.toContain("provider secret");
   });
 
   it("projects versioned tool discovery and manifest routes", async () => {

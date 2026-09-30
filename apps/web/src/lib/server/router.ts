@@ -39,6 +39,7 @@ import {
   ExecutionCapabilityDeniedError,
   ExecutionFailedError,
   GitHubReadError,
+  GitHubWritePreflightError,
   ExecutionIdempotencyConflictError,
   ExecutionInProgressError,
   ExecutionInvocationDeadlineError,
@@ -349,6 +350,12 @@ export function createOMRRouter(
       if (error instanceof GitHubReadError) {
         return Response.json({ error: error.code, message: error.message, receiptId: error.receiptId },
           { status: error.code === "GITHUB_RATE_LIMITED" ? 429 : error.code === "GITHUB_REPOSITORY_UNAVAILABLE" ? 404 : 403 });
+      }
+      if (error instanceof GitHubWritePreflightError) {
+        return Response.json({ error: error.code, message: error.message, receiptId: error.receiptId },
+          { status: error.code === "GITHUB_REPOSITORY_UNAVAILABLE" ? 404
+            : error.code === "GITHUB_PREFLIGHT_UNAVAILABLE" ? 503 : 403,
+            headers: PRIVATE_RESPONSE });
       }
       if (error instanceof ExecutionInvocationDeadlineError) {
         return Response.json({ error: error.code },

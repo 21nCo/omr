@@ -75,7 +75,9 @@ omr approvals execute <approval-id> --json
 The browser approval preview shows the selected account, repository, issue,
 and redacted body. OMR makes zero comment POST requests before approval and
 uses one provider attempt after approval. A preflight repository read refuses
-an unverified public target. If a write outcome is uncertain, reconcile the
+an unverified public target. A private, malformed, or denied repository
+preflight fails the receipt with an explicit safe error before any comment
+POST. If a write outcome is uncertain, reconcile the
 receipt and provider state; do not repeat it with a new idempotency key. MCP
 clients use the same catalog and approval flow and must refresh a long-lived
 catalog after connecting, selecting, or changing grants.
