@@ -4,6 +4,8 @@ import { ClientAccessDeniedError, DeviceAuthorizationError } from "@oh-my-router
 import { ConnectionCleanupUntrackedError, ConnectionProviderOperationError } from "@oh-my-router/connections";
 import {
   ExecutionApprovalRequiredError,
+  ExecutionFailedError,
+  ExecutionInProgressError,
   ExecutionInvocationDeadlineError,
   ExecutionOutcomeUnknownError,
   GitHubReadError,
@@ -395,10 +397,25 @@ describe("OMR Worker HTTP boundary", () => {
           params: { owner: "org", repo: "private" } }) },
     ));
     expect(response.status).toBe(404);
+    expect(response.headers.get("cache-control")).toBe("no-store");
     await expect(response.json()).resolves.toMatchObject({
       error: "GITHUB_REPOSITORY_UNAVAILABLE", receiptId: "receipt_1",
       message: expect.stringContaining("private-repository access"),
     });
+  });
+
+  it.each([
+    [new ExecutionInProgressError("receipt_1"), 409],
+    [new ExecutionFailedError("receipt_1"), 502],
+  ] as const)("keeps receipt-bearing %s responses private", async (failure, status) => {
+    const execution = { async execute() { throw failure; } } as unknown as ExecutionRouteServices;
+    const response = await createOMRRouter(undefined, undefined, undefined, execution).handle(new Request(
+      "https://omr.invalid/api/tools/execute", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId: "workspace_1", toolId: "github.repos.get", params: {} }) },
+    ));
+    expect(response.status).toBe(status);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    await expect(response.json()).resolves.toMatchObject({ receiptId: "receipt_1" });
   });
 
   it.each([

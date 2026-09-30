@@ -23,6 +23,7 @@
     }
   },
   "dependencies": {
+    "@cfworker/json-schema": "^4.1.1",
     "@oh-my-router/client-access": "0.0.0",
     "@oh-my-router/connections": "0.0.0",
     "@oh-my-router/tools": "0.0.0",

@@ -338,18 +338,19 @@ export function createOMRRouter(
       if (error instanceof ExecutionInProgressError) {
         return Response.json(
           { error: error.code, receiptId: error.receiptId },
-          { status: 409, headers: { "retry-after": "2" } },
+          { status: 409, headers: { ...PRIVATE_RESPONSE, "retry-after": "2" } },
         );
       }
       if (error instanceof ExecutionFailedError) {
         return Response.json(
           { error: error.code, receiptId: error.receiptId },
-          { status: 502 },
+          { status: 502, headers: PRIVATE_RESPONSE },
         );
       }
       if (error instanceof GitHubReadError) {
         return Response.json({ error: error.code, message: error.message, receiptId: error.receiptId },
-          { status: error.code === "GITHUB_RATE_LIMITED" ? 429 : error.code === "GITHUB_REPOSITORY_UNAVAILABLE" ? 404 : 403 });
+          { status: error.code === "GITHUB_RATE_LIMITED" ? 429 : error.code === "GITHUB_REPOSITORY_UNAVAILABLE" ? 404 : 403,
+            headers: PRIVATE_RESPONSE });
       }
       if (error instanceof GitHubWritePreflightError) {
         return Response.json({ error: error.code, message: error.message, receiptId: error.receiptId },

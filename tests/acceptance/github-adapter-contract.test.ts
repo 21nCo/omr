@@ -114,6 +114,57 @@ describe("github-adapter-contract", () => {
   });
 
   it.each([
+    [{ status: 429 }, "GITHUB_RATE_LIMITED"],
+    [{ status: 403, headers: { "X-RateLimit-Remaining": "0" } }, "GITHUB_RATE_LIMITED"],
+    [{ status: 403, data: { message: "secondary rate limit exceeded" } }, "GITHUB_RATE_LIMITED"],
+    [{ status: 403, headers: { "Retry-After": "60" } }, "GITHUB_RATE_LIMITED"],
+    [{ status: 403 }, "GITHUB_ACCESS_DENIED"],
+  ] as const)("classifies GitHub read failure %j without an uncertain receipt", async (failure, code) => {
+    const workspaceStore = new MemoryWorkspaceStore();
+    const { workspace } = await new WorkspaceAuthority(workspaceStore)
+      .provisionPersonalWorkspace({ userId: "alice" });
+    const connections = new ConnectionAuthority(new MemoryConnectionBindingStore(workspaceStore));
+    await connections.attach({ actorUserId: "alice", workspaceId: workspace.id, provider: "github",
+      providerConnectionId: "remote_alice", ownership: "personal", label: "Alice" });
+    const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrGithubProvider] } });
+    const receipts = new MemoryExecutionReceiptStore(() => true);
+    const provider = vi.fn(async () => { throw Object.assign(new Error("provider secret"), failure); });
+    const service = new ExecutionService(catalog, connections, { action: provider }, receipts,
+      async () => ["read:user"], Date.now, undefined, undefined, new Uint8Array(32).fill(7));
+    const error = await service.execute({ principal: { kind: "web", userId: "alice", workspaceId: workspace.id },
+      toolId: "github.repos.get", params: { owner: "org", repo: "public" } }).catch((value: unknown) => value);
+    expect(error).toMatchObject({ code, receiptId: expect.any(String) });
+    expect(error.message).not.toContain("provider secret");
+    expect(receipts.receipts.get(error.receiptId)).toMatchObject({ status: "failed", errorCode: "github_read_denied" });
+    expect(provider).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [{ owner: "org", repo: "repo", issueNumber: "1", body: "Hello" }, "wrong issue type"],
+    [{ owner: "org", repo: "repo", issueNumber: 1 }, "missing body"],
+    [{ owner: "org", repo: "repo", issueNumber: 1, body: "" }, "empty body"],
+  ])("rejects %s before GitHub write approval and provider dispatch (%s)", async (params) => {
+    const workspaceStore = new MemoryWorkspaceStore();
+    const { workspace } = await new WorkspaceAuthority(workspaceStore)
+      .provisionPersonalWorkspace({ userId: "alice" });
+    const connections = new ConnectionAuthority(new MemoryConnectionBindingStore(workspaceStore));
+    await connections.attach({ actorUserId: "alice", workspaceId: workspace.id,
+      provider: "github", providerConnectionId: "remote_alice", ownership: "personal", label: "Alice" });
+    const receipts = new MemoryExecutionReceiptStore(() => true);
+    const approvals = new MemoryExecutionApprovalStore(() => true, receipts);
+    const provider = vi.fn(async () => ({ id: 9 }));
+    const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrGithubProvider] } });
+    const service = new ExecutionService(catalog, connections, { action: provider }, receipts,
+      async () => ["public_repo"], Date.now, approvals, undefined, new Uint8Array(32).fill(7));
+    const principal = { kind: "web" as const, userId: "alice", workspaceId: workspace.id };
+    await expect(service.requestApproval({ principal, toolId: "github.issues.commentPublic",
+      params, idempotencyKey: "invalid-comment" })).rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    expect(approvals.approvals.size).toBe(0);
+    expect(receipts.receipts.size).toBe(0);
+    expect(provider).not.toHaveBeenCalled();
+  });
+
+  it.each([
     ["private", { private: true }, null, "GITHUB_PUBLIC_REPOSITORY_REQUIRED"],
     ["malformed", null, null, "GITHUB_PUBLIC_REPOSITORY_REQUIRED"],
     ["denied", null, 403, "GITHUB_ACCESS_DENIED"],

@@ -1,4 +1,5 @@
 import type { ClientCapability } from "@oh-my-router/client-access";
+import { Validator } from "@cfworker/json-schema";
 import {
   ConnectionUnavailableError, isMissingRemoteConnection, markMissingRemoteConnection,
   type ConnectionAuthority, type ConnectionBindingRecord,
@@ -262,10 +263,31 @@ export class GitHubWritePreflightError extends Error {
 function githubReadStatus(error: unknown): { status: number; rateLimited: boolean } | null {
   if (!error || typeof error !== "object" || !("status" in error)) return null;
   const status = error.status;
-  if (status !== 401 && status !== 403 && status !== 404) return null;
-  const headers = "headers" in error && error.headers && typeof error.headers === "object"
+  if (status !== 401 && status !== 403 && status !== 404 && status !== 429) return null;
+  const rawHeaders = "headers" in error && error.headers && typeof error.headers === "object"
     ? error.headers as Record<string, unknown> : {};
-  return { status, rateLimited: status === 403 && headers["x-ratelimit-remaining"] === "0" };
+  const headers = Object.fromEntries(Object.entries(rawHeaders).map(([key, value]) => [key.toLowerCase(), value]));
+  const data = "data" in error && error.data && typeof error.data === "object" ? error.data : null;
+  const message = data && "message" in data && typeof data.message === "string" ? data.message
+    : "message" in error && typeof error.message === "string" ? error.message : "";
+  return { status, rateLimited: status === 429 || status === 403 && (
+    String(headers["x-ratelimit-remaining"]) === "0" || headers["retry-after"] !== undefined ||
+    /rate.?limit|abuse detection/i.test(message)) };
+}
+
+const inputValidators = new Map<string, Validator>();
+
+function validToolInput(manifest: ToolManifest, params: JsonValue): boolean {
+  let validator = inputValidators.get(manifest.hash);
+  if (!validator) {
+    const schema = manifest.inputSchema;
+    if (schema === null || typeof schema !== "object" && typeof schema !== "boolean" || Array.isArray(schema)) {
+      return false;
+    }
+    validator = new Validator(schema as ConstructorParameters<typeof Validator>[0], "7");
+    inputValidators.set(manifest.hash, validator);
+  }
+  return validator.validate(params).valid;
 }
 
 export class ExecutionOutcomeUnknownError extends Error {
@@ -318,6 +340,7 @@ export class ExecutionService {
     if (!manifest) throw new ExecutionInputError("Unknown tool identifier");
     this.authorizeEffect(input.principal, manifest);
     assertJson(input.params);
+    if (!validToolInput(manifest, input.params)) throw new ExecutionInputError("Invalid tool parameters");
     if (input.idempotencyKey !== undefined &&
       (typeof input.idempotencyKey !== "string" || !IDEMPOTENCY_KEY.test(input.idempotencyKey))) {
       throw new ExecutionInputError("Invalid idempotency key");
@@ -386,6 +409,7 @@ export class ExecutionService {
       throw new ExecutionCapabilityDeniedError("approvals:create");
     }
     assertJson(input.params);
+    if (!validToolInput(manifest, input.params)) throw new ExecutionInputError("Invalid tool parameters");
     if (!approvalPreviewReady(manifest, manifest.hash, input.params)) {
       throw new ExecutionInputError("This tool has no complete, safely redacted approval preview");
     }
@@ -432,7 +456,9 @@ export class ExecutionService {
   async approve(approvalId: string, actorUserId: string): Promise<ExecutionApproval> {
     const approvals = this.requiredApprovals();
     const approval = await approvals.getForActor(approvalId, actorUserId);
-    if (!approvalPreviewReady(this.catalog.get(approval.toolId), approval.manifestHash, approval.params)) {
+    const manifest = this.catalog.get(approval.toolId);
+    if (!manifest || !validToolInput(manifest, approval.params) ||
+        !approvalPreviewReady(manifest, approval.manifestHash, approval.params)) {
       throw new ApprovalUnavailableError();
     }
     return approvals.approve({ approvalId, actorUserId, now: this.now() });
@@ -640,6 +666,7 @@ export class ExecutionService {
   private approvedManifest(principal: ExecutionPrincipal, approval: ExecutionApproval): ToolManifest {
     const manifest = this.catalog.get(approval.toolId);
     if (manifest?.hash !== approval.manifestHash || manifest.contract.effect === "read" ||
+        !validToolInput(manifest, approval.params) ||
         !approvalPreviewReady(manifest, approval.manifestHash, approval.params) ||
         (principal.workspaceId !== approval.workspaceId &&
           !(principal.kind === "web" && principal.workspaceId === ""))) {
