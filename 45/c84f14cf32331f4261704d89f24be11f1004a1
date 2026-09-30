@@ -1,0 +1,34 @@
+apps/web/src/lib/server/router.ts
+  h_a39f9495f9ec1d 155-184,383,386,389,392
+apps/web/src/lib/server/scoped-catalog.test.ts
+  h_a39f9495f9ec1d 76-98
+apps/web/src/lib/server/scoped-catalog.ts
+  h_a39f9495f9ec1d 30-32,37-47
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 51-67,244-247,267-270,293-298,322-327,456,551,609,701,718,757-758,762-763,805,809-810,813,830-831,833-835,850,855-856,858,860,869-955,986,993-996,999
+packages/mcp/src/server.test.ts
+  h_a39f9495f9ec1d 228-229,232-233,247
+packages/plugfn-runtime/src/github.ts
+  h_a39f9495f9ec1d 25-27,65,77,140-144
+packages/tools/src/github-errors.ts
+  h_a39f9495f9ec1d 17-53,56-59,63-64
+packages/tools/src/preflight.ts
+  h_a39f9495f9ec1d 4
+tests/acceptance/cli-command-contract.test.ts
+  h_a39f9495f9ec1d 1440-1445
+tests/acceptance/github-adapter-contract.test.ts
+  h_a39f9495f9ec1d 221,237-239,264,267-270
+tests/acceptance/github-provider-boundaries.test.ts
+  h_a39f9495f9ec1d 25,27,43-45,57,59,70-71,81-89,104-107,111-189
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "45c84f14cf32331f4261704d89f24be11f1004a1",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
