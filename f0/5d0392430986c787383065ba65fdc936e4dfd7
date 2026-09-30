@@ -1,0 +1,28 @@
+apps/web/src/lib/server/router.ts
+  h_a39f9495f9ec1d 388-389
+docs/github-v1.md
+  h_a39f9495f9ec1d 90-94
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 299-300,306-308,312-313
+packages/mcp/src/server.test.ts
+  h_a39f9495f9ec1d 224-228,231-233,246
+packages/plugfn-runtime/src/github.ts
+  h_a39f9495f9ec1d 150
+packages/tools/src/github-errors.ts
+  h_a39f9495f9ec1d 3,17,21-22
+tests/acceptance/cli-command-contract.test.ts
+  h_a39f9495f9ec1d 230-231
+tests/acceptance/github-provider-boundaries.test.ts
+  h_a39f9495f9ec1d 25,27,92,170,172-173,199-200,209,211
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f05d0392430986c787383065ba65fdc936e4dfd7",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
