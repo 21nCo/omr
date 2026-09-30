@@ -1,0 +1,35 @@
+apps/web/src/lib/server/router.test.ts
+  s_ee5d9d808851a0::t_b1a07d8ac77ed0 10,12,404-422
+docs/github-v1.md
+  s_ee5d9d808851a0::t_226743e2bf6b5c 78-80
+packages/execution/src/execution.ts
+  s_ee5d9d808851a0::t_aca2226813eeed 6,239-261,771-778,818
+packages/plugfn-runtime/src/github.ts
+  s_22ab84176cadba::t_271d40a2c9747e 4,64-73
+tests/acceptance/github-adapter-contract.test.ts
+  s_ee5d9d808851a0::t_8a62cbc5b30280 42,116-193
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "446442eb4181fd3ab299df8e27b71779f819cd73",
+  "prompts": {},
+  "sessions": {
+    "s_22ab84176cadba": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f0e439f7effexh4cObhrBqfRtc",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    },
+    "s_ee5d9d808851a0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f1e3-16d3-72f2-af1e-998d62994d47",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
