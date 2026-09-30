@@ -199,6 +199,7 @@ function ambiguousMutationResponse(error: unknown,
 function httpBody(error: unknown): { error?: unknown; receiptId?: unknown } | null {
   return error instanceof OMRHttpError ? error.body as { error?: unknown; receiptId?: unknown } | null : null;
 }
+/** Preserve only recognized public server codes; transport errors on writes remain uncertain. */
 function failureCode(error: unknown, body: ReturnType<typeof httpBody>): string {
   if (error instanceof CLIError) return error.code;
   if (error instanceof InvalidProfileNameError) return "INPUT_INVALID";

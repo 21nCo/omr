@@ -214,6 +214,7 @@
     teamName = "";
   }
 
+  /** Review the chosen GitHub grant before leaving OMR for provider consent. */
   async function connectOAuth(connection?: Connection) {
     error = "";
     notice = "";
@@ -228,6 +229,7 @@
     }
   }
 
+  /** GitHub reconnect requires a fresh access-tier choice before starting consent. */
   function reconnectOAuth(connection: Connection) {
     if (connection.provider === "github") {
       const choice = beginGithubReconnect(oauthReview, connection);

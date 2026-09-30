@@ -83,6 +83,7 @@ function contract(effect: "read" | "write", scopes: string[], resources: ActionC
   };
 }
 
+/** Prove effective scopes from the selected account's response, rather than requested OAuth scopes. */
 const account: Action = {
   name: "account.get", displayName: "Get GitHub account",
   description: "Identify the selected GitHub account and verify its token can read the profile.",
@@ -98,6 +99,7 @@ const account: Action = {
   }),
 };
 
+/** Force public visibility even when upstream list defaults or parameters change. */
 const listPublic: Action = {
   ...upstream["repos.list"]!, name: "repos.listPublic", displayName: "List public repositories",
   description: "Discover public repositories visible to the selected GitHub account.",
@@ -108,6 +110,7 @@ const listPublic: Action = {
     upstream["repos.list"]!.execute({ ...params, visibility: "public" }, context)),
 };
 
+/** Private discovery requires the broad repo grant and remains a read-only action. */
 const listPrivate: Action = {
   ...listPublic, name: "repos.listPrivate", displayName: "List private repositories",
   description: "Discover private repositories available to the selected account; requires the broad GitHub repo grant.",
@@ -116,6 +119,7 @@ const listPrivate: Action = {
     upstream["repos.list"]!.execute({ ...params, visibility: "private" }, context)),
 };
 
+/** Public reads use the profile tier; GitHub may deny a private target without repo access. */
 const getRepository: Action = {
   ...upstream["repos.get"]!, name: "repos.get", displayName: "Get repository",
   description: "Read one public repository. Private repositories require a repo-scoped connection.",
@@ -124,6 +128,7 @@ const getRepository: Action = {
   execute: (params, context) => githubRead(() => upstream["repos.get"]!.execute(params, context)),
 };
 
+/** Preflight a public target; failed preflight or definite POST rejection can settle a receipt. */
 const createPublicComment: Action = {
   ...upstream["issues.createComment"]!, name: "issues.commentPublic", displayName: "Comment on public issue",
   description: "Post one comment to an issue in a public repository after OMR approval. Requires public_repo.",

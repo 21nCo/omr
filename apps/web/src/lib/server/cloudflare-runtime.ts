@@ -142,7 +142,7 @@ const OAUTH_BINDINGS: Record<string, readonly [string, string]> = {
   yahoo: ["PLUGFN_YAHOO_CLIENT_ID", "PLUGFN_YAHOO_CLIENT_SECRET"],
 };
 
-/** Include OAuth provider apps only when both server-side credentials exist. */
+/** Include credentialed OAuth apps; GitHub also requires its explicit rollout flag. */
 export function createProviderIntegrationConfig(
   env: Record<string, unknown>,
   origin: string,
@@ -402,7 +402,7 @@ function configuredProviders(plugfn: Awaited<ReturnType<typeof connectPlugFn>>["
   return new Set(statuses(plugfn).filter((status) => status.available).map((status) => status.provider));
 }
 
-/** Restrict the tool catalog to bindings this principal can currently use. */
+/** Project accessible bindings, using effective GitHub grants instead of requested scopes. */
 export async function scopedToolIds(
   catalog: Awaited<ReturnType<typeof createPlugFnToolCatalog>>,
   plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"],
