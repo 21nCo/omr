@@ -48,6 +48,20 @@ describe("github-adapter-contract", () => {
     expect(post.mock.calls[0]?.[0]).toBe("https://api.github.com/repos/org/public/issues/1/comments");
   });
 
+  it.each([
+    ["account.get", {}],
+    ["repos.listPublic", {}],
+    ["repos.listPrivate", {}],
+    ["repos.get", { owner: "org", repo: "public" }],
+  ])("keeps %s 429 timing outside PlugFn's long retry wait", async (action, params) => {
+    const headers = new Headers({ "Retry-After": "120", "X-RateLimit-Reset": "1800000000" });
+    const get = vi.fn(async () => { throw Object.assign(new Error("private provider text"), { status: 429, headers }); });
+    await expect(actions[action]!.execute(params, {
+      provider: { baseUrl: "https://api.github.com" }, http: { get },
+    } as never)).rejects.toMatchObject({ code: "GITHUB_READ_RATE_LIMIT", headers });
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the public write behind approval, scoped selection and revocation", async () => {
     const workspaceStore = new MemoryWorkspaceStore();
     const workspaces = new WorkspaceAuthority(workspaceStore);

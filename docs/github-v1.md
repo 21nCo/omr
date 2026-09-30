@@ -54,7 +54,10 @@ by `owner` and `repo`; a private target needs `repo` and the account's actual
 repository permission. A private repository that GitHub hides may return 404.
 OMR reports that as `GITHUB_REPOSITORY_UNAVAILABLE`, with guidance to check
 the name and private access. A definite read 401 asks for reconnect, 403 asks
-for access/scope review, and rate limit 403 returns `GITHUB_RATE_LIMITED`.
+for access/scope review, and rate limit 403 or 429 returns `GITHUB_RATE_LIMITED`.
+OMR returns GitHub's available `Retry-After` and reset time with that error.
+It does not wait through a GitHub 429 retry window inside the current invocation;
+retry the read after the indicated time.
 Missing known grants fail before the provider call with the required scope in
 `EXECUTION_INPUT_INVALID`.
 

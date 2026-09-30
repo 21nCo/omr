@@ -263,8 +263,9 @@ export class GitHubWritePreflightError extends Error {
 
 function githubReadStatus(error: unknown): { status: number; rateLimited: boolean;
   retryAfterSeconds?: number; rateLimitResetAt?: number } | null {
-  if (!error || typeof error !== "object" || !("status" in error)) return null;
-  const status = error.status;
+  if (!error || typeof error !== "object") return null;
+  const status = "code" in error && error.code === "GITHUB_READ_RATE_LIMIT" ? 429
+    : "status" in error ? error.status : null;
   if (status !== 401 && status !== 403 && status !== 404 && status !== 429) return null;
   const rawHeaders = "headers" in error && error.headers && typeof error.headers === "object"
     ? error.headers : {};

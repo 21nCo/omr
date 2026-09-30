@@ -12,6 +12,31 @@ const repository = z.string().min(1).max(100).regex(/^(?!\.{1,2}$)[A-Za-z0-9_.-]
 const owner = z.string().min(1).max(39).regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/);
 const target = { owner, repo: repository };
 
+// PlugFn retries 429 using Retry-After, even when that delay exceeds OMR's
+// invocation deadline, and replaces the final error without its headers.
+// Keep definite GitHub read limits outside that retry path so the caller can
+// settle its receipt and return GitHub's timing guidance immediately.
+class GitHubReadRateLimit extends Error {
+  readonly code = "GITHUB_READ_RATE_LIMIT";
+  readonly headers: unknown;
+
+  constructor(error: object) {
+    super("GitHub read rate limited");
+    this.headers = "headers" in error ? error.headers : undefined;
+  }
+}
+
+async function githubRead<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error && typeof error === "object" && "status" in error && error.status === 429) {
+      throw new GitHubReadRateLimit(error);
+    }
+    throw error;
+  }
+}
+
 function contract(effect: "read" | "write", scopes: string[], resources: ActionContract["resources"] = []): ActionContract {
   return {
     version: "1.0.0", effect, requiredScopes: scopes, resources,
@@ -28,7 +53,8 @@ const account: Action = {
   returns: z.object({ id: z.number(), login: z.string(), html_url: z.string(),
     avatar_url: z.string().optional(), name: z.string().nullable().optional() }).passthrough(),
   contract: contract("read", ["read:user"]),
-  execute: async (_params, context) => (await context.http.get(`${context.provider.baseUrl}/user`)).data,
+  execute: async (_params, context) => githubRead(async () =>
+    (await context.http.get(`${context.provider.baseUrl}/user`)).data),
 };
 
 const listPublic: Action = {
@@ -37,14 +63,16 @@ const listPublic: Action = {
   parameters: z.object({ startPage: z.number().int().min(1).optional().default(1),
     maxPages: z.number().int().min(1).max(5).optional().default(1) }).strict(),
   contract: contract("read", ["read:user"]),
-  execute: (params, context) => upstream["repos.list"]!.execute({ ...params, visibility: "public" }, context),
+  execute: (params, context) => githubRead(() =>
+    upstream["repos.list"]!.execute({ ...params, visibility: "public" }, context)),
 };
 
 const listPrivate: Action = {
   ...listPublic, name: "repos.listPrivate", displayName: "List private repositories",
   description: "Discover private repositories available to the selected account; requires the broad GitHub repo grant.",
   contract: contract("read", ["repo"]),
-  execute: (params, context) => upstream["repos.list"]!.execute({ ...params, visibility: "private" }, context),
+  execute: (params, context) => githubRead(() =>
+    upstream["repos.list"]!.execute({ ...params, visibility: "private" }, context)),
 };
 
 const getRepository: Action = {
@@ -52,6 +80,7 @@ const getRepository: Action = {
   description: "Read one public repository. Private repositories require a repo-scoped connection.",
   parameters: z.object(target).strict(),
   contract: contract("read", ["read:user"], [{ kind: "repository", parameter: "repo" }]),
+  execute: (params, context) => githubRead(() => upstream["repos.get"]!.execute(params, context)),
 };
 
 const createPublicComment: Action = {
