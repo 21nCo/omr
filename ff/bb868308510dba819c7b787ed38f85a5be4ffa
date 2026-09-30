@@ -1,0 +1,14 @@
+tests/fixtures/worker-mcp-http.mjs
+  h_a39f9495f9ec1d 5-7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ffbb868308510dba819c7b787ed38f85a5be4ffa",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
