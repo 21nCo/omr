@@ -1,31 +1,67 @@
 #!/usr/bin/env node
-import { OMRProfileStore, ProfileMissingError } from "@oh-my-router/client/profile-store";
+import { OMRProfileStore, ProfileMissingError, assertProfileName } from "@oh-my-router/client/profile-store";
 
 import { createOMRMcpServer } from "./server.js";
+import { authenticatedSessionFetch } from "./session.js";
 
-const profiles = new OMRProfileStore();
-const profile = process.env.OMR_PROFILE ?? (process.env.OMR_BACKEND && process.env.OMR_API_KEY
-  ? "default" : profiles.activeName());
-const stored = process.env.OMR_BACKEND && process.env.OMR_API_KEY
-  ? { backend: process.env.OMR_BACKEND, key: process.env.OMR_API_KEY }
-  : profiles.get(profile);
-// Older MCP launches supplied the backend/key through the environment but kept
-// their workspace selection in the local profile. Preserve that configuration.
-let workspaceId = process.env.OMR_WORKSPACE_ID ?? ("workspaceId" in stored ? stored.workspaceId : undefined);
-if (!workspaceId) {
-  try { workspaceId = profiles.workspaceId(profile); }
-  catch (error) {
-    if (process.env.OMR_BACKEND && process.env.OMR_API_KEY && error instanceof ProfileMissingError) {
-      throw new Error("OMR_WORKSPACE_ID is required for headless MCP when no saved profile supplies a workspace");
-    }
-    throw error;
+/** Resolve the host's explicit profile without reading or changing stored credentials. */
+function selectedProfile(args: string[]): string | undefined {
+  if (args.length === 0) return process.env.OMR_PROFILE;
+  if (args.length === 2 && args[0] === "--profile" && args[1]) return assertProfileName(args[1]);
+  if (args.length === 1 && args[0]?.startsWith("--profile=")) {
+    return assertProfileName(args[0].slice("--profile=".length));
   }
+  throw new Error("Usage: omr-mcp [--profile <name>]");
 }
-if (!workspaceId) throw new Error("OMR_WORKSPACE_ID or a logged-in OMR profile is required");
 
-const server = await createOMRMcpServer({
-  baseUrl: stored.backend,
-  credential: stored.key,
-  workspaceId,
-});
-await server.serveStdio();
+/** Select one authorized grant, then own the stdio session for this host process. */
+async function main(): Promise<void> {
+  const requestedProfile = selectedProfile(process.argv.slice(2));
+  const profiles = new OMRProfileStore();
+  const backend = process.env.OMR_BACKEND;
+  const key = process.env.OMR_API_KEY;
+  const workspace = process.env.OMR_WORKSPACE_ID;
+  if (Boolean(backend) !== Boolean(key) || (workspace && !backend)) {
+    throw new Error("Set OMR_BACKEND and OMR_API_KEY together; OMR_WORKSPACE_ID requires both");
+  }
+
+  let selected: { backend: string; key: string; workspaceId: string };
+  if (backend && key) {
+    // Older MCP hosts kept the workspace in profile metadata while supplying
+    // their grant through the environment. An explicit workspace takes priority.
+    let workspaceId = workspace;
+    if (!workspaceId) {
+      const name = requestedProfile ?? "default";
+      try { workspaceId = profiles.workspaceId(name); }
+      catch (error) {
+        if (error instanceof ProfileMissingError) {
+          throw new Error("OMR_WORKSPACE_ID is required for headless MCP when no saved profile supplies a workspace");
+        }
+        throw error;
+      }
+    }
+    selected = { backend, key, workspaceId };
+  } else {
+    const name = requestedProfile ?? profiles.activeName();
+    selected = profiles.get(name);
+  }
+
+  let server: Awaited<ReturnType<typeof createOMRMcpServer>> | undefined;
+  const authenticatedFetch = authenticatedSessionFetch(fetch,
+    async () => { await server?.close(); },
+    () => { process.exit(1); });
+  server = await createOMRMcpServer({
+    baseUrl: selected.backend,
+    credential: selected.key,
+    workspaceId: selected.workspaceId,
+    fetchImpl: authenticatedFetch,
+  });
+  await server.serveStdio();
+}
+
+try {
+  await main();
+} catch (error: unknown) {
+  process.stderr.write(`omr-mcp: ${error instanceof Error ? error.message : "launch failed"}\n`);
+  process.exitCode = 1;
+}

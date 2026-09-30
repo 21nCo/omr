@@ -3,7 +3,6 @@ import {
   McpFnRegistry,
   structuredResult,
   type McpFnObjectSchema,
-  type McpFnSchemaCompiler,
   type McpFnToolDefinition,
 } from "@mcpfn/core";
 import { OMRClient } from "@oh-my-router/client";
@@ -17,12 +16,14 @@ const PROVIDERS_TOOL = "omr.catalog.providers";
 const IDEMPOTENCY_FIELD = "_omrIdempotencyKey";
 type VisibilityContext = { manifests?: Promise<Map<string, string>> };
 
+/** Keep malformed catalog schemas from becoming a non-object MCP tool surface. */
 function objectSchema(value: unknown): McpFnObjectSchema {
   if (value && typeof value === "object" && !Array.isArray(value) &&
     (value as { type?: unknown }).type === "object") return value as McpFnObjectSchema;
   return { type: "object", properties: {}, additionalProperties: true };
 }
 
+/** Add a caller-owned idempotency key only to approval-requiring actions. */
 function actionInputSchema(manifest: ToolManifest): McpFnObjectSchema {
   const schema = objectSchema(manifest.inputSchema);
   if (IDEMPOTENCY_FIELD in (schema.properties ?? {})) {
@@ -42,12 +43,14 @@ function actionInputSchema(manifest: ToolManifest): McpFnObjectSchema {
   };
 }
 
+/** Wrap scalar backend results in MCP structured content. */
 function structured(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : { result: value };
 }
 
+/** Give the host a resumable approval handle without executing the action. */
 function approvalSummary(value: unknown, toolId: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("OMR returned an invalid approval response");
@@ -70,15 +73,16 @@ function approvalSummary(value: unknown, toolId: string): Record<string, unknown
   };
 }
 
+/** Build OMR's policy backed MCP server for local stdio or remote HTTP transport. */
 export async function createOMRMcpServer(input: {
   baseUrl: string;
   credential: string;
   workspaceId: string;
   fetchImpl?: typeof fetch;
-  schemaCompiler?: McpFnSchemaCompiler;
   statelessHttp?: boolean;
 }) {
   const client = new OMRClient(input);
+  /** Collect the complete authorized catalog before registering session tools. */
   async function discoverManifests(): Promise<ToolManifest[]> {
     const manifests: ToolManifest[] = [];
     let cursor: string | undefined;
@@ -95,6 +99,7 @@ export async function createOMRMcpServer(input: {
   const collision = manifests.find((manifest) => reservedNames.has(manifest.id));
   if (collision) throw new Error(`OMR catalog tool ${collision.id} conflicts with an MCP control tool`);
 
+  /** Project one policy-backed catalog action into the MCP registry. */
   const definition = (manifest: ToolManifest): McpFnToolDefinition<VisibilityContext> => ({
     name: manifest.id,
     title: manifest.displayName,
@@ -132,7 +137,8 @@ export async function createOMRMcpServer(input: {
 
   const registeredHashes = new Map(manifests.map(({ id, hash }) => [id, hash]));
   let visibleAtLastRefresh = new Set(manifests.map(({ id }) => id));
-  const registry = new McpFnRegistry<VisibilityContext>({ compileSchema: input.schemaCompiler });
+  // Published mcpfn selects its validator for Node or Workers at runtime.
+  const registry = new McpFnRegistry<VisibilityContext>();
 
   tools.push(
     {

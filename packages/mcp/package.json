@@ -1,8 +1,9 @@
 {
   "name": "@oh-my-router/mcp",
   "version": "0.0.0",
-  "private": true,
   "type": "module",
+  "files": ["dist/bin.js", "dist/index.js", "dist/index.d.ts", "dist/server.d.ts", "README.md"],
+  "engines": { "node": ">=22.0.0" },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -13,15 +14,18 @@
     "omr-mcp": "./dist/bin.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "prepack": "turbo run build --filter=@oh-my-router/mcp... 1>&2",
+    "build": "tsc -p tsconfig.json && esbuild src/bin.ts src/index.ts --bundle --platform=node --format=esm --outdir=dist",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
-    "@oh-my-router/client": "0.0.0",
-    "@oh-my-router/tools": "0.0.0"
+    "@mcpfn/core": "0.0.5"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0"
+    "@oh-my-router/client": "0.0.0",
+    "@oh-my-router/tools": "0.0.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "esbuild": "^0.28.1"
   }
 }

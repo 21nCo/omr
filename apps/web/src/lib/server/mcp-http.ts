@@ -1,6 +1,4 @@
 import type { RequestEvent } from "@sveltejs/kit";
-import { Cabidela } from "@cloudflare/cabidela";
-import type { McpFnSchemaCompiler } from "@mcpfn/core";
 import {
   ClientCapabilityDeniedError,
   InvalidClientCredentialError,
@@ -14,24 +12,7 @@ import { mcpBrowserOriginDenied } from "./mcp-browser-origin.js";
 
 const MAX_MCP_BODY_BYTES = 64 * 1024;
 
-const compileWorkerSchema: McpFnSchemaCompiler = (schema) => {
-  const validator = new Cabidela(schema);
-  const validate = ((data: unknown) => {
-    try {
-      validator.validate(data);
-      validate.errors = null;
-      return true;
-    } catch (error) {
-      validate.errors = [{
-        keyword: "validation",
-        message: error instanceof Error ? error.message : "Schema validation failed",
-      }];
-      return false;
-    }
-  }) as ReturnType<McpFnSchemaCompiler>;
-  return validate;
-};
-
+/** Prevent authenticated MCP responses from being cached by a host or proxy. */
 function noStore(response: Response): Response {
   const headers = new Headers(response.headers);
   headers.set("cache-control", "no-store");
@@ -43,6 +24,7 @@ function noStore(response: Response): Response {
   });
 }
 
+/** Return the remote MCP bearer challenge for missing or expired credentials. */
 function unauthorized(): Response {
   return Response.json({ error: "MCP_CREDENTIAL_INVALID" }, {
     status: 401,
@@ -53,6 +35,7 @@ function unauthorized(): Response {
   });
 }
 
+/** Reject oversized JSON-RPC bodies before routing them to the MCP server. */
 async function boundedRequest(request: Request): Promise<Request | null> {
   if (request.method !== "POST") return request;
   if (Number(request.headers.get("content-length")) > MAX_MCP_BODY_BYTES) return null;
@@ -89,6 +72,7 @@ async function boundedRequest(request: Request): Promise<Request | null> {
   });
 }
 
+/** Authenticate and serve one stateless remote MCP request through OMR policy. */
 export async function handleRemoteMcp(event: RequestEvent): Promise<Response> {
   const request = event.request;
   const origin = new URL(request.url).origin;
@@ -136,7 +120,7 @@ export async function handleRemoteMcp(event: RequestEvent): Promise<Response> {
       services.execution,
       services.controlPlane,
     );
-    const fetchImpl: typeof fetch = async (input, init) => {
+    const fetchImpl: typeof fetch = (input, init) => {
       const internalRequest = new Request(input, init);
       const url = new URL(internalRequest.url);
       if (url.origin !== origin || !url.pathname.startsWith("/api/")) {
@@ -149,7 +133,6 @@ export async function handleRemoteMcp(event: RequestEvent): Promise<Response> {
       credential,
       workspaceId,
       fetchImpl,
-      schemaCompiler: compileWorkerSchema,
       statelessHttp: true,
     });
     // Request-related notifications require an SSE response. JSON response

@@ -1,17 +1,26 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
+import { McpError, ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { ToolManifest } from "@oh-my-router/tools";
-import { afterEach, describe, expect, it } from "vitest";
+import { execFile } from "node:child_process";
+import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createOMRMcpServer } from "./server.js";
+import { authenticatedSessionFetch } from "./session.js";
 
+/** Normalize the request shapes accepted by the mocked backend fetch. */
 function requestUrl(request: RequestInfo | URL): URL {
   if (typeof request === "string") return new URL(request);
   return request instanceof URL ? request : new URL(request.url);
 }
 
+/** Build one catalog manifest with an input constraint shared by both transports. */
 function manifest(id: string, effect: ToolManifest["contract"]["effect"]): ToolManifest {
   const [provider, ...actionParts] = id.split(".");
   return {
@@ -262,6 +271,56 @@ describe("OMR MCP server", () => {
     });
   });
 
+  it("fences every local MCP operation after a backend 401 even if transport close fails", async () => {
+    const paths: string[] = [];
+    const backend: typeof fetch = async (request) => {
+      const path = requestUrl(request).pathname;
+      paths.push(path);
+      if (path === "/api/tools") return Response.json({
+        catalogSchemaVersion: "1.0.0", revision: "test",
+        tools: [manifest("demo.read", "read"), manifest("demo.write", "write")],
+      });
+      return Response.json({ error: "CLIENT_CREDENTIAL_INVALID" }, { status: 401 });
+    };
+    let closeFailures = 0;
+    const fetchImpl = authenticatedSessionFetch(backend,
+      async () => { throw new Error("close failed"); },
+      () => { closeFailures += 1; });
+    const server = await createOMRMcpServer({
+      baseUrl: "https://omr.test", credential: "credential", workspaceId: "workspace-1", fetchImpl,
+    });
+    const client = new Client({ name: "revoked", version: "1.0.0" }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closeables.push(client, server);
+
+    expect((await client.callTool({ name: "demo.read", arguments: { value: "a" } })).isError).toBe(true);
+    const callsAtRevocation = paths.length;
+    await expect(client.listTools()).resolves.toMatchObject({ tools: expect.any(Array) });
+    for (const call of [
+      { name: "demo.write", arguments: { value: "a", _omrIdempotencyKey: "key" } },
+      { name: "omr.connections.list", arguments: {} },
+      { name: "omr.connections.select", arguments: { provider: "demo", connectionId: "one" } },
+      { name: "omr.approvals.execute", arguments: { approvalId: "one" } },
+      { name: "omr.catalog.refresh", arguments: {} },
+      { name: "omr.catalog.providers", arguments: {} },
+    ]) {
+      const operation = (await Promise.allSettled([client.callTool(call)]))[0]!;
+      if (operation.status === "fulfilled") {
+        expect(operation.value.isError, call.name).toBe(true);
+      } else {
+        expect(operation.reason, call.name).toBeInstanceOf(Error);
+        if (!(operation.reason instanceof McpError)) {
+          expect((operation.reason as Error).message, call.name).toMatch(/revoked or expired/);
+        }
+      }
+    }
+    expect(paths).toHaveLength(callsAtRevocation);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(closeFailures).toBe(1);
+  });
+
   it("keeps control tools callable during discovery failure and fails closed for projected actions", async () => {
     let catalogFails = false;
     let executions = 0;
@@ -397,5 +456,22 @@ describe("OMR MCP server", () => {
       .resolves.toMatchObject({
         structuredContent: { status: "succeeded", output: { value: "remote" } },
       });
+    const invalid = await client.callTool({ name: "demo.read", arguments: { value: 42 } });
+    expect(invalid.isError).toBe(true);
+  });
+
+  it("validates HTTP tool calls in a fresh Worker-like process without dynamic code generation", async () => {
+    const fixturePath = fileURLToPath(new URL("../../../tests/fixtures/worker-mcp-http.mjs", import.meta.url));
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "omr worker fixture "));
+    try {
+      const linkedRepository = join(temporaryRoot, "repo");
+      await symlink(resolve(dirname(fixturePath), "../.."), linkedRepository,
+        process.platform === "win32" ? "junction" : "dir");
+      const probe = pathToFileURL(join(linkedRepository, "tests/fixtures/worker-mcp-http.mjs"));
+      const { stdout } = await promisify(execFile)(process.execPath, [fileURLToPath(probe)], { timeout: 10_000 });
+      expect(JSON.parse(stdout)).toEqual({ valid: "remote", invalid: "MCPFN_INVALID_ARGUMENTS", executions: 1 });
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
   });
 });
