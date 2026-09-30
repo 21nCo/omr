@@ -1,0 +1,18 @@
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 382,402,607
+packages/cli/src/bin.ts
+  h_a39f9495f9ec1d 199,216
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 398,537,744,757,961,992,1036,1043,1049
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d2e8c25e15d926e4bedf8bc7895810a0c858ee25",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
