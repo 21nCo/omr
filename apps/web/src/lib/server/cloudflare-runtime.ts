@@ -149,6 +149,7 @@ export function createProviderIntegrationConfig(
 ): Record<string, IntegrationConfig> {
   const redirectUri = new URL("/app/oauth/callback", origin).toString();
   return Object.fromEntries(Object.entries(OAUTH_BINDINGS).flatMap(([provider, names]) => {
+    if (provider === "github" && env.OMR_GITHUB_V1_ENABLED !== "true") return [];
     const clientId = env[names[0]];
     const clientSecret = env[names[1]];
     return typeof clientId === "string" && clientId.length > 0 &&

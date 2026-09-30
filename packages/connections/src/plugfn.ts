@@ -100,6 +100,18 @@ export interface PlugFnConnectionPort {
   };
 }
 
+export type GithubAccess = "profile" | "public_write" | "private_repositories";
+
+/** The private tier requests GitHub's broad repo OAuth scope; the public tier does not. */
+export function githubScopes(access: GithubAccess): string[] {
+  switch (access) {
+    case "profile": return ["read:user"];
+    case "public_write": return ["read:user", "public_repo"];
+    case "private_repositories": return ["read:user", "repo"];
+    default: throw new ConnectionInputError("Unknown GitHub access tier");
+  }
+}
+
 export type ProviderReadiness = ProviderStatus;
 
 export class ProviderUnavailableError extends Error {
@@ -285,6 +297,7 @@ export class PlugFnConnectionOrchestrator {
     redirectUri: string;
     label: string;
     scopes?: string[];
+    githubAccess?: GithubAccess;
     returnTo?: string;
     prompt?: string;
     loginHint?: string;
@@ -296,7 +309,10 @@ export class PlugFnConnectionOrchestrator {
     const owner = ownerFor(input);
     // GitHub's PlugFn defaults include write-capable repository scopes. An empty
     // array would fall back to the shared OAuth descriptor's profile/email grant.
-    const scopes = input.scopes ?? (provider === "github" ? ["read:user"] : undefined);
+    if (input.githubAccess && provider !== "github") {
+      throw new ConnectionInputError("GitHub access applies only to GitHub");
+    }
+    const scopes = input.scopes ?? (provider === "github" ? githubScopes(input.githubAccess ?? "profile") : undefined);
     const authUrl = await this.plugfn.connections.getAuthUrl({
       userId: input.actorUserId,
       provider,

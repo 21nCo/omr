@@ -89,9 +89,8 @@ URI. The provider choice, workspace and label are kept in the initiating browser
 short callback handoff; if that tab or session is lost, start authorization again. A provider
 without configured credentials is reported as unavailable before redirect. Live provider
 authorization still requires a separately verified sandbox/provider account.
-GitHub connections request only the read-only `read:user` profile scope by default, not
-PlugFn's write-capable repository scopes. Private repository access is not available through
-this default flow.
+GitHub connections request only `read:user` by default. Users can choose a
+public-comment or private-repository grant explicitly; see [the GitHub v1 journey](docs/github-v1.md).
 
 Build and install the portable CLI archive as documented in [the CLI command contract](packages/cli/README.md).
 Its `omr` command supports device login, profiles, workspace and provider-account selection,

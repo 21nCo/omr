@@ -6,6 +6,7 @@ import {
   ExecutionApprovalRequiredError,
   ExecutionInvocationDeadlineError,
   ExecutionOutcomeUnknownError,
+  GitHubReadError,
 } from "@oh-my-router/execution";
 
 import {
@@ -300,6 +301,16 @@ describe("OMR Worker HTTP boundary", () => {
       apiKey: "lin_secret",
       label: "Team Linear",
     });
+    const oauth = await request("/api/connections/oauth/start", {
+      workspaceId: "workspace_1", provider: "github", ownership: "personal",
+      redirectUri: "https://omr.invalid/app/oauth/callback", label: "GitHub",
+      githubAccess: "public_write",
+    });
+    const invalidOAuth = await request("/api/connections/oauth/start", {
+      workspaceId: "workspace_1", provider: "github", ownership: "personal",
+      redirectUri: "https://omr.invalid/app/oauth/callback", label: "GitHub",
+      githubAccess: "repo admin",
+    });
     const health = await request("/api/connections/health", { connectionId: "connection_key" });
     const selection = await request("/api/connections/select", {
       workspaceId: "workspace_1", provider: "linear", connectionId: "connection_key",
@@ -316,6 +327,11 @@ describe("OMR Worker HTTP boundary", () => {
       operation: "readiness", input: { provider: "linear", workspaceId: "workspace_1" },
     });
     expect(apiKey.status).toBe(201);
+    expect(oauth.status).toBe(201);
+    expect(invalidOAuth.status).toBe(400);
+    expect(calls).toContainEqual({ operation: "oauth-start", input: expect.objectContaining({
+      provider: "github", githubAccess: "public_write",
+    }) });
     expect(apiKey.headers.get("cache-control")).toBe("no-store");
     expect(health.status).toBe(200);
     expect(selection.status).toBe(200);
@@ -366,6 +382,21 @@ describe("OMR Worker HTTP boundary", () => {
     expect(body).toEqual({ error: "CONNECTION_CLEANUP_UNTRACKED",
       message: "Provider cleanup could not be confirmed or saved. Revoke this connection in the provider account." });
     expect(JSON.stringify(body)).not.toContain("code-secret");
+  });
+
+  it("reports GitHub private-repository and permission read denials without provider text", async () => {
+    const execution = { async execute() { throw new GitHubReadError("receipt_1", 404, false); } } as
+      unknown as ExecutionRouteServices;
+    const response = await createOMRRouter(undefined, undefined, undefined, execution).handle(new Request(
+      "https://omr.invalid/api/tools/execute", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId: "workspace_1", toolId: "github.repos.get",
+          params: { owner: "org", repo: "private" } }) },
+    ));
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "GITHUB_REPOSITORY_UNAVAILABLE", receiptId: "receipt_1",
+      message: expect.stringContaining("private-repository access"),
+    });
   });
 
   it("projects versioned tool discovery and manifest routes", async () => {

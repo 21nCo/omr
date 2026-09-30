@@ -21,14 +21,15 @@ Worker's `PLUGFN_ENCRYPTION_KEY`, database connection, and identity secrets as
 described in the deployment configuration. Do not expose these values through
 public environment variables. A missing pair reports `unconfigured`; the UI
 does not offer connection setup. This release does not enable live provider
-configuration by default.
+configuration by default. GitHub additionally requires `OMR_GITHUB_V1_ENABLED=true`;
+it remains off for the OMR-8 implementation rollout until OMR-15's sandbox evidence.
 
 OAuth start runs an install authorization check and returns a provider URL. The
 browser stores only the short-lived, single-use callback intent in
 `sessionStorage`, then displays the actual `scope` and `user_scope` parameters
 from that URL before navigation. Users review any provider consent details
-there. GitHub requests only `read:user` in this initial flow; its repository
-actions need a separate broader grant. Linear and Slack request the scopes
+there. GitHub defaults to `read:user` and offers explicit public-comment and
+private-repository tiers; see [the GitHub journey](github-v1.md). Linear and Slack request the scopes
 declared by their configured provider adapters. Notion may omit a named OAuth
 scope parameter and presents access in its own consent screen. API-key entry
 is rendered only for a v1 adapter that reports `api_key`; the key is sent once

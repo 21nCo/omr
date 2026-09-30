@@ -217,6 +217,34 @@ export class ExecutionFailedError extends Error {
   }
 }
 
+/** A GitHub read returned a definite HTTP denial before any provider write. */
+export class GitHubReadError extends Error {
+  readonly code: "GITHUB_RECONNECT_REQUIRED" | "GITHUB_ACCESS_DENIED" |
+    "GITHUB_REPOSITORY_UNAVAILABLE" | "GITHUB_RATE_LIMITED";
+  constructor(readonly receiptId: string, status: number, rateLimited: boolean) {
+    const code = status === 401 ? "GITHUB_RECONNECT_REQUIRED"
+      : status === 404 ? "GITHUB_REPOSITORY_UNAVAILABLE"
+      : rateLimited ? "GITHUB_RATE_LIMITED" : "GITHUB_ACCESS_DENIED";
+    super({
+      GITHUB_RECONNECT_REQUIRED: "GitHub rejected this connection. Reconnect the account.",
+      GITHUB_REPOSITORY_UNAVAILABLE: "Repository unavailable. Check its name and private-repository access.",
+      GITHUB_RATE_LIMITED: "GitHub rate limit reached. Retry after its reset window.",
+      GITHUB_ACCESS_DENIED: "GitHub denied this read. Check repository access and OAuth scopes.",
+    }[code]);
+    this.code = code;
+    this.name = "GitHubReadError";
+  }
+}
+
+function githubReadStatus(error: unknown): { status: number; rateLimited: boolean } | null {
+  if (!error || typeof error !== "object" || !("status" in error)) return null;
+  const status = error.status;
+  if (status !== 401 && status !== 403 && status !== 404) return null;
+  const headers = "headers" in error && error.headers && typeof error.headers === "object"
+    ? error.headers as Record<string, unknown> : {};
+  return { status, rateLimited: status === 403 && headers["x-ratelimit-remaining"] === "0" };
+}
+
 export class ExecutionOutcomeUnknownError extends Error {
   readonly code = "EXECUTION_OUTCOME_UNKNOWN";
   constructor(readonly receiptId: string) {
@@ -707,6 +735,16 @@ export class ExecutionService {
         if (missingRemote) {
           missingRemoteAfterInvoke = true;
         }
+        const deniedRead = input.manifest.provider === "github" && input.manifest.contract.effect === "read"
+          ? githubReadStatus(error) : null;
+        if (deniedRead) {
+          let recorded = false;
+          try {
+            await this.receipts.fail(reservation.receipt.id, "github_read_denied", this.now(), cleanupDeadlineAt);
+            recorded = true;
+          } catch { /* Treat a failed receipt write as an uncertain outcome. */ }
+          if (recorded) throw new GitHubReadError(reservation.receipt.id, deniedRead.status, deniedRead.rateLimited);
+        }
         await settle(() => this.receipts.uncertain(reservation.receipt.id,
           "provider_outcome_unknown", this.now(), cleanupDeadlineAt));
         throw new ExecutionOutcomeUnknownError(reservation.receipt.id);
@@ -746,6 +784,7 @@ export class ExecutionService {
       // The provider result and (for approved effects) approval transition are
       // already durable. A later guard COMMIT failure cannot erase that result.
       if (succeededReceipt) return succeededReceipt;
+      if (error instanceof GitHubReadError) throw error;
       if (dispatchedReceiptId &&
           !(error instanceof ExecutionOutcomeUnknownError)) {
         const receiptId = dispatchedReceiptId;
@@ -797,7 +836,7 @@ export class ExecutionService {
       throw new ConnectionUnavailableError();
     }
     if (!hasRequiredScopes(manifest, scopes)) {
-      throw new ExecutionInputError("Connection lacks required action scopes");
+      throw new ExecutionInputError(`Connection lacks required action scopes: ${manifest.contract.requiredScopes.join(", ")}`);
     }
   }
 

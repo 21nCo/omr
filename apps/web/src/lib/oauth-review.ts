@@ -7,6 +7,7 @@ export interface OAuthReviewInput {
   ownership: "personal" | "workspace";
   label: string;
   origin: string;
+  githubAccess?: "profile" | "public_write" | "private_repositories";
 }
 
 export interface OAuthReviewState {

@@ -61,7 +61,7 @@ Run `node scripts/catalog-example.mjs` after building packages. Against the pinn
   "revision": "sha256-4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "tools": [],
   "providers": [
-    { "provider": "github", "displayName": "GitHub", "providerVersion": "1.0.0", "description": "Integration with GitHub for managing repositories, issues, and pull requests", "authMode": "oauth", "actionCount": 20, "state": "unconfigured", "available": false },
+    { "provider": "github", "displayName": "GitHub", "providerVersion": "1.0.0", "description": "OMR GitHub v1 account, repository discovery, and approved public issue comments", "authMode": "oauth", "actionCount": 5, "state": "unconfigured", "available": false },
     { "provider": "linear", "displayName": "Linear", "providerVersion": "1.0.0", "description": "Integration with Linear for issue tracking and project management", "authMode": "oauth", "actionCount": 14, "state": "unconfigured", "available": false },
     { "provider": "slack", "displayName": "Slack", "providerVersion": "1.0.0", "description": "Integration with Slack for messaging and collaboration", "authMode": "oauth", "actionCount": 9, "state": "unconfigured", "available": false },
     { "provider": "notion", "displayName": "Notion", "providerVersion": "1.0.0", "description": "Integration with Notion pages, databases, users, and search", "authMode": "oauth", "actionCount": 12, "state": "unconfigured", "available": false }

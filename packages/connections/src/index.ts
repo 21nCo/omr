@@ -26,6 +26,8 @@ export {
   type PlugFnConnectionPort,
   type PlugFnDisconnectResult,
   type ProviderReadiness,
+  type GithubAccess,
+  githubScopes,
 } from "./plugfn.js";
 
 export { isMissingRemoteConnection, markMissingRemoteConnection } from "./remote.js";

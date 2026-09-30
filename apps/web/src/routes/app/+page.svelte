@@ -83,6 +83,7 @@
   let oauthProvider = "github";
   let oauthLabel = "";
   let oauthOwnership: "personal" | "workspace" = "personal";
+  let githubAccess: "profile" | "public_write" | "private_repositories" = "profile";
   let credentialProvider = "";
   let credentialLabel = "";
   let credentialOwnership: "personal" | "workspace" = "personal";
@@ -95,10 +96,11 @@
     readiness: (provider, workspaceId) => request(
       `/api/connections/providers/readiness?provider=${encodeURIComponent(provider)}&workspaceId=${encodeURIComponent(workspaceId)}`,
     ),
-    start: async ({ workspaceId, provider, ownership, label, redirectUri }) => request("/api/connections/oauth/start", {
+    start: async ({ workspaceId, provider, ownership, label, redirectUri, githubAccess }) => request("/api/connections/oauth/start", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ workspaceId, provider, ownership, label, redirectUri }),
+      body: JSON.stringify({ workspaceId, provider, ownership, label, redirectUri,
+        ...(provider === "github" ? { githubAccess } : {}) }),
     }),
     update: (review, pending) => {
       authorizationDestination = review?.destination ?? "";
@@ -219,10 +221,23 @@
       const provider = connection?.provider ?? oauthProvider;
       const ownership = connection?.ownership ?? oauthOwnership;
       const label = connection?.label ?? (oauthLabel.trim() || catalog?.providers.find((item) => item.provider === provider)?.displayName || provider);
-      await oauthReview.start({ workspaceId: selectedWorkspaceId, provider, ownership, label, origin: location.origin });
+      await oauthReview.start({ workspaceId: selectedWorkspaceId, provider, ownership, label,
+        origin: location.origin, ...(provider === "github" ? { githubAccess } : {}) });
     } catch (caught) {
       error = caught instanceof Error ? caught.message : "Could not start provider authorization";
     }
+  }
+
+  function reconnectOAuth(connection: Connection) {
+    if (connection.provider === "github") {
+      oauthProvider = "github";
+      oauthOwnership = connection.ownership;
+      oauthLabel = connection.label;
+      githubAccess = "profile";
+      notice = "Choose the GitHub access tier below, then continue to reconnect. A new OAuth grant is required.";
+      return;
+    }
+    void connectOAuth(connection);
   }
 
   async function connectCredential() {
@@ -392,7 +407,7 @@
                     onclick={() => void mutate(`refresh:${connection.id}`, "/api/connections/refresh", { connectionId: connection.id }, `Refreshed ${connection.label}.`)}>Refresh</button>{/if}
                   {#if actions(connection, clockNow).canReconnect}<button class="quiet compact" disabled={Boolean(busy)}
                     onclick={() => connection.provider && catalog?.providers.find((entry) => entry.provider === connection.provider)?.authMode === "oauth"
-                      ? void connectOAuth(connection)
+                      ? reconnectOAuth(connection)
                       : (credentialProvider = connection.provider, credentialOwnership = connection.ownership, credentialLabel = connection.label, notice = "Enter a new API key below to reconnect.")}>Reconnect</button>{/if}
                   {#if actions(connection, clockNow).canDisconnect || actions(connection, clockNow).canRetryRevoke}<button
                     class="danger compact"
@@ -420,8 +435,17 @@
                 <select bind:value={oauthOwnership}><option value="personal">Personal · only me</option>{#if canInstallShared()}<option value="workspace">Team · all members</option>{/if}</select>
               </label>
               <label>Label<input bind:value={oauthLabel} placeholder="Engineering GitHub" maxlength="120" /></label>
+              {#if oauthProvider === "github"}
+                <label>GitHub access
+                  <select bind:value={githubAccess}>
+                    <option value="profile">Account and public repository reads · read:user</option>
+                    <option value="public_write">Public issue comments · read:user, public_repo</option>
+                    <option value="private_repositories">Private repository reads · read:user, repo</option>
+                  </select>
+                </label>
+              {/if}
             </div>
-            <p>OMR shows the exact scopes from the provider authorization URL before you leave. Review the provider consent screen before granting access. GitHub starts with <code>read:user</code>; repository tools require a separate broader grant.</p>
+            <p>OMR shows the exact scopes from the provider authorization URL before you leave. Review the provider consent screen before granting access. GitHub private repositories require the broad <code>repo</code> grant. Public comments require approval in OMR.</p>
             <button class="primary" type="submit" disabled={Boolean(busy) || !selectedWorkspaceId || !oauthProvider}>
               {busy === "oauth" ? "Opening provider…" : "Continue to provider"}
             </button>

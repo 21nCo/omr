@@ -23,6 +23,7 @@ import {
   ConnectionCleanupUntrackedError,
   ProviderUnavailableError,
   type ConnectionOwnership,
+  type GithubAccess,
 } from "@oh-my-router/connections";
 import { publicDatafnSchema } from "@oh-my-router/data";
 import { connectPostgresDataRuntime } from "@oh-my-router/data/postgres";
@@ -37,6 +38,7 @@ import {
   ExecutionApprovalRequiredError,
   ExecutionCapabilityDeniedError,
   ExecutionFailedError,
+  GitHubReadError,
   ExecutionIdempotencyConflictError,
   ExecutionInProgressError,
   ExecutionInvocationDeadlineError,
@@ -67,6 +69,7 @@ export interface ConnectionRouteServices {
     ownership: ConnectionOwnership;
     redirectUri: string;
     label: string;
+    githubAccess?: GithubAccess;
     returnTo?: string;
   }): Promise<unknown>;
   completeOAuth(request: Request, input: {
@@ -193,6 +196,13 @@ function ownership(body: Record<string, unknown>): ConnectionOwnership {
     throw new RequestInputError("ownership must be personal or workspace");
   }
   return value;
+}
+
+function githubAccess(body: Record<string, unknown>): GithubAccess | undefined {
+  const value = body.githubAccess;
+  if (value === undefined) return undefined;
+  if (value === "profile" || value === "public_write" || value === "private_repositories") return value;
+  throw new RequestInputError("githubAccess must be profile, public_write, or private_repositories");
 }
 
 function unavailableDeviceServices(): DeviceRouteServices {
@@ -335,6 +345,10 @@ export function createOMRRouter(
           { error: error.code, receiptId: error.receiptId },
           { status: 502 },
         );
+      }
+      if (error instanceof GitHubReadError) {
+        return Response.json({ error: error.code, message: error.message, receiptId: error.receiptId },
+          { status: error.code === "GITHUB_RATE_LIMITED" ? 429 : error.code === "GITHUB_REPOSITORY_UNAVAILABLE" ? 404 : 403 });
       }
       if (error instanceof ExecutionInvocationDeadlineError) {
         return Response.json({ error: error.code },
@@ -550,12 +564,14 @@ export function createOMRRouter(
         handler: async (request, context) => {
           const body = objectBody(await context.json());
           const returnTo = optionalString(body, "returnTo");
+          const access = githubAccess(body);
           return Response.json(await connectionServices.startOAuth(request, {
             workspaceId: requiredString(body, "workspaceId"),
             provider: requiredString(body, "provider"),
             ownership: ownership(body),
             redirectUri: requiredString(body, "redirectUri"),
             label: requiredString(body, "label"),
+            ...(access ? { githubAccess: access } : {}),
             ...(returnTo ? { returnTo } : {}),
           }), { status: 201, headers: PRIVATE_RESPONSE });
         },

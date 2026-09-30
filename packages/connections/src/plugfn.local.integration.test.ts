@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryAdapter, mockProvider, plugFn } from "plugfn";
-import { githubProvider } from "@plugfn/providers";
+import { omrGithubProvider } from "@oh-my-router/plugfn-runtime";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
 import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
 
@@ -43,7 +43,7 @@ describe("local PlugFn integration", () => {
         clientSecret: "sandbox-secret",
         redirectUris: [REDIRECT_URI],
       } },
-    }).use(githubProvider);
+    }).use(omrGithubProvider);
     await runtime.ready;
 
     const workspaceStore = new MemoryWorkspaceStore();
@@ -80,7 +80,7 @@ describe("local PlugFn integration", () => {
     const persisted = await runtime.connections.get(connection.providerConnectionId);
     expect(persisted.credentials.encrypted).not.toContain("sandbox-access-token");
 
-    await runtime.action("github", "repos.list", {
+    await runtime.action("github", "repos.listPublic", {
       userId: "user_owner",
       connectionId: connection.providerConnectionId,
       params: {},
@@ -90,6 +90,7 @@ describe("local PlugFn integration", () => {
     });
     expect(requests).toHaveLength(1);
     expect(requests[0]?.authorization).toBe("Bearer sandbox-access-token");
+    expect(new URL(requests[0]!.url).searchParams.get("visibility")).toBe("public");
 
     await orchestrator.disconnect("user_owner", connection.id);
     await expect(authority.resolve({ actorUserId: "user_owner", workspaceId: workspace.id, provider: "github" }))

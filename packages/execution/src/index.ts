@@ -3,6 +3,7 @@ export {
   ExecutionApprovalRequiredError,
   ExecutionCapabilityDeniedError,
   ExecutionFailedError,
+  GitHubReadError,
   ExecutionIdempotencyConflictError,
   ExecutionInProgressError,
   ExecutionOutcomeUnknownError,
