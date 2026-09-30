@@ -379,6 +379,7 @@ export function createCloudflareDeviceServices(event: RequestEvent): DeviceRoute
   };
 }
 
+/** Derive public provider readiness from configured apps and this workspace's bindings. */
 function statuses(
   plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"],
   bindings: readonly (ProviderBinding & { provider: string })[] = [],
@@ -398,6 +399,7 @@ function statuses(
   });
 }
 
+/** Exclude disabled providers before publishing their actions in the tool catalog. */
 function configuredProviders(plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"]): Set<string> {
   return new Set(statuses(plugfn).filter((status) => status.available).map((status) => status.provider));
 }
@@ -602,6 +604,7 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
     },
   };
 
+  /** Scope each invocation to fresh connection and receipt stores, closing all opened runtimes. */
   async function withExecution<T>(callback: (
     service: ExecutionService,
     catalog: Awaited<ReturnType<typeof createPlugFnToolCatalog>>,

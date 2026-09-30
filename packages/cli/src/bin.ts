@@ -196,6 +196,7 @@ function ambiguousMutationResponse(error: unknown,
   `${operation} response cannot prove whether the request committed; recover with the original request identity`,
   23, { ...identity, ...receiptId });
 }
+/** Read only the server's structured response when projecting a CLI failure. */
 function httpBody(error: unknown): { error?: unknown; receiptId?: unknown } | null {
   return error instanceof OMRHttpError ? error.body as { error?: unknown; receiptId?: unknown } | null : null;
 }
@@ -212,6 +213,7 @@ function failureCode(error: unknown, body: ReturnType<typeof httpBody>): string 
   }
   return error instanceof OMRHttpError ? "HTTP_ERROR" : "CLI_ERROR";
 }
+/** Keep ambiguous effects distinct from input, auth, and terminal HTTP failures. */
 function failureExit(error: unknown, code: string): number {
   if (error instanceof CLIError) return error.exitCode;
   if (error instanceof InvalidProfileNameError) return 2;

@@ -395,7 +395,7 @@ export class ExecutionService {
     this.fingerprintKey = fingerprintKey;
   }
 
-  /** Reject unapproved effects and bind a read to its selected workspace connection. */
+  /** Validate parameters, selected workspace account, and grants before read dispatch; writes require approval. */
   async execute(input: {
     principal: ExecutionPrincipal;
     toolId: string;
@@ -534,6 +534,7 @@ export class ExecutionService {
     return approvals.approve({ approvalId, actorUserId, now: this.now() });
   }
 
+  /** Reject only an approval owned by this actor; no provider effect is entered. */
   async reject(approvalId: string, actorUserId: string): Promise<ExecutionApproval> {
     return this.requiredApprovals().reject({ approvalId, actorUserId, now: this.now() });
   }
@@ -740,6 +741,7 @@ export class ExecutionService {
     return { manifest, effectivePrincipal, connection };
   }
 
+  /** Reject an approval if its manifest, preview, inputs, or workspace changed. */
   private approvedManifest(principal: ExecutionPrincipal, approval: ExecutionApproval): ToolManifest {
     const manifest = this.catalog.get(approval.toolId);
     if (manifest?.hash !== approval.manifestHash || manifest.contract.effect === "read" ||
@@ -752,6 +754,7 @@ export class ExecutionService {
     return manifest;
   }
 
+  /** Use the identity guard, when configured, before disclosing an ambiguous receipt. */
   private reportUncertainReceipt(principal: ExecutionPrincipal, capability: ClientCapability,
     receiptId: string, deadlineAt: number): Promise<never> {
     const report = async (): Promise<never> => { throw new ExecutionOutcomeUnknownError(receiptId); };
@@ -955,6 +958,7 @@ export class ExecutionService {
     throw new ExecutionFailedError(receipt.id);
   }
 
+  /** Client grants restrict the effect independently of connection OAuth scopes. */
   private authorizeEffect(principal: ExecutionPrincipal, manifest: ToolManifest): void {
     if (principal.kind !== "client") return;
     const required: ClientCapability = manifest.contract.effect === "read"
@@ -985,6 +989,7 @@ export class ExecutionService {
     }
   }
 
+  /** Fail closed when the approval store needed for a write is absent. */
   private requiredApprovals(): ExecutionApprovalStore {
     if (!this.approvals) throw new Error("Execution approval store is not configured");
     return this.approvals;
@@ -1028,17 +1033,20 @@ function confirmedDispatchFailure(error: unknown, manifest: ToolManifest,
   return null;
 }
 
+/** Bind idempotency to the exact client grant or signed-in web actor. */
 function principalKey(principal: ExecutionPrincipal): string {
   return principal.kind === "client"
     ? `client:${principal.clientId}:grant:${principal.grantId}`
     : `web:${principal.userId}`;
 }
 
+/** A predispatch claim may be retried; an entered effect requires receipt recovery. */
 function needsApprovalClaim(approval: ExecutionApproval, receipt: ExecutionReceipt | null): boolean {
   return approval.status === "executing" &&
     (!receipt || receipt.status === "reserved" || receipt.status === "failed");
 }
 
+/** Fence recovery against a receipt from another actor, workspace, grant, or request. */
 function matchesApprovalReceipt(receipt: ExecutionReceipt, approval: ExecutionApproval): boolean {
   return (receipt.id === approval.executionReceiptId ||
     (approval.status === "executing" && approval.executionReceiptId === null &&
