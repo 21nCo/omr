@@ -222,7 +222,8 @@ export class ExecutionFailedError extends Error {
 export class GitHubReadError extends Error {
   readonly code: "GITHUB_RECONNECT_REQUIRED" | "GITHUB_ACCESS_DENIED" |
     "GITHUB_REPOSITORY_UNAVAILABLE" | "GITHUB_RATE_LIMITED";
-  constructor(readonly receiptId: string, status: number, rateLimited: boolean) {
+  constructor(readonly receiptId: string, status: number, rateLimited: boolean,
+    readonly retryAfterSeconds?: number, readonly rateLimitResetAt?: number) {
     const code = status === 401 ? "GITHUB_RECONNECT_REQUIRED"
       : status === 404 ? "GITHUB_REPOSITORY_UNAVAILABLE"
       : rateLimited ? "GITHUB_RATE_LIMITED" : "GITHUB_ACCESS_DENIED";
@@ -260,19 +261,32 @@ export class GitHubWritePreflightError extends Error {
   }
 }
 
-function githubReadStatus(error: unknown): { status: number; rateLimited: boolean } | null {
+function githubReadStatus(error: unknown): { status: number; rateLimited: boolean;
+  retryAfterSeconds?: number; rateLimitResetAt?: number } | null {
   if (!error || typeof error !== "object" || !("status" in error)) return null;
   const status = error.status;
   if (status !== 401 && status !== 403 && status !== 404 && status !== 429) return null;
   const rawHeaders = "headers" in error && error.headers && typeof error.headers === "object"
-    ? error.headers as Record<string, unknown> : {};
-  const headers = Object.fromEntries(Object.entries(rawHeaders).map(([key, value]) => [key.toLowerCase(), value]));
+    ? error.headers : {};
+  const headers = rawHeaders instanceof Headers
+    ? Object.fromEntries(rawHeaders.entries())
+    : Object.fromEntries(Object.entries(rawHeaders).map(([key, value]) => [key.toLowerCase(), value]));
+  const numericHeader = (name: string): number | undefined => {
+    const value = headers[name];
+    if (typeof value !== "string" && typeof value !== "number") return undefined;
+    const stringValue = String(value);
+    if (!/^\d+$/.test(stringValue)) return undefined;
+    const parsed = Number(stringValue);
+    return Number.isSafeInteger(parsed) ? parsed : undefined;
+  };
   const data = "data" in error && error.data && typeof error.data === "object" ? error.data : null;
   const message = data && "message" in data && typeof data.message === "string" ? data.message
     : "message" in error && typeof error.message === "string" ? error.message : "";
   return { status, rateLimited: status === 429 || status === 403 && (
     String(headers["x-ratelimit-remaining"]) === "0" || headers["retry-after"] !== undefined ||
-    /rate.?limit|abuse detection/i.test(message)) };
+    /rate.?limit|abuse detection/i.test(message)),
+    retryAfterSeconds: numericHeader("retry-after"),
+    rateLimitResetAt: numericHeader("x-ratelimit-reset") };
 }
 
 const inputValidators = new Map<string, Validator>();
@@ -793,7 +807,8 @@ export class ExecutionService {
             await this.receipts.fail(reservation.receipt.id, "github_read_denied", this.now(), cleanupDeadlineAt);
             recorded = true;
           } catch { /* Treat a failed receipt write as an uncertain outcome. */ }
-          if (recorded) throw new GitHubReadError(reservation.receipt.id, deniedRead.status, deniedRead.rateLimited);
+          if (recorded) throw new GitHubReadError(reservation.receipt.id, deniedRead.status,
+            deniedRead.rateLimited, deniedRead.retryAfterSeconds, deniedRead.rateLimitResetAt);
         }
         if (input.manifest.id === "github.issues.commentPublic" && error instanceof ProviderPreflightError) {
           let recorded = false;

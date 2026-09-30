@@ -404,6 +404,23 @@ describe("OMR Worker HTTP boundary", () => {
     });
   });
 
+  it("returns safe rate-limit timing for a definite GitHub read denial", async () => {
+    const execution = { async execute() {
+      throw new GitHubReadError("receipt_1", 403, true, 45, 1800000000);
+    } } as unknown as ExecutionRouteServices;
+    const response = await createOMRRouter(undefined, undefined, undefined, execution).handle(new Request(
+      "https://omr.invalid/api/tools/execute", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId: "workspace_1", toolId: "github.repos.get",
+          params: { owner: "org", repo: "public" } }) },
+    ));
+    expect(response.status).toBe(429);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("retry-after")).toBe("45");
+    expect(response.headers.get("x-ratelimit-reset")).toBe("1800000000");
+    await expect(response.json()).resolves.toMatchObject({ error: "GITHUB_RATE_LIMITED",
+      receiptId: "receipt_1", message: expect.stringContaining("Retry after") });
+  });
+
   it.each([
     [new ExecutionInProgressError("receipt_1"), 409],
     [new ExecutionFailedError("receipt_1"), 502],

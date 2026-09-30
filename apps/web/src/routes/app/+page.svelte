@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { createOAuthReviewController } from "$lib/oauth-review.js";
+  import { beginGithubReconnect, createOAuthReviewController } from "$lib/oauth-review.js";
   import { connectionActions, connectionStatusLabel, providerRevocationGuidance } from "$lib/connection-ui.js";
   import { createWorkspaceCatalogLoader, providerDisplayState } from "$lib/workspace-catalog.js";
   import { renderApprovalPreview } from "$lib/approval-preview.js";
@@ -230,10 +230,11 @@
 
   function reconnectOAuth(connection: Connection) {
     if (connection.provider === "github") {
-      oauthProvider = "github";
-      oauthOwnership = connection.ownership;
-      oauthLabel = connection.label;
-      githubAccess = "profile";
+      const choice = beginGithubReconnect(oauthReview, connection);
+      oauthProvider = choice.provider;
+      oauthOwnership = choice.ownership;
+      oauthLabel = choice.label;
+      githubAccess = choice.access;
       notice = "Choose the GitHub access tier below, then continue to reconnect. A new OAuth grant is required.";
       return;
     }

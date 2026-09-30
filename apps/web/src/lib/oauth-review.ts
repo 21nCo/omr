@@ -16,6 +16,15 @@ export interface OAuthReviewState {
   scopes: string[];
 }
 
+/** A reconnect starts a new consent choice, so any previous review is invalid. */
+export function beginGithubReconnect(review: { cancel(): void }, connection: {
+  ownership: OAuthReviewInput["ownership"]; label: string;
+}) {
+  review.cancel();
+  return { provider: "github" as const, ownership: connection.ownership,
+    label: connection.label, access: "profile" as const };
+}
+
 /** Fence pending OAuth requests so a late response cannot replace a newer workspace review. */
 export function createOAuthReviewController(deps: {
   storage: () => Pick<Storage, "setItem" | "removeItem">;

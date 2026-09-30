@@ -115,9 +115,12 @@ describe("github-adapter-contract", () => {
 
   it.each([
     [{ status: 429 }, "GITHUB_RATE_LIMITED"],
+    [{ status: 429, headers: new Headers({ "Retry-After": "45", "X-RateLimit-Reset": "1800000000" }) }, "GITHUB_RATE_LIMITED"],
     [{ status: 403, headers: { "X-RateLimit-Remaining": "0" } }, "GITHUB_RATE_LIMITED"],
+    [{ status: 403, headers: new Headers({ "X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1800000000" }) }, "GITHUB_RATE_LIMITED"],
     [{ status: 403, data: { message: "secondary rate limit exceeded" } }, "GITHUB_RATE_LIMITED"],
     [{ status: 403, headers: { "Retry-After": "60" } }, "GITHUB_RATE_LIMITED"],
+    [{ status: 403, headers: new Headers({ "Retry-After": "60" }) }, "GITHUB_RATE_LIMITED"],
     [{ status: 403 }, "GITHUB_ACCESS_DENIED"],
   ] as const)("classifies GitHub read failure %j without an uncertain receipt", async (failure, code) => {
     const workspaceStore = new MemoryWorkspaceStore();
@@ -135,6 +138,12 @@ describe("github-adapter-contract", () => {
       toolId: "github.repos.get", params: { owner: "org", repo: "public" } }).catch((value: unknown) => value);
     expect(error).toMatchObject({ code, receiptId: expect.any(String) });
     expect(error.message).not.toContain("provider secret");
+    if (failure.headers instanceof Headers) {
+      expect(error.retryAfterSeconds).toBe(failure.headers.has("retry-after")
+        ? Number(failure.headers.get("retry-after")) : undefined);
+      expect(error.rateLimitResetAt).toBe(failure.headers.has("x-ratelimit-reset")
+        ? Number(failure.headers.get("x-ratelimit-reset")) : undefined);
+    }
     expect(receipts.receipts.get(error.receiptId)).toMatchObject({ status: "failed", errorCode: "github_read_denied" });
     expect(provider).toHaveBeenCalledTimes(1);
   });
@@ -143,6 +152,8 @@ describe("github-adapter-contract", () => {
     [{ owner: "org", repo: "repo", issueNumber: "1", body: "Hello" }, "wrong issue type"],
     [{ owner: "org", repo: "repo", issueNumber: 1 }, "missing body"],
     [{ owner: "org", repo: "repo", issueNumber: 1, body: "" }, "empty body"],
+    [{ owner: "org", repo: ".", issueNumber: 1, body: "Hello" }, "dot repository"],
+    [{ owner: "org", repo: "..", issueNumber: 1, body: "Hello" }, "dot dot repository"],
   ])("rejects %s before GitHub write approval and provider dispatch (%s)", async (params) => {
     const workspaceStore = new MemoryWorkspaceStore();
     const { workspace } = await new WorkspaceAuthority(workspaceStore)
@@ -160,6 +171,31 @@ describe("github-adapter-contract", () => {
     await expect(service.requestApproval({ principal, toolId: "github.issues.commentPublic",
       params, idempotencyKey: "invalid-comment" })).rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
     expect(approvals.approvals.size).toBe(0);
+    expect(receipts.receipts.size).toBe(0);
+    expect(provider).not.toHaveBeenCalled();
+  });
+
+  it.each([".", ".."])("rejects repository %s on read and legacy approval before provider dispatch", async (repo) => {
+    const workspaceStore = new MemoryWorkspaceStore();
+    const { workspace } = await new WorkspaceAuthority(workspaceStore)
+      .provisionPersonalWorkspace({ userId: "alice" });
+    const connections = new ConnectionAuthority(new MemoryConnectionBindingStore(workspaceStore));
+    await connections.attach({ actorUserId: "alice", workspaceId: workspace.id,
+      provider: "github", providerConnectionId: "remote_alice", ownership: "personal", label: "Alice" });
+    const receipts = new MemoryExecutionReceiptStore(() => true);
+    const approvals = new MemoryExecutionApprovalStore(() => true, receipts);
+    const provider = vi.fn(async () => ({ id: 9 }));
+    const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrGithubProvider] } });
+    const service = new ExecutionService(catalog, connections, { action: provider }, receipts,
+      async () => ["read:user", "public_repo"], Date.now, approvals, undefined, new Uint8Array(32).fill(7));
+    const principal = { kind: "web" as const, userId: "alice", workspaceId: workspace.id };
+    await expect(service.execute({ principal, toolId: "github.repos.get", params: { owner: "org", repo } }))
+      .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    const approval = await service.requestApproval({ principal, toolId: "github.issues.commentPublic",
+      params: { owner: "org", repo: "safe", issueNumber: 1, body: "Hello" }, idempotencyKey: `legacy-${repo.length}` });
+    approvals.approvals.set(approval.id, { ...approval, params: { ...approval.params as object, repo } });
+    await expect(service.approve(approval.id, "alice")).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
     expect(receipts.receipts.size).toBe(0);
     expect(provider).not.toHaveBeenCalled();
   });

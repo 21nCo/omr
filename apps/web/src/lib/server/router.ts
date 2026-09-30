@@ -350,7 +350,11 @@ export function createOMRRouter(
       if (error instanceof GitHubReadError) {
         return Response.json({ error: error.code, message: error.message, receiptId: error.receiptId },
           { status: error.code === "GITHUB_RATE_LIMITED" ? 429 : error.code === "GITHUB_REPOSITORY_UNAVAILABLE" ? 404 : 403,
-            headers: PRIVATE_RESPONSE });
+            headers: { ...PRIVATE_RESPONSE,
+              ...(error.code === "GITHUB_RATE_LIMITED" && error.retryAfterSeconds !== undefined
+                ? { "retry-after": String(error.retryAfterSeconds) } : {}),
+              ...(error.code === "GITHUB_RATE_LIMITED" && error.rateLimitResetAt !== undefined
+                ? { "x-ratelimit-reset": String(error.rateLimitResetAt) } : {}) } });
       }
       if (error instanceof GitHubWritePreflightError) {
         return Response.json({ error: error.code, message: error.message, receiptId: error.receiptId },

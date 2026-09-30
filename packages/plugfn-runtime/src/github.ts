@@ -6,8 +6,9 @@ import { ProviderPreflightError } from "@oh-my-router/tools";
 // OMR v1 deliberately publishes a small journey rather than the upstream action catalog.
 // A new upstream action cannot become executable merely by being registered there.
 const upstream = githubProvider.actions as Record<string, Action>;
-const repository = z.string().min(1).max(100).regex(/^[A-Za-z0-9_.-]+$/)
-  .refine((value) => value !== "." && value !== "..", "Repository name must not be a path segment");
+// Keep the entire constraint in the regular expression: the published JSON Schema
+// must reject the same path segments as Zod before an approval can be created.
+const repository = z.string().min(1).max(100).regex(/^(?!\.{1,2}$)[A-Za-z0-9_.-]+$/);
 const owner = z.string().min(1).max(39).regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/);
 const target = { owner, repo: repository };
 
