@@ -221,12 +221,16 @@ describe("OMR MCP server", () => {
     });
   });
 
-  it("preserves a confirmed GitHub comment denial and receipt in MCP", async () => {
+  it.each([
+    [429, "GITHUB_RATE_LIMITED"],
+    [410, "GITHUB_COMMENT_UNAVAILABLE"],
+    [422, "GITHUB_COMMENT_REJECTED"],
+  ] as const)("preserves a confirmed GitHub comment %i denial and receipt in MCP", async (status, code) => {
     const fetchImpl: typeof fetch = async (request) => requestUrl(request).pathname === "/api/tools"
       ? Response.json({ catalogSchemaVersion: "1.0.0", revision: "revision-1", tools: [] })
-      : Response.json({ error: "GITHUB_RATE_LIMITED", receiptId: "execution_confirmed",
-        message: "GitHub rate limit reached" },
-      { status: 429, headers: { "retry-after": "120" } });
+      : Response.json({ error: code, receiptId: "execution_confirmed",
+        message: "Safe GitHub guidance" },
+      { status, headers: status === 429 ? { "retry-after": "120" } : {} });
     const server = await createOMRMcpServer({ baseUrl: "https://omr.test", credential: "credential",
       workspaceId: "workspace-1", fetchImpl });
     const client = new Client({ name: "github-denial", version: "1.0.0" }, { capabilities: {} });
@@ -239,7 +243,7 @@ describe("OMR MCP server", () => {
       arguments: { approvalId: "approval-1" } })).resolves.toMatchObject({
       isError: true,
       structuredContent: { ok: false, error: { code: "OMR_HTTP_ERROR",
-        details: { error: "GITHUB_RATE_LIMITED", receiptId: "execution_confirmed" } } },
+        details: { error: code, receiptId: "execution_confirmed" } } },
     });
   });
 

@@ -385,6 +385,8 @@ export function createOMRRouter(
         return Response.json({ error: error.code, message: error.message, receiptId: error.receiptId },
           { status: error.code === "GITHUB_RATE_LIMITED" ? 429
             : error.code === "GITHUB_RECONNECT_REQUIRED" ? 401
+            : error.code === "GITHUB_COMMENT_UNAVAILABLE" ? 410
+            : error.code === "GITHUB_COMMENT_REJECTED" ? 422
             : error.code === "GITHUB_REPOSITORY_UNAVAILABLE" ? 404 : 403,
             headers: { ...PRIVATE_RESPONSE,
               ...(error.code === "GITHUB_RATE_LIMITED" && error.retryAfterSeconds !== undefined

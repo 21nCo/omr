@@ -22,9 +22,9 @@ const failures = [
     "API rate limit exceeded", 429, "GITHUB_RATE_LIMITED"],
 ] as const;
 
-async function fixture(failurePoint: "scope" | "preflight" | "comment" | "transport", status: number,
+async function fixture(failurePoint: "scope" | "preflight" | "comment" | "transport" | "server", status: number,
   headers: Record<string, string>, message: string) {
-  let activeFailurePoint: "scope" | "preflight" | "comment" | "transport" = failurePoint;
+  let activeFailurePoint: "scope" | "preflight" | "comment" | "transport" | "server" = failurePoint;
   const calls: string[] = [];
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -89,7 +89,7 @@ async function fixture(failurePoint: "scope" | "preflight" | "comment" | "transp
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
   }));
   return { calls, receipts, approvals, service, principal, workspace, binding, workspaceStore, post,
-    setFailurePoint(value: "scope" | "preflight" | "comment" | "transport") { activeFailurePoint = value; } };
+    setFailurePoint(value: "scope" | "preflight" | "comment" | "transport" | "server") { activeFailurePoint = value; } };
 }
 
 describe("GitHub provider error boundaries through OAuth, PlugFn, execution and HTTP", () => {
@@ -167,8 +167,10 @@ describe("GitHub provider error boundaries through OAuth, PlugFn, execution and 
 
   it.each([
     ...failures,
-    ["missing issue", 404, {}, "Not Found", 404, "GITHUB_REPOSITORY_UNAVAILABLE"],
+    ["repository becomes private after public preflight", 404, {}, "Not Found", 404, "GITHUB_REPOSITORY_UNAVAILABLE"],
     ["scope denied", 403, {}, "Resource not accessible", 403, "GITHUB_ACCESS_DENIED"],
+    ["issue gone after public preflight", 410, {}, "provider-private-data", 410, "GITHUB_COMMENT_UNAVAILABLE"],
+    ["invalid or spam comment", 422, {}, "provider-private-data", 422, "GITHUB_COMMENT_REJECTED"],
   ] as const)("settles definite %s comment POST rejection without replaying the write", async (
     _name, status, headers, message, httpStatus, code,
   ) => {
@@ -194,6 +196,8 @@ describe("GitHub provider error boundaries through OAuth, PlugFn, execution and 
     const body = await response.json() as { error: string; receiptId: string; message: string };
     expect(body).toMatchObject({ error: code, receiptId: expect.any(String) });
     expect(JSON.stringify(body)).not.toContain("provider-private-data");
+    if (status === 410) expect(body.message).toContain("gone");
+    if (status === 422) expect(body.message).toContain("invalid or spam");
     expect(calls.filter((url) => url.endsWith("/comments"))).toHaveLength(1);
     expect(receipts.receipts.get(body.receiptId)).toMatchObject({ status: "failed", workspaceId: workspace.id,
       connectionId: binding.connection.id, errorCode: "github_write_rejected" });
@@ -202,9 +206,9 @@ describe("GitHub provider error boundaries through OAuth, PlugFn, execution and 
     expect(calls.filter((url) => url.endsWith("/comments"))).toHaveLength(1);
   });
 
-  it("keeps an ambiguous comment POST uncertain and fences replay", async () => {
+  it.each(["transport", "server"] as const)("keeps an ambiguous %s comment POST uncertain and fences replay", async (failurePoint) => {
     const { calls, receipts, approvals, service, principal, post } =
-      await fixture("transport", 500, {}, "");
+      await fixture(failurePoint, 500, {}, "provider-private-data");
     const approval = await service.requestApproval({ principal, toolId: "github.issues.commentPublic",
       params: { owner: "org", repo: "public", issueNumber: 1, body: "Hello" },
       idempotencyKey: "transport-post" });

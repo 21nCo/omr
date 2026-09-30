@@ -147,7 +147,7 @@ const createPublicComment: Action = {
     try {
       return await upstream["issues.createComment"]!.execute(params, context);
     } catch (error) {
-      const failure = githubHttpFailure(error);
+      const failure = githubHttpFailure(error, true);
       // Only a confirmed HTTP rejection settles a write. Transport failures and
       // malformed successful responses leave the POST outcome unknown.
       if (failure) throw new ConfirmedGitHubWriteRejection(failure);

@@ -296,16 +296,21 @@ export class GitHubWritePreflightError extends Error {
 /** GitHub returned a definite rejection to the comment POST. */
 export class GitHubWriteRejectedError extends Error {
   readonly code: "GITHUB_RECONNECT_REQUIRED" | "GITHUB_ACCESS_DENIED" |
-    "GITHUB_REPOSITORY_UNAVAILABLE" | "GITHUB_RATE_LIMITED";
+    "GITHUB_REPOSITORY_UNAVAILABLE" | "GITHUB_COMMENT_UNAVAILABLE" |
+    "GITHUB_COMMENT_REJECTED" | "GITHUB_RATE_LIMITED";
   readonly retryAfterSeconds?: number;
   readonly rateLimitResetAt?: number;
   constructor(readonly receiptId: string, failure: GitHubHttpFailure) {
     const code = failure.rateLimited ? "GITHUB_RATE_LIMITED"
       : failure.status === 401 ? "GITHUB_RECONNECT_REQUIRED"
-      : failure.status === 404 ? "GITHUB_REPOSITORY_UNAVAILABLE" : "GITHUB_ACCESS_DENIED";
+      : failure.status === 404 ? "GITHUB_REPOSITORY_UNAVAILABLE"
+      : failure.status === 410 ? "GITHUB_COMMENT_UNAVAILABLE"
+      : failure.status === 422 ? "GITHUB_COMMENT_REJECTED" : "GITHUB_ACCESS_DENIED";
     super({
       GITHUB_RECONNECT_REQUIRED: "GitHub rejected this connection. Reconnect the account before requesting a new approval.",
       GITHUB_REPOSITORY_UNAVAILABLE: "GitHub could not find this issue or repository. Check its name, number, and access before requesting a new approval.",
+      GITHUB_COMMENT_UNAVAILABLE: "GitHub reports this issue or repository is gone. Check whether issues remain enabled and the repository is still public before requesting a new approval.",
+      GITHUB_COMMENT_REJECTED: "GitHub rejected this comment as invalid or spam. Review the issue and comment content before requesting a new approval.",
       GITHUB_RATE_LIMITED: "GitHub rejected the comment at its rate limit. Retry after its reset window with a new approval.",
       GITHUB_ACCESS_DENIED: "GitHub denied this comment. Check repository access and OAuth scopes before requesting a new approval.",
     }[code]);

@@ -1,6 +1,6 @@
 /** Safe, provider-independent details from a definite GitHub HTTP response. */
 export interface GitHubHttpFailure {
-  status: 401 | 403 | 404 | 429;
+  status: 401 | 403 | 404 | 410 | 422 | 429;
   rateLimited: boolean;
   retryAfterSeconds?: number;
   rateLimitResetAt?: number;
@@ -14,11 +14,12 @@ export class ConfirmedGitHubWriteRejection extends Error {
   }
 }
 
-export function githubHttpFailure(error: unknown): GitHubHttpFailure | null {
+export function githubHttpFailure(error: unknown, commentPost = false): GitHubHttpFailure | null {
   if (!error || typeof error !== "object") return null;
   const status = "code" in error && error.code === "GITHUB_READ_RATE_LIMIT" ? 429
     : "status" in error ? error.status : null;
-  if (status !== 401 && status !== 403 && status !== 404 && status !== 429) return null;
+  if (status !== 401 && status !== 403 && status !== 404 && status !== 429 &&
+      !(commentPost && (status === 410 || status === 422))) return null;
   const rawHeaders = "headers" in error && error.headers && typeof error.headers === "object"
     ? error.headers : {};
   const headers = rawHeaders instanceof Headers

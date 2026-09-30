@@ -227,6 +227,8 @@ describe("cli-command-contract", { timeout: 15_000 }, () => {
       [401, "GITHUB_RECONNECT_REQUIRED", 3],
       [403, "GITHUB_ACCESS_DENIED", 1],
       [404, "GITHUB_REPOSITORY_UNAVAILABLE", 1],
+      [410, "GITHUB_COMMENT_UNAVAILABLE", 1],
+      [422, "GITHUB_COMMENT_REJECTED", 1],
       [429, "GITHUB_RATE_LIMITED", 1],
     ] as const) {
       f.failureResponse("/api/approvals/execute", status,
