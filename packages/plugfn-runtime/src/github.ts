@@ -12,6 +12,41 @@ const repository = z.string().min(1).max(100).regex(/^(?!\.{1,2}$)[A-Za-z0-9_.-]
 const owner = z.string().min(1).max(39).regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/);
 const target = { owner, repo: repository };
 
+/** GitHub reports the token's effective grants on authenticated API responses. */
+function grantedScopes(headers: unknown): string[] | null {
+  let value: unknown;
+  if (headers instanceof Headers) value = headers.get("x-oauth-scopes");
+  else if (headers && typeof headers === "object") {
+    const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === "x-oauth-scopes");
+    value = entry?.[1];
+  }
+  if (typeof value !== "string") return null;
+  const scopes = value.split(",").map((scope) => scope.trim());
+  return scopes.length === 1 && scopes[0] === "" ? []
+    : scopes.every((scope) => /^[A-Za-z0-9:_-]+$/.test(scope)) ? scopes : null;
+}
+
+/** Never use PlugFn's requested-scope fallback as proof of a GitHub grant. */
+export async function verifiedGithubScopes(runtime: {
+  action(provider: string, action: string, options: {
+    userId: string; connectionId: string; params: Record<string, never>;
+    actor: { userId: string; tenantId: string; organizationId: string };
+    retry: { maxAttempts: number; backoff: "exponential" }; cache: boolean;
+  }): Promise<unknown>;
+}, input: { userId: string; workspaceId: string; connectionId: string }): Promise<readonly string[] | undefined> {
+  const result = await runtime.action("github", "account.get", {
+    userId: input.userId,
+    connectionId: input.connectionId,
+    params: {},
+    actor: { userId: input.userId, tenantId: input.workspaceId, organizationId: input.workspaceId },
+    retry: { maxAttempts: 1, backoff: "exponential" },
+    cache: false,
+  });
+  if (!result || typeof result !== "object" || !("verifiedScopes" in result)) return undefined;
+  const scopes = result.verifiedScopes;
+  return Array.isArray(scopes) && scopes.every((scope) => typeof scope === "string") ? scopes : undefined;
+}
+
 // PlugFn retries 429 using Retry-After, even when that delay exceeds OMR's
 // invocation deadline, and replaces the final error without its headers.
 // Keep definite GitHub read limits outside that retry path so the caller can
@@ -51,10 +86,13 @@ const account: Action = {
   idempotent: true,
   parameters: z.object({}).strict(),
   returns: z.object({ id: z.number(), login: z.string(), html_url: z.string(),
-    avatar_url: z.string().optional(), name: z.string().nullable().optional() }).passthrough(),
+    avatar_url: z.string().optional(), name: z.string().nullable().optional(),
+    verifiedScopes: z.array(z.string()).nullable() }).passthrough(),
   contract: contract("read", ["read:user"]),
-  execute: async (_params, context) => githubRead(async () =>
-    (await context.http.get(`${context.provider.baseUrl}/user`)).data),
+  execute: async (_params, context) => githubRead(async () => {
+    const response = await context.http.get(`${context.provider.baseUrl}/user`);
+    return { ...response.data, verifiedScopes: grantedScopes(response.headers) };
+  }),
 };
 
 const listPublic: Action = {

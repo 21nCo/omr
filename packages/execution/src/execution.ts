@@ -331,7 +331,8 @@ export class ExecutionService {
     private readonly connections: ConnectionAuthority,
     private readonly plugfn: PlugFnActionPort,
     private readonly receipts: ExecutionReceiptStore,
-    private readonly connectionScopes: (providerConnectionId: string) => Promise<readonly string[] | undefined>,
+    private readonly connectionScopes: (providerConnectionId: string, connection: ConnectionBindingRecord,
+      principal: ExecutionPrincipal) => Promise<readonly string[] | undefined>,
     private readonly now: () => number = Date.now,
     private readonly approvals?: ExecutionApprovalStore,
     private readonly invocationGuard?: ExecutionInvocationGuard,
@@ -388,7 +389,7 @@ export class ExecutionService {
       provider: manifest.provider,
       ...(input.connectionId ? { connectionId: input.connectionId } : {}),
     }));
-    await withinInvocationDeadline(deadlineAt, () => this.assertScopes(manifest, connection));
+    await withinInvocationDeadline(deadlineAt, () => this.assertScopes(manifest, connection, input.principal));
     if (manifest.contract.effect !== "read") {
       throw new ExecutionApprovalRequiredError(manifest);
     }
@@ -442,7 +443,7 @@ export class ExecutionService {
       provider: manifest.provider,
       ...(input.connectionId ? { connectionId: input.connectionId } : {}),
     });
-    await this.assertScopes(manifest, connection);
+    await this.assertScopes(manifest, connection, input.principal);
     const timestamp = this.now();
     const idempotencyKey = input.idempotencyKey;
     return approvals.create({
@@ -674,7 +675,7 @@ export class ExecutionService {
     if (connection.providerConnectionId !== approval.providerConnectionId) {
       throw new ApprovalUnavailableError();
     }
-    await withinInvocationDeadline(deadlineAt, () => this.assertScopes(manifest, connection));
+    await withinInvocationDeadline(deadlineAt, () => this.assertScopes(manifest, connection, effectivePrincipal));
     return { manifest, effectivePrincipal, connection };
   }
 
@@ -900,10 +901,11 @@ export class ExecutionService {
     }
   }
 
-  private async assertScopes(manifest: ToolManifest, connection: ConnectionBindingRecord): Promise<void> {
+  private async assertScopes(manifest: ToolManifest, connection: ConnectionBindingRecord,
+    principal: ExecutionPrincipal): Promise<void> {
     let scopes: readonly string[] | undefined;
     try {
-      scopes = await this.connectionScopes(connection.providerConnectionId);
+      scopes = await this.connectionScopes(connection.providerConnectionId, connection, principal);
     } catch (error) {
       if (!isMissingRemoteConnection(error)) throw error;
       await markMissingRemoteConnection(this.connections, connection.id);

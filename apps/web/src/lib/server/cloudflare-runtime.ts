@@ -14,7 +14,7 @@ import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
 import { decodeExecutionWrappingKey, deriveExecutionFingerprintKey, ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
 import { connectPostgresExecutionReceipts } from "@oh-my-router/execution/postgres";
 import { connectPostgresIdentityRuntime } from "@oh-my-router/identity/postgres";
-import { connectPostgresPlugFn } from "@oh-my-router/plugfn-runtime";
+import { connectPostgresPlugFn, verifiedGithubScopes } from "@oh-my-router/plugfn-runtime";
 import {
   createPlugFnToolCatalog,
   isProviderConfigured,
@@ -416,7 +416,9 @@ export async function scopedToolIds(
     catalog,
     statuses(plugfn, bindings),
     (provider) => authority.resolve({ actorUserId: principal.userId, workspaceId, provider }),
-    async (connectionId) => (await plugfn.connections.get(connectionId)).scopes,
+    async (connectionId, provider) => provider === "github"
+      ? verifiedGithubScopes(plugfn, { userId: principal.userId, workspaceId, connectionId })
+      : (await plugfn.connections.get(connectionId)).scopes,
     async (bindingId) => {
       missing.add(bindingId);
       await markMissingRemoteConnection(authority, bindingId);
@@ -621,7 +623,11 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
         connectionRuntime.connections,
         plugfn.plugfn,
         execution.receipts,
-        async (connectionId) => (await plugfn!.plugfn.connections.get(connectionId)).scopes,
+        async (connectionId, connection, principal) => connection.provider === "github"
+          ? verifiedGithubScopes(plugfn!.plugfn, {
+            userId: principal.userId, workspaceId: principal.workspaceId, connectionId,
+          })
+          : (await plugfn!.plugfn.connections.get(connectionId)).scopes,
         Date.now,
         execution.approvals,
         execution.invocationGuard,

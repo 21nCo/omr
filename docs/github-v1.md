@@ -28,7 +28,12 @@ supported by observed evidence.
 The `repo` grant is broad in GitHub: it permits repository writes at the token
 level even though OMR exposes no private write action. Choose it
 only when private repository access is needed. GitHub may normalize scopes in
-its token response; OMR checks the scopes stored on the selected connection.
+its token response. OMR checks the selected token's effective `X-OAuth-Scopes`
+on an authenticated GitHub response for each catalog or execution request;
+requested scopes and PlugFn's stored fallback do not authorize an action. If
+GitHub omits that header, no GitHub action is authorized. A failed provider
+verification returns an error and authorizes no action; retry after the provider
+recovers or reconnect the account.
 See [GitHub's OAuth scope reference](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps)
 for the provider's current permission definitions.
 OMR requires an explicit `public_repo` grant for its public-comment action; a

@@ -9,7 +9,7 @@ export async function resolveScopedCatalog(
   catalog: ToolCatalog,
   providers: readonly ProviderStatus[],
   resolveBinding: (provider: string) => Promise<{ id: string; providerConnectionId: string }>,
-  remoteScopes: (connectionId: string) => Promise<readonly string[] | undefined>,
+  remoteScopes: (connectionId: string, provider: string) => Promise<readonly string[] | undefined>,
   onRemoteMissing: (bindingId: string) => Promise<void>,
 ): Promise<Set<string>> {
   return usableToolIds(catalog, providers, async (provider) => {
@@ -21,7 +21,7 @@ export async function resolveScopedCatalog(
       throw error;
     }
     try {
-      return await remoteScopes(binding.providerConnectionId);
+      return await remoteScopes(binding.providerConnectionId, provider);
     } catch (error) {
       if (isMissingRemoteConnection(error)) {
         await onRemoteMissing(binding.id);

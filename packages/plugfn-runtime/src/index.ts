@@ -117,4 +117,4 @@ export async function connectPostgresPlugFn(input: {
 }
 
 export { createPostgresPlugFnAdapter } from "./postgres.js";
-export { omrGithubProvider } from "./github.js";
+export { omrGithubProvider, verifiedGithubScopes } from "./github.js";
