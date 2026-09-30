@@ -4,6 +4,7 @@ export {
   ExecutionCapabilityDeniedError,
   ExecutionFailedError,
   GitHubReadError,
+  GitHubScopeProofError,
   GitHubWritePreflightError,
   ExecutionIdempotencyConflictError,
   ExecutionInProgressError,

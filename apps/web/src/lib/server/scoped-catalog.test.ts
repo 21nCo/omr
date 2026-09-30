@@ -58,6 +58,21 @@ describe("workspace-scoped discovery and manifest grants", () => {
     expect(resolve).toHaveBeenCalledTimes(2);
   });
 
+  it.each([401, 403, 429])("keeps healthy provider tools visible when GitHub scope proof returns %i", async (status) => {
+    const tools = await catalog();
+    const onMissing = vi.fn(async () => {});
+    const visible = await resolveScopedCatalog(tools, providers,
+      async (provider) => ({ id: provider, providerConnectionId: provider }),
+      async (provider) => {
+        if (provider === "github") throw Object.assign(new Error("private provider text"), {
+          status, headers: new Headers({ "Retry-After": "45" }),
+        });
+        return ["read"];
+      }, onMissing);
+    expect(tools.discover({ allowedToolIds: visible }).tools.map(({ id }) => id)).toEqual(["linear.read"]);
+    expect(onMissing).not.toHaveBeenCalled();
+  });
+
   it("keeps a deleted remote hidden when health persistence fails, then retries the transition", async () => {
     const tools = await catalog();
     const healthError = new Error("health store unavailable");

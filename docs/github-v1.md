@@ -32,8 +32,10 @@ its token response. OMR checks the selected token's effective `X-OAuth-Scopes`
 on an authenticated GitHub response for each catalog or execution request;
 requested scopes and PlugFn's stored fallback do not authorize an action. If
 GitHub omits that header, no GitHub action is authorized. A failed provider
-verification returns an error and authorizes no action; retry after the provider
-recovers or reconnect the account.
+verification authorizes no GitHub action. Discovery hides GitHub tools while
+keeping other providers visible; direct execution and approval return a safe
+reconnect, access-denied, or rate-limit error. Retry after the indicated rate
+window or reconnect the account as directed.
 See [GitHub's OAuth scope reference](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps)
 for the provider's current permission definitions.
 OMR requires an explicit `public_repo` grant for its public-comment action; a
@@ -85,14 +87,16 @@ and redacted body. OMR makes zero comment POST requests before approval and
 uses one provider attempt after approval. A preflight repository read refuses
 an unverified public target. A private, malformed, or denied repository
 preflight fails the receipt with an explicit safe error before any comment
-POST. If a write outcome is uncertain, reconcile the
+POST. Rate-limited preflight includes available retry and reset timing. If a
+write outcome is uncertain, reconcile the
 receipt and provider state; do not repeat it with a new idempotency key. MCP
 clients use the same catalog and approval flow and must refresh a long-lived
 catalog after connecting, selecting, or changing grants.
 
 ## Evidence and rollout
 
-`tests/acceptance/github-adapter-contract.test.ts` and the connection/router
+`tests/acceptance/github-adapter-contract.test.ts`,
+`tests/acceptance/github-provider-boundaries.test.ts`, and the connection/router
 fixtures prove local schemas, scope tiers, selection, approval, revocation,
 provider error handling, and zero write before approval. They do not prove
 GitHub sandbox permissions or deployment behavior. OMR-15 owns connected

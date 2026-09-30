@@ -4,7 +4,7 @@ import {
   ConnectionUnavailableError, isMissingRemoteConnection, markMissingRemoteConnection,
   type ConnectionAuthority, type ConnectionBindingRecord,
 } from "@oh-my-router/connections";
-import { hasRequiredScopes, ProviderPreflightError, type JsonValue, type ToolCatalog, type ToolManifest } from "@oh-my-router/tools";
+import { githubHttpFailure, hasRequiredScopes, ProviderPreflightError, type GitHubHttpFailure, type JsonValue, type ToolCatalog, type ToolManifest } from "@oh-my-router/tools";
 import { approvalPreviewReady } from "./projection.js";
 
 export type ExecutionStatus = "reserved" | "running" | "succeeded" | "failed" | "uncertain";
@@ -238,13 +238,42 @@ export class GitHubReadError extends Error {
   }
 }
 
+/** Scope proof failed before an execution receipt or approval could be created. */
+export class GitHubScopeProofError extends Error {
+  readonly code: "GITHUB_RECONNECT_REQUIRED" | "GITHUB_ACCESS_DENIED" | "GITHUB_RATE_LIMITED" |
+    "GITHUB_REPOSITORY_UNAVAILABLE";
+  readonly status: number;
+  readonly retryAfterSeconds?: number;
+  readonly rateLimitResetAt?: number;
+  constructor(failure: GitHubHttpFailure) {
+    const code = failure.rateLimited ? "GITHUB_RATE_LIMITED"
+      : failure.status === 401 ? "GITHUB_RECONNECT_REQUIRED"
+      : failure.status === 404 ? "GITHUB_REPOSITORY_UNAVAILABLE" : "GITHUB_ACCESS_DENIED";
+    super({
+      GITHUB_RECONNECT_REQUIRED: "GitHub rejected this connection. Reconnect the account.",
+      GITHUB_REPOSITORY_UNAVAILABLE: "GitHub account unavailable. Check the selected connection.",
+      GITHUB_RATE_LIMITED: "GitHub rate limit reached. Retry after its reset window.",
+      GITHUB_ACCESS_DENIED: "GitHub denied scope verification. Check account access and OAuth scopes.",
+    }[code]);
+    this.name = "GitHubScopeProofError";
+    this.code = code;
+    this.status = failure.rateLimited ? 429 : failure.status;
+    this.retryAfterSeconds = failure.retryAfterSeconds;
+    this.rateLimitResetAt = failure.rateLimitResetAt;
+  }
+}
+
 /** A GitHub comment was rejected before its POST could be sent. */
 export class GitHubWritePreflightError extends Error {
   readonly code: "GITHUB_PUBLIC_REPOSITORY_REQUIRED" | "GITHUB_RECONNECT_REQUIRED" |
-    "GITHUB_ACCESS_DENIED" | "GITHUB_REPOSITORY_UNAVAILABLE" | "GITHUB_PREFLIGHT_UNAVAILABLE";
+    "GITHUB_ACCESS_DENIED" | "GITHUB_REPOSITORY_UNAVAILABLE" | "GITHUB_PREFLIGHT_UNAVAILABLE" |
+    "GITHUB_RATE_LIMITED";
+  readonly retryAfterSeconds?: number;
+  readonly rateLimitResetAt?: number;
   constructor(readonly receiptId: string, preflight: ProviderPreflightError) {
     const code = preflight.reason === "unverified_public_repository"
       ? "GITHUB_PUBLIC_REPOSITORY_REQUIRED"
+      : preflight.failure?.rateLimited ? "GITHUB_RATE_LIMITED"
       : preflight.status === 401 ? "GITHUB_RECONNECT_REQUIRED"
       : preflight.status === 403 ? "GITHUB_ACCESS_DENIED"
       : preflight.status === 404 ? "GITHUB_REPOSITORY_UNAVAILABLE"
@@ -253,41 +282,15 @@ export class GitHubWritePreflightError extends Error {
       GITHUB_PUBLIC_REPOSITORY_REQUIRED: "Public issue comments require a verified public repository. Private repositories are unsupported.",
       GITHUB_RECONNECT_REQUIRED: "GitHub rejected this connection. Reconnect the account.",
       GITHUB_ACCESS_DENIED: "GitHub denied repository preflight. Check repository access and OAuth scopes.",
+      GITHUB_RATE_LIMITED: "GitHub rate limit reached during repository preflight. Retry after its reset window.",
       GITHUB_REPOSITORY_UNAVAILABLE: "Repository unavailable. Check its name and private-repository access.",
       GITHUB_PREFLIGHT_UNAVAILABLE: "GitHub repository preflight could not be verified. Check the connection before requesting a new approval.",
     }[code]);
     this.code = code;
     this.name = "GitHubWritePreflightError";
+    this.retryAfterSeconds = preflight.failure?.retryAfterSeconds;
+    this.rateLimitResetAt = preflight.failure?.rateLimitResetAt;
   }
-}
-
-function githubReadStatus(error: unknown): { status: number; rateLimited: boolean;
-  retryAfterSeconds?: number; rateLimitResetAt?: number } | null {
-  if (!error || typeof error !== "object") return null;
-  const status = "code" in error && error.code === "GITHUB_READ_RATE_LIMIT" ? 429
-    : "status" in error ? error.status : null;
-  if (status !== 401 && status !== 403 && status !== 404 && status !== 429) return null;
-  const rawHeaders = "headers" in error && error.headers && typeof error.headers === "object"
-    ? error.headers : {};
-  const headers = rawHeaders instanceof Headers
-    ? Object.fromEntries(rawHeaders.entries())
-    : Object.fromEntries(Object.entries(rawHeaders).map(([key, value]) => [key.toLowerCase(), value]));
-  const numericHeader = (name: string): number | undefined => {
-    const value = headers[name];
-    if (typeof value !== "string" && typeof value !== "number") return undefined;
-    const stringValue = String(value);
-    if (!/^\d+$/.test(stringValue)) return undefined;
-    const parsed = Number(stringValue);
-    return Number.isSafeInteger(parsed) ? parsed : undefined;
-  };
-  const data = "data" in error && error.data && typeof error.data === "object" ? error.data : null;
-  const message = data && "message" in data && typeof data.message === "string" ? data.message
-    : "message" in error && typeof error.message === "string" ? error.message : "";
-  return { status, rateLimited: status === 429 || status === 403 && (
-    String(headers["x-ratelimit-remaining"]) === "0" || headers["retry-after"] !== undefined ||
-    /rate.?limit|abuse detection/i.test(message)),
-    retryAfterSeconds: numericHeader("retry-after"),
-    rateLimitResetAt: numericHeader("x-ratelimit-reset") };
 }
 
 const inputValidators = new Map<string, Validator>();
@@ -802,7 +805,7 @@ export class ExecutionService {
           missingRemoteAfterInvoke = true;
         }
         const deniedRead = input.manifest.provider === "github" && input.manifest.contract.effect === "read"
-          ? githubReadStatus(error) : null;
+          ? githubHttpFailure(error) : null;
         if (deniedRead) {
           let recorded = false;
           try {
@@ -907,6 +910,8 @@ export class ExecutionService {
     try {
       scopes = await this.connectionScopes(connection.providerConnectionId, connection, principal);
     } catch (error) {
+      const githubFailure = connection.provider === "github" ? githubHttpFailure(error) : null;
+      if (githubFailure) throw new GitHubScopeProofError(githubFailure);
       if (!isMissingRemoteConnection(error)) throw error;
       await markMissingRemoteConnection(this.connections, connection.id);
       throw new ConnectionUnavailableError();

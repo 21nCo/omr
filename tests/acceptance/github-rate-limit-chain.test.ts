@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryAdapter, plugFn } from "plugfn";
-import { omrGithubProvider } from "@oh-my-router/plugfn-runtime";
+import { omrGithubProvider, verifiedGithubScopes } from "@oh-my-router/plugfn-runtime";
 import { createPlugFnToolCatalog } from "@oh-my-router/tools";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
 import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
@@ -25,6 +25,10 @@ describe("GitHub read rate limits through PlugFn and HTTP", () => {
       const url = String(input);
       if (url === "https://github.com/login/oauth/access_token") {
         return Response.json({ access_token: "sandbox-token", token_type: "bearer", scope: "read:user" });
+      }
+      if (url === "https://api.github.com/user") {
+        return Response.json({ id: 7, login: "alice", html_url: "https://github.com/alice" },
+          { headers: { "X-OAuth-Scopes": "read:user" } });
       }
       if (url === "https://api.github.com/repos/org/public") {
         providerCalls.push(url);
@@ -56,7 +60,9 @@ describe("GitHub read rate limits through PlugFn and HTTP", () => {
 
     const receipts = new MemoryExecutionReceiptStore(() => true);
     const service = new ExecutionService(await createPlugFnToolCatalog(runtime), connections, runtime, receipts,
-      async () => ["read:user"], Date.now, undefined, undefined, new Uint8Array(32).fill(7));
+      (connectionId, _binding, principal) => verifiedGithubScopes(runtime, {
+        connectionId, userId: principal.userId, workspaceId: principal.workspaceId,
+      }), Date.now, undefined, undefined, new Uint8Array(32).fill(7));
     const execution = { execute: (_request: Request, input: { workspaceId: string; toolId: string; params: unknown }) =>
       service.execute({ principal: { kind: "web", userId: "alice", workspaceId: input.workspaceId },
         toolId: input.toolId, params: input.params }) } as ExecutionRouteServices;

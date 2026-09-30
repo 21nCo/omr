@@ -2,7 +2,7 @@ import {
   ConnectionSelectionRequiredError, ConnectionUnavailableError,
   isMissingRemoteConnection,
 } from "@oh-my-router/connections";
-import { usableToolIds, type ProviderStatus, type ToolCatalog } from "@oh-my-router/tools";
+import { githubHttpFailure, usableToolIds, type ProviderStatus, type ToolCatalog } from "@oh-my-router/tools";
 
 /** A deleted PlugFn connection is an unavailable grant, not a failed catalog. */
 export async function resolveScopedCatalog(
@@ -27,6 +27,9 @@ export async function resolveScopedCatalog(
         await onRemoteMissing(binding.id);
         return null;
       }
+      // A definite GitHub profile denial makes only that provider's grants
+      // unavailable; it must not hide healthy providers in the same catalog.
+      if (provider === "github" && githubHttpFailure(error)) return null;
       throw error;
     }
   });

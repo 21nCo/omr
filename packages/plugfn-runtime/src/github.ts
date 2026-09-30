@@ -1,7 +1,7 @@
 import { githubProvider } from "@plugfn/providers";
 import type { Action, ActionContract, Provider } from "plugfn";
 import { z } from "zod";
-import { ProviderPreflightError } from "@oh-my-router/tools";
+import { githubHttpFailure, ProviderPreflightError } from "@oh-my-router/tools";
 
 // OMR v1 deliberately publishes a small journey rather than the upstream action catalog.
 // A new upstream action cannot become executable merely by being registered there.
@@ -131,11 +131,15 @@ const createPublicComment: Action = {
   execute: async (params, context) => {
     let repository;
     try {
-      repository = await context.http.get(`${context.provider.baseUrl}/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}`);
+      repository = await githubRead(() => context.http.get(
+        `${context.provider.baseUrl}/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}`));
     } catch (error) {
-      const status = error && typeof error === "object" && "status" in error &&
-        typeof error.status === "number" ? error.status : null;
-      throw new ProviderPreflightError("repository_lookup_failed", status);
+      const failure = githubHttpFailure(error);
+      // PlugFn's retry layer treats any thrown object with status=429 as a
+      // retryable provider error, discarding its headers. The structured
+      // failure retains the definite status without entering that path.
+      throw new ProviderPreflightError("repository_lookup_failed",
+        failure?.status === 429 ? null : failure?.status ?? null, failure);
     }
     if (repository?.data?.private !== false) {
       throw new ProviderPreflightError("unverified_public_repository");
