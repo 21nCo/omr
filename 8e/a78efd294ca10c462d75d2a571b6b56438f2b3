@@ -1,0 +1,23 @@
+apps/web/src/lib/server/cloudflare-runtime.ts
+  s_0609f91acbad47::t_89a9534d528ab7 145,405
+apps/web/src/routes/app/+page.svelte
+  s_0609f91acbad47::t_f431cc0cf1a4df 217,232
+packages/plugfn-runtime/src/github.ts
+  s_0609f91acbad47::t_174724ed8311ce 86,102,113,122,131
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8ea78efd294ca10c462d75d2a571b6b56438f2b3",
+  "prompts": {},
+  "sessions": {
+    "s_0609f91acbad47": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f0c55667effezmm807Vu9fqhAN",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
