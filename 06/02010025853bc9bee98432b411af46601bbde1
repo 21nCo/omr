@@ -1,0 +1,21 @@
+apps/web/src/lib/server/router.ts
+  s_0b55fe5875cc2b::t_3d37fcbd959280 42,353-354,361-370,373-375,377-381
+apps/web/src/lib/server/scoped-catalog.ts
+  s_0b55fe5875cc2b::t_66fb98eb4d62ee 5,30-32
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0602010025853bc9bee98432b411af46601bbde1",
+  "prompts": {},
+  "sessions": {
+    "s_0b55fe5875cc2b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "57f10555-c7dd-452c-99d7-65485e106a12",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
