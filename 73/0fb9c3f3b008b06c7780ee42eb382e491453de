@@ -1,0 +1,24 @@
+apps/web/src/lib/server/router.ts
+  h_a39f9495f9ec1d 194
+docs/connection-lifecycle-v1.md
+  h_a39f9495f9ec1d 24-27
+docs/linear-v1.md
+  h_a39f9495f9ec1d 46-50
+packages/plugfn-runtime/src/linear.ts
+  h_a39f9495f9ec1d 48-52
+packages/tools/src/linear-errors.ts
+  h_a39f9495f9ec1d 5,18,49-51,65-66
+tests/acceptance/linear-adapter-contract.test.ts
+  h_a39f9495f9ec1d 29-31,37-39,54-59,65-76,82-83,332-394
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "730fb9c3f3b008b06c7780ee42eb382e491453de",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
