@@ -8,6 +8,7 @@ export interface OAuthReviewInput {
   label: string;
   origin: string;
   githubAccess?: "profile" | "public_write" | "private_repositories";
+  linearAccess?: "read" | "issue_write";
 }
 
 export interface OAuthReviewState {

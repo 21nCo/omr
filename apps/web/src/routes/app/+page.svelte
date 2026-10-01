@@ -84,6 +84,24 @@
   let oauthLabel = "";
   let oauthOwnership: "personal" | "workspace" = "personal";
   let githubAccess: "profile" | "public_write" | "private_repositories" = "profile";
+  let linearAccess: "read" | "issue_write" = "read";
+  type LinearTeam = { id: string; name: string; key: string };
+  type LinearIssue = { id: string; identifier: string; title: string; description: string | null;
+    url: string; team: { id: string; name: string }; state: { id: string; name: string } | null };
+  let linearWorkspace: { id: string; name: string } | null = null;
+  let linearTeams: LinearTeam[] = [];
+  let linearTeamsCursor: string | null = null;
+  let linearTeamId = "";
+  let linearIssues: LinearIssue[] = [];
+  let linearIssuesCursor: string | null = null;
+  let linearIssueId = "";
+  let linearIssue: LinearIssue | null = null;
+  let linearCreateTitle = "";
+  let linearCreateDescription = "";
+  let linearUpdateTitle = "";
+  let linearUpdateDescription = "";
+  let linearBusy = "";
+  let linearGeneration = 0;
   let credentialProvider = "";
   let credentialLabel = "";
   let credentialOwnership: "personal" | "workspace" = "personal";
@@ -96,11 +114,12 @@
     readiness: (provider, workspaceId) => request(
       `/api/connections/providers/readiness?provider=${encodeURIComponent(provider)}&workspaceId=${encodeURIComponent(workspaceId)}`,
     ),
-    start: async ({ workspaceId, provider, ownership, label, redirectUri, githubAccess }) => request("/api/connections/oauth/start", {
+    start: async ({ workspaceId, provider, ownership, label, redirectUri, githubAccess, linearAccess }) => request("/api/connections/oauth/start", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ workspaceId, provider, ownership, label, redirectUri,
-        ...(provider === "github" ? { githubAccess } : {}) }),
+        ...(provider === "github" ? { githubAccess } : {}),
+        ...(provider === "linear" ? { linearAccess } : {}) }),
     }),
     update: (review, pending) => {
       authorizationDestination = review?.destination ?? "";
@@ -142,7 +161,8 @@
   async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetch(path, { credentials: "same-origin", ...init });
     const body = await response.json().catch(() => ({})) as { error?: string; message?: string };
-    if (response.status === 401) {
+    if (response.status === 401 && body.error !== "LINEAR_RECONNECT_REQUIRED" &&
+      body.error !== "GITHUB_RECONNECT_REQUIRED") {
       location.assign(`/login?returnTo=${encodeURIComponent(location.pathname + location.search)}`);
       throw new Error("Authentication required");
     }
@@ -185,11 +205,90 @@
 
   async function switchWorkspace() {
     cancelAuthorization();
+    clearLinear();
     apiKey = "";
     await load();
   }
 
+  function clearLinear() {
+    linearGeneration++;
+    linearBusy = "";
+    linearWorkspace = null;
+    linearTeams = [];
+    linearTeamsCursor = null;
+    linearTeamId = "";
+    linearIssues = [];
+    linearIssuesCursor = null;
+    linearIssueId = "";
+    linearIssue = null;
+    linearCreateTitle = "";
+    linearCreateDescription = "";
+    linearUpdateTitle = "";
+    linearUpdateDescription = "";
+  }
+
+  function linearAccount(): Connection | undefined {
+    return overview?.connections.find((entry) => entry.provider === "linear" && entry.selected &&
+      entry.status === "active" && entry.readiness === "ready");
+  }
+
+  async function linearRead<T>(name: string, toolId: string, params: object,
+    publish: (value: T) => void) {
+    const account = linearAccount();
+    if (!account) { error = "Select a ready Linear account first."; return; }
+    const generation = linearGeneration;
+    const workspaceId = selectedWorkspaceId;
+    linearBusy = name;
+    error = "";
+    try {
+      const receipt = await request<{ result: T }>("/api/tools/execute", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId, connectionId: account.id, toolId, params }),
+      });
+      if (generation === linearGeneration && workspaceId === selectedWorkspaceId &&
+        account.id === linearAccount()?.id) publish(receipt.result);
+    } catch (caught) {
+      if (generation === linearGeneration) error = caught instanceof Error ? caught.message : "Linear read failed";
+    } finally { if (generation === linearGeneration) linearBusy = ""; }
+  }
+
+  async function linearApproval(toolId: "linear.issues.create" | "linear.issues.update", params: object) {
+    const account = linearAccount();
+    if (!account) { error = "Select a ready Linear account first."; return; }
+    const generation = linearGeneration;
+    const workspaceId = selectedWorkspaceId;
+    linearBusy = "approval";
+    error = "";
+    try {
+      await request("/api/approvals", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId, connectionId: account.id,
+          toolId, params, idempotencyKey: crypto.randomUUID() }),
+      });
+      if (generation !== linearGeneration || workspaceId !== selectedWorkspaceId ||
+        account.id !== linearAccount()?.id) return;
+      notice = "Linear issue change awaits your approval below. Review the account and target before approving.";
+      await load();
+    } catch (caught) {
+      if (generation === linearGeneration) {
+        error = caught instanceof Error ? caught.message : "Could not request Linear approval";
+      }
+    } finally { if (generation === linearGeneration) linearBusy = ""; }
+  }
+
+  function linearUpdateChanges(): { title?: string; description?: string } {
+    if (!linearIssue) return {};
+    return {
+      ...(linearUpdateTitle !== linearIssue.title ? { title: linearUpdateTitle } : {}),
+      ...(linearUpdateDescription !== (linearIssue.description ?? "")
+        ? { description: linearUpdateDescription } : {}),
+    };
+  }
+
   async function mutate(name: string, path: string, body: unknown, success: string) {
+    if (name.startsWith("select:") || name.startsWith("refresh:") || name.startsWith("health:")) clearLinear();
+    if (name.startsWith("execute:") && overview?.approvals.some((approval) =>
+      name === `execute:${approval.id}` && approval.toolId.startsWith("linear."))) clearLinear();
     busy = name;
     error = "";
     notice = "";
@@ -223,7 +322,8 @@
       const ownership = connection?.ownership ?? oauthOwnership;
       const label = connection?.label ?? (oauthLabel.trim() || catalog?.providers.find((item) => item.provider === provider)?.displayName || provider);
       await oauthReview.start({ workspaceId: selectedWorkspaceId, provider, ownership, label,
-        origin: location.origin, ...(provider === "github" ? { githubAccess } : {}) });
+        origin: location.origin, ...(provider === "github" ? { githubAccess } : {}),
+        ...(provider === "linear" ? { linearAccess } : {}) });
     } catch (caught) {
       error = caught instanceof Error ? caught.message : "Could not start provider authorization";
     }
@@ -241,6 +341,15 @@
       notice = "Choose the GitHub access tier below, then continue to reconnect. A new OAuth grant is required.";
       return;
     }
+    if (connection.provider === "linear") {
+      oauthReview.cancel();
+      oauthProvider = "linear";
+      oauthOwnership = connection.ownership;
+      oauthLabel = connection.label;
+      linearAccess = "read";
+      notice = "Choose Linear read or issue-write access below, then reconnect with fresh consent.";
+      return;
+    }
     void connectOAuth(connection);
   }
 
@@ -255,6 +364,7 @@
   }
 
   async function disconnect(connection: Connection) {
+    if (connection.provider === "linear") clearLinear();
     busy = `disconnect:${connection.id}`;
     error = "";
     notice = "";
@@ -448,8 +558,16 @@
                   </select>
                 </label>
               {/if}
+              {#if oauthProvider === "linear"}
+                <label>Linear access
+                  <select bind:value={linearAccess}>
+                    <option value="read">Workspace, teams, and issue reads · read</option>
+                    <option value="issue_write">Create and update issues · read, write</option>
+                  </select>
+                </label>
+              {/if}
             </div>
-            <p>OMR shows the exact scopes from the provider authorization URL before you leave. Review the provider consent screen before granting access. GitHub private repositories require the broad <code>repo</code> grant. Public comments require approval in OMR.</p>
+            <p>OMR shows the requested scopes before provider consent. Linear issue changes require its <code>write</code> grant and OMR approval. Review the provider consent screen before granting access.</p>
             <button class="primary" type="submit" disabled={Boolean(busy) || !selectedWorkspaceId || !oauthProvider}>
               {busy === "oauth" ? "Opening provider…" : "Continue to provider"}
             </button>
@@ -478,9 +596,91 @@
           {/if}
         </section>
 
+        {#if catalog?.providers.find((entry) => entry.provider === "linear")?.state === "ready"}
+          <section class="panel" aria-label="Linear issue journey">
+            <div class="panel-heading"><div><p class="kicker">Linear</p><h2>Issues</h2></div></div>
+            <p>Selected account: {linearAccount()?.label ?? "Select a Linear account above"}. Choose the Linear workspace and team before reading or changing an issue. Changes wait for approval.</p>
+            <button class="quiet compact" disabled={Boolean(linearBusy) || !linearAccount()}
+              onclick={() => void linearRead<{ id: string; name: string }>("workspace", "linear.workspace.get", {},
+                (value) => { clearLinear(); linearWorkspace = value; })}>Find Linear workspace</button>
+            {#if linearWorkspace}
+              <p>{linearWorkspace.name} · {linearWorkspace.id}</p>
+              <button class="quiet compact" disabled={Boolean(linearBusy)}
+                onclick={() => void linearRead<{ nodes: LinearTeam[]; pageInfo: { endCursor: string | null; hasNextPage: boolean } }>("teams", "linear.teams.list",
+                  { linearWorkspaceId: linearWorkspace?.id },
+                  (value) => { linearTeams = value.nodes; linearTeamsCursor = value.pageInfo.hasNextPage ? value.pageInfo.endCursor : null;
+                    linearTeamId = ""; linearIssues = []; linearIssue = null; })}>Find teams</button>
+              {#if linearTeamsCursor}
+                <button class="quiet compact" disabled={Boolean(linearBusy)}
+                  onclick={() => void linearRead<{ nodes: LinearTeam[]; pageInfo: { endCursor: string | null; hasNextPage: boolean } }>("teams", "linear.teams.list",
+                    { linearWorkspaceId: linearWorkspace?.id, after: linearTeamsCursor },
+                    (value) => { linearTeams = [...linearTeams, ...value.nodes];
+                      linearTeamsCursor = value.pageInfo.hasNextPage ? value.pageInfo.endCursor : null; })}>More teams</button>
+              {/if}
+              {#if linearTeams.length}
+                <label>Team
+                  <select bind:value={linearTeamId} onchange={() => { linearGeneration++; linearBusy = "";
+                    linearIssues = []; linearIssuesCursor = null; linearIssueId = ""; linearIssue = null;
+                    linearCreateTitle = ""; linearCreateDescription = ""; }}>
+                    <option value="">Choose a team</option>
+                    {#each linearTeams as team}<option value={team.id}>{team.name} ({team.key})</option>{/each}
+                  </select>
+                </label>
+                {#if linearTeamId}
+                  <button class="quiet compact" disabled={Boolean(linearBusy)}
+                    onclick={() => void linearRead<{ nodes: LinearIssue[]; pageInfo: { endCursor: string | null; hasNextPage: boolean } }>("issues", "linear.issues.list",
+                      { linearWorkspaceId: linearWorkspace?.id, teamId: linearTeamId },
+                      (value) => { linearIssues = value.nodes;
+                        linearIssuesCursor = value.pageInfo.hasNextPage ? value.pageInfo.endCursor : null;
+                        linearIssueId = ""; linearIssue = null; })}>Find issues</button>
+                  {#if linearIssuesCursor}
+                    <button class="quiet compact" disabled={Boolean(linearBusy)}
+                      onclick={() => void linearRead<{ nodes: LinearIssue[]; pageInfo: { endCursor: string | null; hasNextPage: boolean } }>("issues", "linear.issues.list",
+                        { linearWorkspaceId: linearWorkspace?.id, teamId: linearTeamId, after: linearIssuesCursor },
+                        (value) => { linearIssues = [...linearIssues, ...value.nodes];
+                          linearIssuesCursor = value.pageInfo.hasNextPage ? value.pageInfo.endCursor : null; })}>More issues</button>
+                  {/if}
+                  <form class="inset" onsubmit={(event) => { event.preventDefault(); void linearApproval("linear.issues.create",
+                    { linearWorkspaceId: linearWorkspace?.id, teamId: linearTeamId,
+                      title: linearCreateTitle, description: linearCreateDescription }); }}>
+                    <strong>Create issue in {linearTeams.find((team) => team.id === linearTeamId)?.name}</strong>
+                    <label>Title<input bind:value={linearCreateTitle} maxlength="255" required /></label>
+                    <label>Description<textarea bind:value={linearCreateDescription} maxlength="20000"></textarea></label>
+                    <button class="primary compact" type="submit" disabled={Boolean(linearBusy) || !linearCreateTitle.trim()}>Request creation approval</button>
+                  </form>
+                {/if}
+              {/if}
+              {#if linearIssues.length}
+                <label>Issue
+                  <select bind:value={linearIssueId} onchange={() => { linearGeneration++; linearBusy = ""; linearIssue = null; }}>
+                    <option value="">Choose an issue</option>
+                    {#each linearIssues as entry}<option value={entry.id}>{entry.identifier} · {entry.title}</option>{/each}
+                  </select>
+                </label>
+                <button class="quiet compact" disabled={Boolean(linearBusy) || !linearIssueId}
+                  onclick={() => void linearRead<LinearIssue>("issue", "linear.issues.get",
+                    { linearWorkspaceId: linearWorkspace?.id, issueId: linearIssueId },
+                    (value) => { linearIssue = value; linearUpdateTitle = value.title;
+                      linearUpdateDescription = value.description ?? ""; })}>Read issue</button>
+              {/if}
+              {#if linearIssue}
+                <p><a href={linearIssue.url} target="_blank" rel="noopener noreferrer">{linearIssue.identifier}</a> · {linearIssue.state?.name ?? "No state"}</p>
+                <form class="inset" onsubmit={(event) => { event.preventDefault(); void linearApproval("linear.issues.update",
+                  { linearWorkspaceId: linearWorkspace?.id, issueId: linearIssue?.id,
+                    ...linearUpdateChanges() }); }}>
+                  <strong>Update {linearIssue.identifier}</strong>
+                  <label>Title<input bind:value={linearUpdateTitle} maxlength="255" required /></label>
+                  <label>Description<textarea bind:value={linearUpdateDescription} maxlength="20000"></textarea></label>
+                  <button class="primary compact" type="submit" disabled={Boolean(linearBusy) || !linearUpdateTitle.trim() || !Object.keys(linearUpdateChanges()).length}>Request update approval</button>
+                </form>
+              {/if}
+            {/if}
+          </section>
+        {/if}
+
         <section class="panel approvals">
           <div class="panel-heading"><div><p class="kicker">Human in the loop</p><h2>Approvals</h2></div></div>
-          {#each overview.approvals.filter((item) => item.status === "pending") as approval}
+          {#each overview.approvals.filter((item) => item.status === "pending" || item.status === "approved") as approval}
             <article class="approval-card">
               <div class="approval-top"><strong>{approval.action} ({approval.toolId})</strong><span>Expires {timestamp(approval.expiresAt)}</span></div>
               <p class="approval-context">Effect: {approval.effect} · Account: {overview.connections.find((connection) => connection.id === approval.connectionId)?.label ?? "Unavailable"}</p>
@@ -490,8 +690,12 @@
               {#if approval.previewMode === "opaque"}<p class="approval-context">This action has no field review metadata. All arguments are hidden; review the action and account before approving.</p>{/if}
               <pre>{renderApprovalPreview(approval.params)}</pre>
               <div class="actions">
-                <button class="primary compact" disabled={Boolean(busy) || !approval.previewReady} onclick={() => void mutate(`approve:${approval.id}`, "/api/approvals/approve", { approvalId: approval.id }, `Approved ${approval.toolId}.`)}>Approve</button>
-                <button class="danger compact" disabled={Boolean(busy)} onclick={() => void mutate(`reject:${approval.id}`, "/api/approvals/reject", { approvalId: approval.id }, `Rejected ${approval.toolId}.`)}>Reject</button>
+                {#if approval.status === "pending"}
+                  <button class="primary compact" disabled={Boolean(busy) || !approval.previewReady} onclick={() => void mutate(`approve:${approval.id}`, "/api/approvals/approve", { approvalId: approval.id }, `Approved ${approval.toolId}.`)}>Approve</button>
+                  <button class="danger compact" disabled={Boolean(busy)} onclick={() => void mutate(`reject:${approval.id}`, "/api/approvals/reject", { approvalId: approval.id }, `Rejected ${approval.toolId}.`)}>Reject</button>
+                {:else}
+                  <button class="primary compact" disabled={Boolean(busy) || !approval.previewReady} onclick={() => void mutate(`execute:${approval.id}`, "/api/approvals/execute", { approvalId: approval.id }, `Executed ${approval.toolId}.`)}>Execute approved change</button>
+                {/if}
               </div>
             </article>
           {:else}

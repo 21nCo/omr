@@ -24,6 +24,7 @@ import {
   ProviderUnavailableError,
   type ConnectionOwnership,
   type GithubAccess,
+  type LinearAccess,
 } from "@oh-my-router/connections";
 import { publicDatafnSchema } from "@oh-my-router/data";
 import { connectPostgresDataRuntime } from "@oh-my-router/data/postgres";
@@ -32,7 +33,7 @@ import {
   WorkspaceAccessDeniedError,
   WorkspaceInputError,
 } from "@oh-my-router/identity";
-import { ToolCatalogInputError, type ToolEffect } from "@oh-my-router/tools";
+import { LinearProviderDenial, ToolCatalogInputError, type ToolEffect } from "@oh-my-router/tools";
 import {
   ApprovalUnavailableError,
   ExecutionApprovalRequiredError,
@@ -42,6 +43,7 @@ import {
   GitHubScopeProofError,
   GitHubWritePreflightError,
   GitHubWriteRejectedError,
+  LinearExecutionError,
   ExecutionIdempotencyConflictError,
   ExecutionInProgressError,
   ExecutionInvocationDeadlineError,
@@ -73,6 +75,7 @@ export interface ConnectionRouteServices {
     redirectUri: string;
     label: string;
     githubAccess?: GithubAccess;
+    linearAccess?: LinearAccess;
     returnTo?: string;
   }): Promise<unknown>;
   completeOAuth(request: Request, input: {
@@ -182,6 +185,22 @@ function githubErrorResponse(error: GitHubRouteError): Response {
   return Response.json(body, { status: githubStatus(error.code), headers });
 }
 
+/** Linear GraphQL limits can arrive with HTTP 400; expose only safe timing metadata. */
+function linearErrorResponse(error: LinearExecutionError | LinearProviderDenial): Response {
+  const status = error.code === "LINEAR_RATE_LIMITED" ? 429
+    : error.code === "LINEAR_RECONNECT_REQUIRED" ? 401
+    : error.code === "LINEAR_TARGET_UNAVAILABLE" ? 404
+    : error.code === "LINEAR_WORKSPACE_MISMATCH" ? 409
+    : error.code === "LINEAR_INVALID_CHANGE" ? 422 : 403;
+  const headers: Record<string, string> = { ...PRIVATE_RESPONSE };
+  if (error.code === "LINEAR_RATE_LIMITED") {
+    if (error.retryAfterSeconds !== undefined) headers["retry-after"] = String(error.retryAfterSeconds);
+    if (error.rateLimitResetAt !== undefined) headers["x-ratelimit-requests-reset"] = String(error.rateLimitResetAt);
+  }
+  return Response.json({ error: error.code, message: error.message,
+    ...("receiptId" in error ? { receiptId: error.receiptId } : {}) }, { status, headers });
+}
+
 /** Require a JSON object before reading route-specific fields. */
 function objectBody(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -237,6 +256,13 @@ function githubAccess(body: Record<string, unknown>): GithubAccess | undefined {
   if (value === undefined) return undefined;
   if (value === "profile" || value === "public_write" || value === "private_repositories") return value;
   throw new RequestInputError("githubAccess must be profile, public_write, or private_repositories");
+}
+
+function linearAccess(body: Record<string, unknown>): LinearAccess | undefined {
+  const value = body.linearAccess;
+  if (value === undefined) return undefined;
+  if (value === "read" || value === "issue_write") return value;
+  throw new RequestInputError("linearAccess must be read or issue_write");
 }
 
 function unavailableDeviceServices(): DeviceRouteServices {
@@ -391,6 +417,9 @@ export function createOMRRouter(
       }
       if (error instanceof GitHubWriteRejectedError) {
         return githubErrorResponse(error);
+      }
+      if (error instanceof LinearExecutionError || error instanceof LinearProviderDenial) {
+        return linearErrorResponse(error);
       }
       if (error instanceof ExecutionInvocationDeadlineError) {
         return Response.json({ error: error.code },
@@ -607,6 +636,7 @@ export function createOMRRouter(
           const body = objectBody(await context.json());
           const returnTo = optionalString(body, "returnTo");
           const access = githubAccess(body);
+          const linear = linearAccess(body);
           return Response.json(await connectionServices.startOAuth(request, {
             workspaceId: requiredString(body, "workspaceId"),
             provider: requiredString(body, "provider"),
@@ -614,6 +644,7 @@ export function createOMRRouter(
             redirectUri: requiredString(body, "redirectUri"),
             label: requiredString(body, "label"),
             ...(access ? { githubAccess: access } : {}),
+            ...(linear ? { linearAccess: linear } : {}),
             ...(returnTo ? { returnTo } : {}),
           }), { status: 201, headers: PRIVATE_RESPONSE });
         },

@@ -22,6 +22,7 @@ described in the deployment configuration. Do not expose these values through
 public environment variables. A missing pair reports `unconfigured`; the UI
 does not offer connection setup. This release does not enable live provider
 configuration by default. GitHub additionally requires `OMR_GITHUB_V1_ENABLED=true`;
+Linear requires `OMR_LINEAR_V1_ENABLED=true` after OMR-15 live acceptance;
 it remains off for the OMR-8 implementation rollout until OMR-15's sandbox evidence.
 
 OAuth start runs an install authorization check and returns a provider URL. The
@@ -29,8 +30,9 @@ browser stores only the short-lived, single-use callback intent in
 `sessionStorage`, then displays the actual `scope` and `user_scope` parameters
 from that URL before navigation. Users review any provider consent details
 there. GitHub defaults to `read:user` and offers explicit public-comment and
-private-repository tiers; see [the GitHub journey](github-v1.md). Linear and Slack request the scopes
-declared by their configured provider adapters. Notion may omit a named OAuth
+private-repository tiers; see [the GitHub journey](github-v1.md). Linear offers
+explicit read and issue-write tiers; see [the Linear journey](linear-v1.md).
+Slack requests the scopes declared by its provider adapter. Notion may omit a named OAuth
 scope parameter and presents access in its own consent screen. API-key entry
 is rendered only for a v1 adapter that reports `api_key`; the key is sent once
 to the server and cleared from the form. PlugFn encrypts upstream credentials;

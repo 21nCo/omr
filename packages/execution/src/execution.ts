@@ -4,7 +4,7 @@ import {
   ConnectionUnavailableError, isMissingRemoteConnection, markMissingRemoteConnection,
   type ConnectionAuthority, type ConnectionBindingRecord,
 } from "@oh-my-router/connections";
-import { ConfirmedGitHubWriteRejection, githubHttpFailure, hasRequiredScopes, ProviderPreflightError, type GitHubHttpFailure, type JsonValue, type ToolCatalog, type ToolManifest } from "@oh-my-router/tools";
+import { ConfirmedGitHubWriteRejection, githubHttpFailure, hasRequiredScopes, LinearProviderDenial, ProviderPreflightError, type GitHubHttpFailure, type JsonValue, type ToolCatalog, type ToolManifest } from "@oh-my-router/tools";
 import { approvalPreviewReady } from "./projection.js";
 
 export type ExecutionStatus = "reserved" | "running" | "succeeded" | "failed" | "uncertain";
@@ -337,6 +337,20 @@ export class GitHubWriteRejectedError extends Error {
     this.name = "GitHubWriteRejectedError";
     this.retryAfterSeconds = failure.retryAfterSeconds;
     this.rateLimitResetAt = failure.rateLimitResetAt;
+  }
+}
+
+/** Safe Linear denial tied to an execution receipt. */
+export class LinearExecutionError extends Error {
+  readonly code: LinearProviderDenial["code"];
+  readonly retryAfterSeconds?: number;
+  readonly rateLimitResetAt?: number;
+  constructor(readonly receiptId: string, denial: LinearProviderDenial) {
+    super(denial.message);
+    this.name = "LinearExecutionError";
+    this.code = denial.code;
+    this.retryAfterSeconds = denial.retryAfterSeconds;
+    this.rateLimitResetAt = denial.rateLimitResetAt;
   }
 }
 
@@ -863,7 +877,7 @@ export class ExecutionService {
       // already durable. A later guard COMMIT failure cannot erase that result.
       if (state.succeededReceipt) return state.succeededReceipt;
       if (error instanceof ConnectionUnavailableError || error instanceof GitHubReadError || error instanceof GitHubWritePreflightError ||
-          error instanceof GitHubWriteRejectedError) throw error;
+          error instanceof GitHubWriteRejectedError || error instanceof LinearExecutionError) throw error;
       if (state.dispatchedReceiptId &&
           !(error instanceof ExecutionOutcomeUnknownError)) {
         const receiptId = state.dispatchedReceiptId;
@@ -1029,6 +1043,9 @@ function confirmedDispatchFailure(error: unknown, manifest: ToolManifest,
   }
   if (manifest.id === "github.issues.commentPublic" && error instanceof ConfirmedGitHubWriteRejection) {
     return { code: "github_write_rejected", error: new GitHubWriteRejectedError(receiptId, error.failure) };
+  }
+  if (manifest.provider === "linear" && error instanceof LinearProviderDenial) {
+    return { code: `linear_${error.phase}_denied`, error: new LinearExecutionError(receiptId, error) };
   }
   return null;
 }

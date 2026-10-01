@@ -134,7 +134,10 @@ describe("Worker scoped provider catalog", () => {
     const plugfn = {
       providers: { get: (provider: string) => definitions.get(provider) },
       config: { integrations: { github: {}, linear: {} } },
-      action: vi.fn(async () => { throw Object.assign(new Error("deleted"), { code: "CONNECTION_NOT_FOUND" }); }),
+      action: vi.fn(async (provider: string) => {
+        if (provider === "linear") return { id: "11111111-1111-4111-8111-111111111111", name: "Linear workspace" };
+        throw Object.assign(new Error("deleted"), { code: "CONNECTION_NOT_FOUND" });
+      }),
       connections: { get: vi.fn(async (connectionId: string) => {
         if (connectionId === "remote_github") {
           throw Object.assign(new Error("deleted"), { code: "CONNECTION_NOT_FOUND" });

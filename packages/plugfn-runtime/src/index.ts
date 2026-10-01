@@ -9,7 +9,6 @@ import {
   icloudProvider,
   imapSmtpProvider,
   jiraProvider,
-  linearProvider,
   notionProvider,
   onedriveProvider,
   outlookProvider,
@@ -22,6 +21,7 @@ import { plugFn, type IntegrationConfig, type PlugFn, type PlugFnAuthorizationOp
 
 import { createPostgresPlugFnAdapter } from "./postgres.js";
 import { omrGithubProvider } from "./github.js";
+import { omrLinearProvider } from "./linear.js";
 
 const { Client } = pg;
 
@@ -29,6 +29,7 @@ const providers = [
   clickupProvider,
   discordProvider,
   omrGithubProvider,
+  omrLinearProvider,
   gmailProvider,
   googleCalendarProvider,
   googleDocsProvider,
@@ -37,7 +38,6 @@ const providers = [
   icloudProvider,
   imapSmtpProvider,
   jiraProvider,
-  linearProvider,
   notionProvider,
   onedriveProvider,
   outlookProvider,
@@ -118,3 +118,4 @@ export async function connectPostgresPlugFn(input: {
 
 export { createPostgresPlugFnAdapter } from "./postgres.js";
 export { omrGithubProvider, verifiedGithubScopes } from "./github.js";
+export { omrLinearProvider, verifiedLinearScopes } from "./linear.js";

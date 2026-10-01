@@ -14,7 +14,7 @@ import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
 import { decodeExecutionWrappingKey, deriveExecutionFingerprintKey, ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
 import { connectPostgresExecutionReceipts } from "@oh-my-router/execution/postgres";
 import { connectPostgresIdentityRuntime } from "@oh-my-router/identity/postgres";
-import { connectPostgresPlugFn, verifiedGithubScopes } from "@oh-my-router/plugfn-runtime";
+import { connectPostgresPlugFn, verifiedGithubScopes, verifiedLinearScopes } from "@oh-my-router/plugfn-runtime";
 import {
   createPlugFnToolCatalog,
   isProviderConfigured,
@@ -150,6 +150,7 @@ export function createProviderIntegrationConfig(
   const redirectUri = new URL("/app/oauth/callback", origin).toString();
   return Object.fromEntries(Object.entries(OAUTH_BINDINGS).flatMap(([provider, names]) => {
     if (provider === "github" && env.OMR_GITHUB_V1_ENABLED !== "true") return [];
+    if (provider === "linear" && env.OMR_LINEAR_V1_ENABLED !== "true") return [];
     const clientId = env[names[0]];
     const clientSecret = env[names[1]];
     return typeof clientId === "string" && clientId.length > 0 &&
@@ -420,7 +421,9 @@ export async function scopedToolIds(
     (provider) => authority.resolve({ actorUserId: principal.userId, workspaceId, provider }),
     async (connectionId, provider) => provider === "github"
       ? verifiedGithubScopes(plugfn, { userId: principal.userId, workspaceId, connectionId })
-      : (await plugfn.connections.get(connectionId)).scopes,
+      : provider === "linear"
+        ? verifiedLinearScopes(plugfn, { userId: principal.userId, workspaceId, connectionId })
+        : (await plugfn.connections.get(connectionId)).scopes,
     async (bindingId) => {
       missing.add(bindingId);
       await markMissingRemoteConnection(authority, bindingId);
@@ -630,6 +633,10 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
           ? verifiedGithubScopes(plugfn!.plugfn, {
             userId: principal.userId, workspaceId: principal.workspaceId, connectionId,
           })
+          : connection.provider === "linear"
+            ? verifiedLinearScopes(plugfn!.plugfn, {
+              userId: principal.userId, workspaceId: principal.workspaceId, connectionId,
+            })
           : (await plugfn!.plugfn.connections.get(connectionId)).scopes,
         Date.now,
         execution.approvals,

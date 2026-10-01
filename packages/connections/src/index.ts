@@ -27,6 +27,7 @@ export {
   type PlugFnDisconnectResult,
   type ProviderReadiness,
   type GithubAccess,
+  type LinearAccess,
   githubScopes,
 } from "./plugfn.js";
 

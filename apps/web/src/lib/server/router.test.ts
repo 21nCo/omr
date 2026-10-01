@@ -315,6 +315,16 @@ describe("OMR Worker HTTP boundary", () => {
       redirectUri: "https://omr.invalid/app/oauth/callback", label: "GitHub",
       githubAccess: "repo admin",
     });
+    const linearOAuth = await request("/api/connections/oauth/start", {
+      workspaceId: "workspace_1", provider: "linear", ownership: "personal",
+      redirectUri: "https://omr.invalid/app/oauth/callback", label: "Linear",
+      linearAccess: "issue_write",
+    });
+    const invalidLinearOAuth = await request("/api/connections/oauth/start", {
+      workspaceId: "workspace_1", provider: "linear", ownership: "personal",
+      redirectUri: "https://omr.invalid/app/oauth/callback", label: "Linear",
+      linearAccess: "admin",
+    });
     const health = await request("/api/connections/health", { connectionId: "connection_key" });
     const selection = await request("/api/connections/select", {
       workspaceId: "workspace_1", provider: "linear", connectionId: "connection_key",
@@ -333,6 +343,11 @@ describe("OMR Worker HTTP boundary", () => {
     expect(apiKey.status).toBe(201);
     expect(oauth.status).toBe(201);
     expect(invalidOAuth.status).toBe(400);
+    expect(linearOAuth.status).toBe(201);
+    expect(invalidLinearOAuth.status).toBe(400);
+    expect(calls).toContainEqual({ operation: "oauth-start", input: expect.objectContaining({
+      provider: "linear", linearAccess: "issue_write",
+    }) });
     expect(calls).toContainEqual({ operation: "oauth-start", input: expect.objectContaining({
       provider: "github", githubAccess: "public_write",
     }) });

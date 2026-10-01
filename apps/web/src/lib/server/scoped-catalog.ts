@@ -2,7 +2,7 @@ import {
   ConnectionSelectionRequiredError, ConnectionUnavailableError,
   isMissingRemoteConnection,
 } from "@oh-my-router/connections";
-import { githubHttpFailure, usableToolIds, type ProviderStatus, type ToolCatalog } from "@oh-my-router/tools";
+import { githubHttpFailure, LinearProviderDenial, usableToolIds, type ProviderStatus, type ToolCatalog } from "@oh-my-router/tools";
 
 /** A deleted PlugFn connection is an unavailable grant, not a failed catalog. */
 export async function resolveScopedCatalog(
@@ -30,6 +30,8 @@ export async function resolveScopedCatalog(
       // GitHub profile proof is provider-local. Contain its HTTP denials and
       // identifiable outages without swallowing unrelated callback failures.
       if (provider === "github" && githubProofUnavailable(error)) return null;
+      if (provider === "linear" &&
+        (error instanceof LinearProviderDenial || githubProofUnavailable(error))) return null;
       throw error;
     }
   });
