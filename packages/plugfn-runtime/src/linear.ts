@@ -45,7 +45,11 @@ async function query(context: ActionContext, source: string, variables: Record<s
   }
   const body = response?.data;
   if (Array.isArray(body?.errors) && body.errors.length) {
-    throw linearDenial({ status: 400, data: body }, phase) ?? new Error("Linear GraphQL request failed");
+    // A nested field error may follow a completed mutation. Let the action
+    // validate any returned outcome; incomplete results remain uncertain.
+    if (phase !== "write" || !body?.data || typeof body.data !== "object") {
+      throw linearDenial({ status: 400, data: body }, phase) ?? new Error("Linear GraphQL request failed");
+    }
   }
   if (!body?.data || typeof body.data !== "object") {
     if (phase === "write") throw new Error("Linear mutation response is incomplete");

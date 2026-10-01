@@ -2,7 +2,7 @@
 export class LinearProviderDenial extends Error {
   readonly code: "LINEAR_RATE_LIMITED" | "LINEAR_RECONNECT_REQUIRED" |
     "LINEAR_PERMISSION_DENIED" | "LINEAR_TARGET_UNAVAILABLE" |
-    "LINEAR_WORKSPACE_MISMATCH" | "LINEAR_INVALID_CHANGE";
+    "LINEAR_WORKSPACE_MISMATCH" | "LINEAR_INVALID_CHANGE" | "LINEAR_QUERY_REJECTED";
   readonly retryAfterSeconds?: number;
   readonly rateLimitResetAt?: number;
 
@@ -15,6 +15,7 @@ export class LinearProviderDenial extends Error {
       LINEAR_TARGET_UNAVAILABLE: "Linear could not find this team or issue in the selected account.",
       LINEAR_WORKSPACE_MISMATCH: "The selected Linear account belongs to a different Linear workspace.",
       LINEAR_INVALID_CHANGE: "Linear rejected this issue change. Review the target and fields before requesting a new approval.",
+      LINEAR_QUERY_REJECTED: "Linear could not complete this query. Try again or check the selected account.",
     }[code]);
     this.name = "LinearProviderDenial";
     this.code = code;
@@ -45,6 +46,9 @@ export function linearDenial(error: unknown, phase: LinearProviderDenial["phase"
   if ("code" in error && error.code === "CONNECTION_NOT_FOUND") return null;
   const status = "status" in error ? error.status : undefined;
   const data = "data" in error ? error.data : undefined;
+  // GraphQL execution data can be partial even when HTTP reports an error.
+  // Non-null propagation can also make data null after the mutation ran.
+  if (phase === "write" && data && typeof data === "object" && "data" in data) return null;
   const errors = data && typeof data === "object" && "errors" in data ? data.errors : undefined;
   const graphCode = Array.isArray(errors) && errors[0] && typeof errors[0] === "object" &&
     "extensions" in errors[0] && errors[0].extensions && typeof errors[0].extensions === "object" &&
@@ -58,7 +62,8 @@ export function linearDenial(error: unknown, phase: LinearProviderDenial["phase"
   const code = graphCode === "RATELIMITED" || status === 429 ? "LINEAR_RATE_LIMITED"
     : status === 401 || graphCode === "AUTHENTICATION_ERROR" ? "LINEAR_RECONNECT_REQUIRED"
     : status === 403 || graphCode === "FORBIDDEN" ? "LINEAR_PERMISSION_DENIED"
-    : status === 404 ? "LINEAR_TARGET_UNAVAILABLE" : "LINEAR_INVALID_CHANGE";
+    : status === 404 ? "LINEAR_TARGET_UNAVAILABLE"
+    : phase === "write" ? "LINEAR_INVALID_CHANGE" : "LINEAR_QUERY_REJECTED";
   const resetMs = integer(header(error, "x-ratelimit-requests-reset")) ??
     integer(header(error, "x-ratelimit-endpoint-requests-reset"));
   return new LinearProviderDenial(phase, code, {

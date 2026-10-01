@@ -26,12 +26,17 @@ afterEach(() => vi.unstubAllGlobals());
 /** A provider spy answers GraphQL using only the token-selected workspace. */
 function linearFixture(remote: string = workspaceA) {
   const calls: { query: string; variables: Record<string, unknown> }[] = [];
-  let failure: "limit" | "rejected" | "ambiguous" | null = null;
+  let failure: "limit" | "rejected" | "ambiguous" | "partial" | "partial-http" |
+    "null-data" | "errors-only" | null = null;
+  let readFailure: 400 | 422 | null = null;
   const post = vi.fn(async (_url: string, body: { query: string; variables: Record<string, unknown> }) => {
     calls.push(body);
     if (failure === "limit") throw { status: 400, headers: { "X-RateLimit-Requests-Reset": "1800000000000" },
       data: { errors: [{ extensions: { code: "RATELIMITED" }, message: "private quota" }] } };
     if (body.query.includes("organization")) return { data: { data: { organization: { id: remote, name: "Workspace" } } } };
+    if (readFailure && (body.query.includes("OmrIssue(") || body.query.includes("OmrTeam("))) {
+      throw { status: readFailure, data: { errors: [{ message: "private query failure" }] } };
+    }
     if (body.query.includes("OmrTeam(")) return { data: { data: { team: body.variables.id === teamA && remote === workspaceA
       ? { id: teamA, name: "Team A" } : null } } };
     if (body.query.includes("OmrIssueTarget")) return { data: { data: { issue: body.variables.id === issueA && remote === workspaceA
@@ -46,18 +51,36 @@ function linearFixture(remote: string = workspaceA) {
       ? issue(issueA, teamA) : null } } };
     if (body.query.includes("mutation")) {
       if (failure === "ambiguous") throw new TypeError("connection lost after send");
+      if (failure === "errors-only") return { data: { errors: [{
+        extensions: { code: "RATELIMITED" }, message: "private quota",
+      }] } };
+      if (failure === "null-data") return { data: { data: null, errors: [{
+        extensions: { code: "FORBIDDEN" }, message: "private nested field",
+      }] } };
       const result = failure === "rejected" ? { success: false, issue: null } :
         body.query.includes("OmrCreate")
           ? { success: true, issue: { id: issueB, identifier: "A-2", title: "New",
             url: "https://linear.app/example/new", team: { id: teamA } } }
           : { success: true, issue: { id: issueA, identifier: "A-1", title: "Updated", team: { id: teamA } } };
-      return { data: { data: { [body.query.includes("OmrCreate") ? "issueCreate" : "issueUpdate"]: result } } };
+      const key = body.query.includes("OmrCreate") ? "issueCreate" : "issueUpdate";
+      if (failure === "partial" || failure === "partial-http") {
+        const partial = { data: { [key]: { success: true, issue: {
+          id: key === "issueCreate" ? issueB : issueA, identifier: "A-2",
+          team: { id: teamA },
+        } } }, errors: [{ extensions: {
+          code: failure === "partial-http" ? "AUTHENTICATION_ERROR" : "RATELIMITED",
+        }, message: "private nested field" }] };
+        if (failure === "partial-http") throw { status: 400, data: partial };
+        return { data: partial };
+      }
+      return { data: { data: { [key]: result } } };
     }
     throw new Error("Unexpected GraphQL query");
   });
   const context = { provider: { baseUrl: "https://api.linear.app/graphql" }, http: { post } } as never;
   const mutations = () => calls.filter((call) => call.query.includes("mutation"));
-  return { calls, post, context, mutations, setFailure: (value: typeof failure) => { failure = value; } };
+  return { calls, post, context, mutations, setFailure: (value: typeof failure) => { failure = value; },
+    setReadFailure: (value: typeof readFailure) => { readFailure = value; } };
 }
 
 describe("linear-adapter-contract", () => {
@@ -304,6 +327,69 @@ describe("linear-adapter-contract", () => {
     linear.setFailure("ambiguous");
     await expect(actions["issues.update"]!.execute({ linearWorkspaceId: workspaceA, issueId: issueA, title: "Updated" },
       linear.context)).rejects.toThrow("connection lost after send");
+  });
+
+  it.each(["issues.create", "issues.update"] as const)(
+    "keeps %s receipts uncertain for partial mutation data and transport failures", async (action) => {
+      const store = new MemoryWorkspaceStore();
+      const { workspace } = await new WorkspaceAuthority(store).provisionPersonalWorkspace({ userId: "alice" });
+      const connections = new ConnectionAuthority(new MemoryConnectionBindingStore(store));
+      const binding = await connections.attach({ actorUserId: "alice", workspaceId: workspace.id,
+        provider: "linear", providerConnectionId: "remote_linear_A", ownership: "personal", label: "A" });
+      const receipts = new MemoryExecutionReceiptStore(() => true);
+      const approvals = new MemoryExecutionApprovalStore(() => true, receipts);
+      const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrLinearProvider] } });
+      const linear = linearFixture();
+      const dispatch = vi.fn(async (_provider: string, selected: string, options: { params: unknown }) =>
+        omrLinearProvider.actions[selected]!.execute(options.params, linear.context));
+      const service = new ExecutionService(catalog, connections, { action: dispatch }, receipts,
+        async () => ["read", "write"], Date.now, approvals, undefined, new Uint8Array(32).fill(7));
+      const principal = { kind: "web" as const, userId: "alice", workspaceId: workspace.id };
+      const params = action === "issues.create"
+        ? { linearWorkspaceId: workspaceA, teamId: teamA, title: "New" }
+        : { linearWorkspaceId: workspaceA, issueId: issueA, title: "Updated" };
+
+      for (const failure of ["partial", "partial-http", "null-data", "errors-only", "ambiguous"] as const) {
+        linear.setFailure(failure);
+        const approval = await service.requestApproval({ principal, toolId: `linear.${action}`, params,
+          connectionId: binding.id, idempotencyKey: `${action}-${failure}` });
+        const before = linear.mutations().length;
+        await service.approve(approval.id, "alice");
+        expect(linear.mutations()).toHaveLength(before);
+        await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({
+          code: failure === "errors-only" ? "LINEAR_RATE_LIMITED" : "EXECUTION_OUTCOME_UNKNOWN",
+        });
+        expect(linear.mutations()).toHaveLength(before + 1);
+        expect([...receipts.receipts.values()].find((receipt) => receipt.approvalId === approval.id))
+          .toMatchObject({ status: failure === "errors-only" ? "failed" : "uncertain" });
+        await expect(service.executeApproved(principal, approval.id)).rejects.toBeDefined();
+        expect(linear.mutations()).toHaveLength(before + 1);
+      }
+    });
+
+  it("returns a read-appropriate error for unknown GraphQL query failures", async () => {
+    const linear = linearFixture();
+    linear.setReadFailure(400);
+    const readError = await omrLinearProvider.actions["issues.get"]!.execute({
+      linearWorkspaceId: workspaceA, issueId: issueA,
+    }, linear.context).catch((error: unknown) => error);
+    expect(readError).toMatchObject({ code: "LINEAR_QUERY_REJECTED", phase: "read" });
+    const router = createOMRRouter(undefined, undefined, undefined, {
+      execute: async () => { throw new LinearExecutionError("receipt_read", readError as LinearProviderDenial); },
+    } as unknown as ExecutionRouteServices);
+    const response = await router.handle(new Request("https://omr.example/api/tools/execute", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspaceId: "omr_A", toolId: "linear.issues.get", params: {} }),
+    }));
+    expect(response.status).toBe(502);
+    expect(await response.json()).toMatchObject({ error: "LINEAR_QUERY_REJECTED", receiptId: "receipt_read" });
+    expect(response.headers.get("cache-control")).toBe("no-store");
+
+    linear.setReadFailure(422);
+    await expect(omrLinearProvider.actions["issues.create"]!.execute({
+      linearWorkspaceId: workspaceA, teamId: teamA, title: "New",
+    }, linear.context)).rejects.toMatchObject({ code: "LINEAR_QUERY_REJECTED", phase: "preflight" });
+    expect(linear.mutations()).toHaveLength(0);
   });
 
   it("returns safe Linear rate timing and receipt identity through the HTTP protocol", async () => {

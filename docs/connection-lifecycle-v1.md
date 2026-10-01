@@ -21,9 +21,10 @@ Worker's `PLUGFN_ENCRYPTION_KEY`, database connection, and identity secrets as
 described in the deployment configuration. Do not expose these values through
 public environment variables. A missing pair reports `unconfigured`; the UI
 does not offer connection setup. This release does not enable live provider
-configuration by default. GitHub additionally requires `OMR_GITHUB_V1_ENABLED=true`;
-Linear requires `OMR_LINEAR_V1_ENABLED=true` after OMR-15 live acceptance;
-it remains off for the OMR-8 implementation rollout until OMR-15's sandbox evidence.
+configuration by default. GitHub requires `OMR_GITHUB_V1_ENABLED=true` for
+the OMR-8 journey, and Linear requires `OMR_LINEAR_V1_ENABLED=true` for the
+OMR-9 journey. Keep each flag off until OMR-15 records live sandbox acceptance
+for that provider.
 
 OAuth start runs an install authorization check and returns a provider URL. The
 browser stores only the short-lived, single-use callback intent in

@@ -191,6 +191,7 @@ function linearErrorResponse(error: LinearExecutionError | LinearProviderDenial)
     : error.code === "LINEAR_RECONNECT_REQUIRED" ? 401
     : error.code === "LINEAR_TARGET_UNAVAILABLE" ? 404
     : error.code === "LINEAR_WORKSPACE_MISMATCH" ? 409
+    : error.code === "LINEAR_QUERY_REJECTED" ? 502
     : error.code === "LINEAR_INVALID_CHANGE" ? 422 : 403;
   const headers: Record<string, string> = { ...PRIVATE_RESPONSE };
   if (error.code === "LINEAR_RATE_LIMITED") {

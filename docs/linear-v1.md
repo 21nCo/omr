@@ -43,9 +43,11 @@ same approval request, status, approval, and execution protocol.
 A definite Linear read or preflight denial fails safely. GraphQL
 `RATELIMITED`, a token rejection, and a permission denial return safe error
 codes; rate limit responses expose available reset timing. A definite
-mutation rejection settles its receipt. A transport failure or malformed
-mutation response after dispatch stays uncertain and must be reconciled in
-Linear before any new approval. See [Linear rate limits](https://linear.app/developers/rate-limiting).
+mutation rejection settles its receipt. A transport failure or incomplete
+mutation result with GraphQL errors after dispatch stays uncertain and must be
+reconciled in Linear before any new approval. Unknown read or preflight query
+errors return `LINEAR_QUERY_REJECTED`, never an issue-change error. See
+[Linear rate limits](https://linear.app/developers/rate-limiting).
 
 `tests/acceptance/linear-adapter-contract.test.ts` exercises the typed schemas,
 OAuth tiers, selected Linear workspace and issue targets, approval, OMR workspace
