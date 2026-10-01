@@ -308,6 +308,11 @@ describe("PlugFn connection orchestration", () => {
     }));
     await expect(orchestrator.startOAuth({ ...input, githubAccess: "invalid" as never }))
       .rejects.toMatchObject({ code: "CONNECTION_INPUT_INVALID" });
+    plugfn.port.config!.integrations = {};
+    await expect(orchestrator.startOAuth({ ...input, githubAccess: "invalid" as never }))
+      .rejects.toMatchObject({ code: "CONNECTION_INPUT_INVALID" });
+    await expect(orchestrator.startOAuth({ ...input, provider: "linear", githubAccess: "public_write" }))
+      .rejects.toMatchObject({ code: "CONNECTION_INPUT_INVALID" });
     expect(plugfn.methods.getAuthUrl).toHaveBeenCalledTimes(2);
   });
 

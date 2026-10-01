@@ -38,7 +38,7 @@ export async function resolveScopedCatalog(
 /** Whether a failed GitHub account proof identifies an unavailable provider. */
 function githubProofUnavailable(error: unknown): boolean {
   if (githubHttpFailure(error)) return true;
-  if (!(error instanceof Error)) return false;
+  if (!error || typeof error !== "object") return false;
   if ("status" in error && typeof error.status === "number" &&
       error.status >= 500 && error.status <= 599) return true;
   if ("code" in error && typeof error.code === "string" &&

@@ -304,15 +304,16 @@ export class PlugFnConnectionOrchestrator {
   }): Promise<{ authUrl: string }> {
     const provider = normalizeProvider(input.provider);
     const label = normalizeLabel(input.label);
+    if (input.githubAccess !== undefined && provider !== "github") {
+      throw new ConnectionInputError("GitHub access applies only to GitHub");
+    }
+    const defaultScopes = provider === "github" ? githubScopes(input.githubAccess ?? "profile") : undefined;
+    const scopes = input.scopes ?? defaultScopes;
     await this.authority.authorizeInstall(input);
     this.assertConnectable(provider, "oauth");
     const owner = ownerFor(input);
     // GitHub's PlugFn defaults include write-capable repository scopes. An empty
     // array would fall back to the shared OAuth descriptor's profile/email grant.
-    if (input.githubAccess && provider !== "github") {
-      throw new ConnectionInputError("GitHub access applies only to GitHub");
-    }
-    const scopes = input.scopes ?? (provider === "github" ? githubScopes(input.githubAccess ?? "profile") : undefined);
     const authUrl = await this.plugfn.connections.getAuthUrl({
       userId: input.actorUserId,
       provider,

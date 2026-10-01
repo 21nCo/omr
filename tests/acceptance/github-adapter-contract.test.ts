@@ -3,12 +3,35 @@ import { createPlugFnToolCatalog, hasRequiredScopes } from "@oh-my-router/tools"
 import { omrGithubProvider } from "@oh-my-router/plugfn-runtime";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
 import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
-import { ConnectionAuthority } from "@oh-my-router/connections";
+import { ConnectionAuthority, type ConnectionBindingRecord } from "@oh-my-router/connections";
 import { MemoryConnectionBindingStore } from "@oh-my-router/connections/testing";
 import { ExecutionService } from "@oh-my-router/execution";
 import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "@oh-my-router/execution/testing";
 
 const actions = omrGithubProvider.actions;
+
+/** Give each contract case workspace-bound bindings and fenced stores. */
+async function executionFixture(options: { otherWorkspace?: boolean; accounts?: string[] } = {}) {
+  const workspaceStore = new MemoryWorkspaceStore();
+  const workspaces = new WorkspaceAuthority(workspaceStore);
+  const { workspace } = await workspaces.provisionPersonalWorkspace({ userId: "alice" });
+  const other = options.otherWorkspace
+    ? await workspaces.createTeam({ ownerUserId: "alice", name: "Other" }) : undefined;
+  const connections = new ConnectionAuthority(new MemoryConnectionBindingStore(workspaceStore));
+  const bindings: ConnectionBindingRecord[] = [];
+  for (const account of options.accounts ?? ["alice"]) {
+    bindings.push(await connections.attach({ actorUserId: "alice", workspaceId: workspace.id,
+      provider: "github", providerConnectionId: `remote_${account}`, ownership: "personal", label: account }));
+  }
+  const isMember = (workspaceId: string, userId: string) =>
+    [...workspaceStore.memberships.values()].some((member) => member.workspaceId === workspaceId && member.userId === userId);
+  const receipts = new MemoryExecutionReceiptStore(isMember);
+  const approvals = new MemoryExecutionApprovalStore(isMember, receipts);
+  const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrGithubProvider] } });
+  const principal = { kind: "web" as const, userId: "alice", workspaceId: workspace.id };
+  return { workspaceStore, workspace, other, connections, bindings, binding: bindings[0]!,
+    receipts, approvals, catalog, principal };
+}
 
 describe("github-adapter-contract", () => {
   it("publishes only typed v1 actions with the minimum distinct GitHub grants", async () => {
@@ -63,24 +86,12 @@ describe("github-adapter-contract", () => {
   });
 
   it("keeps the public write behind approval, scoped selection and revocation", async () => {
-    const workspaceStore = new MemoryWorkspaceStore();
-    const workspaces = new WorkspaceAuthority(workspaceStore);
-    const { workspace } = await workspaces.provisionPersonalWorkspace({ userId: "alice" });
-    const other = await workspaces.createTeam({ ownerUserId: "alice", name: "Other" });
-    const connections = new ConnectionAuthority(new MemoryConnectionBindingStore(workspaceStore));
-    const binding = await connections.attach({ actorUserId: "alice", workspaceId: workspace.id,
-      provider: "github", providerConnectionId: "remote_alice", ownership: "personal", label: "Alice" });
+    const { workspace, other, connections, binding, receipts, approvals, catalog, principal } =
+      await executionFixture({ otherWorkspace: true });
     const provider = vi.fn(async () => ({ id: 9, html_url: "https://github.com/org/repo/issues/1#issuecomment-9" }));
-    const isMember = (workspaceId: string, actorUserId: string) =>
-      [...workspaceStore.memberships.values()].some((member) =>
-        member.workspaceId === workspaceId && member.userId === actorUserId);
-    const receipts = new MemoryExecutionReceiptStore(isMember);
-    const approvals = new MemoryExecutionApprovalStore(isMember, receipts);
-    const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrGithubProvider] } });
     let scopes = ["read:user"];
     const service = new ExecutionService(catalog, connections, { action: provider }, receipts,
       async () => scopes, Date.now, approvals, undefined, new Uint8Array(32).fill(7));
-    const principal = { kind: "web" as const, userId: "alice", workspaceId: workspace.id };
     const toolId = "github.issues.commentPublic";
     const params = { owner: "org", repo: "repo", issueNumber: 1, body: "Hello" };
     await expect(service.requestApproval({ principal, toolId, params, idempotencyKey: "comment-1" }))
@@ -97,7 +108,7 @@ describe("github-adapter-contract", () => {
       actor: { tenantId: workspace.id } });
     await service.executeApproved(principal, approval.id);
     expect(provider).toHaveBeenCalledTimes(1);
-    await expect(service.requestApproval({ principal: { ...principal, workspaceId: other.workspace.id },
+    await expect(service.requestApproval({ principal: { ...principal, workspaceId: other!.workspace.id },
       toolId, params, connectionId: binding.id, idempotencyKey: "other-1" }))
       .rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
     const next = await service.requestApproval({ principal, toolId, params, idempotencyKey: "comment-2" });
@@ -108,18 +119,11 @@ describe("github-adapter-contract", () => {
   });
 
   it("turns definite GitHub read denials into explicit safe errors", async () => {
-    const workspaceStore = new MemoryWorkspaceStore();
-    const { workspace } = await new WorkspaceAuthority(workspaceStore)
-      .provisionPersonalWorkspace({ userId: "alice" });
-    const connections = new ConnectionAuthority(new MemoryConnectionBindingStore(workspaceStore));
-    await connections.attach({ actorUserId: "alice", workspaceId: workspace.id, provider: "github",
-      providerConnectionId: "remote_alice", ownership: "personal", label: "Alice" });
-    const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrGithubProvider] } });
-    const receipts = new MemoryExecutionReceiptStore();
+    const { connections, catalog, receipts, principal } = await executionFixture();
     const provider = vi.fn(async () => { throw Object.assign(new Error("provider private details"), { status: 404 }); });
     const service = new ExecutionService(catalog, connections, { action: provider }, receipts,
       async () => ["read:user"], Date.now, undefined, undefined, new Uint8Array(32).fill(7));
-    await expect(service.execute({ principal: { kind: "web", userId: "alice", workspaceId: workspace.id },
+    await expect(service.execute({ principal,
       toolId: "github.repos.get", params: { owner: "org", repo: "private" } }))
       .rejects.toMatchObject({ code: "GITHUB_REPOSITORY_UNAVAILABLE",
         message: expect.stringContaining("private-repository access") });
@@ -137,18 +141,11 @@ describe("github-adapter-contract", () => {
     [{ status: 403, headers: new Headers({ "Retry-After": "60" }) }, "GITHUB_RATE_LIMITED"],
     [{ status: 403 }, "GITHUB_ACCESS_DENIED"],
   ] as const)("classifies GitHub read failure %j without an uncertain receipt", async (failure, code) => {
-    const workspaceStore = new MemoryWorkspaceStore();
-    const { workspace } = await new WorkspaceAuthority(workspaceStore)
-      .provisionPersonalWorkspace({ userId: "alice" });
-    const connections = new ConnectionAuthority(new MemoryConnectionBindingStore(workspaceStore));
-    await connections.attach({ actorUserId: "alice", workspaceId: workspace.id, provider: "github",
-      providerConnectionId: "remote_alice", ownership: "personal", label: "Alice" });
-    const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrGithubProvider] } });
-    const receipts = new MemoryExecutionReceiptStore(() => true);
+    const { connections, catalog, receipts, principal } = await executionFixture();
     const provider = vi.fn(async () => { throw Object.assign(new Error("provider secret"), failure); });
     const service = new ExecutionService(catalog, connections, { action: provider }, receipts,
       async () => ["read:user"], Date.now, undefined, undefined, new Uint8Array(32).fill(7));
-    const error = await service.execute({ principal: { kind: "web", userId: "alice", workspaceId: workspace.id },
+    const error = await service.execute({ principal,
       toolId: "github.repos.get", params: { owner: "org", repo: "public" } }).catch((value: unknown) => value);
     expect(error).toMatchObject({ code, receiptId: expect.any(String) });
     expect(error.message).not.toContain("provider secret");
@@ -169,19 +166,10 @@ describe("github-adapter-contract", () => {
     [{ owner: "org", repo: ".", issueNumber: 1, body: "Hello" }, "dot repository"],
     [{ owner: "org", repo: "..", issueNumber: 1, body: "Hello" }, "dot dot repository"],
   ])("rejects %s before GitHub write approval and provider dispatch (%s)", async (params) => {
-    const workspaceStore = new MemoryWorkspaceStore();
-    const { workspace } = await new WorkspaceAuthority(workspaceStore)
-      .provisionPersonalWorkspace({ userId: "alice" });
-    const connections = new ConnectionAuthority(new MemoryConnectionBindingStore(workspaceStore));
-    await connections.attach({ actorUserId: "alice", workspaceId: workspace.id,
-      provider: "github", providerConnectionId: "remote_alice", ownership: "personal", label: "Alice" });
-    const receipts = new MemoryExecutionReceiptStore(() => true);
-    const approvals = new MemoryExecutionApprovalStore(() => true, receipts);
+    const { connections, catalog, receipts, approvals, principal } = await executionFixture();
     const provider = vi.fn(async () => ({ id: 9 }));
-    const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrGithubProvider] } });
     const service = new ExecutionService(catalog, connections, { action: provider }, receipts,
       async () => ["public_repo"], Date.now, approvals, undefined, new Uint8Array(32).fill(7));
-    const principal = { kind: "web" as const, userId: "alice", workspaceId: workspace.id };
     await expect(service.requestApproval({ principal, toolId: "github.issues.commentPublic",
       params, idempotencyKey: "invalid-comment" })).rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
     expect(approvals.approvals.size).toBe(0);
@@ -190,19 +178,10 @@ describe("github-adapter-contract", () => {
   });
 
   it.each([".", ".."])("rejects repository %s on read and legacy approval before provider dispatch", async (repo) => {
-    const workspaceStore = new MemoryWorkspaceStore();
-    const { workspace } = await new WorkspaceAuthority(workspaceStore)
-      .provisionPersonalWorkspace({ userId: "alice" });
-    const connections = new ConnectionAuthority(new MemoryConnectionBindingStore(workspaceStore));
-    await connections.attach({ actorUserId: "alice", workspaceId: workspace.id,
-      provider: "github", providerConnectionId: "remote_alice", ownership: "personal", label: "Alice" });
-    const receipts = new MemoryExecutionReceiptStore(() => true);
-    const approvals = new MemoryExecutionApprovalStore(() => true, receipts);
+    const { connections, catalog, receipts, approvals, principal } = await executionFixture();
     const provider = vi.fn(async () => ({ id: 9 }));
-    const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrGithubProvider] } });
     const service = new ExecutionService(catalog, connections, { action: provider }, receipts,
       async () => ["read:user", "public_repo"], Date.now, approvals, undefined, new Uint8Array(32).fill(7));
-    const principal = { kind: "web" as const, userId: "alice", workspaceId: workspace.id };
     await expect(service.execute({ principal, toolId: "github.repos.get", params: { owner: "org", repo } }))
       .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
     const approval = await service.requestApproval({ principal, toolId: "github.issues.commentPublic",
@@ -222,17 +201,8 @@ describe("github-adapter-contract", () => {
   ] as const)("settles a %s comment preflight without posting or crossing workspaces", async (
     _case, repository, status, code,
   ) => {
-    const workspaceStore = new MemoryWorkspaceStore();
-    const workspaces = new WorkspaceAuthority(workspaceStore);
-    const { workspace } = await workspaces.provisionPersonalWorkspace({ userId: "alice" });
-    const other = await workspaces.createTeam({ ownerUserId: "alice", name: "Other" });
-    const connections = new ConnectionAuthority(new MemoryConnectionBindingStore(workspaceStore));
-    const binding = await connections.attach({ actorUserId: "alice", workspaceId: workspace.id,
-      provider: "github", providerConnectionId: "remote_alice", ownership: "personal", label: "Alice" });
-    const isMember = (workspaceId: string, userId: string) =>
-      [...workspaceStore.memberships.values()].some((member) => member.workspaceId === workspaceId && member.userId === userId);
-    const receipts = new MemoryExecutionReceiptStore(isMember);
-    const approvals = new MemoryExecutionApprovalStore(isMember, receipts);
+    const { workspace, other, connections, binding, receipts, approvals, catalog, principal } =
+      await executionFixture({ otherWorkspace: true });
     const get = vi.fn(async () => {
       if (status) throw Object.assign(new Error("provider secret"), {
         status, ...(status === 404 ? { code: "CONNECTION_NOT_FOUND" } : {}),
@@ -244,12 +214,10 @@ describe("github-adapter-contract", () => {
       actions["issues.commentPublic"]!.execute(options.params as never, {
         provider: { baseUrl: "https://api.github.com" }, http: { get, post },
       } as never));
-    const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrGithubProvider] } });
     const service = new ExecutionService(catalog, connections, { action: provider }, receipts,
       async () => ["read:user", "public_repo"], Date.now, approvals, undefined, new Uint8Array(32).fill(7));
-    const principal = { kind: "web" as const, userId: "alice", workspaceId: workspace.id };
     const params = { owner: "org", repo: "repo", issueNumber: 1, body: "Hello" };
-    await expect(service.requestApproval({ principal: { ...principal, workspaceId: other.workspace.id },
+    await expect(service.requestApproval({ principal: { ...principal, workspaceId: other!.workspace.id },
       toolId: "github.issues.commentPublic", params, connectionId: binding.id,
       idempotencyKey: "other-workspace" })).rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
     expect(provider).not.toHaveBeenCalled();
@@ -273,23 +241,15 @@ describe("github-adapter-contract", () => {
   });
 
   it("keeps an ambiguous comment POST uncertain after successful preflight", async () => {
-    const workspaceStore = new MemoryWorkspaceStore();
-    const { workspace } = await new WorkspaceAuthority(workspaceStore).provisionPersonalWorkspace({ userId: "alice" });
-    const connections = new ConnectionAuthority(new MemoryConnectionBindingStore(workspaceStore));
-    await connections.attach({ actorUserId: "alice", workspaceId: workspace.id,
-      provider: "github", providerConnectionId: "remote_alice", ownership: "personal", label: "Alice" });
-    const receipts = new MemoryExecutionReceiptStore(() => true);
-    const approvals = new MemoryExecutionApprovalStore(() => true, receipts);
+    const { connections, catalog, receipts, approvals, principal } = await executionFixture();
     const post = vi.fn(async () => { throw new Error("POST outcome unknown"); });
     const provider = vi.fn(async (_provider: string, _action: string, options: { params: unknown }) =>
       actions["issues.commentPublic"]!.execute(options.params as never, {
         provider: { baseUrl: "https://api.github.com" },
         http: { get: async () => ({ data: { private: false } }), post },
       } as never));
-    const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrGithubProvider] } });
     const service = new ExecutionService(catalog, connections, { action: provider }, receipts,
       async () => ["public_repo"], Date.now, approvals, undefined, new Uint8Array(32).fill(7));
-    const principal = { kind: "web" as const, userId: "alice", workspaceId: workspace.id };
     const approval = await service.requestApproval({ principal, toolId: "github.issues.commentPublic",
       params: { owner: "org", repo: "repo", issueNumber: 1, body: "Hello" }, idempotencyKey: "ambiguous" });
     await service.approve(approval.id, "alice");
@@ -300,21 +260,13 @@ describe("github-adapter-contract", () => {
   });
 
   it("uses the explicitly selected GitHub account when several are ready", async () => {
-    const workspaceStore = new MemoryWorkspaceStore();
-    const { workspace } = await new WorkspaceAuthority(workspaceStore)
-      .provisionPersonalWorkspace({ userId: "alice" });
-    const connections = new ConnectionAuthority(new MemoryConnectionBindingStore(workspaceStore));
-    for (const suffix of ["one", "two"]) {
-      await connections.attach({ actorUserId: "alice", workspaceId: workspace.id,
-        provider: "github", providerConnectionId: `remote_${suffix}`, ownership: "personal", label: suffix });
-    }
+    const { workspace, connections, catalog, receipts, principal } =
+      await executionFixture({ accounts: ["one", "two"] });
     const provider = vi.fn(async (_provider: string, _action: string,
       options: { connectionId?: string }) => ({ login: options.connectionId }));
-    const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrGithubProvider] } });
     const service = new ExecutionService(catalog, connections, { action: provider },
-      new MemoryExecutionReceiptStore(), async () => ["read:user"], Date.now,
+      receipts, async () => ["read:user"], Date.now,
       undefined, undefined, new Uint8Array(32).fill(7));
-    const principal = { kind: "web" as const, userId: "alice", workspaceId: workspace.id };
     await expect(service.execute({ principal, toolId: "github.account.get", params: {} }))
       .rejects.toMatchObject({ code: "CONNECTION_SELECTION_REQUIRED" });
     expect(provider).not.toHaveBeenCalled();

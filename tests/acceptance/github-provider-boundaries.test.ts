@@ -190,8 +190,9 @@ describe("GitHub provider error boundaries through OAuth, PlugFn, execution and 
   it.each(failures)("returns safe %s scope proof errors before a receipt or approval", async (
     _name, status, headers, message, httpStatus, code,
   ) => {
-    const { calls, receipts, approvals, service, principal, workspace, post } =
-      await fixture("scope", status, headers, message);
+    const { calls, receipts, approvals, service, principal, workspace, post, setFailurePoint } =
+      await fixture("read", status, headers, message);
+    setFailurePoint("scope");
     const started = Date.now();
     const response = await post("/api/tools/execute", { workspaceId: workspace.id,
       toolId: "github.repos.get", params: { owner: "org", repo: "public" } });
@@ -201,13 +202,15 @@ describe("GitHub provider error boundaries through OAuth, PlugFn, execution and 
     expect(response.headers.get("retry-after")).toBe("retry-after" in headers ? headers["retry-after"] : null);
     expect(response.headers.get("x-ratelimit-reset")).toBe(
       "x-ratelimit-reset" in headers ? headers["x-ratelimit-reset"] : null);
-    const body = await response.json() as { error: string; receiptId?: string };
+    const body = await response.json() as { error: string; message: string; receiptId?: string };
     expect(body.error).toBe(code);
     expect(body.receiptId).toBeUndefined();
+    expect(body.message).toContain(code === "GITHUB_RECONNECT_REQUIRED" ? "Reconnect" : "Retry after");
     expect(JSON.stringify(body)).not.toContain("provider-private-data");
     await expect(service.requestApproval({ principal, toolId: "github.issues.commentPublic",
       params: { owner: "org", repo: "public", issueNumber: 1, body: "Hello" },
-      idempotencyKey: "scope-denied" })).rejects.toMatchObject({ code });
+      idempotencyKey: "scope-denied" })).rejects.toMatchObject({ code,
+        message: expect.stringContaining(code === "GITHUB_RECONNECT_REQUIRED" ? "Reconnect" : "Retry after") });
     expect(calls).toEqual(["https://api.github.com/user", "https://api.github.com/user"]);
     expect(receipts.receipts.size).toBe(0);
     expect(approvals.approvals.size).toBe(0);

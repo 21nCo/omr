@@ -230,7 +230,8 @@ describe("OMR MCP server", () => {
     const fetchImpl: typeof fetch = async (request) => requestUrl(request).pathname === "/api/tools"
       ? Response.json({ catalogSchemaVersion: "1.0.0", revision: "revision-1", tools: [] })
       : Response.json({ error: code, ...(status === 409 ? {} : { receiptId: "execution_confirmed" }),
-        ...(status === 409 ? {} : { message: "Safe GitHub guidance" }) },
+        ...(status === 409 ? {} : { message: status === 429
+          ? "Safe GitHub guidance. Retry after 120 seconds." : "Safe GitHub guidance" }) },
       { status, headers: status === 429 ? { "retry-after": "120" } : {} });
     const server = await createOMRMcpServer({ baseUrl: "https://omr.test", credential: "credential",
       workspaceId: "workspace-1", fetchImpl });
@@ -244,7 +245,8 @@ describe("OMR MCP server", () => {
       arguments: { approvalId: "approval-1" } })).resolves.toMatchObject({
       isError: true,
       structuredContent: { ok: false, error: { code: "OMR_HTTP_ERROR",
-        details: { error: code, ...(status === 409 ? {} : { receiptId: "execution_confirmed" }) } } },
+        details: { error: code, ...(status === 409 ? {} : { receiptId: "execution_confirmed",
+          message: status === 429 ? "Safe GitHub guidance. Retry after 120 seconds." : "Safe GitHub guidance" }) } } },
     });
   });
 

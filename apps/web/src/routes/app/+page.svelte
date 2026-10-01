@@ -237,6 +237,7 @@
       oauthOwnership = choice.ownership;
       oauthLabel = choice.label;
       githubAccess = choice.access;
+      error = "";
       notice = "Choose the GitHub access tier below, then continue to reconnect. A new OAuth grant is required.";
       return;
     }
