@@ -1451,6 +1451,33 @@ syncBuiltinESMExports();
       details: { approvalId: "approval_1", receiptId: "receipt_approved_uncertain" } });
   });
 
+  it("preserves a proven GitHub preflight failure across both execution commands", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    for (const [path, args] of [
+      ["/api/tools/execute", ["tools", "run", "github.issues.commentPublic", "--idempotency", "preflight-key", "--json"]],
+      ["/api/approvals/execute", ["approvals", "execute", "approval_1", "--json"]],
+    ] as const) {
+      f.failureResponse(path, 503, { error: "GITHUB_PREFLIGHT_UNAVAILABLE", receiptId: "execution_preflight",
+        message: "omr_fixture_secret" });
+      const response = await f.run([...args], env);
+      expect(response.code).toBe(1);
+      expect(response.stdout).toBe("");
+      expect(lastError(response.stderr)).toMatchObject({ error: "GITHUB_PREFLIGHT_UNAVAILABLE",
+        message: expect.stringContaining("Check the connection before requesting a new approval"),
+        details: { receiptId: "execution_preflight" } });
+      expect(response.stderr).not.toContain("omr_fixture_secret");
+      f.clearFailureResponse();
+    }
+    expect(f.committedMutations).toEqual([]);
+
+    f.failureResponse("/api/tools/execute", 503, { error: "GITHUB_PREFLIGHT_UNAVAILABLE" });
+    const unproven = await f.run(["tools", "run", "github.issues.commentPublic", "--idempotency", "unproven-key", "--json"], env);
+    expect(unproven.code).toBe(23);
+    expect(lastError(unproven.stderr)).toMatchObject({ error: "EXECUTION_EFFECT_UNCERTAIN",
+      details: { idempotencyKey: "unproven-key" } });
+  });
+
   it("refuses symlinked profile targets", async () => {
     const f = await fixture();
     expect((await f.run(["login", "--url", f.url, "--json"])).code).toBe(0);

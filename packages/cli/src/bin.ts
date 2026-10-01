@@ -188,6 +188,7 @@ function ambiguousMutationResponse(error: unknown,
   const receiptId = validReceiptId ? { receiptId: body.receiptId } : {};
   if (operation !== "approval request" &&
       ((error.status === 502 && body.error === "EXECUTION_FAILED" && validReceiptId) ||
+       (error.status === 503 && body.error === "GITHUB_PREFLIGHT_UNAVAILABLE" && validReceiptId) ||
        (error.status === 504 && body.error === "EXECUTION_INVOCATION_TIMEOUT"))) throw error;
   let code = "EXECUTION_EFFECT_UNCERTAIN";
   if (body.error === "EXECUTION_OUTCOME_UNKNOWN") code = "EXECUTION_OUTCOME_UNKNOWN";
@@ -225,9 +226,15 @@ function failureExit(error: unknown, code: string): number {
   if (error instanceof OMRHttpError && error.status === 400) return 2;
   return 1;
 }
-function failureMessage(error: unknown): string {
+/** Use fixed recovery guidance for a proven GitHub preflight failure, never arbitrary server text. */
+function failureMessage(error: unknown, code: string): string {
   if (error instanceof CLIError) return error.message;
-  if (error instanceof OMRHttpError) return `OMR request failed (${error.status})`;
+  if (error instanceof OMRHttpError) {
+    if (code === "GITHUB_PREFLIGHT_UNAVAILABLE") {
+      return "GitHub repository preflight could not be verified. Check the connection before requesting a new approval.";
+    }
+    return `OMR request failed (${error.status})`;
+  }
   if (error instanceof OMRTransportError) return "OMR transport failed";
   if (error instanceof OMRProtocolError) return "Invalid OMR response";
   if (error instanceof SyntaxError) return "Invalid JSON input";
@@ -243,7 +250,7 @@ function failureDetails(error: unknown, body: ReturnType<typeof httpBody>): unkn
 function fail(error: unknown, json: boolean): void {
   const body = httpBody(error);
   const code = failureCode(error, body);
-  const message = failureMessage(error);
+  const message = failureMessage(error, code);
   const details = failureDetails(error, body);
   if (json) info(JSON.stringify({ error: code, message, ...(details ? { details } : {}) }));
   else {
