@@ -188,6 +188,7 @@ function ambiguousMutationResponse(error: unknown,
   const receiptId = validReceiptId ? { receiptId: body.receiptId } : {};
   if (operation !== "approval request" &&
       ((error.status === 502 && body.error === "EXECUTION_FAILED" && validReceiptId) ||
+       (error.status === 503 && body.error === "GITHUB_PREFLIGHT_UNAVAILABLE" && validReceiptId) ||
        (error.status === 504 && body.error === "EXECUTION_INVOCATION_TIMEOUT"))) throw error;
   let code = "EXECUTION_EFFECT_UNCERTAIN";
   if (body.error === "EXECUTION_OUTCOME_UNKNOWN") code = "EXECUTION_OUTCOME_UNKNOWN";
@@ -196,9 +197,11 @@ function ambiguousMutationResponse(error: unknown,
   `${operation} response cannot prove whether the request committed; recover with the original request identity`,
   23, { ...identity, ...receiptId });
 }
+/** Read only the server's structured response when projecting a CLI failure. */
 function httpBody(error: unknown): { error?: unknown; receiptId?: unknown } | null {
   return error instanceof OMRHttpError ? error.body as { error?: unknown; receiptId?: unknown } | null : null;
 }
+/** Preserve only recognized public server codes; transport errors on writes remain uncertain. */
 function failureCode(error: unknown, body: ReturnType<typeof httpBody>): string {
   if (error instanceof CLIError) return error.code;
   if (error instanceof InvalidProfileNameError) return "INPUT_INVALID";
@@ -206,11 +209,12 @@ function failureCode(error: unknown, body: ReturnType<typeof httpBody>): string 
   if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) &&
       ["/api/tools/execute", "/api/approvals/execute"].includes(error.path)) return "EXECUTION_EFFECT_UNCERTAIN";
   if (typeof body?.error === "string" &&
-      /^(?:EXECUTION|APPROVAL|CLIENT|DEVICE|CONNECTION|TOOL|WORKSPACE|REQUEST|AUTHFN|PROVIDER|RUNTIME)_[A-Z0-9_]{1,64}$/.test(body.error)) {
+      /^(?:EXECUTION|APPROVAL|CLIENT|DEVICE|CONNECTION|TOOL|WORKSPACE|REQUEST|AUTHFN|PROVIDER|RUNTIME|GITHUB)_[A-Z0-9_]{1,64}$/.test(body.error)) {
     return body.error;
   }
   return error instanceof OMRHttpError ? "HTTP_ERROR" : "CLI_ERROR";
 }
+/** Keep ambiguous effects distinct from input, auth, and terminal HTTP failures. */
 function failureExit(error: unknown, code: string): number {
   if (error instanceof CLIError) return error.exitCode;
   if (error instanceof InvalidProfileNameError) return 2;
@@ -222,9 +226,15 @@ function failureExit(error: unknown, code: string): number {
   if (error instanceof OMRHttpError && error.status === 400) return 2;
   return 1;
 }
-function failureMessage(error: unknown): string {
+/** Use fixed recovery guidance for a proven GitHub preflight failure, never arbitrary server text. */
+function failureMessage(error: unknown, code: string): string {
   if (error instanceof CLIError) return error.message;
-  if (error instanceof OMRHttpError) return `OMR request failed (${error.status})`;
+  if (error instanceof OMRHttpError) {
+    if (code === "GITHUB_PREFLIGHT_UNAVAILABLE") {
+      return "GitHub repository preflight could not be verified. Check the connection before requesting a new approval.";
+    }
+    return `OMR request failed (${error.status})`;
+  }
   if (error instanceof OMRTransportError) return "OMR transport failed";
   if (error instanceof OMRProtocolError) return "Invalid OMR response";
   if (error instanceof SyntaxError) return "Invalid JSON input";
@@ -240,7 +250,7 @@ function failureDetails(error: unknown, body: ReturnType<typeof httpBody>): unkn
 function fail(error: unknown, json: boolean): void {
   const body = httpBody(error);
   const code = failureCode(error, body);
-  const message = failureMessage(error);
+  const message = failureMessage(error, code);
   const details = failureDetails(error, body);
   if (json) info(JSON.stringify({ error: code, message, ...(details ? { details } : {}) }));
   else {

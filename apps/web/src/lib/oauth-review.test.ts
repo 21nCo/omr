@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createOAuthReviewController } from "./oauth-review.js";
+import { beginGithubReconnect, createOAuthReviewController } from "./oauth-review.js";
 
 const input = { workspaceId: "workspace_a", provider: "github", ownership: "personal" as const,
   label: "GitHub", origin: "https://omr.example" };
@@ -48,5 +48,26 @@ describe("OAuth review state", () => {
       destination: expect.stringContaining("state=one"),
     }), false);
     expect(JSON.parse(items.get("omr.provider-oauth.one")!)).toMatchObject({ workspaceId: "workspace_b" });
+  });
+
+  it("clears old consent and fences an in-flight start when GitHub reconnect is chosen", async () => {
+    const { controller, items, update, start } = fixture();
+    await controller.start(input);
+    expect(items.size).toBe(1);
+    const choice = beginGithubReconnect(controller, { ownership: "workspace", label: "Team GitHub" });
+    expect(choice).toEqual({ provider: "github", ownership: "workspace",
+      label: "Team GitHub", access: "profile" });
+    expect(items.size).toBe(0);
+    expect(update).toHaveBeenLastCalledWith(null, false);
+
+    let finish!: (value: { authUrl: string }) => void;
+    start.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const pending = controller.start(input);
+    await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(2));
+    beginGithubReconnect(controller, { ownership: "personal", label: "GitHub" });
+    finish({ authUrl: "https://provider.example/oauth?state=stale" });
+    await pending;
+    expect(items.size).toBe(0);
+    expect(update).toHaveBeenLastCalledWith(null, false);
   });
 });

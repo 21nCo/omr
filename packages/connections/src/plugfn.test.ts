@@ -294,6 +294,28 @@ describe("PlugFn connection orchestration", () => {
     }));
   });
 
+  it("requests only the selected GitHub tier and rejects a tier for another provider", async () => {
+    const { orchestrator, plugfn, workspaceId } = await fixture();
+    const input = { actorUserId: "user_owner", workspaceId, provider: "github",
+      ownership: "personal" as const, redirectUri: "https://omr.example/app/oauth/callback", label: "GitHub" };
+    await orchestrator.startOAuth({ ...input, githubAccess: "public_write" });
+    expect(plugfn.methods.getAuthUrl).toHaveBeenLastCalledWith(expect.objectContaining({
+      scopes: ["read:user", "public_repo"],
+    }));
+    await orchestrator.startOAuth({ ...input, githubAccess: "private_repositories" });
+    expect(plugfn.methods.getAuthUrl).toHaveBeenLastCalledWith(expect.objectContaining({
+      scopes: ["read:user", "repo"],
+    }));
+    await expect(orchestrator.startOAuth({ ...input, githubAccess: "invalid" as never }))
+      .rejects.toMatchObject({ code: "CONNECTION_INPUT_INVALID" });
+    plugfn.port.config!.integrations = {};
+    await expect(orchestrator.startOAuth({ ...input, githubAccess: "invalid" as never }))
+      .rejects.toMatchObject({ code: "CONNECTION_INPUT_INVALID" });
+    await expect(orchestrator.startOAuth({ ...input, provider: "linear", githubAccess: "public_write" }))
+      .rejects.toMatchObject({ code: "CONNECTION_INPUT_INVALID" });
+    expect(plugfn.methods.getAuthUrl).toHaveBeenCalledTimes(2);
+  });
+
   it("stores only the opaque PlugFn id after a direct API-key connection", async () => {
     const { orchestrator, plugfn, store, workspaceId } = await fixture();
     plugfn.methods.connect.mockResolvedValueOnce(plugfn.connection({

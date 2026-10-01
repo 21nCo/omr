@@ -221,6 +221,35 @@ describe("OMR MCP server", () => {
     });
   });
 
+  it.each([
+    [429, "GITHUB_RATE_LIMITED"],
+    [410, "GITHUB_COMMENT_UNAVAILABLE"],
+    [422, "GITHUB_COMMENT_REJECTED"],
+    [409, "CONNECTION_UNAVAILABLE"],
+  ] as const)("preserves a GitHub or connection %i denial in MCP", async (status, code) => {
+    const fetchImpl: typeof fetch = async (request) => requestUrl(request).pathname === "/api/tools"
+      ? Response.json({ catalogSchemaVersion: "1.0.0", revision: "revision-1", tools: [] })
+      : Response.json({ error: code, ...(status === 409 ? {} : { receiptId: "execution_confirmed" }),
+        ...(status === 409 ? {} : { message: status === 429
+          ? "Safe GitHub guidance. Retry after 120 seconds." : "Safe GitHub guidance" }) },
+      { status, headers: status === 429 ? { "retry-after": "120" } : {} });
+    const server = await createOMRMcpServer({ baseUrl: "https://omr.test", credential: "credential",
+      workspaceId: "workspace-1", fetchImpl });
+    const client = new Client({ name: "github-denial", version: "1.0.0" }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closeables.push(client, server);
+
+    await expect(client.callTool({ name: "omr.approvals.execute",
+      arguments: { approvalId: "approval-1" } })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { ok: false, error: { code: "OMR_HTTP_ERROR",
+        details: { error: code, ...(status === 409 ? {} : { receiptId: "execution_confirmed",
+          message: status === 429 ? "Safe GitHub guidance. Retry after 120 seconds." : "Safe GitHub guidance" }) } } },
+    });
+  });
+
   it("preserves predispatch timeout and postdispatch uncertainty for projected MCP calls", async () => {
     const fetchImpl: typeof fetch = async (request, init) => {
       const path = requestUrl(request).pathname;

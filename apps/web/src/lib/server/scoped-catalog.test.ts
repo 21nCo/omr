@@ -58,6 +58,57 @@ describe("workspace-scoped discovery and manifest grants", () => {
     expect(resolve).toHaveBeenCalledTimes(2);
   });
 
+  it.each([401, 403, 429])("keeps healthy provider tools visible when GitHub scope proof returns %i", async (status) => {
+    const tools = await catalog();
+    const onMissing = vi.fn(async () => {});
+    const visible = await resolveScopedCatalog(tools, providers,
+      async (provider) => ({ id: provider, providerConnectionId: provider }),
+      async (provider) => {
+        if (provider === "github") throw Object.assign(new Error("private provider text"), {
+          status, headers: new Headers({ "Retry-After": "45" }),
+        });
+        return ["read"];
+      }, onMissing);
+    expect(tools.discover({ allowedToolIds: visible }).tools.map(({ id }) => id)).toEqual(["linear.read"]);
+    expect(onMissing).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { status: 503 },
+    Object.assign(new Error("GitHub unavailable"), { status: 503 }),
+    new TypeError("fetch failed"),
+    { code: "ETIMEDOUT" },
+    Object.assign(new Error("socket closed"), { code: "ECONNRESET" }),
+  ])("contains an identifiable GitHub proof outage without hiding Linear tools", async (failure) => {
+    const tools = await catalog();
+    const visible = await resolveScopedCatalog(tools, providers,
+      async (provider) => ({ id: provider, providerConnectionId: provider }),
+      async (provider) => {
+        if (provider === "github") throw failure;
+        return ["read"];
+      }, async () => {});
+    expect(tools.discover({ allowedToolIds: visible }).tools.map(({ id }) => id)).toEqual(["linear.read"]);
+  });
+
+  it("propagates a programming failure from GitHub proof", async () => {
+    const tools = await catalog();
+    await expect(resolveScopedCatalog(tools, providers,
+      async (provider) => ({ id: provider, providerConnectionId: provider }),
+      async () => { throw new TypeError("Cannot read properties of undefined"); },
+      async () => {})).rejects.toThrow("Cannot read properties of undefined");
+  });
+
+  it("does not contain an unrelated plain callback failure", async () => {
+    const tools = await catalog();
+    const failure = { status: 400, reason: "invalid local callback" };
+    await expect(resolveScopedCatalog(tools, providers,
+      async (provider) => ({ id: provider, providerConnectionId: provider }),
+      async (provider) => {
+        if (provider === "github") throw failure;
+        return ["read"];
+      }, async () => {})).rejects.toBe(failure);
+  });
+
   it("keeps a deleted remote hidden when health persistence fails, then retries the transition", async () => {
     const tools = await catalog();
     const healthError = new Error("health store unavailable");

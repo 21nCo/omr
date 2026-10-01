@@ -220,6 +220,28 @@ async function fixture() {
 
 // These contracts launch multiple CLI processes per case; parallel suites can delay their startup.
 describe("cli-command-contract", { timeout: 15_000 }, () => {
+  it("reports confirmed GitHub write denial as a failed effect with its receipt", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    for (const [status, code, exitCode] of [
+      [401, "GITHUB_RECONNECT_REQUIRED", 3],
+      [403, "GITHUB_ACCESS_DENIED", 1],
+      [404, "GITHUB_REPOSITORY_UNAVAILABLE", 1],
+      [410, "GITHUB_COMMENT_UNAVAILABLE", 1],
+      [422, "GITHUB_COMMENT_REJECTED", 1],
+      [429, "GITHUB_RATE_LIMITED", 1],
+    ] as const) {
+      f.failureResponse("/api/approvals/execute", status,
+        { error: code, receiptId: "execution_confirmed", message: "Safe GitHub guidance" });
+      const response = await f.run(["approvals", "execute", "approval_1", "--json"], env);
+      expect(response.code).toBe(exitCode);
+      expect(lastError(response.stderr)).toMatchObject({ error: code,
+        details: { receiptId: "execution_confirmed" } });
+      expect(response.stdout + response.stderr).not.toContain("EXECUTION_EFFECT_UNCERTAIN");
+      f.clearFailureResponse();
+    }
+  });
+
   it("isolates a malformed active pointer and lets explicit selection repair the default", async () => {
     const f = await fixture();
     expect((await f.run(["login", "--url", f.url, "--profile", "good", "--json"])).code).toBe(0);
@@ -1415,12 +1437,45 @@ syncBuiltinESMExports();
       details: { idempotencyKey: "run-after-commit" } });
     f.clearFailureResponse();
 
+    f.failureResponse("/api/tools/execute", 409, { error: "CONNECTION_UNAVAILABLE" });
+    const missingConnection = await f.run(cases[0]!.args, env);
+    expect(missingConnection.code).toBe(1);
+    expect(lastError(missingConnection.stderr).error).toBe("CONNECTION_UNAVAILABLE");
+    f.clearFailureResponse();
+
     f.failAfterCommit("/api/approvals/execute", 502,
       { error: "EXECUTION_OUTCOME_UNKNOWN", receiptId: "receipt_approved_uncertain" });
     const unknown = await f.run(cases[2]!.args, env);
     expect(unknown.code).toBe(23);
     expect(lastError(unknown.stderr)).toMatchObject({ error: "EXECUTION_OUTCOME_UNKNOWN",
       details: { approvalId: "approval_1", receiptId: "receipt_approved_uncertain" } });
+  });
+
+  it("preserves a proven GitHub preflight failure across both execution commands", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    for (const [path, args] of [
+      ["/api/tools/execute", ["tools", "run", "github.issues.commentPublic", "--idempotency", "preflight-key", "--json"]],
+      ["/api/approvals/execute", ["approvals", "execute", "approval_1", "--json"]],
+    ] as const) {
+      f.failureResponse(path, 503, { error: "GITHUB_PREFLIGHT_UNAVAILABLE", receiptId: "execution_preflight",
+        message: "omr_fixture_secret" });
+      const response = await f.run([...args], env);
+      expect(response.code).toBe(1);
+      expect(response.stdout).toBe("");
+      expect(lastError(response.stderr)).toMatchObject({ error: "GITHUB_PREFLIGHT_UNAVAILABLE",
+        message: expect.stringContaining("Check the connection before requesting a new approval"),
+        details: { receiptId: "execution_preflight" } });
+      expect(response.stderr).not.toContain("omr_fixture_secret");
+      f.clearFailureResponse();
+    }
+    expect(f.committedMutations).toEqual([]);
+
+    f.failureResponse("/api/tools/execute", 503, { error: "GITHUB_PREFLIGHT_UNAVAILABLE" });
+    const unproven = await f.run(["tools", "run", "github.issues.commentPublic", "--idempotency", "unproven-key", "--json"], env);
+    expect(unproven.code).toBe(23);
+    expect(lastError(unproven.stderr)).toMatchObject({ error: "EXECUTION_EFFECT_UNCERTAIN",
+      details: { idempotencyKey: "unproven-key" } });
   });
 
   it("refuses symlinked profile targets", async () => {

@@ -14,7 +14,7 @@ import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
 import { decodeExecutionWrappingKey, deriveExecutionFingerprintKey, ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
 import { connectPostgresExecutionReceipts } from "@oh-my-router/execution/postgres";
 import { connectPostgresIdentityRuntime } from "@oh-my-router/identity/postgres";
-import { connectPostgresPlugFn } from "@oh-my-router/plugfn-runtime";
+import { connectPostgresPlugFn, verifiedGithubScopes } from "@oh-my-router/plugfn-runtime";
 import {
   createPlugFnToolCatalog,
   isProviderConfigured,
@@ -142,13 +142,14 @@ const OAUTH_BINDINGS: Record<string, readonly [string, string]> = {
   yahoo: ["PLUGFN_YAHOO_CLIENT_ID", "PLUGFN_YAHOO_CLIENT_SECRET"],
 };
 
-/** Include OAuth provider apps only when both server-side credentials exist. */
+/** Include credentialed OAuth apps; GitHub also requires its explicit rollout flag. */
 export function createProviderIntegrationConfig(
   env: Record<string, unknown>,
   origin: string,
 ): Record<string, IntegrationConfig> {
   const redirectUri = new URL("/app/oauth/callback", origin).toString();
   return Object.fromEntries(Object.entries(OAUTH_BINDINGS).flatMap(([provider, names]) => {
+    if (provider === "github" && env.OMR_GITHUB_V1_ENABLED !== "true") return [];
     const clientId = env[names[0]];
     const clientSecret = env[names[1]];
     return typeof clientId === "string" && clientId.length > 0 &&
@@ -378,6 +379,7 @@ export function createCloudflareDeviceServices(event: RequestEvent): DeviceRoute
   };
 }
 
+/** Derive public provider readiness from configured apps and this workspace's bindings. */
 function statuses(
   plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"],
   bindings: readonly (ProviderBinding & { provider: string })[] = [],
@@ -397,11 +399,12 @@ function statuses(
   });
 }
 
+/** Exclude disabled providers before publishing their actions in the tool catalog. */
 function configuredProviders(plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"]): Set<string> {
   return new Set(statuses(plugfn).filter((status) => status.available).map((status) => status.provider));
 }
 
-/** Restrict the tool catalog to bindings this principal can currently use. */
+/** Project accessible bindings, using effective GitHub grants instead of requested scopes. */
 export async function scopedToolIds(
   catalog: Awaited<ReturnType<typeof createPlugFnToolCatalog>>,
   plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"],
@@ -415,7 +418,9 @@ export async function scopedToolIds(
     catalog,
     statuses(plugfn, bindings),
     (provider) => authority.resolve({ actorUserId: principal.userId, workspaceId, provider }),
-    async (connectionId) => (await plugfn.connections.get(connectionId)).scopes,
+    async (connectionId, provider) => provider === "github"
+      ? verifiedGithubScopes(plugfn, { userId: principal.userId, workspaceId, connectionId })
+      : (await plugfn.connections.get(connectionId)).scopes,
     async (bindingId) => {
       missing.add(bindingId);
       await markMissingRemoteConnection(authority, bindingId);
@@ -599,6 +604,7 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
     },
   };
 
+  /** Scope each invocation to fresh connection and receipt stores, closing all opened runtimes. */
   async function withExecution<T>(callback: (
     service: ExecutionService,
     catalog: Awaited<ReturnType<typeof createPlugFnToolCatalog>>,
@@ -620,7 +626,11 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
         connectionRuntime.connections,
         plugfn.plugfn,
         execution.receipts,
-        async (connectionId) => (await plugfn!.plugfn.connections.get(connectionId)).scopes,
+        async (connectionId, connection, principal) => connection.provider === "github"
+          ? verifiedGithubScopes(plugfn!.plugfn, {
+            userId: principal.userId, workspaceId: principal.workspaceId, connectionId,
+          })
+          : (await plugfn!.plugfn.connections.get(connectionId)).scopes,
         Date.now,
         execution.approvals,
         execution.invocationGuard,

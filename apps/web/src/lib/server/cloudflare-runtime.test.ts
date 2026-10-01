@@ -11,6 +11,7 @@ import { createOMRRouter, type ConnectionRouteServices } from "./router.js";
 describe("Worker provider OAuth configuration", () => {
   it("allowlists the browser callback for configured providers", () => {
     const config = createProviderIntegrationConfig({
+      OMR_GITHUB_V1_ENABLED: "true",
       PLUGFN_GITHUB_CLIENT_ID: "sandbox-client",
       PLUGFN_GITHUB_CLIENT_SECRET: "sandbox-secret",
     }, "https://omr-web-staging.example");
@@ -25,7 +26,20 @@ describe("Worker provider OAuth configuration", () => {
 
   it("does not expose a provider with only one client credential", () => {
     expect(createProviderIntegrationConfig({
+      OMR_GITHUB_V1_ENABLED: "true",
       PLUGFN_GITHUB_CLIENT_ID: "sandbox-client",
+    }, "https://omr-web-staging.example").github).toBeUndefined();
+  });
+
+  it("keeps GitHub unavailable by default even when OAuth credentials are configured", () => {
+    expect(createProviderIntegrationConfig({
+      PLUGFN_GITHUB_CLIENT_ID: "sandbox-client",
+      PLUGFN_GITHUB_CLIENT_SECRET: "sandbox-secret",
+    }, "https://omr-web-staging.example").github).toBeUndefined();
+    expect(createProviderIntegrationConfig({
+      OMR_GITHUB_V1_ENABLED: "false",
+      PLUGFN_GITHUB_CLIENT_ID: "sandbox-client",
+      PLUGFN_GITHUB_CLIENT_SECRET: "sandbox-secret",
     }, "https://omr-web-staging.example").github).toBeUndefined();
   });
 });
@@ -120,6 +134,7 @@ describe("Worker scoped provider catalog", () => {
     const plugfn = {
       providers: { get: (provider: string) => definitions.get(provider) },
       config: { integrations: { github: {}, linear: {} } },
+      action: vi.fn(async () => { throw Object.assign(new Error("deleted"), { code: "CONNECTION_NOT_FOUND" }); }),
       connections: { get: vi.fn(async (connectionId: string) => {
         if (connectionId === "remote_github") {
           throw Object.assign(new Error("deleted"), { code: "CONNECTION_NOT_FOUND" });

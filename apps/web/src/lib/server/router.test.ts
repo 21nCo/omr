@@ -4,9 +4,14 @@ import { ClientAccessDeniedError, DeviceAuthorizationError } from "@oh-my-router
 import { ConnectionCleanupUntrackedError, ConnectionProviderOperationError } from "@oh-my-router/connections";
 import {
   ExecutionApprovalRequiredError,
+  ExecutionFailedError,
+  ExecutionInProgressError,
   ExecutionInvocationDeadlineError,
   ExecutionOutcomeUnknownError,
+  GitHubReadError,
+  GitHubWritePreflightError,
 } from "@oh-my-router/execution";
+import { ProviderPreflightError } from "@oh-my-router/tools";
 
 import {
   createOMRRouter,
@@ -300,6 +305,16 @@ describe("OMR Worker HTTP boundary", () => {
       apiKey: "lin_secret",
       label: "Team Linear",
     });
+    const oauth = await request("/api/connections/oauth/start", {
+      workspaceId: "workspace_1", provider: "github", ownership: "personal",
+      redirectUri: "https://omr.invalid/app/oauth/callback", label: "GitHub",
+      githubAccess: "public_write",
+    });
+    const invalidOAuth = await request("/api/connections/oauth/start", {
+      workspaceId: "workspace_1", provider: "github", ownership: "personal",
+      redirectUri: "https://omr.invalid/app/oauth/callback", label: "GitHub",
+      githubAccess: "repo admin",
+    });
     const health = await request("/api/connections/health", { connectionId: "connection_key" });
     const selection = await request("/api/connections/select", {
       workspaceId: "workspace_1", provider: "linear", connectionId: "connection_key",
@@ -316,6 +331,11 @@ describe("OMR Worker HTTP boundary", () => {
       operation: "readiness", input: { provider: "linear", workspaceId: "workspace_1" },
     });
     expect(apiKey.status).toBe(201);
+    expect(oauth.status).toBe(201);
+    expect(invalidOAuth.status).toBe(400);
+    expect(calls).toContainEqual({ operation: "oauth-start", input: expect.objectContaining({
+      provider: "github", githubAccess: "public_write",
+    }) });
     expect(apiKey.headers.get("cache-control")).toBe("no-store");
     expect(health.status).toBe(200);
     expect(selection.status).toBe(200);
@@ -366,6 +386,72 @@ describe("OMR Worker HTTP boundary", () => {
     expect(body).toEqual({ error: "CONNECTION_CLEANUP_UNTRACKED",
       message: "Provider cleanup could not be confirmed or saved. Revoke this connection in the provider account." });
     expect(JSON.stringify(body)).not.toContain("code-secret");
+  });
+
+  it("reports GitHub private-repository and permission read denials without provider text", async () => {
+    const execution = { async execute() { throw new GitHubReadError("receipt_1", 404, false); } } as
+      unknown as ExecutionRouteServices;
+    const response = await createOMRRouter(undefined, undefined, undefined, execution).handle(new Request(
+      "https://omr.invalid/api/tools/execute", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId: "workspace_1", toolId: "github.repos.get",
+          params: { owner: "org", repo: "private" } }) },
+    ));
+    expect(response.status).toBe(404);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    await expect(response.json()).resolves.toMatchObject({
+      error: "GITHUB_REPOSITORY_UNAVAILABLE", receiptId: "receipt_1",
+      message: expect.stringContaining("private-repository access"),
+    });
+  });
+
+  it("returns safe rate-limit timing for a definite GitHub read denial", async () => {
+    const execution = { async execute() {
+      throw new GitHubReadError("receipt_1", 403, true, 45, 1800000000);
+    } } as unknown as ExecutionRouteServices;
+    const response = await createOMRRouter(undefined, undefined, undefined, execution).handle(new Request(
+      "https://omr.invalid/api/tools/execute", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId: "workspace_1", toolId: "github.repos.get",
+          params: { owner: "org", repo: "public" } }) },
+    ));
+    expect(response.status).toBe(429);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("retry-after")).toBe("45");
+    expect(response.headers.get("x-ratelimit-reset")).toBe("1800000000");
+    await expect(response.json()).resolves.toMatchObject({ error: "GITHUB_RATE_LIMITED",
+      receiptId: "receipt_1", message: expect.stringContaining("Retry after") });
+  });
+
+  it.each([
+    [new ExecutionInProgressError("receipt_1"), 409],
+    [new ExecutionFailedError("receipt_1"), 502],
+  ] as const)("keeps receipt-bearing %s responses private", async (failure, status) => {
+    const execution = { async execute() { throw failure; } } as unknown as ExecutionRouteServices;
+    const response = await createOMRRouter(undefined, undefined, undefined, execution).handle(new Request(
+      "https://omr.invalid/api/tools/execute", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId: "workspace_1", toolId: "github.repos.get", params: {} }) },
+    ));
+    expect(response.status).toBe(status);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    await expect(response.json()).resolves.toMatchObject({ receiptId: "receipt_1" });
+  });
+
+  it.each([
+    ["unverified_public_repository", null, "GITHUB_PUBLIC_REPOSITORY_REQUIRED", 403],
+    ["repository_lookup_failed", 403, "GITHUB_ACCESS_DENIED", 403],
+    ["repository_lookup_failed", 404, "GITHUB_REPOSITORY_UNAVAILABLE", 404],
+  ] as const)("returns a safe HTTP error for %s comment preflight", async (reason, status, code, httpStatus) => {
+    const execution = { async executeApproved() {
+      throw new GitHubWritePreflightError("receipt_1", new ProviderPreflightError(reason, status));
+    } } as unknown as ExecutionRouteServices;
+    const response = await createOMRRouter(undefined, undefined, undefined, execution).handle(new Request(
+      "https://omr.invalid/api/approvals/execute", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ approvalId: "approval_1" }) },
+    ));
+    expect(response.status).toBe(httpStatus);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const body = await response.json();
+    expect(body).toMatchObject({ error: code, receiptId: "receipt_1" });
+    expect(JSON.stringify(body)).not.toContain("provider secret");
   });
 
   it("projects versioned tool discovery and manifest routes", async () => {

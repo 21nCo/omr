@@ -23,6 +23,7 @@ import {
   ConnectionCleanupUntrackedError,
   ProviderUnavailableError,
   type ConnectionOwnership,
+  type GithubAccess,
 } from "@oh-my-router/connections";
 import { publicDatafnSchema } from "@oh-my-router/data";
 import { connectPostgresDataRuntime } from "@oh-my-router/data/postgres";
@@ -37,6 +38,10 @@ import {
   ExecutionApprovalRequiredError,
   ExecutionCapabilityDeniedError,
   ExecutionFailedError,
+  GitHubReadError,
+  GitHubScopeProofError,
+  GitHubWritePreflightError,
+  GitHubWriteRejectedError,
   ExecutionIdempotencyConflictError,
   ExecutionInProgressError,
   ExecutionInvocationDeadlineError,
@@ -67,6 +72,7 @@ export interface ConnectionRouteServices {
     ownership: ConnectionOwnership;
     redirectUri: string;
     label: string;
+    githubAccess?: GithubAccess;
     returnTo?: string;
   }): Promise<unknown>;
   completeOAuth(request: Request, input: {
@@ -146,6 +152,36 @@ export class RequestOriginDeniedError extends Error {
 const CAPABILITIES = new Set<string>(CLIENT_CAPABILITIES);
 const PRIVATE_RESPONSE = { "cache-control": "no-store" };
 
+type GitHubRouteError = GitHubReadError | GitHubScopeProofError |
+  GitHubWritePreflightError | GitHubWriteRejectedError;
+
+/** Map safe GitHub failure codes to the public HTTP contract. */
+function githubStatus(code: GitHubRouteError["code"]): number {
+  switch (code) {
+    case "GITHUB_RATE_LIMITED": return 429;
+    case "GITHUB_RECONNECT_REQUIRED": return 401;
+    case "GITHUB_REPOSITORY_UNAVAILABLE": return 404;
+    case "GITHUB_COMMENT_UNAVAILABLE": return 410;
+    case "GITHUB_COMMENT_REJECTED": return 422;
+    case "GITHUB_PREFLIGHT_UNAVAILABLE": return 503;
+    default: return 403;
+  }
+}
+
+/** Preserve only safe receipt and rate-limit metadata at the HTTP boundary. */
+function githubErrorResponse(error: GitHubRouteError): Response {
+  const body: { error: string; message: string; receiptId?: string } = {
+    error: error.code, message: error.message,
+  };
+  if ("receiptId" in error) body.receiptId = error.receiptId;
+  const headers: Record<string, string> = { ...PRIVATE_RESPONSE };
+  if (error.code === "GITHUB_RATE_LIMITED") {
+    if (error.retryAfterSeconds !== undefined) headers["retry-after"] = String(error.retryAfterSeconds);
+    if (error.rateLimitResetAt !== undefined) headers["x-ratelimit-reset"] = String(error.rateLimitResetAt);
+  }
+  return Response.json(body, { status: githubStatus(error.code), headers });
+}
+
 /** Require a JSON object before reading route-specific fields. */
 function objectBody(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -193,6 +229,14 @@ function ownership(body: Record<string, unknown>): ConnectionOwnership {
     throw new RequestInputError("ownership must be personal or workspace");
   }
   return value;
+}
+
+/** Accept only the consent tiers exposed by the GitHub v1 connection journey. */
+function githubAccess(body: Record<string, unknown>): GithubAccess | undefined {
+  const value = body.githubAccess;
+  if (value === undefined) return undefined;
+  if (value === "profile" || value === "public_write" || value === "private_repositories") return value;
+  throw new RequestInputError("githubAccess must be profile, public_write, or private_repositories");
 }
 
 function unavailableDeviceServices(): DeviceRouteServices {
@@ -327,14 +371,26 @@ export function createOMRRouter(
       if (error instanceof ExecutionInProgressError) {
         return Response.json(
           { error: error.code, receiptId: error.receiptId },
-          { status: 409, headers: { "retry-after": "2" } },
+          { status: 409, headers: { ...PRIVATE_RESPONSE, "retry-after": "2" } },
         );
       }
       if (error instanceof ExecutionFailedError) {
         return Response.json(
           { error: error.code, receiptId: error.receiptId },
-          { status: 502 },
+          { status: 502, headers: PRIVATE_RESPONSE },
         );
+      }
+      if (error instanceof GitHubReadError) {
+        return githubErrorResponse(error);
+      }
+      if (error instanceof GitHubScopeProofError) {
+        return githubErrorResponse(error);
+      }
+      if (error instanceof GitHubWritePreflightError) {
+        return githubErrorResponse(error);
+      }
+      if (error instanceof GitHubWriteRejectedError) {
+        return githubErrorResponse(error);
       }
       if (error instanceof ExecutionInvocationDeadlineError) {
         return Response.json({ error: error.code },
@@ -550,12 +606,14 @@ export function createOMRRouter(
         handler: async (request, context) => {
           const body = objectBody(await context.json());
           const returnTo = optionalString(body, "returnTo");
+          const access = githubAccess(body);
           return Response.json(await connectionServices.startOAuth(request, {
             workspaceId: requiredString(body, "workspaceId"),
             provider: requiredString(body, "provider"),
             ownership: ownership(body),
             redirectUri: requiredString(body, "redirectUri"),
             label: requiredString(body, "label"),
+            ...(access ? { githubAccess: access } : {}),
             ...(returnTo ? { returnTo } : {}),
           }), { status: 201, headers: PRIVATE_RESPONSE });
         },

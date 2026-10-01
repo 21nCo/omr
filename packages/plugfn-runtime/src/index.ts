@@ -1,7 +1,6 @@
 import {
   clickupProvider,
   discordProvider,
-  githubProvider,
   gmailProvider,
   googleCalendarProvider,
   googleDocsProvider,
@@ -22,13 +21,14 @@ import pg from "pg";
 import { plugFn, type IntegrationConfig, type PlugFn, type PlugFnAuthorizationOptions } from "plugfn";
 
 import { createPostgresPlugFnAdapter } from "./postgres.js";
+import { omrGithubProvider } from "./github.js";
 
 const { Client } = pg;
 
 const providers = [
   clickupProvider,
   discordProvider,
-  githubProvider,
+  omrGithubProvider,
   gmailProvider,
   googleCalendarProvider,
   googleDocsProvider,
@@ -117,3 +117,4 @@ export async function connectPostgresPlugFn(input: {
 }
 
 export { createPostgresPlugFnAdapter } from "./postgres.js";
+export { omrGithubProvider, verifiedGithubScopes } from "./github.js";

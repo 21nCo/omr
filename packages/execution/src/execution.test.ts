@@ -52,6 +52,10 @@ async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes: st
       actions: {
         get_issue: action("get_issue", "read"),
         create_issue: action("create_issue", "write"),
+        typed_write: { ...action("typed_write", "write"), parameters: {
+          type: "object", required: ["title"], properties: { title: { type: "string", minLength: 1 } },
+          additionalProperties: false,
+        } },
         mystery: action("mystery", "unknown"),
         uncontracted: { ...action("uncontracted", "unknown"), contract: undefined },
         targeted: { ...action("targeted", "write"), contract: {
@@ -149,6 +153,27 @@ function action(name: string, effect: ToolEffect) {
 }
 
 describe("execution service", () => {
+  it("rejects malformed sibling write inputs before approval and fails a legacy malformed claim without a receipt", async () => {
+    const { actionCall, approvals, receipts, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    await expect(requestApproval(service, { principal, toolId: "linear.typed_write", params: {} }))
+      .rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
+    expect(approvals.approvals.size).toBe(0);
+    const approval = await requestApproval(service, { principal, toolId: "linear.typed_write",
+      params: { title: "Valid" } });
+    approvals.approvals.get(approval.id)!.params = { title: "" };
+    await expect(service.approve(approval.id, principal.userId))
+      .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    approvals.approvals.get(approval.id)!.params = { title: "Valid" };
+    await service.approve(approval.id, principal.userId);
+    approvals.approvals.get(approval.id)!.params = { title: "" };
+    await expect(service.executeApproved(principal, approval.id))
+      .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    expect(approvals.approvals.get(approval.id)?.status).toBe("failed");
+    expect(receipts.receipts.size).toBe(0);
+    expect(actionCall).not.toHaveBeenCalled();
+  });
+
   it("shows approval status only to the exact client grant and current member", async () => {
     const { service, workspace, workspaceStore } = await fixture();
     const principal = { kind: "client" as const, userId: "user_1", workspaceId: workspace.id,
