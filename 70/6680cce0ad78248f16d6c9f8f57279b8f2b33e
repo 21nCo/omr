@@ -1,0 +1,52 @@
+.env.example
+  h_a39f9495f9ec1d 23-24
+apps/web/src/lib/oauth-review.test.ts
+  h_a39f9495f9ec1d 20-27
+apps/web/src/lib/oauth-review.ts
+  h_a39f9495f9ec1d 11
+apps/web/src/lib/server/cloudflare-runtime.test.ts
+  h_a39f9495f9ec1d 137-140
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 17,153,424-426,636-639
+apps/web/src/lib/server/router.test.ts
+  h_a39f9495f9ec1d 318-327,346-350
+apps/web/src/lib/server/router.ts
+  h_a39f9495f9ec1d 27,36,46,78,188-203,261-267,421-423,639,647
+apps/web/src/lib/server/scoped-catalog.ts
+  h_a39f9495f9ec1d 5,33-34
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 87-104,117,121-122,164-165,208,213-287,289-291,325-326,344-352,367,561-568,570,599-680,683,693-698
+docs/connection-lifecycle-v1.md
+  h_a39f9495f9ec1d 25,33-35
+docs/linear-v1.md
+  h_a39f9495f9ec1d 1-55
+packages/connections/src/index.ts
+  h_a39f9495f9ec1d 30
+packages/connections/src/plugfn.ts
+  h_a39f9495f9ec1d 104,302,312-317
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 7,343-356,880,1047-1049
+packages/execution/src/index.ts
+  h_a39f9495f9ec1d 10
+packages/plugfn-runtime/src/index.ts
+  h_a39f9495f9ec1d 24,32,121
+packages/plugfn-runtime/src/linear.ts
+  h_a39f9495f9ec1d 1-233
+packages/tools/src/index.ts
+  h_a39f9495f9ec1d 18
+packages/tools/src/linear-errors.ts
+  h_a39f9495f9ec1d 1-68
+tests/acceptance/linear-adapter-contract.test.ts
+  h_a39f9495f9ec1d 1-326
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "706680cce0ad78248f16d6c9f8f57279b8f2b33e",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
