@@ -103,7 +103,10 @@ describe("workspace-scoped discovery and manifest grants", () => {
     const failure = { status: 400, reason: "invalid local callback" };
     await expect(resolveScopedCatalog(tools, providers,
       async (provider) => ({ id: provider, providerConnectionId: provider }),
-      async () => { throw failure; }, async () => {})).rejects.toBe(failure);
+      async (provider) => {
+        if (provider === "github") throw failure;
+        return ["read"];
+      }, async () => {})).rejects.toBe(failure);
   });
 
   it("keeps a deleted remote hidden when health persistence fails, then retries the transition", async () => {
