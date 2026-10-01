@@ -1,0 +1,19 @@
+tests/acceptance/github-adapter-contract.test.ts
+  s_0609f91acbad47::t_3f64d18646fbfb 6,13-35,89-90,111,122,126,144,148,169,181,204-205,220,244,263-264,268
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fcbf13c6adbb944f96ee1cf23340878722fed064",
+  "prompts": {},
+  "sessions": {
+    "s_0609f91acbad47": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f0c55667effezmm807Vu9fqhAN",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
