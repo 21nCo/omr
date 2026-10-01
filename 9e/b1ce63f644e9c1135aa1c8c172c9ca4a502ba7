@@ -1,0 +1,29 @@
+packages/cli/src/bin.ts
+  s_d52385ad0fbd0d::t_bd769db0bead78 191,229-230,232-237,253
+tests/acceptance/cli-command-contract.test.ts
+  s_61c5b1bd90001b::t_2ee9aa290b6f5d 1454-1480
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9eb1ce63f644e9c1135aa1c8c172c9ca4a502ba7",
+  "prompts": {},
+  "sessions": {
+    "s_61c5b1bd90001b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f738-c526-7191-9fa9-e79f8ebc0697",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    },
+    "s_d52385ad0fbd0d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f1cc-46a9-73a2-bf93-2e81a58b21fc",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
