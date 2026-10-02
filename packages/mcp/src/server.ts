@@ -273,7 +273,7 @@ export async function createOMRMcpServer(input: {
     {
       name: RECONCILE_APPROVAL_TOOL,
       title: "Reconcile an Uncertain Linear Approval",
-      description: "After checking Linear independently, record whether an uncertain issue change happened. An effect_absent decision permits a new approval for the same change.",
+      description: "After checking Linear independently, record whether an uncertain issue change happened. An effect_absent decision permits a new approval only when OMR received a completed but ambiguous mutation response; transport uncertainty stays fenced.",
       inputSchema: {
         type: "object",
         properties: {

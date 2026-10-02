@@ -1,7 +1,7 @@
 import { linearProvider } from "@plugfn/providers";
 import type { Action, ActionContext, ActionContract, Provider } from "plugfn";
 import { z } from "zod";
-import { LinearProviderDenial, linearDenial } from "@oh-my-router/tools";
+import { LinearProviderDenial, LinearProviderResponseAmbiguous, linearDenial } from "@oh-my-router/tools";
 
 const id = z.string().uuid();
 const linearWorkspaceId = id.describe("Linear workspace ID from workspace.get");
@@ -41,6 +41,11 @@ function queryFailure(error: unknown, phase: Phase): unknown {
   if (error && typeof error === "object" && "code" in error && error.code === "CONNECTION_NOT_FOUND") {
     return error;
   }
+  if (phase === "write" && error && typeof error === "object" && "status" in error &&
+    typeof error.status === "number" && "data" in error &&
+    error.data && typeof error.data === "object" && "data" in error.data) {
+    return new LinearProviderResponseAmbiguous();
+  }
   return linearDenial(error, phase) ??
     (phase === "write" ? error : new LinearProviderDenial(phase, "LINEAR_QUERY_REJECTED"));
 }
@@ -59,12 +64,12 @@ async function query(context: ActionContext, source: string, variables: Record<s
     // validate any returned outcome; incomplete results remain uncertain.
     if (phase !== "write" || !body?.data || typeof body.data !== "object") {
       throw linearDenial({ status: 400, data: body, headers: response.headers }, phase) ??
-        (phase === "write" ? new Error("Linear GraphQL request failed")
+        (phase === "write" ? new LinearProviderResponseAmbiguous()
           : new LinearProviderDenial(phase, "LINEAR_QUERY_REJECTED"));
     }
   }
   if (!body?.data || typeof body.data !== "object") {
-    if (phase === "write") throw new Error("Linear mutation response is incomplete");
+    if (phase === "write") throw new LinearProviderResponseAmbiguous();
     throw new LinearProviderDenial(phase, "LINEAR_TARGET_UNAVAILABLE");
   }
   return body.data;
@@ -190,7 +195,9 @@ const issuesCreate: Action = {
       "success" in data.issueCreate && data.issueCreate.success === false) {
       throw new LinearProviderDenial("write", "LINEAR_INVALID_CHANGE");
     }
-    if (!result.success || result.data.issue.team.id !== params.teamId) throw new Error("Linear create outcome is unverified");
+    if (!result.success || result.data.issue.team.id !== params.teamId) {
+      throw new LinearProviderResponseAmbiguous();
+    }
     return result.data;
   },
 };
@@ -217,7 +224,9 @@ const issuesUpdate: Action = {
       "success" in data.issueUpdate && data.issueUpdate.success === false) {
       throw new LinearProviderDenial("write", "LINEAR_INVALID_CHANGE");
     }
-    if (!result.success || result.data.issue.id !== params.issueId) throw new Error("Linear update outcome is unverified");
+    if (!result.success || result.data.issue.id !== params.issueId) {
+      throw new LinearProviderResponseAmbiguous();
+    }
     return result.data;
   },
 };

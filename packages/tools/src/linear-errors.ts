@@ -24,6 +24,14 @@ export class LinearProviderDenial extends Error {
   }
 }
 
+/** The provider returned a completed response, but its mutation result is unclear. */
+export class LinearProviderResponseAmbiguous extends Error {
+  constructor() {
+    super("Linear mutation response is incomplete");
+    this.name = "LinearProviderResponseAmbiguous";
+  }
+}
+
 /** Read rate timing from either Fetch Headers or a provider header object. */
 function header(error: object, name: string): unknown {
   if (!("headers" in error) || !error.headers) return undefined;

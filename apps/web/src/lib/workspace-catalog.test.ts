@@ -1,12 +1,53 @@
 import { describe, expect, it } from "vitest";
 
-import { createWorkspaceCatalogLoader, providerDisplayState, selectedReadyLinearConnection,
+import { createWorkspaceCatalogLoader, linearEffectAbsentAvailable, providerDisplayState,
+  selectedLinearAccountId, selectedReadyLinearConnection,
   type WorkspaceCatalogState } from "./workspace-catalog.js";
 
 type Overview = { selectedWorkspaceId: string; connections: { provider: string; status: string }[] };
 type Catalog = { providers: { provider: string; state: string; available?: boolean; authMode?: string }[] };
 
 describe("workspace catalog loading", () => {
+  it("offers no-effect reconciliation only for an observed completed ambiguous response", () => {
+    const approval = { executionReceiptId: "receipt-A" };
+    expect(linearEffectAbsentAvailable(approval, [{ id: "receipt-A",
+      errorCode: "provider_outcome_unknown" }])).toBe(false);
+    expect(linearEffectAbsentAvailable(approval, [{ id: "receipt-A",
+      errorCode: "provider_response_ambiguous" }])).toBe(true);
+    expect(linearEffectAbsentAvailable(approval, [{ id: "receipt-B",
+      errorCode: "provider_response_ambiguous" }])).toBe(false);
+    expect(linearEffectAbsentAvailable(approval, [])).toBe(false);
+  });
+
+  it("clears a Linear issue selected under another account during a same-workspace refresh", async () => {
+    type AccountOverview = { selectedWorkspaceId: string; connections: { id: string; provider: string;
+      selected: boolean; status: string; readiness: string }[] };
+    let accountId = "account-A";
+    let visible: AccountOverview | null = null;
+    let selectedWorkspaceId = "team";
+    let issueTarget: string | null = null;
+    const load = createWorkspaceCatalogLoader<AccountOverview, { tools: string[] }>(
+      async () => ({ selectedWorkspaceId: "team", connections: [{ id: accountId, provider: "linear",
+        selected: true, status: "active", readiness: "ready" }] }),
+      async () => ({ tools: ["linear.issues.update"] }),
+      (state) => {
+        const previous = selectedLinearAccountId(visible, selectedWorkspaceId);
+        visible = state.overview;
+        selectedWorkspaceId = state.selectedWorkspaceId;
+        if (previous !== selectedLinearAccountId(visible, selectedWorkspaceId)) issueTarget = null;
+      },
+    );
+    await load("team");
+    issueTarget = "issue-from-A";
+    await load("team");
+    expect(issueTarget).toBe("issue-from-A");
+    accountId = "account-B";
+    await load("team");
+    expect(selectedLinearAccountId(visible, selectedWorkspaceId)).toBe("account-B");
+    expect(issueTarget).toBeNull();
+    expect(selectedLinearAccountId(visible, "other-workspace")).toBeNull();
+  });
+
   it("hides an old selected Linear account throughout a workspace or account switch", () => {
     const prior = { selectedWorkspaceId: "A", connections: [{ provider: "linear", selected: true,
       status: "active", readiness: "ready", id: "old-account" }] };

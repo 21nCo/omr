@@ -587,7 +587,8 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
            WHERE workspace_id = approval.workspace_id AND user_id = $2 FOR SHARE)
          AND EXISTS (SELECT 1 FROM omr_control.execution_receipts AS receipt
            WHERE receipt.id = approval.execution_receipt_id AND ${EXACT_RECEIPT}
-             AND receipt.status = 'uncertain')
+             AND receipt.status = 'uncertain'
+             AND ($4 <> 'effect_absent' OR receipt.error_code = 'provider_response_ambiguous'))
        RETURNING ${COLUMNS}`,
       [input.approvalId, input.actorUserId, input.principalKey, input.decision, input.now],
     );

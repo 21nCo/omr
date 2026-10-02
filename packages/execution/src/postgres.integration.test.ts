@@ -135,6 +135,17 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     await expect(runtime.approvals.reconcile({ approvalId: a.id, actorUserId: "wrong_actor",
       principalKey: a.principalKey, decision: "effect_absent", now: now + 7 }))
       .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    await expect(runtime.approvals.reconcile({ approvalId: a.id, actorUserId: a.actorUserId,
+      principalKey: a.principalKey, decision: "effect_absent", now: now + 7 }))
+      .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    const observer = new Client({ connectionString: connectionString! });
+    await observer.connect();
+    try {
+      await observer.query(`UPDATE omr_control.execution_receipts
+        SET error_code = 'provider_response_ambiguous' WHERE id = $1`, [receipt.id]);
+    } finally {
+      await observer.end();
+    }
     const reconciled = await runtime.approvals.reconcile({ approvalId: a.id,
       actorUserId: a.actorUserId, principalKey: a.principalKey,
       decision: "effect_absent", now: now + 8 });
@@ -159,7 +170,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       const receipt = receiptFixture(approval, now);
       await runtime.receipts.reserve(receipt);
       await runtime.receipts.beginDispatch(receipt.id, now + 3);
-      await runtime.receipts.uncertain(receipt.id, "provider_outcome_unknown", now + 4);
+      await runtime.receipts.uncertain(receipt.id, "provider_response_ambiguous", now + 4);
       await runtime.approvals.uncertain({ approvalId: approval.id, receiptId: receipt.id, now: now + 5 });
       const revoker = new Client({ connectionString: connectionString! });
       await revoker.connect();
@@ -205,7 +216,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       const receipt = receiptFixture(approval, now);
       await runtime.receipts.reserve(receipt);
       await runtime.receipts.beginDispatch(receipt.id, now + 3);
-      await runtime.receipts.uncertain(receipt.id, "provider_outcome_unknown", now + 4);
+      await runtime.receipts.uncertain(receipt.id, "provider_response_ambiguous", now + 4);
       await runtime.approvals.uncertain({ approvalId: approval.id, receiptId: receipt.id, now: now + 5 });
       const blocker = new Client({ connectionString: connectionString! });
       const revoker = new Client({ connectionString: connectionString! });

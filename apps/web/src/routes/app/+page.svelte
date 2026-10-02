@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { beginGithubReconnect, createOAuthReviewController } from "$lib/oauth-review.js";
   import { connectionActions, connectionStatusLabel, providerRevocationGuidance } from "$lib/connection-ui.js";
-  import { createWorkspaceCatalogLoader, providerDisplayState, selectedReadyLinearConnection } from "$lib/workspace-catalog.js";
+  import { createWorkspaceCatalogLoader, linearEffectAbsentAvailable, providerDisplayState, selectedLinearAccountId, selectedReadyLinearConnection } from "$lib/workspace-catalog.js";
   import { renderApprovalPreview } from "$lib/approval-preview.js";
   import { createLinearActionKeys, linearApprovalNotice } from "$lib/linear-action-keys.js";
   import { V1_PROVIDERS } from "@oh-my-router/tools";
@@ -178,11 +178,13 @@
     (workspaceId) => request<Overview>(`/api/control-plane${workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : ""}`),
     (workspaceId) => request<Catalog>(`/api/tools?workspaceId=${encodeURIComponent(workspaceId)}&limit=100`),
     (state) => {
+      const previousLinearAccountId = selectedLinearAccountId(overview, selectedWorkspaceId);
       overview = state.overview;
       catalog = state.catalog;
       selectedWorkspaceId = state.selectedWorkspaceId;
       loading = state.loading;
       error = state.error;
+      if (previousLinearAccountId !== selectedLinearAccountId(overview, selectedWorkspaceId)) clearLinear();
       if (!catalog) {
         oauthProvider = "";
         credentialProvider = "";
@@ -754,9 +756,13 @@
                   <button class="quiet compact" disabled={Boolean(busy) || !approval.executionReceiptId}
                     onclick={() => void mutate(`reconcile:${approval.id}`, "/api/approvals/reconcile",
                       { approvalId: approval.id, decision: "effect_present" }, "Recorded that Linear applied this change.")}>I verified the change happened</button>
-                  <button class="danger compact" disabled={Boolean(busy) || !approval.executionReceiptId}
-                    onclick={() => void mutate(`reconcile:${approval.id}`, "/api/approvals/reconcile",
-                      { approvalId: approval.id, decision: "effect_absent" }, "Recorded that Linear did not apply this change.")}>I verified no change happened</button>
+                  {#if linearEffectAbsentAvailable(approval, overview.executions)}
+                    <button class="danger compact" disabled={Boolean(busy)}
+                      onclick={() => void mutate(`reconcile:${approval.id}`, "/api/approvals/reconcile",
+                        { approvalId: approval.id, decision: "effect_absent" }, "Recorded that Linear did not apply this change.")}>I verified no change happened</button>
+                  {:else}
+                    <p class="approval-context">The request may still be running. OMR cannot safely record no change or allow a retry for this receipt.</p>
+                  {/if}
                 {:else}
                   <button class="primary compact" disabled={Boolean(busy) || !approval.previewReady} onclick={() => void mutate(`execute:${approval.id}`, "/api/approvals/execute", { approvalId: approval.id }, `Executed ${approval.toolId}.`)}>Execute approved change</button>
                 {/if}

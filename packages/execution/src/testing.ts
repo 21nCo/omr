@@ -351,8 +351,12 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
       const approval = this.approvals.get(input.approvalId);
       if (approval?.actorUserId !== input.actorUserId ||
           approval.principalKey !== input.principalKey || !this.isMember(approval.workspaceId, input.actorUserId) ||
-          approval.status !== "uncertain" || !approval.executionReceiptId ||
-          this.assertReceiptOwnership(approval, approval.executionReceiptId).status !== "uncertain") {
+          approval.status !== "uncertain" || !approval.executionReceiptId) {
+        throw new ApprovalUnavailableError();
+      }
+      const receipt = this.assertReceiptOwnership(approval, approval.executionReceiptId);
+      if (receipt.status !== "uncertain" ||
+          (input.decision === "effect_absent" && receipt.errorCode !== "provider_response_ambiguous")) {
         throw new ApprovalUnavailableError();
       }
       approval.status = input.decision === "effect_present" ? "consumed" : "failed";

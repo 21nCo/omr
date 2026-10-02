@@ -6,6 +6,24 @@ export interface WorkspaceCatalogState<Overview, Catalog> {
   error: string;
 }
 
+/** Bind Linear discovery to the selected account in the current workspace. */
+export function selectedLinearAccountId<Connection extends { id: string; provider: string; selected: boolean }>(
+  overview: { selectedWorkspaceId: string | null; connections: readonly Connection[] } | null,
+  workspaceId: string,
+): string | null {
+  if (overview?.selectedWorkspaceId !== workspaceId) return null;
+  return overview.connections.find((connection) => connection.provider === "linear" && connection.selected)?.id ?? null;
+}
+
+/** A completed ambiguous response can be checked for a definite absence. */
+export function linearEffectAbsentAvailable(
+  approval: { executionReceiptId?: string | null },
+  receipts: readonly { id: string; errorCode: string | null }[],
+): boolean {
+  return Boolean(approval.executionReceiptId && receipts.some((receipt) =>
+    receipt.id === approval.executionReceiptId && receipt.errorCode === "provider_response_ambiguous"));
+}
+
 /** A pending selection cannot reuse the previous account's browser controls. */
 export function selectedReadyLinearConnection<Connection extends { provider: string; selected: boolean;
   status: string; readiness: string }>(state: {

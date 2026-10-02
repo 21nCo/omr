@@ -42,10 +42,14 @@ request, status, execution, and reconciliation. MCP exposes approval request,
 execution, and reconciliation;
 review and approve the pending request in the browser control plane.
 For an uncertain Linear write, inspect the receipt and verify the issue in
-Linear before choosing **effect happened** or **no effect** in the browser,
+Linear before choosing **effect happened** in the browser,
 `omr approvals reconcile <approvalId> --decision effect_present|effect_absent`,
 or `omr.approvals.reconcile` in MCP. This decision is recorded against the
-original approval. A verified no-effect decision permits a retry; an
+original approval. **No effect** is available only when OMR received a
+completed but ambiguous mutation response; a transport error or invocation
+timeout may leave the original provider request running, so its approval
+remains fenced even if the issue is not visible yet. A verified no-effect
+decision for a completed response permits a retry; an
 effect-present decision closes the attempt. Either decision requires a new
 approval before any later identical change; reconciliation itself never
 dispatches a mutation.

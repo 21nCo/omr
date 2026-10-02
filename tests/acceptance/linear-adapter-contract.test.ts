@@ -269,7 +269,9 @@ describe("linear-adapter-contract", () => {
   it("requires an explicit recorded decision before retrying an uncertain Linear create", async () => {
     const { binding, linear, service, principal, receipts } = await executionFixture();
     const params = { linearWorkspaceId: workspaceA, teamId: teamA, title: "Reconcile me" };
-    linear.setFailure("ambiguous");
+    // The provider returned a completed, partial mutation response. Its effect
+    // is unclear, but no request remains in flight when the user checks Linear.
+    linear.setFailure("partial");
     const approval = await service.requestApproval({ principal, toolId: "linear.issues.create",
       params, connectionId: binding.id, idempotencyKey: "reconcile-first" });
     await service.approve(approval.id, "alice");
@@ -285,7 +287,9 @@ describe("linear-adapter-contract", () => {
     expect(linear.mutations()).toHaveLength(1);
     const reconciled = await service.reconcileUncertain(principal, approval.id, "effect_absent");
     expect(reconciled).toMatchObject({ status: "failed", reconciledAs: "effect_absent" });
-    expect(receipts.receipts.get(reconciled.executionReceiptId!)?.status).toBe("uncertain");
+    expect(receipts.receipts.get(reconciled.executionReceiptId!)).toMatchObject({
+      status: "uncertain", errorCode: "provider_response_ambiguous",
+    });
     expect(linear.mutations()).toHaveLength(1);
     await expect(service.executeApproved(principal, approval.id))
       .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
@@ -296,6 +300,66 @@ describe("linear-adapter-contract", () => {
     await service.approve(next.id, "alice");
     await service.executeApproved(principal, next.id);
     expect(linear.mutations()).toHaveLength(2);
+  });
+
+  it("keeps a transport-uncertain Linear create fenced after a no-effect observation", async () => {
+    const { binding, linear, service, principal, receipts } = await executionFixture();
+    const params = { linearWorkspaceId: workspaceA, teamId: teamA, title: "Still in flight" };
+    linear.setFailure("ambiguous");
+    const approval = await service.requestApproval({ principal, toolId: "linear.issues.create",
+      params, connectionId: binding.id, idempotencyKey: "transport-first" });
+    await service.approve(approval.id, "alice");
+    await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({
+      code: "EXECUTION_OUTCOME_UNKNOWN",
+    });
+    const uncertain = await service.approvalStatus(principal, approval.id);
+    expect(receipts.receipts.get(uncertain.executionReceiptId!)?.errorCode).toBe("provider_outcome_unknown");
+    await expect(service.reconcileUncertain(principal, approval.id, "effect_absent"))
+      .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    const retry = await service.requestApproval({ principal, toolId: "linear.issues.create",
+      params, connectionId: binding.id, idempotencyKey: "transport-second" });
+    expect(retry.id).toBe(approval.id);
+    expect(linear.mutations()).toHaveLength(1);
+    await service.reconcileUncertain(principal, approval.id, "effect_present");
+    await expect(service.executeApproved(principal, approval.id))
+      .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    expect(linear.mutations()).toHaveLength(1);
+  });
+
+  it("does not release a timed-out write while its provider promise can still complete", async () => {
+    const { binding, dispatch, service, principal, receipts } = await executionFixture();
+    const params = { linearWorkspaceId: workspaceA, teamId: teamA, title: "Late create" };
+    const approval = await service.requestApproval({ principal, toolId: "linear.issues.create",
+      params, connectionId: binding.id, idempotencyKey: "late-first" });
+    await service.approve(approval.id, "alice");
+    let finishProvider: (() => void) | undefined;
+    dispatch.mockImplementationOnce(async () => new Promise((resolve) => {
+      finishProvider = () => resolve({ id: issueB });
+    }));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const executing = service.executeApproved(principal, approval.id)
+        .then(() => null, (error: unknown) => error);
+      await vi.waitFor(() => expect(finishProvider).toBeTypeOf("function"),
+        { timeout: 1_000, interval: 1 });
+      await vi.advanceTimersByTimeAsync(61_000);
+      await expect(executing).resolves.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN" });
+      const uncertain = await service.approvalStatus(principal, approval.id);
+      expect(receipts.receipts.get(uncertain.executionReceiptId!)).toMatchObject({
+        status: "uncertain", errorCode: "invocation_outcome_unknown",
+      });
+      await expect(service.reconcileUncertain(principal, approval.id, "effect_absent"))
+        .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      const retry = await service.requestApproval({ principal, toolId: "linear.issues.create",
+        params, connectionId: binding.id, idempotencyKey: "late-second" });
+      expect(retry.id).toBe(approval.id);
+      finishProvider!();
+      await Promise.resolve();
+      expect(dispatch).toHaveBeenCalledTimes(1);
+    } finally {
+      finishProvider?.();
+      vi.useRealTimers();
+    }
   });
 
   it("closes an effect-present Linear update without replaying its dispatched mutation", async () => {
