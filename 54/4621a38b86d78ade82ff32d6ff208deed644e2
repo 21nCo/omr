@@ -1,0 +1,35 @@
+apps/web/src/lib/server/cloudflare-runtime.ts
+  s_f35acf97713caf::t_d57b672685ac1d 39,767,801-802,814
+apps/web/src/lib/workspace-catalog.test.ts
+  s_f35acf97713caf::t_0ecb0f9e852b65 14,16,18-20
+apps/web/src/lib/workspace-catalog.ts
+  s_f35acf97713caf::t_8ed7e943a52fe4 21,24-25
+apps/web/src/routes/app/+page.svelte
+  s_f35acf97713caf::t_8095391ee2aa3c 61,760
+packages/execution/src/execution.ts
+  s_f35acf97713caf::t_f8d4a09843432e 101-102
+packages/execution/src/postgres-approval-store.ts
+  s_f35acf97713caf::t_422ad01c648d1b 524-573
+packages/execution/src/postgres-store.ts
+  s_f35acf97713caf::t_b0890f2456720b 64-76
+packages/execution/src/postgres.integration.test.ts
+  s_f35acf97713caf::t_93448d25e42da4 114-155,206,242
+packages/execution/src/testing.ts
+  s_f35acf97713caf::t_0a6458f50de757 32-39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "544621a38b86d78ade82ff32d6ff208deed644e2",
+  "prompts": {},
+  "sessions": {
+    "s_f35acf97713caf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fc84-64a0-7e21-abe8-470ad56e7650",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
