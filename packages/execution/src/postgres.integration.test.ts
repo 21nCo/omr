@@ -216,10 +216,10 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
 
   it("excludes expired pending and approved rows before applying the Linear overview limit", async () => {
     const now = Date.now();
-    const expired = await runtime.approvals.create(approvalFixture(now - 120_000,
-      { status: "approved", expiresAt: now - 1 }));
-    const live = await runtime.approvals.create(approvalFixture(now,
+    const live = await runtime.approvals.create(approvalFixture(now - 120_000,
       { status: "pending", expiresAt: now + 60_000 }));
+    const expired = await runtime.approvals.create(approvalFixture(now,
+      { status: "approved", expiresAt: now - 1 }));
     const actor = { workspaceId, actorUserId: live.actorUserId, now, limit: 1 };
     expect(await runtime.approvals.listOutstandingLinearForActor(actor))
       .toMatchObject([{ id: live.id }]);

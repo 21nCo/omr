@@ -19,14 +19,14 @@ export async function recoverLinearApproval(
 ): Promise<ExecutionApproval | null> {
   if (!approvalId) return null;
   const approval = await store.getForActor(approvalId, actorUserId);
-  const recorded = Boolean(approval.executionReceiptId) &&
-    ((approval.status === "consumed" && approval.reconciledAs === "effect_present") ||
-      (approval.status === "failed" && approval.reconciledAs === "effect_absent"));
+  const recorded = approval.reconciledAs;
+  const validDecision = !recorded || (Boolean(approval.executionReceiptId) &&
+    ((approval.status === "consumed" && recorded === "effect_present") ||
+      (approval.status === "failed" && recorded === "effect_absent")));
   if (approval.workspaceId !== workspaceId || !approval.toolId.startsWith("linear.") ||
-      (approval.status !== "uncertain" &&
-        !recorded &&
-        !((approval.status === "pending" || approval.status === "approved") &&
-          approval.expiresAt > now))) throw new ApprovalUnavailableError();
+      !validDecision ||
+      ((approval.status === "pending" || approval.status === "approved") &&
+        approval.expiresAt <= now)) throw new ApprovalUnavailableError();
   return approval;
 }
 
@@ -50,8 +50,11 @@ export async function linearReconciliationReceipts(
 ): Promise<ExecutionReceipt[]> {
   const uncertain = approvals.filter((approval) => approval.status === "uncertain" &&
     approval.toolId.startsWith("linear.") && approval.executionReceiptId);
-  const found = await Promise.all(uncertain.map((approval) =>
-    receipts.findForApproval({ workspaceId, actorUserId, approvalId: approval.id,
-      receiptId: approval.executionReceiptId! })));
+  const found: (ExecutionReceipt | null)[] = [];
+  for (let index = 0; index < uncertain.length; index += 8) {
+    found.push(...await Promise.all(uncertain.slice(index, index + 8).map((approval) =>
+      receipts.findForApproval({ workspaceId, actorUserId, approvalId: approval.id,
+        receiptId: approval.executionReceiptId! }))));
+  }
   return found.filter((receipt): receipt is ExecutionReceipt => receipt !== null);
 }

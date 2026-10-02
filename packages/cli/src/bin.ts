@@ -204,6 +204,11 @@ function ambiguousMutationResponse(error: unknown,
 function httpBody(error: unknown): { error?: unknown; receiptId?: unknown } | null {
   return error instanceof OMRHttpError ? error.body as { error?: unknown; receiptId?: unknown } | null : null;
 }
+const publicLinearCodes = new Set([
+  "LINEAR_RATE_LIMITED", "LINEAR_RECONNECT_REQUIRED", "LINEAR_PERMISSION_DENIED",
+  "LINEAR_TARGET_UNAVAILABLE", "LINEAR_WORKSPACE_MISMATCH", "LINEAR_INVALID_CHANGE",
+  "LINEAR_QUERY_REJECTED",
+]);
 /** Preserve only recognized public server codes; transport errors on writes remain uncertain. */
 function failureCode(error: unknown, body: ReturnType<typeof httpBody>): string {
   if (error instanceof CLIError) return error.code;
@@ -212,7 +217,8 @@ function failureCode(error: unknown, body: ReturnType<typeof httpBody>): string 
   if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) &&
       ["/api/tools/execute", "/api/approvals/execute"].includes(error.path)) return "EXECUTION_EFFECT_UNCERTAIN";
   if (typeof body?.error === "string" &&
-      /^(?:(?:EXECUTION|APPROVAL|CLIENT|DEVICE|CONNECTION|TOOL|WORKSPACE|REQUEST|AUTHFN|PROVIDER|RUNTIME|GITHUB)_[A-Z0-9_]{1,64}|LINEAR_(?:RATE_LIMITED|RECONNECT_REQUIRED|PERMISSION_DENIED|TARGET_UNAVAILABLE|WORKSPACE_MISMATCH|INVALID_CHANGE|QUERY_REJECTED))$/.test(body.error)) {
+      (/^(?:EXECUTION|APPROVAL|CLIENT|DEVICE|CONNECTION|TOOL|WORKSPACE|REQUEST|AUTHFN|PROVIDER|RUNTIME|GITHUB)_[A-Z0-9_]{1,64}$/.test(body.error) ||
+        publicLinearCodes.has(body.error))) {
     return body.error;
   }
   return error instanceof OMRHttpError ? "HTTP_ERROR" : "CLI_ERROR";

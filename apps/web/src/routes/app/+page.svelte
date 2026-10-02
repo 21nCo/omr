@@ -812,7 +812,7 @@
           {#each overview.approvals.filter((item) =>
             ((item.status === "pending" || item.status === "approved") && item.expiresAt > clockNow) ||
             (item.status === "uncertain" && item.toolId.startsWith("linear.")) ||
-            (item.id === recoveredApprovalId && Boolean(item.reconciledAs))) as approval}
+            item.id === recoveredApprovalId) as approval}
             <article class="approval-card">
               <div class="approval-top"><strong>{approval.action} ({approval.toolId})</strong><span>Expires {timestamp(approval.expiresAt)}</span></div>
               <p class="approval-context">Effect: {approval.effect} · Account: {overview.connections.find((connection) => connection.id === approval.connectionId)?.label ?? "Unavailable"}</p>
@@ -842,12 +842,16 @@
                   {/if}
                 {:else if approval.reconciledAs}
                   <p class="approval-context">Recorded decision for receipt {approval.executionReceiptId}: {approval.reconciledAs === "effect_present" ? "Linear applied the change" : "Linear did not apply the change"}. No issue write was repeated.</p>
-                {:else}
+                {:else if approval.status === "approved"}
                   {#if approval.browserActionable}
                     <button class="primary compact" disabled={Boolean(busy) || !approval.previewReady} onclick={() => void mutate(`execute:${approval.id}`, "/api/approvals/execute", { approvalId: approval.id }, `Executed ${approval.toolId}.`)}>Execute approved change</button>
                   {:else}
                     <p class="approval-context">Execute this approved action from the originating CLI or MCP client. This browser session cannot use its grant.</p>
                   {/if}
+                {:else if approval.status === "executing"}
+                  <p class="approval-context">Execution is in progress. Check this approval and its receipt before taking another action.</p>
+                {:else}
+                  <p class="approval-context">This approval is {approval.status} and cannot be executed again.</p>
                 {/if}
               </div>
             </article>

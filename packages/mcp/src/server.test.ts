@@ -224,7 +224,9 @@ describe("OMR MCP server", () => {
       for (const decision of ["effect_present", "effect_absent"] as const) {
         let recorded: typeof decision | null = null;
         let reconciliations = 0;
-        let issueWrites = 0;
+        const approvalKeys = new Set<string>();
+        let approvalRequests = 0;
+        let executions = 0;
         const fetchImpl: typeof fetch = async (request, init) => {
           const url = requestUrl(request);
           const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null;
@@ -247,7 +249,13 @@ describe("OMR MCP server", () => {
             return Response.json({ id: "approval-old", status: decision === "effect_present" ? "consumed" : "failed",
               reconciledAs: decision });
           }
-          if (url.pathname === "/api/approvals") issueWrites += 1;
+          if (url.pathname === "/api/approvals") {
+            approvalRequests += 1;
+            approvalKeys.add(String(body?.idempotencyKey));
+            return Response.json({ id: "approval-old", status: "uncertain",
+              expiresAt: Date.now() + 600_000 }, { status: 201 });
+          }
+          if (url.pathname === "/api/approvals/execute") executions += 1;
           return Response.json({ error: "NOT_FOUND" }, { status: 404 });
         };
         const server = await createOMRMcpServer({ baseUrl: "https://omr.test", credential: "credential",
@@ -257,6 +265,10 @@ describe("OMR MCP server", () => {
         await server.connect(serverTransport);
         await client.connect(clientTransport);
         closeables.push(client, server);
+        const writeArgs = { value: "change", _omrIdempotencyKey: "linear-action-old" };
+        await expect(client.callTool({ name: toolId, arguments: writeArgs })).resolves.toMatchObject({
+          structuredContent: { approvalId: "approval-old" },
+        });
         const args = { approvalId: "approval-old", decision };
         expect((await client.callTool({ name: "omr.approvals.reconcile", arguments: args })).isError).toBe(true);
         await expect(client.callTool({ name: "omr.approvals.status",
@@ -269,7 +281,12 @@ describe("OMR MCP server", () => {
         expect((await client.callTool({ name: "omr.approvals.reconcile", arguments: {
           ...args, decision: decision === "effect_present" ? "effect_absent" : "effect_present",
         } })).isError).toBe(true);
-        expect(issueWrites).toBe(0);
+        await expect(client.callTool({ name: toolId, arguments: writeArgs })).resolves.toMatchObject({
+          structuredContent: { approvalId: "approval-old" },
+        });
+        expect(approvalRequests).toBe(2);
+        expect(approvalKeys).toEqual(new Set(["linear-action-old"]));
+        expect(executions).toBe(0);
       }
     },
   );

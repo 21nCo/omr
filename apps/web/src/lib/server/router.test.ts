@@ -695,6 +695,8 @@ describe("OMR Worker HTTP boundary", () => {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ approvalId: "approval_1", decision: "effect_present", workspaceId: "workspace_1" }),
     }));
+    expect(reconciled.status).toBe(200);
+    expect(reconciled.headers.get("cache-control")).toBe("no-store");
     await expect(reconciled.json()).resolves.toMatchObject({ status: "consumed", reconciledAs: "effect_present" });
     const revoked = await tested.handle(new Request("https://omr.invalid/api/client-grants/revoke-self", {
       method: "POST", headers: { authorization: "Bearer fixture", "content-type": "application/json" },
