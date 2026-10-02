@@ -112,6 +112,8 @@ describe("OMR MCP server", () => {
       "demo.read",
       "demo.write",
       "omr.approvals.execute",
+      "omr.approvals.reconcile",
+      "omr.approvals.status",
       "omr.catalog.providers",
       "omr.catalog.refresh",
       "omr.connections.list",
@@ -181,6 +183,113 @@ describe("OMR MCP server", () => {
       approvalId: "approval-1",
     });
   });
+
+  it("reconciles only an uncertain Linear approval through MCP", async () => {
+    const requests: Array<{ path: string; body: Record<string, unknown> | null }> = [];
+    const fetchImpl: typeof fetch = async (request, init) => {
+      const path = requestUrl(request).pathname;
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null;
+      requests.push({ path, body });
+      if (path === "/api/tools") return Response.json({ catalogSchemaVersion: "1.0.0",
+        revision: "linear-1", tools: [manifest("linear.issues.update", "write")] });
+      if (path === "/api/approvals") return Response.json({ id: "linear-approval", status: "pending",
+        expiresAt: Date.now() + 600_000 }, { status: 201 });
+      if (path === "/api/approvals/execute") return Response.json({ id: "linear-receipt",
+        status: "uncertain" });
+      if (path === "/api/approvals/reconcile") return Response.json({ id: "linear-approval",
+        status: "failed", reconciledAs: "effect_absent" });
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    };
+    const server = await createOMRMcpServer({ baseUrl: "https://omr.test", credential: "credential",
+      workspaceId: "workspace-1", fetchImpl });
+    const client = new Client({ name: "test", version: "1.0.0" }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closeables.push(client, server);
+    await client.callTool({ name: "linear.issues.update",
+      arguments: { value: "change", _omrIdempotencyKey: "linear-action-1" } });
+    await expect(client.callTool({ name: "omr.approvals.execute",
+      arguments: { approvalId: "linear-approval" } }))
+      .resolves.toMatchObject({ structuredContent: { status: "uncertain" } });
+    await expect(client.callTool({ name: "omr.approvals.reconcile",
+      arguments: { approvalId: "linear-approval", decision: "effect_absent" } }))
+      .resolves.toMatchObject({ structuredContent: { status: "failed", reconciledAs: "effect_absent" } });
+    expect(requests.filter(({ path }) => path === "/api/approvals/reconcile")[0]?.body)
+      .toEqual({ approvalId: "linear-approval", decision: "effect_absent" });
+  });
+
+  it.each(["linear.issues.create", "linear.issues.update"] as const)(
+    "reads back a lost %s reconciliation response without repeating the issue write", async (toolId) => {
+      for (const decision of ["effect_present", "effect_absent"] as const) {
+        let recorded: typeof decision | null = null;
+        let reconciliations = 0;
+        const approvalKeys = new Set<string>();
+        let approvalRequests = 0;
+        let executions = 0;
+        const fetchImpl: typeof fetch = async (request, init) => {
+          const url = requestUrl(request);
+          const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null;
+          if (url.pathname === "/api/tools") return Response.json({ catalogSchemaVersion: "1.0.0",
+            revision: "linear-1", tools: [manifest(toolId, "write")] });
+          if (url.pathname === "/api/approvals/status") {
+            if (url.searchParams.get("approvalId") !== "approval-old") {
+              return Response.json({ error: "APPROVAL_UNAVAILABLE" }, { status: 409 });
+            }
+            return Response.json({ id: "approval-old", status: recorded === "effect_present" ? "consumed" :
+              recorded === "effect_absent" ? "failed" : "uncertain", reconciledAs: recorded });
+          }
+          if (url.pathname === "/api/approvals/reconcile") {
+            reconciliations += 1;
+            if (body?.decision !== decision || body.approvalId !== "approval-old") {
+              return Response.json({ error: "APPROVAL_UNAVAILABLE" }, { status: 409 });
+            }
+            recorded = decision;
+            if (reconciliations === 1) throw new TypeError("response lost after commit");
+            return Response.json({ id: "approval-old", status: decision === "effect_present" ? "consumed" : "failed",
+              reconciledAs: decision });
+          }
+          if (url.pathname === "/api/approvals") {
+            approvalRequests += 1;
+            approvalKeys.add(String(body?.idempotencyKey));
+            return Response.json({ id: "approval-old", status: "uncertain",
+              expiresAt: Date.now() + 600_000 }, { status: 201 });
+          }
+          if (url.pathname === "/api/approvals/execute") executions += 1;
+          return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+        };
+        const server = await createOMRMcpServer({ baseUrl: "https://omr.test", credential: "credential",
+          workspaceId: "workspace-1", fetchImpl });
+        const client = new Client({ name: "test", version: "1.0.0" }, { capabilities: {} });
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+        await server.connect(serverTransport);
+        await client.connect(clientTransport);
+        closeables.push(client, server);
+        const writeArgs = { value: "change", _omrIdempotencyKey: "linear-action-old" };
+        await expect(client.callTool({ name: toolId, arguments: writeArgs })).resolves.toMatchObject({
+          structuredContent: { approvalId: "approval-old" },
+        });
+        const args = { approvalId: "approval-old", decision };
+        expect((await client.callTool({ name: "omr.approvals.reconcile", arguments: args })).isError).toBe(true);
+        await expect(client.callTool({ name: "omr.approvals.status",
+          arguments: { approvalId: "approval-old" } })).resolves.toMatchObject({
+          structuredContent: { id: "approval-old", reconciledAs: decision,
+            status: decision === "effect_present" ? "consumed" : "failed" },
+        });
+        await expect(client.callTool({ name: "omr.approvals.reconcile", arguments: args }))
+          .resolves.toMatchObject({ structuredContent: { reconciledAs: decision } });
+        expect((await client.callTool({ name: "omr.approvals.reconcile", arguments: {
+          ...args, decision: decision === "effect_present" ? "effect_absent" : "effect_present",
+        } })).isError).toBe(true);
+        await expect(client.callTool({ name: toolId, arguments: writeArgs })).resolves.toMatchObject({
+          structuredContent: { approvalId: "approval-old" },
+        });
+        expect(approvalRequests).toBe(2);
+        expect(approvalKeys).toEqual(new Set(["linear-action-old"]));
+        expect(executions).toBe(0);
+      }
+    },
+  );
 
   it("preserves OMR error response details in MCP tool errors", async () => {
     const fetchImpl: typeof fetch = async (request) => {

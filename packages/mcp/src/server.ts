@@ -11,16 +11,35 @@ import type { JsonValue, ToolManifest } from "@oh-my-router/tools";
 const CONNECTIONS_TOOL = "omr.connections.list";
 const SELECT_CONNECTION_TOOL = "omr.connections.select";
 const EXECUTE_APPROVAL_TOOL = "omr.approvals.execute";
+const STATUS_APPROVAL_TOOL = "omr.approvals.status";
+const RECONCILE_APPROVAL_TOOL = "omr.approvals.reconcile";
 const REFRESH_CATALOG_TOOL = "omr.catalog.refresh";
 const PROVIDERS_TOOL = "omr.catalog.providers";
 const IDEMPOTENCY_FIELD = "_omrIdempotencyKey";
 type VisibilityContext = { manifests?: Promise<Map<string, string>> };
 
-/** Keep malformed catalog schemas from becoming a non-object MCP tool surface. */
+/** Preserve object unions while giving MCP hosts a discoverable root object. */
 function objectSchema(value: unknown): McpFnObjectSchema {
-  if (value && typeof value === "object" && !Array.isArray(value) &&
-    (value as { type?: unknown }).type === "object") return value as McpFnObjectSchema;
-  return { type: "object", properties: {}, additionalProperties: true };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("OMR catalog tool has a non-object input schema");
+  }
+  const schema = value as Record<string, unknown>;
+  if (schema.type === "object") return schema as McpFnObjectSchema;
+  if (!Array.isArray(schema.anyOf) || !schema.anyOf.length ||
+    !schema.anyOf.every((branch) => branch && typeof branch === "object" &&
+      !Array.isArray(branch) && (branch as { type?: unknown }).type === "object")) {
+    throw new Error("OMR catalog tool has a non-object input schema");
+  }
+  const branches = schema.anyOf as McpFnObjectSchema[];
+  const properties: NonNullable<McpFnObjectSchema["properties"]> = {};
+  for (const branch of branches) {
+    for (const [name, property] of Object.entries(branch.properties ?? {})) {
+      if (!(name in properties)) properties[name] = property;
+    }
+  }
+  const required = (branches[0]?.required ?? []).filter((name) =>
+    branches.every((branch) => branch.required?.includes(name)));
+  return { ...schema, type: "object", properties, required };
 }
 
 /** Add a caller-owned idempotency key only to approval-requiring actions. */
@@ -30,16 +49,21 @@ function actionInputSchema(manifest: ToolManifest): McpFnObjectSchema {
     throw new Error(`OMR catalog tool ${manifest.id} conflicts with the MCP idempotency field`);
   }
   if (manifest.contract.effect === "read") return schema;
+  const idempotencyProperty = {
+    type: "string",
+    description: "Caller-generated stable key for this intended action. Reuse it after an uncertain response; use a new key for a new action.",
+  };
   return {
     ...schema,
     properties: {
       ...schema.properties,
-      [IDEMPOTENCY_FIELD]: {
-        type: "string",
-        description: "Caller-generated stable key for this intended action. Reuse it after an uncertain response; use a new key for a new action.",
-      },
+      [IDEMPOTENCY_FIELD]: idempotencyProperty,
     },
     required: [...(schema.required ?? []), IDEMPOTENCY_FIELD],
+    ...(Array.isArray(schema.anyOf) ? { anyOf: schema.anyOf.map((branch) => ({
+      ...branch as McpFnObjectSchema,
+      properties: { ...(branch as McpFnObjectSchema).properties, [IDEMPOTENCY_FIELD]: idempotencyProperty },
+    })) } : {}),
   };
 }
 
@@ -95,7 +119,9 @@ export async function createOMRMcpServer(input: {
   }
   const manifests = await discoverManifests();
 
-  const reservedNames = new Set([CONNECTIONS_TOOL, SELECT_CONNECTION_TOOL, EXECUTE_APPROVAL_TOOL, REFRESH_CATALOG_TOOL, PROVIDERS_TOOL]);
+  const reservedNames = new Set([CONNECTIONS_TOOL, SELECT_CONNECTION_TOOL, EXECUTE_APPROVAL_TOOL,
+    STATUS_APPROVAL_TOOL,
+    RECONCILE_APPROVAL_TOOL, REFRESH_CATALOG_TOOL, PROVIDERS_TOOL]);
   const collision = manifests.find((manifest) => reservedNames.has(manifest.id));
   if (collision) throw new Error(`OMR catalog tool ${collision.id} conflicts with an MCP control tool`);
 
@@ -268,6 +294,44 @@ export async function createOMRMcpServer(input: {
         return structuredResult(structured(await client.executeApproved(String(args.approvalId))));
       },
     },
+    {
+      name: STATUS_APPROVAL_TOOL,
+      title: "Read OMR Approval Status",
+      description: "Read an approval by ID using this MCP client's original grant. After a lost reconciliation response, check reconciledAs before retrying the same decision.",
+      inputSchema: {
+        type: "object",
+        properties: { approvalId: { type: "string", description: "The approval id." } },
+        required: ["approvalId"],
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      metadata: { surface: "omr-control-plane" },
+      async handler(args) {
+        return structuredResult(structured(await client.approvalStatus(String(args.approvalId))));
+      },
+    },
+    {
+      name: RECONCILE_APPROVAL_TOOL,
+      title: "Reconcile an Uncertain Linear Approval",
+      description: "After checking Linear independently, record whether an uncertain issue change happened. An effect_absent decision permits a new approval only when OMR received a completed but ambiguous mutation response; transport uncertainty stays fenced.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          approvalId: { type: "string", description: "The uncertain Linear approval id." },
+          decision: { type: "string", enum: ["effect_present", "effect_absent"],
+            description: "The outcome you verified in the selected Linear workspace." },
+        },
+        required: ["approvalId", "decision"],
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      metadata: { surface: "omr-control-plane" },
+      async handler(args) {
+        const decision = String(args.decision);
+        if (decision !== "effect_present" && decision !== "effect_absent") throw new Error("Invalid decision");
+        return structuredResult(structured(await client.reconcileUncertain(String(args.approvalId), decision)));
+      },
+    },
   );
 
   registry.registerAll(tools);
@@ -275,7 +339,7 @@ export async function createOMRMcpServer(input: {
     info: {
       name: "oh-my-router",
       version: "0.0.0",
-      instructions: "Use omr.catalog.providers to inspect the workspace-scoped v1 provider states, including unavailable providers. Tools are projected from the authenticated OMR catalog. For multiple ready connections, list and select one with omr.connections.list and omr.connections.select. Call omr.catalog.refresh after connection or selection changes; changed schemas require restarting this session. Revoked tools are hidden on the next list and call. Write, destructive, and unknown-effect calls create an OMR approval instead of executing immediately. After approval in the OMR control plane, call omr.approvals.execute with the returned approvalId.",
+      instructions: "Use omr.catalog.providers to inspect the workspace-scoped v1 provider states, including unavailable providers. Tools are projected from the authenticated OMR catalog. For multiple ready connections, list and select one with omr.connections.list and omr.connections.select. Call omr.catalog.refresh after connection or selection changes; changed schemas require restarting this session. Revoked tools are hidden on the next list and call. Write, destructive, and unknown-effect calls create an OMR approval instead of executing immediately. After approval in the OMR control plane, call omr.approvals.execute with the returned approvalId. Verify an uncertain Linear result in Linear before calling omr.approvals.reconcile. If that response is lost, read omr.approvals.status by the same grant and check reconciledAs before retrying the same decision.",
     },
     transports: ["stdio", "streamable-http"],
     registry,

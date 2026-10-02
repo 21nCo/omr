@@ -2,7 +2,7 @@ import {
   ConnectionSelectionRequiredError, ConnectionUnavailableError,
   isMissingRemoteConnection,
 } from "@oh-my-router/connections";
-import { githubHttpFailure, usableToolIds, type ProviderStatus, type ToolCatalog } from "@oh-my-router/tools";
+import { githubHttpFailure, LinearProviderDenial, usableToolIds, type ProviderStatus, type ToolCatalog } from "@oh-my-router/tools";
 
 /** A deleted PlugFn connection is an unavailable grant, not a failed catalog. */
 export async function resolveScopedCatalog(
@@ -11,6 +11,7 @@ export async function resolveScopedCatalog(
   resolveBinding: (provider: string) => Promise<{ id: string; providerConnectionId: string }>,
   remoteScopes: (connectionId: string, provider: string) => Promise<readonly string[] | undefined>,
   onRemoteMissing: (bindingId: string) => Promise<void>,
+  onReconnectRequired?: (bindingId: string) => Promise<void>,
 ): Promise<Set<string>> {
   return usableToolIds(catalog, providers, async (provider) => {
     let binding: { id: string; providerConnectionId: string };
@@ -23,16 +24,30 @@ export async function resolveScopedCatalog(
     try {
       return await remoteScopes(binding.providerConnectionId, provider);
     } catch (error) {
-      if (isMissingRemoteConnection(error)) {
-        await onRemoteMissing(binding.id);
-        return null;
-      }
-      // GitHub profile proof is provider-local. Contain its HTTP denials and
-      // identifiable outages without swallowing unrelated callback failures.
-      if (provider === "github" && githubProofUnavailable(error)) return null;
+      if (await providerProofUnavailable(provider, binding.id, error,
+        onRemoteMissing, onReconnectRequired)) return null;
       throw error;
     }
   });
+}
+
+/** Contain provider-local proof failures and update a revoked binding. */
+async function providerProofUnavailable(provider: string, bindingId: string, error: unknown,
+  onRemoteMissing: (bindingId: string) => Promise<void>,
+  onReconnectRequired?: (bindingId: string) => Promise<void>): Promise<boolean> {
+  if (isMissingRemoteConnection(error)) {
+    await onRemoteMissing(bindingId);
+    return true;
+  }
+  if (provider === "github") return githubProofUnavailable(error);
+  if (provider !== "linear") return false;
+  if (error instanceof LinearProviderDenial && error.code === "LINEAR_RECONNECT_REQUIRED") {
+    await onReconnectRequired?.(bindingId);
+    return true;
+  }
+  return error instanceof LinearProviderDenial ||
+    (error !== null && typeof error === "object" && "status" in error && error.status === 408) ||
+    githubProofUnavailable(error);
 }
 
 /** Whether a failed GitHub account proof identifies an unavailable provider. */

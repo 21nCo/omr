@@ -4,8 +4,10 @@ import type { JsonValue } from "@oh-my-router/tools";
 import {
   ApprovalUnavailableError,
   ExecutionIdempotencyConflictError,
+  LinearIntentTransactionRequiredError,
   ExecutionInvocationDeadlineError,
   ExecutionOutcomeUnknownError,
+  EXECUTION_INVOCATION_DEADLINE_MS,
   EXECUTION_STALE_AFTER_MS,
   withinInvocationDeadline,
   type ApprovalStatus,
@@ -30,6 +32,8 @@ interface ApprovalRow {
   params_crypto_version: number;
   idempotency_key: string;
   request_hash: string | null;
+  intent_hash: string | null;
+  reconciled_as: "effect_present" | "effect_absent" | null;
   status: ApprovalStatus;
   approved_by: string | null;
   decided_at: string | null;
@@ -41,7 +45,7 @@ interface ApprovalRow {
 
 const COLUMNS = `id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash,
   connection_id, provider_connection_id, params_ciphertext, params_iv, params_crypto_version,
-  idempotency_key, request_hash,
+  idempotency_key, request_hash, intent_hash, reconciled_as,
   status, approved_by, decided_at, expires_at, execution_receipt_id, created_at, updated_at`;
 const EXACT_RECEIPT = `receipt.approval_id = approval.id
   AND receipt.workspace_id = approval.workspace_id
@@ -56,6 +60,7 @@ const { Client: PostgresClient } = pg;
 
 export type RunOwnedApprovalClient = <T>(deadlineAt: number,
   invoke: (client: Client, shutdownSignal: AbortSignal) => Promise<T>) => Promise<T>;
+type ApprovalQuery = <R extends QueryResultRow>(sql: string, values?: unknown[]) => Promise<QueryResult<R>>;
 
 export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
   constructor(
@@ -77,16 +82,65 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
   }
 
   async create(approval: ExecutionApproval): Promise<ExecutionApproval> {
+    if (approval.intentHash && !approval.requestHash) throw new ExecutionIdempotencyConflictError();
+    if (approval.intentHash && !this.runOwnedClient) {
+      throw new LinearIntentTransactionRequiredError();
+    }
+    if (!this.runOwnedClient) return this.createWithQuery(approval, (sql, values) => this.query(sql, values));
+    const deadlineAt = Date.now() + EXECUTION_INVOCATION_DEADLINE_MS;
+    return this.runOwnedClient(deadlineAt, async (client) => {
+      const query: ApprovalQuery = (sql, values) =>
+        withinInvocationDeadline(deadlineAt, () => client.query(sql, values));
+      await query("BEGIN");
+      try {
+        // One actor's approval keys and intent reservations share a commit boundary.
+        await query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+          [JSON.stringify([approval.workspaceId, approval.principalKey])]);
+        const reserved = await this.createWithQuery(approval, query);
+        await query("COMMIT");
+        return reserved;
+      } catch (error) {
+        await query("ROLLBACK").catch(() => undefined);
+        throw error;
+      }
+    });
+  }
+
+  private async createWithQuery(approval: ExecutionApproval, query: ApprovalQuery): Promise<ExecutionApproval> {
+    await query(
+      `UPDATE omr_control.execution_approvals SET status = 'expired', updated_at = $3
+       WHERE workspace_id = $1 AND principal_key = $2
+         AND status IN ('pending', 'approved') AND expires_at <= $3`,
+      [approval.workspaceId, approval.principalKey, approval.createdAt],
+    );
+    const alias = await query<{ approval_id: string; request_hash: string }>(
+      `SELECT approval_id, request_hash FROM omr_control.execution_approval_aliases
+       WHERE workspace_id = $1 AND principal_key = $2 AND idempotency_key = $3`,
+      [approval.workspaceId, approval.principalKey, approval.idempotencyKey],
+    );
+    if (alias.rows[0]) {
+      if (alias.rows[0].request_hash !== approval.requestHash) throw new ExecutionIdempotencyConflictError();
+      return this.getAliasedApproval(alias.rows[0].approval_id, approval, query);
+    }
+    if (approval.intentHash) {
+      await query(
+        `UPDATE omr_control.execution_approvals SET status = 'failed', updated_at = $5
+         WHERE workspace_id = $1 AND principal_key = $2 AND intent_hash = $3
+           AND manifest_hash <> $4 AND status IN ('pending', 'approved')`,
+        [approval.workspaceId, approval.principalKey, approval.intentHash, approval.manifestHash,
+          approval.createdAt],
+      );
+    }
     const encrypted = await encryptJson(approval.params, this.wrappingKey,
       { kind: "approval-params", workspaceId: approval.workspaceId, id: approval.id });
-    const result = await this.query<ApprovalRow>(
+    const insert = () => query<ApprovalRow>(
       `INSERT INTO omr_control.execution_approvals
          (id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash,
           connection_id, provider_connection_id, params_ciphertext, params_iv, params_crypto_version,
-          idempotency_key, request_hash,
+          idempotency_key, request_hash, intent_hash,
           status, approved_by, decided_at, expires_at, execution_receipt_id, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11, $12, $13, $14, $15, $16, $17, $18, $19)
-       ON CONFLICT (workspace_id, principal_key, idempotency_key) DO NOTHING
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+       ON CONFLICT DO NOTHING
        RETURNING ${COLUMNS}`,
       [
         approval.id,
@@ -101,6 +155,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
         encrypted.iv,
         approval.idempotencyKey,
         approval.requestHash ?? null,
+        approval.intentHash ?? null,
         approval.status,
         approval.approvedBy,
         approval.decidedAt,
@@ -110,17 +165,61 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
         approval.updatedAt,
       ],
     );
+    const result = await insert();
     if (result.rows[0]) return this.toApproval(result.rows[0]);
-    const existing = await this.query<ApprovalRow>(
+    const existing = await query<ApprovalRow>(
       `SELECT ${COLUMNS} FROM omr_control.execution_approvals
        WHERE workspace_id = $1 AND principal_key = $2 AND idempotency_key = $3`,
       [approval.workspaceId, approval.principalKey, approval.idempotencyKey],
     );
-    if (!existing.rows[0]) throw new Error("Approval reservation disappeared");
-    if (existing.rows[0].request_hash !== approval.requestHash) {
-      throw new ExecutionIdempotencyConflictError();
+    if (existing.rows[0]) {
+      if (existing.rows[0].request_hash !== approval.requestHash) {
+        throw new ExecutionIdempotencyConflictError();
+      }
+      return this.toApproval(existing.rows[0]);
     }
-    return this.toApproval(existing.rows[0]);
+    if (approval.intentHash) {
+      const live = await query<ApprovalRow>(
+        `SELECT ${COLUMNS} FROM omr_control.execution_approvals
+         WHERE workspace_id = $1 AND principal_key = $2 AND intent_hash = $3
+           AND status IN ('pending', 'approved', 'executing', 'uncertain')
+         FOR UPDATE`,
+        [approval.workspaceId, approval.principalKey, approval.intentHash],
+      );
+      if (live.rows[0]) {
+        await this.recordAlias(approval, live.rows[0].id, query);
+        return this.getAliasedApproval(live.rows[0].id, approval, query);
+      }
+      // The conflicting intent may have been reconciled while the insert
+      // waited. Reattempt once under the same actor reservation.
+      const retried = await insert();
+      if (retried.rows[0]) return this.toApproval(retried.rows[0]);
+    }
+    throw new ExecutionIdempotencyConflictError();
+  }
+
+  private async getAliasedApproval(id: string, approval: ExecutionApproval,
+    query: ApprovalQuery): Promise<ExecutionApproval> {
+    const result = await query<ApprovalRow>(
+      `SELECT ${COLUMNS} FROM omr_control.execution_approvals
+       WHERE id = $1 AND workspace_id = $2 AND principal_key = $3`,
+      [id, approval.workspaceId, approval.principalKey]);
+    if (!result.rows[0]) throw new ApprovalUnavailableError();
+    return this.toApproval(result.rows[0]);
+  }
+
+  private async recordAlias(approval: ExecutionApproval, targetId: string,
+    query: ApprovalQuery): Promise<void> {
+    const result = await query<{ approval_id: string; request_hash: string }>(
+      `INSERT INTO omr_control.execution_approval_aliases
+         (workspace_id, principal_key, idempotency_key, request_hash, approval_id)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (workspace_id, principal_key, idempotency_key) DO UPDATE
+         SET approval_id = execution_approval_aliases.approval_id
+       RETURNING approval_id, request_hash`,
+      [approval.workspaceId, approval.principalKey, approval.idempotencyKey, approval.requestHash, targetId]);
+    if (result.rows[0]?.request_hash !== approval.requestHash ||
+        result.rows[0]?.approval_id !== targetId) throw new ExecutionIdempotencyConflictError();
   }
 
   async getForActor(approvalId: string, actorUserId: string,
@@ -281,7 +380,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
        WHERE approval.id = $1 AND approval.actor_user_id = $2 AND approval.principal_key = $3
          AND approval.status = 'uncertain' AND approval.execution_receipt_id IS NOT NULL
          AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
-           WHERE workspace_id = approval.workspace_id AND user_id = $2)
+           WHERE workspace_id = approval.workspace_id AND user_id = $2 FOR SHARE)
          AND EXISTS (SELECT 1 FROM omr_control.execution_receipts AS receipt
            WHERE receipt.id = approval.execution_receipt_id AND ${EXACT_RECEIPT}
              AND receipt.status IN ('running', 'succeeded', 'uncertain'))`,
@@ -422,47 +521,57 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     const query = <R extends object>(sql: string, values?: unknown[]) =>
       withinInvocationDeadline(deadlineAt, () => client.query<R>(sql, values));
     if (!connected) await withinInvocationDeadline(deadlineAt, () => client.connect());
-    await query("BEGIN");
-    await query("SELECT set_config('statement_timeout', $1, true)",
-      [`${Math.max(1, deadlineAt - Date.now())}ms`]);
-    // Reconciliation takes the approval lock before the receipt lock. Use
-    // the same order here so stale recovery and completion cannot deadlock.
-    const currentApproval = await query<{ workspace_id: string }>(
-      `SELECT workspace_id FROM omr_control.execution_approvals
-       WHERE id = $1 AND status = 'executing' FOR UPDATE`,
-      [input.approvalId],
-    );
-    if (currentApproval.rows[0]?.workspace_id !== input.receipt.workspaceId) {
-      throw new ApprovalUnavailableError();
+    try {
+      await query("BEGIN");
+      await query("SELECT set_config('statement_timeout', $1, true)",
+        [`${Math.max(1, deadlineAt - Date.now())}ms`]);
+      // Reconciliation takes the approval lock before the receipt lock. Use
+      // the same order here so stale recovery and completion cannot deadlock.
+      const currentApproval = await query<{ workspace_id: string }>(
+        `SELECT workspace_id FROM omr_control.execution_approvals
+         WHERE id = $1 AND status = 'executing' FOR UPDATE`,
+        [input.approvalId],
+      );
+      if (currentApproval.rows[0]?.workspace_id !== input.receipt.workspaceId) {
+        throw new ApprovalUnavailableError();
+      }
+      const locked = await query<{ workspace_id: string }>(
+        `SELECT receipt.workspace_id FROM omr_control.execution_receipts AS receipt
+         JOIN omr_control.execution_approvals AS approval ON ${EXACT_RECEIPT}
+         WHERE receipt.id = $1 AND approval.id = $2 AND receipt.status = 'running'
+           AND approval.status = 'executing'
+         FOR UPDATE OF receipt`,
+        [input.receipt.id, input.approvalId],
+      );
+      if (locked.rows[0]?.workspace_id !== input.receipt.workspaceId) {
+        throw new ApprovalUnavailableError();
+      }
+      const encrypted = await withinInvocationDeadline(deadlineAt, () =>
+        encryptJson(input.result, this.wrappingKey,
+          { kind: "receipt-result", workspaceId: input.receipt.workspaceId, id: input.receipt.id }));
+      await query(
+        `UPDATE omr_control.execution_receipts
+         SET status = 'succeeded', result_ciphertext = $2, result_iv = $3,
+             result_crypto_version = 1, completed_at = $4, updated_at = $4 WHERE id = $1`,
+        [input.receipt.id, encrypted.ciphertext, encrypted.iv, input.now],
+      );
+      await query(
+        `UPDATE omr_control.execution_approvals
+         SET status = 'consumed', execution_receipt_id = $2, updated_at = $3 WHERE id = $1`,
+        [input.approvalId, input.receipt.id, input.now],
+      );
+      await query("COMMIT");
+      return { ...input.receipt, status: "succeeded", result: input.result,
+        completedAt: input.now, updatedAt: input.now };
+    } catch (error) {
+      // A server statement timeout can win the race with our client deadline.
+      // The transaction must be rolled back before a fresh completion attempt.
+      await withinInvocationDeadline(Date.now() + 500, () => client.query("ROLLBACK"))
+        .catch(() => { client.connection?.stream.destroy(); });
+      if (error instanceof Error && "code" in error && error.code === "57014" &&
+          /statement timeout/i.test(error.message)) throw new ExecutionInvocationDeadlineError();
+      throw error;
     }
-    const locked = await query<{ workspace_id: string }>(
-      `SELECT receipt.workspace_id FROM omr_control.execution_receipts AS receipt
-       JOIN omr_control.execution_approvals AS approval ON ${EXACT_RECEIPT}
-       WHERE receipt.id = $1 AND approval.id = $2 AND receipt.status = 'running'
-         AND approval.status = 'executing'
-       FOR UPDATE OF receipt`,
-      [input.receipt.id, input.approvalId],
-    );
-    if (locked.rows[0]?.workspace_id !== input.receipt.workspaceId) {
-      throw new ApprovalUnavailableError();
-    }
-    const encrypted = await withinInvocationDeadline(deadlineAt, () =>
-      encryptJson(input.result, this.wrappingKey,
-        { kind: "receipt-result", workspaceId: input.receipt.workspaceId, id: input.receipt.id }));
-    await query(
-      `UPDATE omr_control.execution_receipts
-       SET status = 'succeeded', result_ciphertext = $2, result_iv = $3,
-           result_crypto_version = 1, completed_at = $4, updated_at = $4 WHERE id = $1`,
-      [input.receipt.id, encrypted.ciphertext, encrypted.iv, input.now],
-    );
-    await query(
-      `UPDATE omr_control.execution_approvals
-       SET status = 'consumed', execution_receipt_id = $2, updated_at = $3 WHERE id = $1`,
-      [input.approvalId, input.receipt.id, input.now],
-    );
-    await query("COMMIT");
-    return { ...input.receipt, status: "succeeded", result: input.result,
-      completedAt: input.now, updatedAt: input.now };
   }
 
   async fail(input: { approvalId: string; now: number; deadlineAt?: number }): Promise<ExecutionApproval> {
@@ -472,6 +581,27 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
        WHERE id = $1 AND status = 'executing'
        RETURNING ${COLUMNS}`,
       [input.approvalId, input.now], input.deadlineAt,
+    );
+  }
+
+  /** Atomically close a verified uncertain intent while preserving its receipt audit. */
+  async reconcile(input: { approvalId: string; actorUserId: string; principalKey: string;
+    decision: "effect_present" | "effect_absent"; now: number }): Promise<ExecutionApproval> {
+    return this.transition(
+      `UPDATE omr_control.execution_approvals AS approval
+       SET status = CASE WHEN $4 = 'effect_present' THEN 'consumed' ELSE 'failed' END,
+           reconciled_as = $4, decided_at = $5, updated_at = $5
+       WHERE approval.id = $1 AND approval.actor_user_id = $2 AND approval.principal_key = $3
+         AND approval.status = 'uncertain' AND approval.execution_receipt_id IS NOT NULL
+         AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
+           WHERE workspace_id = approval.workspace_id AND user_id = $2 FOR SHARE)
+         AND EXISTS (SELECT 1 FROM omr_control.execution_receipts AS receipt
+           WHERE receipt.id = approval.execution_receipt_id AND ${EXACT_RECEIPT}
+             AND (receipt.status = 'uncertain' OR
+               ($4 = 'effect_present' AND receipt.status = 'running'))
+             AND ($4 <> 'effect_absent' OR receipt.error_code = 'provider_response_ambiguous'))
+       RETURNING ${COLUMNS}`,
+      [input.approvalId, input.actorUserId, input.principalKey, input.decision, input.now],
     );
   }
 
@@ -509,6 +639,22 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     return Promise.all(result.rows.map((row) => this.toApproval(row)));
   }
 
+  async listOutstandingLinearForActor(input: { workspaceId: string; actorUserId: string;
+    now: number; limit: number }): Promise<ExecutionApproval[]> {
+    const result = await this.query<ApprovalRow>(
+      `SELECT ${COLUMNS} FROM omr_control.execution_approvals
+       WHERE workspace_id = $1 AND actor_user_id = $2
+         AND tool_id LIKE 'linear.%'
+         AND (status = 'uncertain' OR
+           (status IN ('pending', 'approved') AND expires_at > $3))
+         AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
+           WHERE workspace_id = $1 AND user_id = $2)
+       ORDER BY created_at DESC, id DESC LIMIT $4`,
+      [input.workspaceId, input.actorUserId, input.now, input.limit],
+    );
+    return Promise.all(result.rows.map((row) => this.toApproval(row)));
+  }
+
   private async transition(query: string, values: unknown[], deadlineAt?: number): Promise<ExecutionApproval> {
     const result = await this.query<ApprovalRow>(query, values, deadlineAt);
     if (!result.rows[0]) throw new ApprovalUnavailableError();
@@ -530,6 +676,8 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
         row.params_crypto_version),
       idempotencyKey: row.idempotency_key,
       ...(row.request_hash ? { requestHash: row.request_hash } : {}),
+      ...(row.intent_hash ? { intentHash: row.intent_hash } : {}),
+      ...(row.reconciled_as ? { reconciledAs: row.reconciled_as } : {}),
       status: row.status,
       approvedBy: row.approved_by,
       decidedAt: row.decided_at === null ? null : Number(row.decided_at),

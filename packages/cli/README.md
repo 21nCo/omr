@@ -36,19 +36,20 @@ omr connections list --provider linear --json
 omr connections select <connection-id> --provider linear --json
 omr tools list --provider linear --effect read --limit 20 --json
 omr tools search --query 'find issue' --json
-omr tools inspect linear.get_issue --json
-omr tools run linear.get_issue --params '{"issue_id":"ABC-1"}' --json
-omr tools run linear.get_issue --params @input.json --json
-cat input.json | omr tools run linear.get_issue --params - --json
-omr tools run linear.get_issue --params-file input.json --json
-omr approvals request linear.create_issue --params @input.json --idempotency my-key --json
+omr tools inspect linear.issues.get --json
+omr tools run linear.issues.get --params '{"linearWorkspaceId":"<uuid>","issueId":"<uuid>"}' --json
+omr tools run linear.issues.get --params @input.json --json
+cat input.json | omr tools run linear.issues.get --params - --json
+omr tools run linear.issues.get --params-file input.json --json
+omr approvals request linear.issues.create --params @input.json --idempotency my-key --json
 omr approvals status <approval-id> --json
 omr approvals execute <approval-id> --json
+omr approvals reconcile <approval-id> --decision effect_present --json
 ```
 
-Tool catalog, account selection, execution and approvals use the same authenticated backend routes as the web control plane. `tools run` requests approval when the backend says the effect requires one, then reports the returned approval state and idempotency key. `approvals request` requires an explicit idempotency key so an interrupted script can retry safely. If an approval response is lost, the CLI exits 23 and prints the key in the error details. Retry the same request with that key to recover the existing approval. A workspace member decides in the browser control plane; `approvals status` checks its state and `approvals execute` runs an approved request. `--connection` selects an account for one request. `--cursor` continues a catalog page. The server owns manifest visibility, capabilities, account access, effects, idempotency, and retry policy. Never retry an uncertain write with a new idempotency key.
+Tool catalog, account selection, execution and approvals use the same authenticated backend routes as the web control plane. `tools run` requests approval when the backend says the effect requires one, then reports the returned approval state and idempotency key. `approvals request` requires an explicit idempotency key so an interrupted script can retry safely. If an approval response is lost, the CLI exits 23 and prints the key in the error details. Retry the same request with that key to recover the existing approval. A workspace member decides in the browser control plane; `approvals status` checks its state and `approvals execute` runs an approved request. For an uncertain Linear write, verify the issue in Linear before `approvals reconcile` records `effect_present`. An `effect_absent` decision is accepted only when OMR received a completed but ambiguous mutation response; transport and timeout uncertainty may still have an in-flight provider request, so their retry fence remains closed. If the reconciliation response cannot prove the decision, the CLI checks status and otherwise exits 23 with the approval ID and decision. Check that approval's status before retrying the same decision; never execute the write again. `--connection` selects an account for one request. `--cursor` continues a catalog page. The server owns manifest visibility, capabilities, account access, effects, idempotency, and retry policy. Never retry an uncertain write with a new idempotency key.
 
-When `tools run` generates a key, it writes an `IDEMPOTENCY_KEY` event to stderr **before** sending the request. Capture that key in automation, or supply `--idempotency` yourself. If the process is interrupted after dispatch, repeat the same command and parameters with that key. A malformed or mismatched successful response, or a server error that cannot establish whether a mutation committed, exits 23 with the original retry key or approval ID. Known failed receipts and predispatch timeouts keep their terminal exit codes. Approved execution receipts include the approval ID for this check. Read-only commands reject malformed or mismatched responses as protocol failures.
+When `tools run` generates a key, it writes an `IDEMPOTENCY_KEY` event to stderr **before** sending the request. Capture that key in automation, or supply `--idempotency` yourself. If the process is interrupted after dispatch, repeat the same command and parameters with that key. A malformed or mismatched successful response, or a server error that cannot establish whether a mutation committed, exits 23 with the original retry key or approval ID. Known failed receipts and predispatch timeouts keep their terminal exit codes. A typed `LINEAR_INTENT_TRANSACTION_REQUIRED` 503 is a definite failure before Linear dispatch and exits 1; retry with the original request identity after the service is repaired. Approved execution receipts include the approval ID for this check. Read-only commands reject malformed or mismatched responses as protocol failures.
 
 Successful commands write one JSON value to stdout. Informational device-login instructions and errors go to stderr. `--json` makes errors JSON too. The CLI never prints a bearer credential or raw server error body. JSON input is limited to 16 KiB, matching the server request limit.
 

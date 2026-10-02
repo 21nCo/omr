@@ -24,6 +24,7 @@ import {
   ProviderUnavailableError,
   type ConnectionOwnership,
   type GithubAccess,
+  type LinearAccess,
 } from "@oh-my-router/connections";
 import { publicDatafnSchema } from "@oh-my-router/data";
 import { connectPostgresDataRuntime } from "@oh-my-router/data/postgres";
@@ -32,7 +33,7 @@ import {
   WorkspaceAccessDeniedError,
   WorkspaceInputError,
 } from "@oh-my-router/identity";
-import { ToolCatalogInputError, type ToolEffect } from "@oh-my-router/tools";
+import { LinearProviderDenial, ToolCatalogInputError, type ToolEffect } from "@oh-my-router/tools";
 import {
   ApprovalUnavailableError,
   ExecutionApprovalRequiredError,
@@ -42,6 +43,8 @@ import {
   GitHubScopeProofError,
   GitHubWritePreflightError,
   GitHubWriteRejectedError,
+  LinearExecutionError,
+  LinearIntentTransactionRequiredError,
   ExecutionIdempotencyConflictError,
   ExecutionInProgressError,
   ExecutionInvocationDeadlineError,
@@ -73,6 +76,7 @@ export interface ConnectionRouteServices {
     redirectUri: string;
     label: string;
     githubAccess?: GithubAccess;
+    linearAccess?: LinearAccess;
     returnTo?: string;
   }): Promise<unknown>;
   completeOAuth(request: Request, input: {
@@ -126,11 +130,13 @@ export interface ExecutionRouteServices {
   approve(request: Request, approvalId: string): Promise<unknown>;
   reject(request: Request, approvalId: string): Promise<unknown>;
   executeApproved(request: Request, approvalId: string): Promise<unknown>;
-  approvalStatus?(request: Request, approvalId: string): Promise<unknown>;
+  approvalStatus?(request: Request, approvalId: string, workspaceId?: string): Promise<unknown>;
+  reconcileUncertain?(request: Request, approvalId: string,
+    decision: "effect_present" | "effect_absent", workspaceId?: string): Promise<unknown>;
 }
 
 export interface ControlPlaneRouteServices {
-  overview(request: Request, workspaceId?: string): Promise<unknown>;
+  overview(request: Request, workspaceId?: string, approvalId?: string): Promise<unknown>;
   createTeam(request: Request, name: string): Promise<unknown>;
   listManualGrants(request: Request, cursor?: string): Promise<unknown>;
   revokeManualClient(request: Request, clientId: string): Promise<unknown>;
@@ -180,6 +186,30 @@ function githubErrorResponse(error: GitHubRouteError): Response {
     if (error.rateLimitResetAt !== undefined) headers["x-ratelimit-reset"] = String(error.rateLimitResetAt);
   }
   return Response.json(body, { status: githubStatus(error.code), headers });
+}
+
+/** Return the public HTTP status for one safe Linear failure code. */
+function linearStatus(code: LinearProviderDenial["code"]): number {
+  switch (code) {
+    case "LINEAR_RATE_LIMITED": return 429;
+    case "LINEAR_RECONNECT_REQUIRED": return 401;
+    case "LINEAR_TARGET_UNAVAILABLE": return 404;
+    case "LINEAR_WORKSPACE_MISMATCH": return 409;
+    case "LINEAR_QUERY_REJECTED": return 502;
+    case "LINEAR_INVALID_CHANGE": return 422;
+    default: return 403;
+  }
+}
+
+/** Linear GraphQL limits can arrive with HTTP 400; expose only safe timing metadata. */
+function linearErrorResponse(error: LinearExecutionError | LinearProviderDenial): Response {
+  const headers: Record<string, string> = { ...PRIVATE_RESPONSE };
+  if (error.code === "LINEAR_RATE_LIMITED") {
+    if (error.retryAfterSeconds !== undefined) headers["retry-after"] = String(error.retryAfterSeconds);
+    if (error.rateLimitResetAt !== undefined) headers["x-ratelimit-requests-reset"] = String(error.rateLimitResetAt);
+  }
+  return Response.json({ error: error.code, message: error.message,
+    ...("receiptId" in error ? { receiptId: error.receiptId } : {}) }, { status: linearStatus(error.code), headers });
 }
 
 /** Require a JSON object before reading route-specific fields. */
@@ -237,6 +267,13 @@ function githubAccess(body: Record<string, unknown>): GithubAccess | undefined {
   if (value === undefined) return undefined;
   if (value === "profile" || value === "public_write" || value === "private_repositories") return value;
   throw new RequestInputError("githubAccess must be profile, public_write, or private_repositories");
+}
+
+function linearAccess(body: Record<string, unknown>): LinearAccess | undefined {
+  const value = body.linearAccess;
+  if (value === undefined) return undefined;
+  if (value === "read" || value === "issue_write") return value;
+  throw new RequestInputError("linearAccess must be read or issue_write");
 }
 
 function unavailableDeviceServices(): DeviceRouteServices {
@@ -368,6 +405,9 @@ export function createOMRRouter(
       if (error instanceof ExecutionIdempotencyConflictError) {
         return Response.json({ error: error.code }, { status: 409 });
       }
+      if (error instanceof LinearIntentTransactionRequiredError) {
+        return Response.json({ error: error.code }, { status: 503, headers: PRIVATE_RESPONSE });
+      }
       if (error instanceof ExecutionInProgressError) {
         return Response.json(
           { error: error.code, receiptId: error.receiptId },
@@ -391,6 +431,9 @@ export function createOMRRouter(
       }
       if (error instanceof GitHubWriteRejectedError) {
         return githubErrorResponse(error);
+      }
+      if (error instanceof LinearExecutionError || error instanceof LinearProviderDenial) {
+        return linearErrorResponse(error);
       }
       if (error instanceof ExecutionInvocationDeadlineError) {
         return Response.json({ error: error.code },
@@ -480,8 +523,10 @@ export function createOMRRouter(
         method: "GET",
         path: "/api/control-plane",
         handler: async (request) => {
-          const workspaceId = new URL(request.url).searchParams.get("workspaceId") ?? undefined;
-          return Response.json(await controlPlaneServices.overview(request, workspaceId), {
+          const params = new URL(request.url).searchParams;
+          const workspaceId = params.get("workspaceId") ?? undefined;
+          const approvalId = params.get("approvalId") ?? undefined;
+          return Response.json(await controlPlaneServices.overview(request, workspaceId, approvalId), {
             headers: PRIVATE_RESPONSE,
           });
         },
@@ -607,6 +652,7 @@ export function createOMRRouter(
           const body = objectBody(await context.json());
           const returnTo = optionalString(body, "returnTo");
           const access = githubAccess(body);
+          const linear = linearAccess(body);
           return Response.json(await connectionServices.startOAuth(request, {
             workspaceId: requiredString(body, "workspaceId"),
             provider: requiredString(body, "provider"),
@@ -614,6 +660,7 @@ export function createOMRRouter(
             redirectUri: requiredString(body, "redirectUri"),
             label: requiredString(body, "label"),
             ...(access ? { githubAccess: access } : {}),
+            ...(linear ? { linearAccess: linear } : {}),
             ...(returnTo ? { returnTo } : {}),
           }), { status: 201, headers: PRIVATE_RESPONSE });
         },
@@ -734,7 +781,24 @@ export function createOMRRouter(
           const approvalId = new URL(request.url).searchParams.get("approvalId");
           if (!approvalId) throw new RequestInputError("approvalId is required");
           if (!executionServices.approvalStatus) throw new RuntimeUnavailableError("Approval status is unavailable");
-          return Response.json(await executionServices.approvalStatus(request, approvalId),
+          const workspaceId = new URL(request.url).searchParams.get("workspaceId") ?? undefined;
+          return Response.json(await executionServices.approvalStatus(request, approvalId, workspaceId),
+            { headers: PRIVATE_RESPONSE });
+        },
+      },
+      {
+        method: "POST",
+        path: "/api/approvals/reconcile",
+        handler: async (request, context) => {
+          const body = objectBody(await context.json());
+          const approvalId = requiredString(body, "approvalId");
+          const decision = requiredString(body, "decision");
+          const workspaceId = optionalString(body, "workspaceId");
+          if (decision !== "effect_present" && decision !== "effect_absent") {
+            throw new RequestInputError("decision must be effect_present or effect_absent");
+          }
+          if (!executionServices.reconcileUncertain) throw new RuntimeUnavailableError("Reconciliation is unavailable");
+          return Response.json(await executionServices.reconcileUncertain(request, approvalId, decision, workspaceId),
             { headers: PRIVATE_RESPONSE });
         },
       },

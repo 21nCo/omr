@@ -2,9 +2,11 @@
   import { onMount } from "svelte";
   import { beginGithubReconnect, createOAuthReviewController } from "$lib/oauth-review.js";
   import { connectionActions, connectionStatusLabel, providerRevocationGuidance } from "$lib/connection-ui.js";
-  import { createWorkspaceCatalogLoader, providerDisplayState } from "$lib/workspace-catalog.js";
+  import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, linearEffectAbsentAvailable, linearEffectPresentAvailable, providerDisplayState, recoverLinearReconciliation, recoverWorkspaceOverview, selectedLinearAccountId, selectedReadyLinearConnection, visibleApprovalCard } from "$lib/workspace-catalog.js";
   import { renderApprovalPreview } from "$lib/approval-preview.js";
+  import { createLinearActionKeys, linearApprovalNotice } from "$lib/linear-action-keys.js";
   import { V1_PROVIDERS } from "@oh-my-router/tools";
+  import type { LinearAccess } from "@oh-my-router/connections";
 
   type WorkspaceAccess = {
     workspace: { id: string; name: string; kind: "personal" | "team" };
@@ -34,8 +36,11 @@
     resources: { kind: string; parameter?: string }[];
     manifestCurrent: boolean;
     previewReady: boolean;
+    browserActionable: boolean;
     previewMode: "opaque" | "redacted" | "unavailable";
     connectionId: string;
+    executionReceiptId?: string | null;
+    reconciledAs?: "effect_present" | "effect_absent" | null;
     createdAt: number;
     expiresAt: number;
   };
@@ -55,6 +60,7 @@
     connections: Connection[];
     approvals: Approval[];
     executions: Execution[];
+    reconciliationReceipts: Execution[];
   };
   type Provider = {
     provider: string;
@@ -79,11 +85,35 @@
   let clockNow = Date.now();
   let error = "";
   let notice = "";
+  let recoveryInput = "";
+  let recoveryError = "";
+  let overviewRequestGeneration = 0;
+  let recoveredApprovalId = "";
+  let automaticApprovalLookup: { id: string; expiresAt: number } | null = null;
   let teamName = "";
   let oauthProvider = "github";
   let oauthLabel = "";
   let oauthOwnership: "personal" | "workspace" = "personal";
   let githubAccess: "profile" | "public_write" | "private_repositories" = "profile";
+  let linearAccess: LinearAccess = "read";
+  type LinearTeam = { id: string; name: string; key: string };
+  type LinearIssue = { id: string; identifier: string; title: string; description: string | null;
+    url: string; team: { id: string; name: string }; state: { id: string; name: string } | null };
+  let linearWorkspace: { id: string; name: string } | null = null;
+  let linearTeams: LinearTeam[] = [];
+  let linearTeamsCursor: string | null = null;
+  let linearTeamId = "";
+  let linearIssues: LinearIssue[] = [];
+  let linearIssuesCursor: string | null = null;
+  let linearIssueId = "";
+  let linearIssue: LinearIssue | null = null;
+  let linearCreateTitle = "";
+  let linearCreateDescription = "";
+  let linearUpdateTitle = "";
+  let linearUpdateDescription = "";
+  let linearBusy = "";
+  let linearGeneration = 0;
+  const linearActionKeys = createLinearActionKeys(() => crypto.randomUUID(), () => sessionStorage);
   let credentialProvider = "";
   let credentialLabel = "";
   let credentialOwnership: "personal" | "workspace" = "personal";
@@ -96,11 +126,12 @@
     readiness: (provider, workspaceId) => request(
       `/api/connections/providers/readiness?provider=${encodeURIComponent(provider)}&workspaceId=${encodeURIComponent(workspaceId)}`,
     ),
-    start: async ({ workspaceId, provider, ownership, label, redirectUri, githubAccess }) => request("/api/connections/oauth/start", {
+    start: async ({ workspaceId, provider, ownership, label, redirectUri, githubAccess, linearAccess }) => request("/api/connections/oauth/start", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ workspaceId, provider, ownership, label, redirectUri,
-        ...(provider === "github" ? { githubAccess } : {}) }),
+        ...(provider === "github" ? { githubAccess } : {}),
+        ...(provider === "linear" ? { linearAccess } : {}) }),
     }),
     update: (review, pending) => {
       authorizationDestination = review?.destination ?? "";
@@ -139,26 +170,68 @@
     return providerDisplayState(catalog, provider);
   }
 
+  class OMRResponseError extends Error {
+    code: string;
+    constructor(code: string, message: string) { super(message); this.code = code; }
+  }
+
   async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetch(path, { credentials: "same-origin", ...init });
     const body = await response.json().catch(() => ({})) as { error?: string; message?: string };
-    if (response.status === 401) {
+    if (response.status === 401 && body.error !== "LINEAR_RECONNECT_REQUIRED" &&
+      body.error !== "GITHUB_RECONNECT_REQUIRED") {
       location.assign(`/login?returnTo=${encodeURIComponent(location.pathname + location.search)}`);
       throw new Error("Authentication required");
     }
-    if (!response.ok) throw new Error(body.message ?? body.error ?? `Request failed (${response.status})`);
+    if (!response.ok) throw new OMRResponseError(body.error ?? "HTTP_ERROR",
+      body.message ?? body.error ?? `Request failed (${response.status})`);
     return body as T;
   }
 
   const loadWorkspace = createWorkspaceCatalogLoader<Overview, Catalog>(
-    (workspaceId) => request<Overview>(`/api/control-plane${workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : ""}`),
+    async (workspaceId) => {
+      const generation = ++overviewRequestGeneration;
+      if (expiredAutomaticApprovalLookup(automaticApprovalLookup, recoveredApprovalId, Date.now())) {
+        recoveredApprovalId = "";
+        recoveryInput = "";
+        automaticApprovalLookup = null;
+      }
+      const lookup = recoveredApprovalId;
+      const result = await recoverWorkspaceOverview(lookup, (approvalId) => {
+        const params = new URLSearchParams();
+        if (workspaceId) params.set("workspaceId", workspaceId);
+        if (approvalId) params.set("approvalId", approvalId);
+        return request<Overview>(`/api/control-plane${params.size ? `?${params}` : ""}`);
+      }, (error) => error instanceof OMRResponseError && error.code === "APPROVAL_UNAVAILABLE",
+      () => {
+        if (generation === overviewRequestGeneration && recoveredApprovalId === lookup) {
+          recoveredApprovalId = "";
+          automaticApprovalLookup = null;
+          recoveryError = "That approval is unavailable in this workspace.";
+        }
+      });
+      if (generation === overviewRequestGeneration) {
+        const recovered = lookup && result.overview.approvals.some((approval) =>
+          approval.id === lookup && visibleApprovalCard(approval, lookup, Date.now(), true));
+        if (lookup && !recovered && recoveredApprovalId === lookup) {
+          recoveredApprovalId = "";
+          automaticApprovalLookup = null;
+          recoveryError = "That approval is unavailable in this workspace.";
+        } else if (!result.lookupUnavailable) {
+          recoveryError = "";
+        }
+      }
+      return result.overview;
+    },
     (workspaceId) => request<Catalog>(`/api/tools?workspaceId=${encodeURIComponent(workspaceId)}&limit=100`),
     (state) => {
+      const previousLinearAccountId = selectedLinearAccountId(overview, selectedWorkspaceId);
       overview = state.overview;
       catalog = state.catalog;
       selectedWorkspaceId = state.selectedWorkspaceId;
       loading = state.loading;
       error = state.error;
+      if (previousLinearAccountId !== selectedLinearAccountId(overview, selectedWorkspaceId)) clearLinear();
       if (!catalog) {
         oauthProvider = "";
         credentialProvider = "";
@@ -185,11 +258,141 @@
 
   async function switchWorkspace() {
     cancelAuthorization();
+    recoveredApprovalId = "";
+    recoveryInput = "";
+    recoveryError = "";
+    automaticApprovalLookup = null;
+    clearLinear();
     apiKey = "";
     await load();
   }
 
+  function clearLinear() {
+    linearGeneration++;
+    linearBusy = "";
+    linearWorkspace = null;
+    linearTeams = [];
+    linearTeamsCursor = null;
+    linearTeamId = "";
+    linearIssues = [];
+    linearIssuesCursor = null;
+    linearIssueId = "";
+    linearIssue = null;
+    linearCreateTitle = "";
+    linearCreateDescription = "";
+    linearUpdateTitle = "";
+    linearUpdateDescription = "";
+  }
+
+  /** Hide a selected account while overview and catalog are changing. */
+  function linearAccount(): Connection | undefined {
+    return selectedReadyLinearConnection({ overview, selectedWorkspaceId, loading, busy });
+  }
+
+  /** Use the effective catalog grant to decide whether a Linear control is usable. */
+  function linearToolAvailable(toolId: string): boolean {
+    return Boolean(linearAccount() && catalog?.tools.some((tool) => tool.id === toolId));
+  }
+
+  /** Publish only a read that still belongs to the selected account generation. */
+  async function linearRead<T>(name: string, toolId: string, params: object,
+    publish: (value: T) => void) {
+    const account = linearAccount();
+    if (!account || linearBusy || !linearToolAvailable(toolId)) {
+      error = "Select a ready Linear account and available action first."; return;
+    }
+    const generation = linearGeneration;
+    const workspaceId = selectedWorkspaceId;
+    linearBusy = name;
+    error = "";
+    try {
+      const receipt = await request<{ result: T }>("/api/tools/execute", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId, connectionId: account.id, toolId, params }),
+      });
+      if (generation === linearGeneration && workspaceId === selectedWorkspaceId &&
+        account.id === linearAccount()?.id) publish(receipt.result);
+    } catch (caught) {
+      if (generation === linearGeneration) error = caught instanceof Error ? caught.message : "Linear read failed";
+    } finally { if (generation === linearGeneration) linearBusy = ""; }
+  }
+
+  /** Ask for consent only while the selected account has this write action. */
+  async function linearApproval(toolId: "linear.issues.create" | "linear.issues.update", params: object) {
+    const account = linearAccount();
+    if (!account || linearBusy || !linearToolAvailable(toolId)) {
+      error = "Issue write access is unavailable for the selected Linear account."; return;
+    }
+    const generation = linearGeneration;
+    const workspaceId = selectedWorkspaceId;
+    linearBusy = "approval";
+    error = "";
+    try {
+      const idempotencyKey = await linearActionKeys.key(toolId, workspaceId, account.id, params);
+      const approval = await request<{ id: string; status: string; expiresAt: number }>("/api/approvals", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId, connectionId: account.id,
+          toolId, params, idempotencyKey }),
+      });
+      if (generation !== linearGeneration || workspaceId !== selectedWorkspaceId ||
+        account.id !== linearAccount()?.id) return;
+      recoveredApprovalId = ["pending", "approved", "uncertain"].includes(approval.status)
+        ? approval.id : "";
+      automaticApprovalLookup = ["pending", "approved"].includes(approval.status)
+        ? { id: approval.id, expiresAt: approval.expiresAt } : null;
+      recoveryInput = recoveredApprovalId;
+      notice = linearApprovalNotice(approval.status);
+      await load();
+    } catch (caught) {
+      if (generation === linearGeneration) {
+        error = caught instanceof Error ? caught.message : "Could not request Linear approval";
+      }
+    } finally { if (generation === linearGeneration) linearBusy = ""; }
+  }
+
+  /** A deliberate identical write gets a new key after the old action settles. */
+  async function resetLinearAction(toolId: "linear.issues.create" | "linear.issues.update", params: object) {
+    const account = linearAccount();
+    if (!account || linearBusy) return;
+    const generation = linearGeneration;
+    const workspaceId = selectedWorkspaceId;
+    linearBusy = "reset";
+    error = "";
+    notice = "";
+    try {
+      // Replaying the same key recovers state after a lost response without
+      // dispatching a provider mutation.
+      await linearActionKeys.resetAfterSettlement(toolId, workspaceId, account.id, params,
+        (idempotencyKey) => request<{ status: string }>("/api/approvals", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId, connectionId: account.id, toolId, params, idempotencyKey }),
+      }), () => generation === linearGeneration && workspaceId === selectedWorkspaceId &&
+        account.id === linearAccount()?.id);
+      if (generation !== linearGeneration || workspaceId !== selectedWorkspaceId ||
+          account.id !== linearAccount()?.id) return;
+      recoveredApprovalId = "";
+      recoveryInput = "";
+      automaticApprovalLookup = null;
+      notice = "New Linear action started. Review the account and target before requesting approval.";
+    } catch (caught) {
+      if (generation === linearGeneration) error = caught instanceof Error ? caught.message : "Could not start another Linear action";
+    } finally { if (generation === linearGeneration) linearBusy = ""; }
+  }
+
+  function linearUpdateChanges(): { title?: string; description?: string } {
+    if (!linearIssue) return {};
+    return {
+      ...(linearUpdateTitle !== linearIssue.title ? { title: linearUpdateTitle } : {}),
+      ...(linearUpdateDescription !== (linearIssue.description ?? "")
+        ? { description: linearUpdateDescription } : {}),
+    };
+  }
+
   async function mutate(name: string, path: string, body: unknown, success: string) {
+    if (name.startsWith("select:") || name.startsWith("refresh:") || name.startsWith("health:") ||
+        name.startsWith("reconcile:")) clearLinear();
+    if (name.startsWith("execute:") && overview?.approvals.some((approval) =>
+      name === `execute:${approval.id}` && approval.toolId.startsWith("linear."))) clearLinear();
     busy = name;
     error = "";
     notice = "";
@@ -199,6 +402,12 @@
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
+      if (["reconcile:", "reject:", "execute:"].some((prefix) =>
+        name === `${prefix}${recoveredApprovalId}`)) {
+        recoveredApprovalId = "";
+        recoveryInput = "";
+        automaticApprovalLookup = null;
+      }
       notice = success;
       await load();
     } catch (caught) {
@@ -206,6 +415,35 @@
     } finally {
       busy = "";
     }
+  }
+
+  async function reconcileLinear(approvalId: string, decision: "effect_present" | "effect_absent") {
+    const workspaceId = selectedWorkspaceId;
+    busy = `reconcile:${approvalId}`;
+    clearLinear();
+    error = "";
+    notice = "";
+    const success = decision === "effect_present"
+      ? "Recorded that Linear applied this change." : "Recorded that Linear did not apply this change.";
+    try {
+      await recoverLinearReconciliation(approvalId, decision,
+        () => request<Approval>("/api/approvals/reconcile", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ approvalId, decision, workspaceId }),
+        }),
+        () => request<Approval>(`/api/approvals/status?${new URLSearchParams({ approvalId, workspaceId })}`));
+    } catch (caught) {
+      if (workspaceId === selectedWorkspaceId) error = caught instanceof Error ? caught.message : "Reconciliation is unconfirmed";
+      return;
+    } finally {
+      busy = "";
+    }
+    if (workspaceId !== selectedWorkspaceId) return;
+    recoveredApprovalId = approvalId;
+    recoveryInput = approvalId;
+    automaticApprovalLookup = null;
+    notice = success;
+    await load();
   }
 
   async function createTeam() {
@@ -223,7 +461,8 @@
       const ownership = connection?.ownership ?? oauthOwnership;
       const label = connection?.label ?? (oauthLabel.trim() || catalog?.providers.find((item) => item.provider === provider)?.displayName || provider);
       await oauthReview.start({ workspaceId: selectedWorkspaceId, provider, ownership, label,
-        origin: location.origin, ...(provider === "github" ? { githubAccess } : {}) });
+        origin: location.origin, ...(provider === "github" ? { githubAccess } : {}),
+        ...(provider === "linear" ? { linearAccess } : {}) });
     } catch (caught) {
       error = caught instanceof Error ? caught.message : "Could not start provider authorization";
     }
@@ -241,6 +480,15 @@
       notice = "Choose the GitHub access tier below, then continue to reconnect. A new OAuth grant is required.";
       return;
     }
+    if (connection.provider === "linear") {
+      oauthReview.cancel();
+      oauthProvider = "linear";
+      oauthOwnership = connection.ownership;
+      oauthLabel = connection.label;
+      linearAccess = "read";
+      notice = "Choose Linear read or issue-write access below, then reconnect with fresh consent.";
+      return;
+    }
     void connectOAuth(connection);
   }
 
@@ -255,6 +503,7 @@
   }
 
   async function disconnect(connection: Connection) {
+    if (connection.provider === "linear") clearLinear();
     busy = `disconnect:${connection.id}`;
     error = "";
     notice = "";
@@ -448,8 +697,16 @@
                   </select>
                 </label>
               {/if}
+              {#if oauthProvider === "linear"}
+                <label>Linear access
+                  <select bind:value={linearAccess}>
+                    <option value="read">Workspace, teams, and issue reads · read</option>
+                    <option value="issue_write">Create and update issues · read, write</option>
+                  </select>
+                </label>
+              {/if}
             </div>
-            <p>OMR shows the exact scopes from the provider authorization URL before you leave. Review the provider consent screen before granting access. GitHub private repositories require the broad <code>repo</code> grant. Public comments require approval in OMR.</p>
+            <p>OMR shows the requested scopes before provider consent. Linear issue changes require its <code>write</code> grant and OMR approval. Review the provider consent screen before granting access.</p>
             <button class="primary" type="submit" disabled={Boolean(busy) || !selectedWorkspaceId || !oauthProvider}>
               {busy === "oauth" ? "Opening provider…" : "Continue to provider"}
             </button>
@@ -478,9 +735,115 @@
           {/if}
         </section>
 
+        {#if catalog?.providers.find((entry) => entry.provider === "linear")?.state === "ready"}
+          <section class="panel" aria-label="Linear issue journey">
+            <div class="panel-heading"><div><p class="kicker">Linear</p><h2>Issues</h2></div></div>
+            <p>Selected account: {linearAccount()?.label ?? "Select a Linear account above"}. Choose the Linear workspace and team before reading or changing an issue. Changes wait for approval.</p>
+            {#if linearAccount() && !linearToolAvailable("linear.workspace.get")}
+              <p class="approval-context">Linear reads are unavailable for this grant. Reconnect with read access or select another account.</p>
+            {/if}
+            <button class="quiet compact" disabled={Boolean(linearBusy) || !linearToolAvailable("linear.workspace.get")}
+              onclick={() => void linearRead<{ id: string; name: string }>("workspace", "linear.workspace.get", {},
+                (value) => { clearLinear(); linearWorkspace = value; })}>Find Linear workspace</button>
+            {#if linearWorkspace}
+              <p>{linearWorkspace.name} · {linearWorkspace.id}</p>
+              <button class="quiet compact" disabled={Boolean(linearBusy)}
+                onclick={() => void linearRead<{ nodes: LinearTeam[]; pageInfo: { endCursor: string | null; hasNextPage: boolean } }>("teams", "linear.teams.list",
+                  { linearWorkspaceId: linearWorkspace?.id },
+                  (value) => { linearTeams = value.nodes; linearTeamsCursor = value.pageInfo.hasNextPage ? value.pageInfo.endCursor : null;
+                    linearTeamId = ""; linearIssues = []; linearIssue = null; })}>Find teams</button>
+              {#if linearTeamsCursor}
+                <button class="quiet compact" disabled={Boolean(linearBusy)}
+                  onclick={() => void linearRead<{ nodes: LinearTeam[]; pageInfo: { endCursor: string | null; hasNextPage: boolean } }>("teams", "linear.teams.list",
+                    { linearWorkspaceId: linearWorkspace?.id, after: linearTeamsCursor },
+                    (value) => { linearTeams = [...linearTeams, ...value.nodes];
+                      linearTeamsCursor = value.pageInfo.hasNextPage ? value.pageInfo.endCursor : null; })}>More teams</button>
+              {/if}
+              {#if linearTeams.length}
+                <label>Team
+                  <select bind:value={linearTeamId} onchange={() => { linearGeneration++; linearBusy = "";
+                    linearIssues = []; linearIssuesCursor = null; linearIssueId = ""; linearIssue = null;
+                    linearCreateTitle = ""; linearCreateDescription = ""; }}>
+                    <option value="">Choose a team</option>
+                    {#each linearTeams as team}<option value={team.id}>{team.name} ({team.key})</option>{/each}
+                  </select>
+                </label>
+                {#if linearTeamId}
+                  <button class="quiet compact" disabled={Boolean(linearBusy)}
+                    onclick={() => void linearRead<{ nodes: LinearIssue[]; pageInfo: { endCursor: string | null; hasNextPage: boolean } }>("issues", "linear.issues.list",
+                      { linearWorkspaceId: linearWorkspace?.id, teamId: linearTeamId },
+                      (value) => { linearIssues = value.nodes;
+                        linearIssuesCursor = value.pageInfo.hasNextPage ? value.pageInfo.endCursor : null;
+                        linearIssueId = ""; linearIssue = null; })}>Find issues</button>
+                  {#if linearIssuesCursor}
+                    <button class="quiet compact" disabled={Boolean(linearBusy)}
+                      onclick={() => void linearRead<{ nodes: LinearIssue[]; pageInfo: { endCursor: string | null; hasNextPage: boolean } }>("issues", "linear.issues.list",
+                        { linearWorkspaceId: linearWorkspace?.id, teamId: linearTeamId, after: linearIssuesCursor },
+                        (value) => { linearIssues = [...linearIssues, ...value.nodes];
+                          linearIssuesCursor = value.pageInfo.hasNextPage ? value.pageInfo.endCursor : null; })}>More issues</button>
+                  {/if}
+                  {#if linearToolAvailable("linear.issues.create")}
+                  <form class="inset" onsubmit={(event) => { event.preventDefault(); void linearApproval("linear.issues.create",
+                    { linearWorkspaceId: linearWorkspace?.id, teamId: linearTeamId,
+                      title: linearCreateTitle, description: linearCreateDescription }); }}>
+                    <strong>Create issue in {linearTeams.find((team) => team.id === linearTeamId)?.name}</strong>
+                    <label>Title<input bind:value={linearCreateTitle} maxlength="255" required /></label>
+                    <label>Description<textarea bind:value={linearCreateDescription} maxlength="20000"></textarea></label>
+                    <button class="primary compact" type="submit" disabled={Boolean(linearBusy) || !linearCreateTitle.trim()}>Request creation approval</button>
+                    <button class="quiet compact" type="button" disabled={Boolean(linearBusy)}
+                      onclick={() => void resetLinearAction("linear.issues.create",
+                        { linearWorkspaceId: linearWorkspace?.id, teamId: linearTeamId,
+                          title: linearCreateTitle, description: linearCreateDescription })}>Start a new creation action</button>
+                  </form>
+                  {/if}
+                {/if}
+              {/if}
+              {#if linearIssues.length}
+                <label>Issue
+                  <select bind:value={linearIssueId} onchange={() => { linearGeneration++; linearBusy = ""; linearIssue = null; }}>
+                    <option value="">Choose an issue</option>
+                    {#each linearIssues as entry}<option value={entry.id}>{entry.identifier} · {entry.title}</option>{/each}
+                  </select>
+                </label>
+                <button class="quiet compact" disabled={Boolean(linearBusy) || !linearIssueId}
+                  onclick={() => void linearRead<LinearIssue>("issue", "linear.issues.get",
+                    { linearWorkspaceId: linearWorkspace?.id, issueId: linearIssueId },
+                    (value) => { linearIssue = value; linearUpdateTitle = value.title;
+                      linearUpdateDescription = value.description ?? ""; })}>Read issue</button>
+              {/if}
+              {#if linearIssue}
+                <p><a href={linearIssue.url} target="_blank" rel="noopener noreferrer">{linearIssue.identifier}</a> · {linearIssue.state?.name ?? "No state"}</p>
+                {#if linearToolAvailable("linear.issues.update")}
+                <form class="inset" onsubmit={(event) => { event.preventDefault(); void linearApproval("linear.issues.update",
+                  { linearWorkspaceId: linearWorkspace?.id, issueId: linearIssue?.id,
+                    ...linearUpdateChanges() }); }}>
+                  <strong>Update {linearIssue.identifier}</strong>
+                  <label>Title<input bind:value={linearUpdateTitle} maxlength="255" required /></label>
+                  <label>Description<textarea bind:value={linearUpdateDescription} maxlength="20000"></textarea></label>
+                  <button class="primary compact" type="submit" disabled={Boolean(linearBusy) || !linearUpdateTitle.trim() || !Object.keys(linearUpdateChanges()).length}>Request update approval</button>
+                  <button class="quiet compact" type="button" disabled={Boolean(linearBusy)}
+                    onclick={() => void resetLinearAction("linear.issues.update",
+                      { linearWorkspaceId: linearWorkspace?.id, issueId: linearIssue?.id,
+                        ...linearUpdateChanges() })}>Start a new update action</button>
+                </form>
+                {/if}
+              {/if}
+            {/if}
+          </section>
+        {/if}
+
         <section class="panel approvals">
           <div class="panel-heading"><div><p class="kicker">Human in the loop</p><h2>Approvals</h2></div></div>
-          {#each overview.approvals.filter((item) => item.status === "pending") as approval}
+          <form class="inline-form" onsubmit={(event) => { event.preventDefault(); recoveredApprovalId = recoveryInput.trim(); recoveryError = ""; automaticApprovalLookup = null; void load(); }}>
+            <label for="recover-approval">Find an older Linear approval by ID</label>
+            <input id="recover-approval" bind:value={recoveryInput} maxlength="128" placeholder="Approval ID" />
+            <button class="quiet compact" type="submit" disabled={Boolean(busy) || !recoveryInput.trim()}>Find approval</button>
+            {#if recoveredApprovalId}<button class="quiet compact" type="button" disabled={Boolean(busy)}
+              onclick={() => { recoveredApprovalId = ""; recoveryInput = ""; recoveryError = ""; automaticApprovalLookup = null; void load(); }}>Clear lookup</button>{/if}
+          </form>
+          {#if recoveryError}<p class="approval-context" role="status">{recoveryError}</p>{/if}
+          {#each overview.approvals.filter((item) =>
+            visibleApprovalCard(item, recoveredApprovalId, clockNow, !loading && !error)) as approval}
             <article class="approval-card">
               <div class="approval-top"><strong>{approval.action} ({approval.toolId})</strong><span>Expires {timestamp(approval.expiresAt)}</span></div>
               <p class="approval-context">Effect: {approval.effect} · Account: {overview.connections.find((connection) => connection.id === approval.connectionId)?.label ?? "Unavailable"}</p>
@@ -490,8 +853,37 @@
               {#if approval.previewMode === "opaque"}<p class="approval-context">This action has no field review metadata. All arguments are hidden; review the action and account before approving.</p>{/if}
               <pre>{renderApprovalPreview(approval.params)}</pre>
               <div class="actions">
-                <button class="primary compact" disabled={Boolean(busy) || !approval.previewReady} onclick={() => void mutate(`approve:${approval.id}`, "/api/approvals/approve", { approvalId: approval.id }, `Approved ${approval.toolId}.`)}>Approve</button>
-                <button class="danger compact" disabled={Boolean(busy)} onclick={() => void mutate(`reject:${approval.id}`, "/api/approvals/reject", { approvalId: approval.id }, `Rejected ${approval.toolId}.`)}>Reject</button>
+                {#if approval.status === "pending"}
+                  <button class="primary compact" disabled={Boolean(busy) || Boolean(error) || loading || !approval.previewReady} onclick={() => void mutate(`approve:${approval.id}`, "/api/approvals/approve", { approvalId: approval.id }, `Approved ${approval.toolId}.`)}>Approve</button>
+                  <button class="danger compact" disabled={Boolean(busy) || Boolean(error) || loading} onclick={() => void mutate(`reject:${approval.id}`, "/api/approvals/reject", { approvalId: approval.id }, `Rejected ${approval.toolId}.`)}>Reject</button>
+                  {#if !approval.browserActionable}<p class="approval-context">After approval, execute this action from the originating CLI or MCP client.</p>{/if}
+                {:else if approval.status === "uncertain"}
+                  <p class="approval-context">The Linear outcome is unknown. Check receipt {approval.executionReceiptId ?? "pending"} against the selected Linear workspace and issue before recording a decision.</p>
+                  {#if !approval.browserActionable}
+                    <p class="approval-context">Record the verified outcome from the originating CLI or MCP client. This browser session cannot reconcile its grant.</p>
+                  {:else}
+                    <button class="quiet compact" disabled={Boolean(busy) || Boolean(error) || loading || !linearEffectPresentAvailable(approval, overview.reconciliationReceipts)}
+                      onclick={() => void reconcileLinear(approval.id, "effect_present")}>I verified the change happened</button>
+                    {#if linearEffectAbsentAvailable(approval, overview.reconciliationReceipts)}
+                      <button class="danger compact" disabled={Boolean(busy) || Boolean(error) || loading}
+                        onclick={() => void reconcileLinear(approval.id, "effect_absent")}>I verified no change happened</button>
+                    {:else}
+                      <p class="approval-context">The request may still be running. OMR cannot safely record no change or allow a retry for this receipt.</p>
+                    {/if}
+                  {/if}
+                {:else if approval.reconciledAs}
+                  <p class="approval-context">Recorded decision for receipt {approval.executionReceiptId}: {approval.reconciledAs === "effect_present" ? "Linear applied the change" : "Linear did not apply the change"}. No issue write was repeated.</p>
+                {:else if approval.status === "approved"}
+                  {#if approval.browserActionable}
+                    <button class="primary compact" disabled={Boolean(busy) || Boolean(error) || loading || !approval.previewReady} onclick={() => void mutate(`execute:${approval.id}`, "/api/approvals/execute", { approvalId: approval.id }, `Executed ${approval.toolId}.`)}>Execute approved change</button>
+                  {:else}
+                    <p class="approval-context">Execute this approved action from the originating CLI or MCP client. This browser session cannot use its grant.</p>
+                  {/if}
+                {:else if approval.status === "executing"}
+                  <p class="approval-context">Execution is in progress. Check this approval and its receipt before taking another action.</p>
+                {:else}
+                  <p class="approval-context">This approval is {approval.status} and cannot be executed again.</p>
+                {/if}
               </div>
             </article>
           {:else}

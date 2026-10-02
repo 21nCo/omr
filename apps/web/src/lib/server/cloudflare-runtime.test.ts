@@ -3,7 +3,7 @@ import { ClientAccessAuthority } from "@oh-my-router/client-access";
 import { MemoryClientAccessStore } from "@oh-my-router/client-access/testing";
 import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
-import { ToolCatalog } from "@oh-my-router/tools";
+import { LinearProviderDenial, ToolCatalog } from "@oh-my-router/tools";
 
 import { assertConnectionWorkspace, checkAuthorizedConnectionHealth, createProviderIntegrationConfig, requireExecutionOrigin, revokeOwnBearerClient, scopedToolIds, selectAuthorizedConnection } from "./cloudflare-runtime.js";
 import { createOMRRouter, type ConnectionRouteServices } from "./router.js";
@@ -106,6 +106,39 @@ describe("CLI self-revocation", () => {
 });
 
 describe("Worker scoped provider catalog", () => {
+  it("projects a rejected Linear token as reconnect-required without hiding GitHub", async () => {
+    const definitions = new Map(["github", "linear"].map((name) => [name, {
+      name, displayName: name, version: "1.0.0", description: name,
+      auth: { type: "oauth2" }, actions: { read: {
+        name: "read", displayName: "Read", description: "Read resource", parameters: {}, returns: {},
+        contract: { version: "1.0.0", effect: "read" as const, requiredScopes: ["read"],
+          resources: [], sensitiveKeys: [], pagination: { kind: "none" as const }, retry: "never" as const },
+      } },
+    }]));
+    const catalog = await ToolCatalog.create({ providers: { list: () => [...definitions.values()] } },
+      (value) => value as Record<string, never>);
+    const bindings = ["github", "linear"].map((provider) => ({ id: `binding_${provider}`, provider,
+      providerConnectionId: `remote_${provider}`, status: "active", readiness: "ready" }));
+    const recordHealth = vi.fn(async () => undefined);
+    const authority = { resolve: async ({ provider }: { provider: string }) => bindings.find((b) => b.provider === provider)!,
+      recordHealth };
+    const plugfn = {
+      providers: { get: (provider: string) => definitions.get(provider) },
+      config: { integrations: { github: {}, linear: {} } },
+      action: vi.fn(async (provider: string) => {
+        if (provider === "linear") throw new LinearProviderDenial("read", "LINEAR_RECONNECT_REQUIRED");
+        return { verifiedScopes: ["read"] };
+      }),
+      connections: { get: vi.fn(async () => ({ scopes: ["read"], status: "active" })) },
+    };
+    const result = await scopedToolIds(catalog, plugfn as never, authority as never,
+      { kind: "web", userId: "user_1", workspaceId: "workspace_1" }, "workspace_1", bindings as never);
+    expect(result.allowedToolIds.has("linear.read")).toBe(false);
+    expect(result.allowedToolIds.has("github.read")).toBe(true);
+    expect(result.providers.find(({ provider }) => provider === "linear")?.state).toBe("expired");
+    expect(recordHealth).toHaveBeenCalledWith({ connectionId: "binding_linear", status: "needs_reauth",
+      readiness: "unavailable", reason: "linear_reconnect_required" });
+  });
   it.each([false, true])("omits a missing selected binding with alternate ready=%s", async (alternateReady) => {
     const definitions = new Map(["github", "linear"].map((name) => [name, {
       name, displayName: name, version: "1.0.0", description: name,
@@ -134,7 +167,10 @@ describe("Worker scoped provider catalog", () => {
     const plugfn = {
       providers: { get: (provider: string) => definitions.get(provider) },
       config: { integrations: { github: {}, linear: {} } },
-      action: vi.fn(async () => { throw Object.assign(new Error("deleted"), { code: "CONNECTION_NOT_FOUND" }); }),
+      action: vi.fn(async (provider: string) => {
+        if (provider === "linear") return { id: "11111111-1111-4111-8111-111111111111", name: "Linear workspace" };
+        throw Object.assign(new Error("deleted"), { code: "CONNECTION_NOT_FOUND" });
+      }),
       connections: { get: vi.fn(async (connectionId: string) => {
         if (connectionId === "remote_github") {
           throw Object.assign(new Error("deleted"), { code: "CONNECTION_NOT_FOUND" });

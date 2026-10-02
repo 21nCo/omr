@@ -81,8 +81,12 @@ integration("PostgreSQL PlugFn runtime", () => {
         actor: { userId: "runtime-user", tenantId: "test-runtime" },
       });
       expect(connection.provider).toBe("stripe");
-      expect((await createPlugFnToolCatalog(runtime.plugfn)).discover({ limit: 100 }).tools.length)
-        .toBeGreaterThan(50);
+      const catalog = await createPlugFnToolCatalog(runtime.plugfn);
+      expect(catalog.list().filter(({ provider }) => provider === "linear").map(({ id }) => id)).toEqual([
+        "linear.issues.create", "linear.issues.get", "linear.issues.list", "linear.issues.update",
+        "linear.teams.list", "linear.workspace.get",
+      ]);
+      expect(catalog.get("stripe.charges.create")).toBeNull();
       expect((await runtime.plugfn.connections.get(connection.id)).id).toBe(connection.id);
       await runtime.plugfn.connections.disconnect({
         userId: "runtime-user",

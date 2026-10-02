@@ -17,6 +17,14 @@ function fixture() {
 }
 
 describe("OAuth review state", () => {
+  it("shows the Linear scope tier in the pre-consent review", async () => {
+    const { controller, update, start } = fixture();
+    start.mockResolvedValueOnce({ authUrl: "https://linear.app/oauth/authorize?state=linear&scope=read%2Cwrite" });
+    await controller.start({ ...input, provider: "linear", label: "Linear", linearAccess: "issue_write" });
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ linearAccess: "issue_write" }));
+    expect(update).toHaveBeenLastCalledWith(expect.objectContaining({ scopes: ["read", "write"] }), false);
+  });
+
   it("unlocks controls on review and cancel, clears intent, and permits another action", async () => {
     const { controller, items, update, start } = fixture();
     await controller.start(input);

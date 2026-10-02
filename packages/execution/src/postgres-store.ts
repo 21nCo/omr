@@ -63,6 +63,19 @@ export class PostgresExecutionReceiptStore implements ExecutionReceiptStore {
     return result.rows[0] ? this.toReceipt(result.rows[0]) : null;
   }
 
+  /** Read an exact approval receipt even after it leaves bounded history. */
+  async findForApproval(input: { workspaceId: string; actorUserId: string; approvalId: string;
+    receiptId: string }): Promise<ExecutionReceipt | null> {
+    const result = await this.query<ReceiptRow>(
+      `SELECT ${COLUMNS} FROM omr_control.execution_receipts
+       WHERE id = $1 AND workspace_id = $2 AND actor_user_id = $3 AND approval_id = $4
+         AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
+                     WHERE workspace_id = $2 AND user_id = $3)`,
+      [input.receiptId, input.workspaceId, input.actorUserId, input.approvalId],
+    );
+    return result.rows[0] ? this.toReceipt(result.rows[0]) : null;
+  }
+
   async reserve(receipt: ExecutionReceipt, deadlineAt?: number): Promise<{ receipt: ExecutionReceipt; created: boolean }> {
     const result = await this.query<ReceiptRow>(
       `INSERT INTO omr_control.execution_receipts

@@ -11,10 +11,10 @@ import {
   type ConnectionBindingRecord,
 } from "@oh-my-router/connections";
 import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
-import { decodeExecutionWrappingKey, deriveExecutionFingerprintKey, ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
+import { ApprovalUnavailableError, decodeExecutionWrappingKey, deriveExecutionFingerprintKey, ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
 import { connectPostgresExecutionReceipts } from "@oh-my-router/execution/postgres";
 import { connectPostgresIdentityRuntime } from "@oh-my-router/identity/postgres";
-import { connectPostgresPlugFn, verifiedGithubScopes } from "@oh-my-router/plugfn-runtime";
+import { connectPostgresPlugFn, verifiedGithubScopes, verifiedLinearScopes } from "@oh-my-router/plugfn-runtime";
 import {
   createPlugFnToolCatalog,
   isProviderConfigured,
@@ -36,6 +36,7 @@ import {
 } from "./router.js";
 import { resolveScopedCatalog } from "./scoped-catalog.js";
 import { publicConnections, publicConnectionsAfterMutation } from "./connection-view.js";
+import { linearReconciliationReceipts, publicBrowserApproval, recoverLinearApproval, visibleApprovals } from "./reconciliation-receipts.js";
 
 type OMRBindings = Cloudflare.Env & {
   HYPERDRIVE?: { connectionString: string };
@@ -150,6 +151,7 @@ export function createProviderIntegrationConfig(
   const redirectUri = new URL("/app/oauth/callback", origin).toString();
   return Object.fromEntries(Object.entries(OAUTH_BINDINGS).flatMap(([provider, names]) => {
     if (provider === "github" && env.OMR_GITHUB_V1_ENABLED !== "true") return [];
+    if (provider === "linear" && env.OMR_LINEAR_V1_ENABLED !== "true") return [];
     const clientId = env[names[0]];
     const clientSecret = env[names[1]];
     return typeof clientId === "string" && clientId.length > 0 &&
@@ -404,6 +406,17 @@ function configuredProviders(plugfn: Awaited<ReturnType<typeof connectPlugFn>>["
   return new Set(statuses(plugfn).filter((status) => status.available).map((status) => status.provider));
 }
 
+/** Prove the selected provider grant before exposing tools or dispatching actions. */
+async function verifiedProviderScopes(
+  plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"],
+  input: { provider: string; connectionId: string; userId: string; workspaceId: string },
+): Promise<readonly string[] | undefined> {
+  const { provider, connectionId, userId, workspaceId } = input;
+  if (provider === "github") return verifiedGithubScopes(plugfn, { userId, workspaceId, connectionId });
+  if (provider === "linear") return verifiedLinearScopes(plugfn, { userId, workspaceId, connectionId });
+  return (await plugfn.connections.get(connectionId)).scopes;
+}
+
 /** Project accessible bindings, using effective GitHub grants instead of requested scopes. */
 export async function scopedToolIds(
   catalog: Awaited<ReturnType<typeof createPlugFnToolCatalog>>,
@@ -418,12 +431,17 @@ export async function scopedToolIds(
     catalog,
     statuses(plugfn, bindings),
     (provider) => authority.resolve({ actorUserId: principal.userId, workspaceId, provider }),
-    async (connectionId, provider) => provider === "github"
-      ? verifiedGithubScopes(plugfn, { userId: principal.userId, workspaceId, connectionId })
-      : (await plugfn.connections.get(connectionId)).scopes,
+    (connectionId, provider) => verifiedProviderScopes(plugfn, {
+      provider, connectionId, userId: principal.userId, workspaceId,
+    }),
     async (bindingId) => {
       missing.add(bindingId);
       await markMissingRemoteConnection(authority, bindingId);
+    },
+    async (bindingId) => {
+      missing.add(bindingId);
+      await authority.recordHealth({ connectionId: bindingId, status: "needs_reauth",
+        readiness: "unavailable", reason: "linear_reconnect_required" }).catch(() => undefined);
     },
   );
   return {
@@ -626,11 +644,10 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
         connectionRuntime.connections,
         plugfn.plugfn,
         execution.receipts,
-        async (connectionId, connection, principal) => connection.provider === "github"
-          ? verifiedGithubScopes(plugfn!.plugfn, {
-            userId: principal.userId, workspaceId: principal.workspaceId, connectionId,
-          })
-          : (await plugfn!.plugfn.connections.get(connectionId)).scopes,
+        (connectionId, connection, principal) => verifiedProviderScopes(plugfn!.plugfn, {
+          provider: connection.provider, connectionId,
+          userId: principal.userId, workspaceId: principal.workspaceId,
+        }),
         Date.now,
         execution.approvals,
         execution.invocationGuard,
@@ -688,10 +705,20 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
       const principal = await authenticate(event, request, undefined, undefined, allowRemoteMcp);
       return withExecution(async (service) => publicReceipt(await service.executeApproved(principal, approvalId)));
     },
-    async approvalStatus(request, approvalId) {
-      const principal = await authenticate(event, request, undefined, "approvals:create", allowRemoteMcp);
+    async approvalStatus(request, approvalId, workspaceId) {
+      const principal = await authenticate(event, request, workspaceId, "approvals:create", allowRemoteMcp);
+      if (principal.kind === "web" && !workspaceId) throw new ApprovalUnavailableError();
       return withExecution(async (service, catalog) => {
         const approval = await service.approvalStatus(principal, approvalId);
+        return publicApproval(approval, catalog.get(approval.toolId));
+      });
+    },
+    async reconcileUncertain(request, approvalId, decision, workspaceId) {
+      requireExecutionOrigin(request);
+      const principal = await authenticate(event, request, workspaceId, "approvals:create", allowRemoteMcp);
+      if (principal.kind === "web" && !workspaceId) throw new ApprovalUnavailableError();
+      return withExecution(async (service, catalog) => {
+        const approval = await service.reconcileUncertain(principal, approvalId, decision);
         return publicApproval(approval, catalog.get(approval.toolId));
       });
     },
@@ -709,7 +736,7 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
         });
     },
     /** Assemble the private workspace overview for a current member. */
-    async overview(request, requestedWorkspaceId) {
+    async overview(request, requestedWorkspaceId, recoveredApprovalId) {
       const identity = await connectPostgresIdentityRuntime({
         connectionString: databaseConnectionString(event),
         environment: {
@@ -739,6 +766,7 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
             connections: [],
             approvals: [],
             executions: [],
+            reconciliationReceipts: [],
           };
         }
 
@@ -751,7 +779,8 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
           resultWrappingKey: executionWrappingKey(event),
         });
         const connectionService = new PlugFnConnectionOrchestrator(connections.connections, plugfn.plugfn);
-        const [availableConnections, orphanedConnections, approvals, executions] = await Promise.all([
+        const now = Date.now();
+        const [availableConnections, orphanedConnections, recentApprovals, outstandingLinear, recoveredApproval, executions] = await Promise.all([
           connectionService.listAvailable({
             actorUserId: session.actorId,
             workspaceId: selected.workspace.id,
@@ -765,13 +794,24 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
             workspaceId: selected.workspace.id,
             limit: 50,
           }),
+          activity.approvals.listOutstandingLinearForActor({
+            actorUserId: session.actorId,
+            workspaceId: selected.workspace.id,
+            now,
+            limit: 50,
+          }),
+          recoverLinearApproval(activity.approvals, recoveredApprovalId,
+            selected.workspace.id, session.actorId, now),
           activity.receipts.listForActor({
             actorUserId: session.actorId,
             workspaceId: selected.workspace.id,
             limit: 50,
           }),
         ]);
+        const approvals = visibleApprovals(recentApprovals, outstandingLinear, recoveredApproval, now);
         const approvalCatalog = await createPlugFnToolCatalog(plugfn.plugfn, configuredProviders(plugfn.plugfn));
+        const reconciliationReceipts = await linearReconciliationReceipts(
+          approvals, activity.receipts, selected.workspace.id, session.actorId);
         return {
           actor: { id: session.actorId, email: session.primaryEmail ?? null },
           workspaces,
@@ -781,8 +821,10 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
             [...availableConnections, ...orphanedConnections.map((binding) => ({ ...binding,
               cleanupOnly: true, selectable: false }))],
           ),
-          approvals: approvals.map((approval) => publicApproval(approval, approvalCatalog.get(approval.toolId))),
+          approvals: approvals.map((approval) => publicBrowserApproval(
+            approval, approvalCatalog.get(approval.toolId), session.actorId, selected.workspace.id)),
           executions: executions.map((receipt) => publicReceipt(receipt, false)),
+          reconciliationReceipts: reconciliationReceipts.map((receipt) => publicReceipt(receipt, false)),
         };
       } finally {
         await Promise.allSettled([identity.close(), connections?.close(), activity?.close(), plugfn?.close()]);

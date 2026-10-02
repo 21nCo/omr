@@ -7,6 +7,8 @@ export {
   GitHubScopeProofError,
   GitHubWritePreflightError,
   GitHubWriteRejectedError,
+  LinearExecutionError,
+  LinearIntentTransactionRequiredError,
   ExecutionIdempotencyConflictError,
   ExecutionInProgressError,
   ExecutionOutcomeUnknownError,

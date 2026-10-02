@@ -101,6 +101,16 @@ export interface PlugFnConnectionPort {
 }
 
 export type GithubAccess = "profile" | "public_write" | "private_repositories";
+export type LinearAccess = "read" | "issue_write";
+
+/** Linear read access is required for the target checks before every write. */
+export function linearScopes(access: LinearAccess): string[] {
+  switch (access) {
+    case "read": return ["read"];
+    case "issue_write": return ["read", "write"];
+    default: throw new ConnectionInputError("Unknown Linear access tier");
+  }
+}
 
 /** The private tier requests GitHub's broad repo OAuth scope; the public tier does not. */
 export function githubScopes(access: GithubAccess): string[] {
@@ -298,6 +308,7 @@ export class PlugFnConnectionOrchestrator {
     label: string;
     scopes?: string[];
     githubAccess?: GithubAccess;
+    linearAccess?: LinearAccess;
     returnTo?: string;
     prompt?: string;
     loginHint?: string;
@@ -307,7 +318,17 @@ export class PlugFnConnectionOrchestrator {
     if (input.githubAccess !== undefined && provider !== "github") {
       throw new ConnectionInputError("GitHub access applies only to GitHub");
     }
-    const defaultScopes = provider === "github" ? githubScopes(input.githubAccess ?? "profile") : undefined;
+    if (input.linearAccess !== undefined && provider !== "linear") {
+      throw new ConnectionInputError("Linear access applies only to Linear");
+    }
+    let defaultScopes: string[] | undefined;
+    if (provider === "github") defaultScopes = githubScopes(input.githubAccess ?? "profile");
+    if (provider === "linear") defaultScopes = linearScopes(input.linearAccess ?? "read");
+    if (provider === "linear" && input.scopes &&
+        (input.scopes.length !== defaultScopes?.length ||
+          defaultScopes.some((scope) => !input.scopes?.includes(scope)))) {
+      throw new ConnectionInputError("Linear scopes must match the selected access tier");
+    }
     const scopes = input.scopes ?? defaultScopes;
     await this.authority.authorizeInstall(input);
     this.assertConnectable(provider, "oauth");

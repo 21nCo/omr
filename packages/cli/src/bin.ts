@@ -9,7 +9,7 @@ import { CLIENT_CAPABILITIES, type ClientCapability } from "@oh-my-router/client
 import type { JsonValue, ToolEffect } from "@oh-my-router/tools";
 
 type Parsed = { positionals: string[]; options: Map<string, string | true> };
-const valueOptions = new Set(["profile", "url", "kind", "name", "capabilities", "workspace", "provider", "query", "effect", "params", "params-file", "connection", "idempotency", "limit", "cursor"]);
+const valueOptions = new Set(["profile", "url", "kind", "name", "capabilities", "workspace", "provider", "query", "effect", "params", "params-file", "connection", "idempotency", "limit", "cursor", "decision"]);
 const flagOptions = new Set(["json", "help", "local"]);
 const store = new OMRProfileStore();
 
@@ -186,6 +186,15 @@ function ambiguousMutationResponse(error: unknown,
   const validReceiptId = typeof body.receiptId === "string" &&
     /^(?:execution|receipt)_[A-Za-z0-9_-]{1,100}$/.test(body.receiptId);
   const receiptId = validReceiptId ? { receiptId: body.receiptId } : {};
+  // This Linear code is emitted only by a failed read or target preflight;
+  // the issue mutation has not been dispatched.
+  if (error.status === 502 && body.error === "LINEAR_QUERY_REJECTED") throw error;
+  // Intent reservation failed before an approval or provider call could begin.
+  if (error.status === 503 && body.error === "LINEAR_INTENT_TRANSACTION_REQUIRED") {
+    throw new CLIError("LINEAR_INTENT_TRANSACTION_REQUIRED",
+      "Linear intent could not be reserved atomically; no issue change was sent. Retry with the same request identity after the service is available.",
+      1, identity);
+  }
   if (operation !== "approval request" &&
       ((error.status === 502 && body.error === "EXECUTION_FAILED" && validReceiptId) ||
        (error.status === 503 && body.error === "GITHUB_PREFLIGHT_UNAVAILABLE" && validReceiptId) ||
@@ -201,6 +210,12 @@ function ambiguousMutationResponse(error: unknown,
 function httpBody(error: unknown): { error?: unknown; receiptId?: unknown } | null {
   return error instanceof OMRHttpError ? error.body as { error?: unknown; receiptId?: unknown } | null : null;
 }
+const publicLinearCodes = new Set([
+  "LINEAR_INTENT_TRANSACTION_REQUIRED",
+  "LINEAR_RATE_LIMITED", "LINEAR_RECONNECT_REQUIRED", "LINEAR_PERMISSION_DENIED",
+  "LINEAR_TARGET_UNAVAILABLE", "LINEAR_WORKSPACE_MISMATCH", "LINEAR_INVALID_CHANGE",
+  "LINEAR_QUERY_REJECTED",
+]);
 /** Preserve only recognized public server codes; transport errors on writes remain uncertain. */
 function failureCode(error: unknown, body: ReturnType<typeof httpBody>): string {
   if (error instanceof CLIError) return error.code;
@@ -209,7 +224,8 @@ function failureCode(error: unknown, body: ReturnType<typeof httpBody>): string 
   if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) &&
       ["/api/tools/execute", "/api/approvals/execute"].includes(error.path)) return "EXECUTION_EFFECT_UNCERTAIN";
   if (typeof body?.error === "string" &&
-      /^(?:EXECUTION|APPROVAL|CLIENT|DEVICE|CONNECTION|TOOL|WORKSPACE|REQUEST|AUTHFN|PROVIDER|RUNTIME|GITHUB)_[A-Z0-9_]{1,64}$/.test(body.error)) {
+      (/^(?:EXECUTION|APPROVAL|CLIENT|DEVICE|CONNECTION|TOOL|WORKSPACE|REQUEST|AUTHFN|PROVIDER|RUNTIME|GITHUB)_[A-Z0-9_]{1,64}$/.test(body.error) ||
+        publicLinearCodes.has(body.error))) {
     return body.error;
   }
   return error instanceof OMRHttpError ? "HTTP_ERROR" : "CLI_ERROR";
@@ -243,9 +259,15 @@ function failureMessage(error: unknown, code: string): string {
 }
 function failureDetails(error: unknown, body: ReturnType<typeof httpBody>): unknown {
   if (error instanceof CLIError) return error.details;
+  const details: { receiptId?: string; retryAfterSeconds?: number; rateLimitResetAt?: number } = {};
   if (typeof body?.receiptId === "string" &&
-      /^(?:execution|receipt)_[A-Za-z0-9_-]{1,100}$/.test(body.receiptId)) return { receiptId: body.receiptId };
-  return undefined;
+      /^(?:execution|receipt)_[A-Za-z0-9_-]{1,100}$/.test(body.receiptId)) details.receiptId = body.receiptId;
+  if (error instanceof OMRHttpError && typeof body?.error === "string" &&
+      body.error === "LINEAR_RATE_LIMITED") {
+    if (error.retryAfterSeconds !== undefined) details.retryAfterSeconds = error.retryAfterSeconds;
+    if (error.rateLimitResetAt !== undefined) details.rateLimitResetAt = error.rateLimitResetAt;
+  }
+  return Object.keys(details).length ? details : undefined;
 }
 function fail(error: unknown, json: boolean): void {
   const body = httpBody(error);
@@ -419,7 +441,7 @@ const commandActions: Record<string, Record<string, CommandAction>> = {
   workspaces: { list: "none", show: "none", use: "subject" },
   connections: { list: "none", select: "subject" },
   tools: { list: "none", search: "none", inspect: "subject", get: "subject", run: "subject" },
-  approvals: { request: "subject", status: "subject", execute: "subject" },
+  approvals: { request: "subject", status: "subject", execute: "subject", reconcile: "subject" },
 };
 
 function validateCommand(command: string, action: string | undefined, subject: string | undefined): void {
@@ -624,16 +646,52 @@ async function approvalCommand(parsed: Parsed, action: string, subject: string,
     return approvalResult(await api.approvalStatus(subject), { id: subject, workspaceId });
   }
   if (action === "execute") return approvalExecute(subject, api, workspaceId);
+  if (action === "reconcile") return reconcileApproval(parsed, subject, api, workspaceId);
   const connectionId = opt(parsed, "connection");
   const approval = await requestApproval(api, { workspaceId, toolId: subject, params: params(parsed),
     ...(connectionId ? { connectionId } : {}), idempotencyKey: required(parsed, "idempotency") });
   return approvalResult(approval, { workspaceId, toolId: subject, connectionId });
 }
 
+function validReconciliation(reply: Record<string, unknown>, decision: string): boolean {
+  return reply.reconciledAs === decision &&
+    reply.status === (decision === "effect_present" ? "consumed" : "failed");
+}
+
+async function recoverReconciliation(subject: string, decision: "effect_present" | "effect_absent",
+  api: OMRClient, workspaceId: string): Promise<void> {
+  try {
+    const status = checkedApproval(await api.approvalStatus(subject), "/api/approvals/status",
+      { id: subject, workspaceId });
+    if (validReconciliation(status, decision)) return approvalResult(status, { id: subject, workspaceId });
+  } catch { /* Status may also be unavailable; keep the decision uncertain. */ }
+  throw new CLIError("APPROVAL_RECONCILIATION_UNCERTAIN",
+    "Reconciliation response cannot prove the decision. Check approval status before retrying the same decision; never execute the write again.",
+    23, { approvalId: subject, decision });
+}
+
+async function reconcileApproval(parsed: Parsed, subject: string,
+  api: OMRClient, workspaceId: string): Promise<void> {
+  const decision = required(parsed, "decision");
+  if (decision !== "effect_present" && decision !== "effect_absent") {
+    throw new CLIError("USAGE", "--decision must be effect_present or effect_absent", 2);
+  }
+  try {
+    const reply = checkedApproval(await api.reconcileUncertain(subject, decision),
+      "/api/approvals/reconcile", { id: subject, workspaceId });
+    if (!validReconciliation(reply, decision)) invalidResponse("/api/approvals/reconcile");
+    return approvalResult(reply, { id: subject, workspaceId });
+  } catch (error) {
+    if (!(error instanceof OMRTransportError || error instanceof OMRProtocolError ||
+        (error instanceof OMRHttpError && error.status >= 500))) throw error;
+    return recoverReconciliation(subject, decision, api, workspaceId);
+  }
+}
+
 async function main(parsed: Parsed): Promise<void> {
   const [command, action, subject, ...extra] = parsed.positionals;
   if (parsed.options.has("help") || !command || command === "help") {
-    result({ usage: "omr login|logout|profiles list|use|show|workspaces list|show|use|connections list|select|tools list|search|inspect|run|approvals request|status|execute" });
+    result({ usage: "omr login|logout|profiles list|use|show|workspaces list|show|use|connections list|select|tools list|search|inspect|run|approvals request|status|execute|reconcile" });
     return;
   }
   if (extra.length) throw new CLIError("INPUT_INVALID", "Too many positional arguments", 2);

@@ -1,11 +1,240 @@
 import { describe, expect, it } from "vitest";
 
-import { createWorkspaceCatalogLoader, providerDisplayState, type WorkspaceCatalogState } from "./workspace-catalog.js";
+import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, linearEffectAbsentAvailable, linearEffectPresentAvailable,
+  recoverLinearReconciliation, recoverWorkspaceOverview, providerDisplayState, visibleApprovalCard,
+  selectedLinearAccountId, selectedReadyLinearConnection,
+  type WorkspaceCatalogState } from "./workspace-catalog.js";
 
 type Overview = { selectedWorkspaceId: string; connections: { provider: string; status: string }[] };
 type Catalog = { providers: { provider: string; state: string; available?: boolean; authMode?: string }[] };
 
 describe("workspace catalog loading", () => {
+  it("retires a denied recovery hint and loads the current workspace without stale approval controls", async () => {
+    const ids: string[] = [];
+    let retired = false;
+    const fetchOverview = async (id: string) => {
+      ids.push(id);
+      if (id) throw Object.assign(new Error("unavailable"), { code: "APPROVAL_UNAVAILABLE" });
+      return { selectedWorkspaceId: "A", approvals: [] };
+    };
+    const unavailable = (error: unknown) => (error as { code?: string }).code === "APPROVAL_UNAVAILABLE";
+    await expect(recoverWorkspaceOverview("foreign-or-stale", fetchOverview, unavailable, () => { retired = true; }))
+      .resolves.toEqual({ overview: { selectedWorkspaceId: "A", approvals: [] }, lookupUnavailable: true });
+    expect(ids).toEqual(["foreign-or-stale", ""]);
+    expect(retired).toBe(true);
+    expect(visibleApprovalCard({ id: "approval-old", toolId: "linear.issues.update", status: "consumed",
+      expiresAt: 0 }, "approval-old", 10, false)).toBe(false);
+    await expect(recoverWorkspaceOverview("foreign-or-stale", async () => { throw new Error("database down"); }, unavailable))
+      .rejects.toThrow("database down");
+  });
+
+  it("refreshes the catalog after a foreign lookup denial and removes a stale approval card", async () => {
+    type ApprovalOverview = { selectedWorkspaceId: string; approvals: { id: string; toolId: string;
+      status: string; expiresAt: number }[] };
+    const states: WorkspaceCatalogState<ApprovalOverview, Catalog>[] = [];
+    let denied = false;
+    let lookup = "approval-old";
+    const load = createWorkspaceCatalogLoader<ApprovalOverview, Catalog>(
+      async () => (await recoverWorkspaceOverview(lookup, async (id) => {
+        if (id && denied) throw Object.assign(new Error("unavailable"), { code: "APPROVAL_UNAVAILABLE" });
+        return { selectedWorkspaceId: "A", approvals: id
+          ? [{ id, toolId: "linear.issues.create", status: "approved", expiresAt: 100 }]
+          : [] };
+      }, (error) => (error as { code?: string }).code === "APPROVAL_UNAVAILABLE",
+      () => { lookup = ""; })).overview,
+      async () => ({ providers: [{ provider: "linear", state: "ready" }] }),
+      (state) => states.push(state),
+    );
+    await load("A");
+    expect(states.at(-1)?.overview?.approvals).toHaveLength(1);
+    denied = true;
+    await load("A");
+    expect(lookup).toBe("");
+    expect(states.at(-1)).toMatchObject({ loading: false, error: "", catalog: {
+      providers: [{ provider: "linear", state: "ready" }] }, overview: { approvals: [] } });
+  });
+
+  it.each(["linear.issues.create", "linear.issues.update"])(
+    "shows only current or verified %s approval states", (toolId) => {
+      const approval = { id: "approval-old", toolId, status: "approved", expiresAt: 10 };
+      expect(visibleApprovalCard(approval, approval.id, 10, true)).toBe(false);
+      expect(visibleApprovalCard({ ...approval, status: "rejected" }, approval.id, 1, true)).toBe(false);
+      expect(visibleApprovalCard({ ...approval, status: "consumed" }, approval.id, 1, true)).toBe(false);
+      expect(visibleApprovalCard({ ...approval, status: "executing" }, approval.id, 10, true)).toBe(true);
+      for (const [status, reconciledAs] of [["consumed", "effect_present"], ["failed", "effect_absent"]]) {
+        expect(visibleApprovalCard({ ...approval, status, reconciledAs, executionReceiptId: "receipt-old" },
+          approval.id, 10, true)).toBe(true);
+        expect(visibleApprovalCard({ ...approval, status, reconciledAs, executionReceiptId: "receipt-old" },
+          approval.id, 10, false)).toBe(false);
+      }
+      expect(visibleApprovalCard({ ...approval, status: "consumed", reconciledAs: "effect_absent",
+        executionReceiptId: "receipt-old" }, approval.id, 10, true)).toBe(false);
+    },
+  );
+  it.each(["linear.issues.create", "linear.issues.update"])(
+    "hides retained %s approval controls until a fresh overview succeeds", async (toolId) => {
+      type ApprovalOverview = { selectedWorkspaceId: string; approvals: { id: string; toolId: string;
+        status: string; expiresAt: number }[] };
+      const states: WorkspaceCatalogState<ApprovalOverview, Catalog>[] = [];
+      let status = "pending";
+      let fetchOverview: () => Promise<ApprovalOverview> = async () => ({ selectedWorkspaceId: "A",
+        approvals: [{ id: "owned", toolId, status, expiresAt: 100 }] });
+      let failCatalog = false;
+      const load = createWorkspaceCatalogLoader<ApprovalOverview, Catalog>(
+        () => fetchOverview(),
+        async () => {
+          if (failCatalog) throw new Error("catalog unavailable");
+          return { providers: [{ provider: "linear", state: "ready" }] };
+        },
+        (state) => states.push(state),
+      );
+      const visible = (state: WorkspaceCatalogState<ApprovalOverview, Catalog>) =>
+        state.overview?.approvals.filter((approval) => visibleApprovalCard(
+          approval, "owned", 10, !state.loading && !state.error)) ?? [];
+
+      for (const approvalStatus of ["pending", "approved", "uncertain"]) {
+        status = approvalStatus;
+        await load("A");
+        expect(visible(states.at(-1)!)).toHaveLength(1);
+
+        let rejectOverview!: (error: Error) => void;
+        fetchOverview = () => new Promise<ApprovalOverview>((_resolve, reject) => { rejectOverview = reject; });
+        const refresh = load("A");
+        expect(states.at(-1)).toMatchObject({ loading: true, error: "", overview: { approvals: [{ status }] } });
+        expect(visible(states.at(-1)!)).toEqual([]);
+        rejectOverview(new Error("overview unavailable"));
+        await refresh;
+        expect(states.at(-1)).toMatchObject({ loading: false, error: "overview unavailable" });
+        expect(visible(states.at(-1)!)).toEqual([]);
+        fetchOverview = async () => ({ selectedWorkspaceId: "A",
+          approvals: [{ id: "owned", toolId, status, expiresAt: 100 }] });
+      }
+
+      failCatalog = true;
+      await load("A");
+      expect(states.at(-1)).toMatchObject({ error: "catalog unavailable" });
+      expect(visible(states.at(-1)!)).toEqual([]);
+      failCatalog = false;
+      await load("A");
+      expect(visible(states.at(-1)!)).toHaveLength(1);
+    },
+  );
+  it("drops an expired automatic Linear approval before reload while preserving foreign-ID denial", async () => {
+    const states: WorkspaceCatalogState<Overview, Catalog>[] = [];
+    const requestedIds: string[] = [];
+    let automatic: { id: string; expiresAt: number } | null = { id: "approval-pending", expiresAt: 100 };
+    let selectedId = "approval-pending";
+    let now = 99;
+    const load = createWorkspaceCatalogLoader<Overview, Catalog>(
+      async (workspaceId) => {
+        if (expiredAutomaticApprovalLookup(automatic, selectedId, now)) {
+          automatic = null;
+          selectedId = "";
+        }
+        requestedIds.push(selectedId);
+        if (selectedId === "approval-pending" && now >= 100) throw new Error("Approval unavailable");
+        if (selectedId === "approval-foreign") throw new Error("Approval unavailable");
+        return { selectedWorkspaceId: workspaceId, connections: [{ provider: "github", status: "ready" }] };
+      },
+      async () => ({ providers: [{ provider: "github", state: "ready" }] }),
+      (state) => states.push(state),
+    );
+    await load("workspace-A");
+    now = 100;
+    await load("workspace-A");
+    expect(requestedIds).toEqual(["approval-pending", ""]);
+    expect(states.at(-1)).toMatchObject({ error: "", catalog: { providers: [{ provider: "github" }] } });
+    selectedId = "approval-foreign";
+    await load("workspace-A");
+    expect(requestedIds.at(-1)).toBe("approval-foreign");
+    expect(states.at(-1)).toMatchObject({ error: "Approval unavailable", catalog: null });
+  });
+  it.each(["effect_present", "effect_absent"] as const)(
+    "recovers a lost %s browser response by authenticated exact-ID status", async (decision) => {
+      const status = decision === "effect_present" ? "consumed" : "failed";
+      const read = async () => ({ id: "approval-old", status, reconciledAs: decision });
+      await expect(recoverLinearReconciliation("approval-old", decision,
+        async () => { throw new TypeError("response lost after commit"); }, read))
+        .resolves.toMatchObject({ id: "approval-old", status, reconciledAs: decision });
+      await expect(recoverLinearReconciliation("approval-old", decision,
+        async () => ({ id: "approval-other", status, reconciledAs: decision }), read))
+        .resolves.toMatchObject({ id: "approval-old" });
+      for (const invalid of [
+        { id: "approval-other", status, reconciledAs: decision },
+        { id: "approval-old", status: "uncertain", reconciledAs: decision },
+        { id: "approval-old", status, reconciledAs: decision === "effect_present" ? "effect_absent" : "effect_present" },
+      ]) {
+        await expect(recoverLinearReconciliation("approval-old", decision,
+          async () => { throw new TypeError("response lost after commit"); }, async () => invalid))
+          .rejects.toThrow("Reconciliation is unconfirmed");
+      }
+      await expect(recoverLinearReconciliation("approval-old", decision,
+        async () => { throw new TypeError("response lost after commit"); },
+        async () => { throw new Error("membership revoked"); }))
+        .rejects.toThrow("Reconciliation is unconfirmed");
+    },
+  );
+  it("offers no-effect reconciliation only for an observed completed ambiguous response", () => {
+    const approval = { executionReceiptId: "receipt-A" };
+    expect(linearEffectAbsentAvailable(approval, [{ id: "receipt-A",
+      status: "uncertain", errorCode: "provider_outcome_unknown" }])).toBe(false);
+    expect(linearEffectAbsentAvailable(approval, [{ id: "receipt-A",
+      status: "uncertain", errorCode: "provider_response_ambiguous" }])).toBe(true);
+    expect(linearEffectAbsentAvailable(approval, [{ id: "receipt-B",
+      status: "uncertain", errorCode: "provider_response_ambiguous" }])).toBe(false);
+    expect(linearEffectAbsentAvailable(approval, [{ id: "receipt-A",
+      status: "running", errorCode: "provider_response_ambiguous" }])).toBe(false);
+    expect(linearEffectAbsentAvailable(approval, [])).toBe(false);
+  });
+
+  it("offers effect-present only with the exact running or uncertain receipt", () => {
+    const approval = { executionReceiptId: "receipt-A" };
+    expect(linearEffectPresentAvailable(approval, [])).toBe(false);
+    expect(linearEffectPresentAvailable(approval, [{ id: "receipt-B", status: "running" }])).toBe(false);
+    expect(linearEffectPresentAvailable(approval, [{ id: "receipt-A", status: "failed" }])).toBe(false);
+    expect(linearEffectPresentAvailable(approval, [{ id: "receipt-A", status: "running" }])).toBe(true);
+    expect(linearEffectPresentAvailable(approval, [{ id: "receipt-A", status: "uncertain" }])).toBe(true);
+  });
+
+  it("clears a Linear issue selected under another account during a same-workspace refresh", async () => {
+    type AccountOverview = { selectedWorkspaceId: string; connections: { id: string; provider: string;
+      selected: boolean; status: string; readiness: string }[] };
+    let accountId = "account-A";
+    let visible: AccountOverview | null = null;
+    let selectedWorkspaceId = "team";
+    let issueTarget: string | null = null;
+    const load = createWorkspaceCatalogLoader<AccountOverview, { tools: string[] }>(
+      async () => ({ selectedWorkspaceId: "team", connections: [{ id: accountId, provider: "linear",
+        selected: true, status: "active", readiness: "ready" }] }),
+      async () => ({ tools: ["linear.issues.update"] }),
+      (state) => {
+        const previous = selectedLinearAccountId(visible, selectedWorkspaceId);
+        visible = state.overview;
+        selectedWorkspaceId = state.selectedWorkspaceId;
+        if (previous !== selectedLinearAccountId(visible, selectedWorkspaceId)) issueTarget = null;
+      },
+    );
+    await load("team");
+    issueTarget = "issue-from-A";
+    await load("team");
+    expect(issueTarget).toBe("issue-from-A");
+    accountId = "account-B";
+    await load("team");
+    expect(selectedLinearAccountId(visible, selectedWorkspaceId)).toBe("account-B");
+    expect(issueTarget).toBeNull();
+    expect(selectedLinearAccountId(visible, "other-workspace")).toBeNull();
+  });
+
+  it("hides an old selected Linear account throughout a workspace or account switch", () => {
+    const prior = { selectedWorkspaceId: "A", connections: [{ provider: "linear", selected: true,
+      status: "active", readiness: "ready", id: "old-account" }] };
+    const selected = (selectedWorkspaceId: string, loading: boolean, busy: string) =>
+      selectedReadyLinearConnection({ overview: prior, selectedWorkspaceId, loading, busy });
+    expect(selected("A", false, "")?.id).toBe("old-account");
+    expect(selected("A", false, "select:new-account")).toBeUndefined();
+    expect(selected("A", true, "")).toBeUndefined();
+    expect(selected("B", false, "")).toBeUndefined();
+  });
   it("keeps the overview and chosen OAuth provider during a same-workspace refresh", async () => {
     const states: WorkspaceCatalogState<Overview, Catalog>[] = [];
     const providers = [

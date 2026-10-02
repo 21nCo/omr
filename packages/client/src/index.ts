@@ -31,14 +31,25 @@ export interface DeviceCredential {
 export class OMRHttpError extends Error {
   readonly code = "OMR_HTTP_ERROR";
   readonly details: unknown;
+  readonly retryAfterSeconds?: number;
+  readonly rateLimitResetAt?: number;
   constructor(
     readonly status: number,
     readonly path: string,
     readonly body: unknown,
+    headers?: Headers,
   ) {
     super(`OMR request failed (${status}) for ${path}`);
     this.name = "OMRHttpError";
     this.details = body;
+    const timing = (name: string) => {
+      const value = headers?.get(name);
+      if (value === null || value === undefined || !/^\d+$/.test(value)) return undefined;
+      const parsed = Number(value);
+      return Number.isSafeInteger(parsed) ? parsed : undefined;
+    };
+    this.retryAfterSeconds = timing("retry-after");
+    this.rateLimitResetAt = timing("x-ratelimit-requests-reset");
   }
 }
 
@@ -106,7 +117,7 @@ async function request<T>(input: {
     let body: unknown;
     try { body = await responseBody(response); }
     catch { throw new OMRTransportError(input.path.split("?", 1)[0]!); }
-    if (!response.ok) throw new OMRHttpError(response.status, input.path, body);
+    if (!response.ok) throw new OMRHttpError(response.status, input.path, body, response.headers);
     if (body === null || typeof body !== "object") {
       throw new OMRProtocolError(input.path.split("?", 1)[0]!);
     }
@@ -230,6 +241,11 @@ export class OMRClient {
 
   approvalStatus(approvalId: string): Promise<unknown> {
     return this.get(`/api/approvals/status?approvalId=${encodeURIComponent(approvalId)}`);
+  }
+
+  /** Submit a verified Linear outcome without redispatching the write. */
+  reconcileUncertain(approvalId: string, decision: "effect_present" | "effect_absent"): Promise<unknown> {
+    return this.post("/api/approvals/reconcile", { approvalId, decision });
   }
 
   revokeSelf(): Promise<unknown> {

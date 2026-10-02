@@ -76,6 +76,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     principalKey: "web:execution_owner", toolId: "linear.create_issue",
     manifestHash: `sha256-${"d".repeat(64)}`, connectionId,
     providerConnectionId: `plug_${crypto.randomUUID()}`, params: {},
+    requestHash: `hmac-sha256-${"a".repeat(64)}`,
     idempotencyKey: `approval_${crypto.randomUUID()}`, status: "pending",
     approvedBy: null, decidedAt: null, expiresAt: now + 60_000,
     executionReceiptId: null, createdAt: now, updatedAt: now,
@@ -92,6 +93,351 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     approvalId: approval.id, status: "reserved", result: null, errorCode: null,
     startedAt: now, completedAt: null, createdAt: now, updatedAt: now,
     ...overrides,
+  });
+
+  /** Wait for the specified statement to reach a lock held by another backend. */
+  const blockedBackend = async (observer: Client, blockerPid: number, statement: string) =>
+    vi.waitFor(async () => {
+      // The observer may be inside the revocation transaction; refresh its
+      // statistics snapshot so each poll sees newly waiting backends.
+      await observer.query("SELECT pg_stat_clear_snapshot()");
+      const result = await observer.query<{ pid: number }>(
+        `SELECT pid FROM pg_stat_activity
+         WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock'
+           AND $1 = ANY(pg_blocking_pids(pid)) AND query LIKE $2
+         ORDER BY pid LIMIT 1`, [blockerPid, `${statement}%`],
+      );
+      expect(result.rows[0]?.pid).toBeTypeOf("number");
+      return result.rows[0]!.pid;
+    }, { timeout: 5_000, interval: 20 });
+
+  const uncertainLinearApproval = async (toolId: "linear.issues.create" | "linear.issues.update") => {
+    const now = Date.now();
+    const approval = approvalFixture(now, { toolId });
+    await runtime.approvals.create(approval);
+    await runtime.approvals.approve({ approvalId: approval.id, actorUserId: approval.actorUserId,
+      now: now + 1 });
+    await runtime.approvals.claim({ approvalId: approval.id, actorUserId: approval.actorUserId,
+      principalKey: approval.principalKey, now: now + 2, deadlineAt: Date.now() + 2_000 });
+    const receipt = receiptFixture(approval, now);
+    await runtime.receipts.reserve(receipt);
+    await runtime.receipts.beginDispatch(receipt.id, now + 3);
+    await runtime.receipts.uncertain(receipt.id, "provider_response_ambiguous", now + 4);
+    await runtime.approvals.uncertain({ approvalId: approval.id, receiptId: receipt.id, now: now + 5 });
+    return { approval, receipt, now };
+  };
+
+  it.each(["linear.issues.create", "linear.issues.update"] as const)(
+    "reconciles an exact running %s receipt only as effect present", async (toolId) => {
+      const { approval, receipt, now } = await uncertainLinearApproval(toolId);
+      const observer = new Client({ connectionString: connectionString! });
+      await observer.connect();
+      try {
+        await observer.query(`UPDATE omr_control.execution_receipts
+          SET status = 'running', error_code = NULL, completed_at = NULL WHERE id = $1`, [receipt.id]);
+        const decision = { approvalId: approval.id, actorUserId: approval.actorUserId,
+          principalKey: approval.principalKey, now: now + 6 };
+        await expect(runtime.approvals.reconcile({ ...decision, decision: "effect_absent" }))
+          .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+        await expect(runtime.approvals.reconcile({ ...decision, actorUserId: "other_actor",
+          decision: "effect_present" })).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+        await observer.query(`DELETE FROM omr_control.workspace_memberships
+          WHERE workspace_id = $1 AND user_id = $2`, [workspaceId, approval.actorUserId]);
+        try {
+          await expect(runtime.approvals.reconcile({ ...decision, decision: "effect_present" }))
+            .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+        } finally {
+          await observer.query(`INSERT INTO omr_control.workspace_memberships
+            (id, workspace_id, user_id, role, created_at, updated_at)
+            VALUES ($1, $2, $3, 'member', $4, $4) ON CONFLICT DO NOTHING`,
+          [`membership_${crypto.randomUUID()}`, workspaceId, approval.actorUserId, Date.now()]);
+        }
+        expect(await runtime.approvals.reconcile({ ...decision, decision: "effect_present" }))
+          .toMatchObject({ status: "consumed", reconciledAs: "effect_present",
+            executionReceiptId: receipt.id });
+        await expect(runtime.approvals.reconcile({ ...decision, decision: "effect_present" }))
+          .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+        const stored = await observer.query<{ status: string }>(
+          `SELECT status FROM omr_control.execution_receipts WHERE id = $1`, [receipt.id]);
+        expect(stored.rows[0]?.status).toBe("running");
+      } finally {
+        await observer.end();
+      }
+    },
+  );
+
+  it.each(["effect_present", "effect_absent"] as const)(
+    "keeps old uncertain Linear approvals and exact receipts available for %s", async (decision) => {
+      const { approval, receipt } = await uncertainLinearApproval("linear.issues.update");
+      for (let index = 0; index < 75; index++) {
+        await runtime.approvals.create(approvalFixture(approval.createdAt + index + 1,
+          { status: "uncertain" }));
+      }
+      const actor = { workspaceId, actorUserId: approval.actorUserId, now: Date.now(), limit: 50 };
+      expect((await runtime.approvals.listForActor({ ...actor, limit: 50 }))
+        .some((candidate) => candidate.id === approval.id)).toBe(false);
+      const page = await runtime.approvals.listOutstandingLinearForActor(actor);
+      expect(page).toHaveLength(50);
+      expect(page.some((candidate) => candidate.id === approval.id)).toBe(false);
+      expect(await runtime.approvals.getForActor(approval.id, approval.actorUserId))
+        .toMatchObject({ id: approval.id, executionReceiptId: receipt.id });
+      expect(await runtime.receipts.findForApproval({ ...actor,
+        approvalId: approval.id, receiptId: receipt.id })).toMatchObject({ id: receipt.id });
+      expect(await runtime.receipts.findForApproval({ ...actor, workspaceId: "foreign_workspace",
+        approvalId: approval.id, receiptId: receipt.id })).toBeNull();
+      expect(await runtime.approvals.listOutstandingLinearForActor({ ...actor,
+        workspaceId: "foreign_workspace" })).toEqual([]);
+      expect(await runtime.approvals.listOutstandingLinearForActor({ ...actor,
+        actorUserId: "other_actor" })).toEqual([]);
+      await expect(runtime.approvals.getForActor(approval.id, "other_actor"))
+        .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      const observer = new Client({ connectionString: connectionString! });
+      await observer.connect();
+      try {
+        await observer.query(`DELETE FROM omr_control.workspace_memberships
+          WHERE workspace_id = $1 AND user_id = $2`, [workspaceId, approval.actorUserId]);
+        expect(await runtime.approvals.listOutstandingLinearForActor(actor)).toEqual([]);
+      } finally {
+        await observer.query(`INSERT INTO omr_control.workspace_memberships
+          (id, workspace_id, user_id, role, created_at, updated_at)
+          VALUES ($1, $2, $3, 'member', $4, $4) ON CONFLICT DO NOTHING`,
+        [`membership_${crypto.randomUUID()}`, workspaceId, approval.actorUserId, Date.now()]);
+        await observer.end();
+      }
+      expect(await runtime.approvals.reconcile({ approvalId: approval.id,
+        actorUserId: approval.actorUserId, principalKey: approval.principalKey,
+        decision, now: Date.now() })).toMatchObject({
+          status: decision === "effect_present" ? "consumed" : "failed", reconciledAs: decision,
+        });
+      expect((await runtime.approvals.listOutstandingLinearForActor(actor))
+        .some((candidate) => candidate.id === approval.id)).toBe(false);
+    },
+  );
+
+  it("excludes expired pending and approved rows before applying the Linear overview limit", async () => {
+    const now = Date.now();
+    const live = await runtime.approvals.create(approvalFixture(now - 120_000,
+      { status: "pending", expiresAt: now + 60_000 }));
+    const expired = await runtime.approvals.create(approvalFixture(now,
+      { status: "approved", expiresAt: now - 1 }));
+    const actor = { workspaceId, actorUserId: live.actorUserId, now, limit: 1 };
+    expect(await runtime.approvals.listOutstandingLinearForActor(actor))
+      .toMatchObject([{ id: live.id }]);
+    expect((await runtime.approvals.listOutstandingLinearForActor({ ...actor, limit: 50 }))
+      .some((approval) => approval.id === expired.id)).toBe(false);
+  });
+
+  it("reads the exact reconciliation receipt only for its current workspace member", async () => {
+    const { approval, receipt } = await uncertainLinearApproval("linear.issues.update");
+    const lookup = { workspaceId, actorUserId: approval.actorUserId,
+      approvalId: approval.id, receiptId: receipt.id };
+    await expect(runtime.receipts.findForApproval(lookup)).resolves.toMatchObject({
+      id: receipt.id, status: "uncertain", errorCode: "provider_response_ambiguous",
+    });
+    for (const wrong of [{ workspaceId: "foreign_workspace" }, { actorUserId: "other_actor" },
+      { approvalId: "approval_other" }, { receiptId: "execution_other" }]) {
+      await expect(runtime.receipts.findForApproval({ ...lookup, ...wrong })).resolves.toBeNull();
+    }
+    const observer = new Client({ connectionString: connectionString! });
+    await observer.connect();
+    try {
+      await observer.query(`DELETE FROM omr_control.workspace_memberships
+        WHERE workspace_id = $1 AND user_id = $2`, [workspaceId, approval.actorUserId]);
+      await expect(runtime.receipts.findForApproval(lookup)).resolves.toBeNull();
+    } finally {
+      await observer.query(`INSERT INTO omr_control.workspace_memberships
+        (id, workspace_id, user_id, role, created_at, updated_at)
+        VALUES ($1, $2, $3, 'member', $4, $4) ON CONFLICT DO NOTHING`,
+      [`membership_${crypto.randomUUID()}`, workspaceId, approval.actorUserId, Date.now()]);
+      await observer.end();
+    }
+  });
+
+  it("fences concurrent Linear approval keys until an uncertain receipt is reconciled", async () => {
+    const now = Date.now();
+    const intentHash = `hmac-sha256-${"e".repeat(64)}`;
+    const first = approvalFixture(now, { toolId: "linear.issues.create", intentHash,
+      providerConnectionId: "remote_linear_one" });
+    const second = approvalFixture(now, { toolId: first.toolId, intentHash,
+      providerConnectionId: first.providerConnectionId });
+    const [a, b] = await Promise.all([runtime.approvals.create(first), runtime.approvals.create(second)]);
+    expect(a.id).toBe(b.id);
+    await runtime.approvals.approve({ approvalId: a.id, actorUserId: a.actorUserId, now: now + 1 });
+    await runtime.approvals.claim({ approvalId: a.id, actorUserId: a.actorUserId,
+      principalKey: a.principalKey, now: now + 2, deadlineAt: Date.now() + 2_000 });
+    const receipt = receiptFixture(a, now);
+    await runtime.receipts.reserve(receipt);
+    await runtime.receipts.beginDispatch(receipt.id, now + 3);
+    await runtime.receipts.uncertain(receipt.id, "provider_outcome_unknown", now + 4);
+    await runtime.approvals.uncertain({ approvalId: a.id, receiptId: receipt.id, now: now + 5 });
+    const fresh = approvalFixture(now + 6, { toolId: a.toolId, intentHash,
+      providerConnectionId: a.providerConnectionId,
+      manifestHash: `sha256-${"f".repeat(64)}` });
+    expect((await runtime.approvals.create(fresh)).id).toBe(a.id);
+    await expect(runtime.approvals.reconcile({ approvalId: a.id, actorUserId: "wrong_actor",
+      principalKey: a.principalKey, decision: "effect_absent", now: now + 7 }))
+      .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    await expect(runtime.approvals.reconcile({ approvalId: a.id, actorUserId: a.actorUserId,
+      principalKey: a.principalKey, decision: "effect_absent", now: now + 7 }))
+      .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    const observer = new Client({ connectionString: connectionString! });
+    await observer.connect();
+    try {
+      await observer.query(`UPDATE omr_control.execution_receipts
+        SET error_code = 'provider_response_ambiguous' WHERE id = $1`, [receipt.id]);
+    } finally {
+      await observer.end();
+    }
+    const reconciled = await runtime.approvals.reconcile({ approvalId: a.id,
+      actorUserId: a.actorUserId, principalKey: a.principalKey,
+      decision: "effect_absent", now: now + 8 });
+    expect(reconciled).toMatchObject({ status: "failed", reconciledAs: "effect_absent" });
+    expect((await runtime.approvals.create(second)).id).toBe(a.id);
+    expect((await runtime.approvals.create(fresh)).id).toBe(a.id);
+    const afterAbsent = approvalFixture(now + 9, { toolId: a.toolId, intentHash,
+      providerConnectionId: a.providerConnectionId, manifestHash: fresh.manifestHash });
+    expect((await runtime.approvals.create(afterAbsent)).id).toBe(afterAbsent.id);
+    expect((await runtime.receipts.findByIdempotency({ workspaceId,
+      principalKey: a.principalKey, idempotencyKey: a.idempotencyKey }))?.status).toBe("uncertain");
+  });
+
+  it.each(["effect_present", "effect_absent"] as const)(
+    "does not reconcile %s after membership deletion wins the row lock", async (decision) => {
+      const { approval, now } = await uncertainLinearApproval("linear.issues.create");
+      const revoker = new Client({ connectionString: connectionString! });
+      await revoker.connect();
+      let pending: Promise<unknown> | undefined;
+      try {
+        await revoker.query("BEGIN");
+        await revoker.query(`DELETE FROM omr_control.workspace_memberships
+          WHERE workspace_id = $1 AND user_id = 'execution_owner'`, [workspaceId]);
+        const revokerPid = (await revoker.query<{ pid: number }>(
+          "SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+        pending = runtime.approvals.reconcile({ approvalId: approval.id,
+          actorUserId: "execution_owner", principalKey: "web:execution_owner", decision, now: now + 6 })
+          .then(() => null, (error: unknown) => error);
+        await blockedBackend(revoker, revokerPid, "UPDATE omr_control.execution_approvals AS approval");
+        await revoker.query("COMMIT");
+        await expect(pending).resolves.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+        const state = await revoker.query<{ status: string; reconciled_as: string | null }>(
+          `SELECT status, reconciled_as FROM omr_control.execution_approvals WHERE id = $1`, [approval.id]);
+        expect(state.rows[0]).toEqual({ status: "uncertain", reconciled_as: null });
+        const membership = await revoker.query<{ count: string }>(
+          `SELECT count(*)::text AS count FROM omr_control.workspace_memberships
+           WHERE workspace_id = $1 AND user_id = 'execution_owner'`, [workspaceId]);
+        expect(membership.rows[0]?.count).toBe("0");
+      } finally {
+        await revoker.query("ROLLBACK").catch(() => undefined);
+        if (pending) await Promise.allSettled([pending]);
+        await revoker.query(`INSERT INTO omr_control.workspace_memberships
+          (id, workspace_id, user_id, role, created_at, updated_at)
+          VALUES ($1, $2, 'execution_owner', 'member', $3, $3) ON CONFLICT DO NOTHING`,
+        [`membership_${crypto.randomUUID()}`, workspaceId, Date.now()]);
+        await revoker.end();
+      }
+    }, 12_000);
+
+  it.each(["effect_present", "effect_absent"] as const)(
+    "finishes %s before a later membership deletion can commit", async (decision) => {
+      const { approval, now } = await uncertainLinearApproval("linear.issues.update");
+      const blocker = new Client({ connectionString: connectionString! });
+      const revoker = new Client({ connectionString: connectionString! });
+      await blocker.connect();
+      await revoker.connect();
+      const pauseKey = crypto.getRandomValues(new Uint32Array(1))[0]! & 0x7fff_ffff;
+      const trigger = `omr9_pause_${crypto.randomUUID().replaceAll("-", "")}`;
+      let pending: Promise<unknown> | undefined;
+      let deletion: Promise<unknown> | undefined;
+      try {
+        await blocker.query(`CREATE FUNCTION omr_control.${trigger}() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN IF NEW.id = '${approval.id}' AND NEW.reconciled_as IS NOT NULL THEN
+            PERFORM pg_advisory_xact_lock(${pauseKey}); END IF; RETURN NEW; END $$`);
+        await blocker.query(`CREATE TRIGGER ${trigger} BEFORE UPDATE ON omr_control.execution_approvals
+          FOR EACH ROW EXECUTE FUNCTION omr_control.${trigger}()`);
+        await blocker.query("SELECT pg_advisory_lock($1)", [pauseKey]);
+        const blockerPid = (await blocker.query<{ pid: number }>(
+          "SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+        pending = runtime.approvals.reconcile({ approvalId: approval.id,
+          actorUserId: "execution_owner", principalKey: "web:execution_owner", decision, now: now + 6 });
+        void pending.catch(() => undefined);
+        const reconcilePid = await blockedBackend(blocker, blockerPid,
+          "UPDATE omr_control.execution_approvals AS approval");
+        await revoker.query("BEGIN");
+        deletion = revoker.query(`DELETE FROM omr_control.workspace_memberships
+          WHERE workspace_id = $1 AND user_id = 'execution_owner'`, [workspaceId]);
+        void deletion.catch(() => undefined);
+        await blockedBackend(blocker, reconcilePid,
+          "DELETE FROM omr_control.workspace_memberships");
+        await blocker.query("SELECT pg_advisory_unlock($1)", [pauseKey]);
+        await expect(pending).resolves.toMatchObject({
+          status: decision === "effect_present" ? "consumed" : "failed", reconciledAs: decision,
+        });
+        await deletion;
+        await revoker.query("COMMIT");
+        const state = await revoker.query<{ status: string; reconciled_as: string }>(
+          `SELECT status, reconciled_as FROM omr_control.execution_approvals WHERE id = $1`, [approval.id]);
+        expect(state.rows[0]).toEqual({
+          status: decision === "effect_present" ? "consumed" : "failed", reconciled_as: decision,
+        });
+        const membership = await revoker.query<{ count: string }>(
+          `SELECT count(*) FROM omr_control.workspace_memberships
+           WHERE workspace_id = $1 AND user_id = 'execution_owner'`, [workspaceId]);
+        expect(membership.rows[0]?.count).toBe("0");
+      } finally {
+        await blocker.query("SELECT pg_advisory_unlock($1)", [pauseKey]).catch(() => undefined);
+        await revoker.query("ROLLBACK").catch(() => undefined);
+        await Promise.allSettled([pending, deletion].filter((operation) => operation !== undefined));
+        await revoker.query(`INSERT INTO omr_control.workspace_memberships
+          (id, workspace_id, user_id, role, created_at, updated_at)
+          VALUES ($1, $2, 'execution_owner', 'member', $3, $3) ON CONFLICT DO NOTHING`,
+        [`membership_${crypto.randomUUID()}`, workspaceId, Date.now()]);
+        await blocker.query(`DROP TRIGGER IF EXISTS ${trigger} ON omr_control.execution_approvals`);
+        await blocker.query(`DROP FUNCTION IF EXISTS omr_control.${trigger}()`);
+        await blocker.end();
+        await revoker.end();
+      }
+    }, 12_000);
+
+  it("retains a coalesced key after settlement while allowing a deliberate new action", async () => {
+    const now = Date.now();
+    const intentHash = `hmac-sha256-${"c".repeat(64)}`;
+    const first = approvalFixture(now, { toolId: "linear.issues.update", intentHash,
+      providerConnectionId: "remote_linear_one" });
+    const retry = approvalFixture(now + 1, { toolId: first.toolId, intentHash,
+      providerConnectionId: first.providerConnectionId });
+    const initial = await runtime.approvals.create(first);
+    expect((await runtime.approvals.create(retry)).id).toBe(initial.id);
+    const client = new Client({ connectionString: connectionString! });
+    await client.connect();
+    try {
+      await client.query(`UPDATE omr_control.execution_approvals SET status = 'consumed' WHERE id = $1`,
+        [initial.id]);
+    } finally {
+      await client.end();
+    }
+    expect(await runtime.approvals.create(retry)).toMatchObject({ id: initial.id, status: "consumed" });
+    const deliberate = approvalFixture(now + 2, { toolId: first.toolId, intentHash,
+      providerConnectionId: first.providerConnectionId });
+    expect((await runtime.approvals.create(deliberate)).id).toBe(deliberate.id);
+  });
+
+  it("reports an expired key and replaces a stale pending manifest before dispatch", async () => {
+    const now = Date.now();
+    const intentHash = `hmac-sha256-${"b".repeat(64)}`;
+    const expired = approvalFixture(now, { toolId: "linear.issues.create", intentHash,
+      providerConnectionId: "remote_linear_one", expiresAt: now + 1 });
+    await runtime.approvals.create(expired);
+    const oldKeyRetry = approvalFixture(now + 2, { ...expired, id: `approval_${crypto.randomUUID()}`,
+      createdAt: now + 2, updatedAt: now + 2 });
+    expect((await runtime.approvals.create(oldKeyRetry)).status).toBe("expired");
+    const next = approvalFixture(now + 3, { toolId: expired.toolId, intentHash,
+      providerConnectionId: expired.providerConnectionId });
+    expect((await runtime.approvals.create(next)).id).toBe(next.id);
+    const changedManifest = approvalFixture(now + 4, { toolId: expired.toolId, intentHash,
+      providerConnectionId: expired.providerConnectionId,
+      manifestHash: `sha256-${"e".repeat(64)}` });
+    expect((await runtime.approvals.create(changedManifest)).id).toBe(changedManifest.id);
+    expect((await runtime.approvals.getForActor(next.id, next.actorUserId)).status).toBe("failed");
   });
 
   it("reserves idempotently and encrypts successful results at rest", async () => {

@@ -49,10 +49,13 @@ async function fixture() {
   let catalogHeld = false;
   let selectionOverride: Record<string, unknown> | undefined;
   let approvalStatus: string = "pending";
+  let reconciledAs: string | undefined;
+  let reconciliationReplyLost = false;
   let expiresAt = Date.now() + 600_000;
   const malformedSuccess = new Map<string, "json" | "empty" | "shape">();
   const successOverride = new Map<string, unknown>();
-  const failureReply = new Map<string, { status: number; body: unknown; committed: boolean }>();
+  const failureReply = new Map<string, { status: number; body: unknown; committed: boolean;
+    headers?: Record<string, string> }>();
   const committedMutations: { path: string; identity: unknown }[] = [];
   const interrupted = new Map<string, string>();
   const server = createServer(async (request, response) => {
@@ -61,10 +64,13 @@ async function fixture() {
     for await (const chunk of request) raw += chunk.toString();
     const body = raw ? JSON.parse(raw) as Record<string, unknown> : undefined;
     calls.push({ path, url: request.url!, body, authorization: request.headers.authorization });
-    const answer = (status: number, value: unknown) => {
-      response.writeHead(status, { "content-type": "application/json" });
+    const answer = (status: number, value: unknown, headers: Record<string, string> = {}) => {
+      response.writeHead(status, { "content-type": "application/json", ...headers });
       response.end(JSON.stringify(value));
     };
+    if (path === "/api/approvals/reconcile" && approvalStatus !== "uncertain") {
+      return answer(409, { error: "APPROVAL_UNAVAILABLE" });
+    }
     const malformed = malformedSuccess.get(path);
     if (malformed) {
       response.writeHead(path === "/api/approvals" ? 201 : 200, { "content-type": "application/json" });
@@ -86,7 +92,7 @@ async function fixture() {
       const failure = failureReply.get(path);
       if (failure) {
         if (failure.committed) committedMutations.push({ path, identity: body?.deviceCode });
-        return answer(failure.status, failure.body);
+        return answer(failure.status, failure.body, failure.headers);
       }
     }
     if (path === "/api/device/token") return answer(200, deviceReply ?? {
@@ -100,7 +106,7 @@ async function fixture() {
     if (failure) {
       if (failure.committed) committedMutations.push({ path, identity: path === "/api/approvals/execute"
         ? body?.approvalId : body?.idempotencyKey });
-      return answer(failure.status, failure.body);
+      return answer(failure.status, failure.body, failure.headers);
     }
     if (path === "/api/client-grants/revoke-self") {
       if (revokeHeld) await new Promise<void>((resolve) => { releaseRevoke = resolve; });
@@ -156,7 +162,21 @@ async function fixture() {
         status: approvalStatus, expiresAt });
     }
     if (path === "/api/approvals/status") return answer(200, { id: "approval_1", workspaceId: "workspace_1",
-      toolId: "linear.write", connectionId: "connection_1", status: approvalStatus, expiresAt });
+      toolId: "linear.write", connectionId: "connection_1", status: approvalStatus, reconciledAs, expiresAt });
+    if (path === "/api/approvals/reconcile") {
+      if (reconciliationReplyLost) {
+        reconciledAs = String(body?.decision);
+        approvalStatus = reconciledAs === "effect_present" ? "consumed" : "failed";
+        request.socket.destroy(); return;
+      }
+      reconciledAs = String(body?.decision);
+      approvalStatus = reconciledAs === "effect_present" ? "consumed" : "failed";
+      return answer(200, {
+      id: body?.approvalId, workspaceId: "workspace_1", toolId: "linear.write",
+      status: body?.decision === "effect_present" ? "consumed" : "failed",
+      reconciledAs: body?.decision, expiresAt,
+    });
+    }
     if (path === "/api/approvals/execute") {
       if (approvalStatus === "executing") return answer(409,
         { error: "EXECUTION_IN_PROGRESS", receiptId: "receipt_approved_running" });
@@ -198,8 +218,9 @@ async function fixture() {
     failAfterCommit: (path: string, status: number, body: unknown) => {
       failureReply.set(path, { status, body, committed: true });
     },
-    failureResponse: (path: string, status: number, body: unknown) => {
-      failureReply.set(path, { status, body, committed: false });
+    failureResponse: (path: string, status: number, body: unknown,
+      headers?: Record<string, string>) => {
+      failureReply.set(path, { status, body, committed: false, headers });
     },
     clearFailureResponse: () => failureReply.clear(),
     committedMutations,
@@ -214,8 +235,9 @@ async function fixture() {
     emptyCatalog: () => { emptyCatalog = true; },
     setGrantWorkspace: (value: string) => { grantWorkspace = value; },
     setApproval: (status: string, expiry = Date.now() + 600_000) => {
-    approvalStatus = status; expiresAt = expiry;
-  }, revoke: () => { revoked = true; } };
+    approvalStatus = status; reconciledAs = undefined; expiresAt = expiry;
+  }, loseReconciliationReply: () => { reconciliationReplyLost = true; },
+    revoke: () => { revoked = true; } };
 }
 
 // These contracts launch multiple CLI processes per case; parallel suites can delay their startup.
@@ -490,6 +512,65 @@ describe("cli-command-contract", { timeout: 15_000 }, () => {
     expect(lastError(lostAutomatic.stderr)).toMatchObject({ error: "APPROVAL_DELIVERY_UNCERTAIN",
       details: { idempotencyKey: expect.any(String) } });
     expect(errorDetails(lostAutomatic.stderr).idempotencyKey).toMatch(/^[a-f0-9-]{36}$/);
+  });
+
+  it("validates reconciliation identity and reports effect-absent as a failed action", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    f.setApproval("uncertain");
+    const absent = await f.run(["approvals", "reconcile", "approval_1", "--decision", "effect_absent", "--json"], env);
+    expect(absent.code).toBe(1);
+    expect(JSON.parse(absent.stdout)).toMatchObject({ id: "approval_1", status: "failed",
+      reconciledAs: "effect_absent" });
+    f.setApproval("uncertain");
+    const present = await f.run(["approvals", "reconcile", "approval_1", "--decision", "effect_present", "--json"], env);
+    expect(present.code).toBe(0);
+    f.successReply("/api/approvals/reconcile", { id: "another", workspaceId: "workspace_1",
+      toolId: "linear.write", status: "consumed", expiresAt: Date.now() + 600_000 });
+    f.setApproval("uncertain");
+    expect((await f.run(["approvals", "reconcile", "approval_1", "--decision", "effect_present", "--json"], env)).code)
+      .not.toBe(0);
+    expect(f.calls.filter((call) => call.path === "/api/approvals/reconcile")).toHaveLength(3);
+  });
+
+  it("recovers a committed reconciliation after response loss and labels unresolved replies uncertain", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    f.setApproval("uncertain");
+    f.loseReconciliationReply();
+    const recovered = await f.run(["approvals", "reconcile", "approval_1", "--decision", "effect_present", "--json"], env);
+    expect(recovered.code).toBe(0);
+    expect(JSON.parse(recovered.stdout)).toMatchObject({ status: "consumed", reconciledAs: "effect_present" });
+
+    const absentFixture = await fixture();
+    absentFixture.setApproval("uncertain");
+    absentFixture.loseReconciliationReply();
+    const absent = await absentFixture.run(["approvals", "reconcile", "approval_1", "--decision", "effect_absent", "--json"],
+      { OMR_BACKEND: absentFixture.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" });
+    expect(absent.code).toBe(1);
+    expect(JSON.parse(absent.stdout)).toMatchObject({ status: "failed", reconciledAs: "effect_absent" });
+
+    const g = await fixture();
+    g.setApproval("uncertain");
+    g.failureResponse("/api/approvals/reconcile", 503, { error: "SERVER_UNAVAILABLE" });
+    const uncertain = await g.run(["approvals", "reconcile", "approval_1", "--decision", "effect_absent", "--json"],
+      { OMR_BACKEND: g.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" });
+    expect(uncertain.code).toBe(23);
+    expect(lastError(uncertain.stderr)).toMatchObject({ error: "APPROVAL_RECONCILIATION_UNCERTAIN",
+      details: { approvalId: "approval_1", decision: "effect_absent" } });
+    expect(g.calls.map((call) => call.path)).toContain("/api/approvals/status");
+
+    const h = await fixture();
+    h.setApproval("uncertain");
+    h.successReply("/api/approvals/reconcile", { id: "approval_1", workspaceId: "workspace_1",
+      toolId: "linear.write", status: "consumed", expiresAt: Date.now() + 600_000 });
+    h.successReply("/api/approvals/status", { id: "approval_1", workspaceId: "workspace_1",
+      toolId: "linear.write", status: "consumed", reconciledAs: "effect_present",
+      expiresAt: Date.now() + 600_000 });
+    const malformed = await h.run(["approvals", "reconcile", "approval_1", "--decision", "effect_present", "--json"],
+      { OMR_BACKEND: h.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" });
+    expect(malformed.code).toBe(0);
+    expect(JSON.parse(malformed.stdout)).toMatchObject({ reconciledAs: "effect_present" });
   });
 
   it("emits a generated retry key before dispatch and replays it after an interrupted run", async () => {
@@ -1449,6 +1530,66 @@ syncBuiltinESMExports();
     expect(unknown.code).toBe(23);
     expect(lastError(unknown.stderr)).toMatchObject({ error: "EXECUTION_OUTCOME_UNKNOWN",
       details: { approvalId: "approval_1", receiptId: "receipt_approved_uncertain" } });
+  });
+
+  it("keeps typed Linear rate and permission denials across read, approval, and approved execution", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    const cases = [
+      { path: "/api/tools/execute", args: ["tools", "run", "linear.read"],
+        status: 429, code: "LINEAR_RATE_LIMITED", headers: { "retry-after": "17",
+          "x-ratelimit-requests-reset": "1800000000000" } },
+      { path: "/api/approvals", args: ["approvals", "request", "linear.write", "--idempotency", "linear-denial"],
+        status: 403, code: "LINEAR_PERMISSION_DENIED", headers: {} },
+      { path: "/api/approvals", args: ["approvals", "request", "linear.write", "--idempotency", "linear-query"],
+        status: 502, code: "LINEAR_QUERY_REJECTED", headers: {} },
+      { path: "/api/approvals/execute", args: ["approvals", "execute", "approval_1"],
+        status: 401, code: "LINEAR_RECONNECT_REQUIRED", headers: {} },
+      { path: "/api/approvals/execute", args: ["approvals", "execute", "approval_1"],
+        status: 502, code: "LINEAR_QUERY_REJECTED", headers: {} },
+      { path: "/api/approvals", args: ["approvals", "request", "linear.write", "--idempotency", "linear-reservation"],
+        status: 503, code: "LINEAR_INTENT_TRANSACTION_REQUIRED", headers: {} },
+      { path: "/api/tools/execute", args: ["tools", "run", "linear.read", "--idempotency", "linear-direct"],
+        status: 503, code: "LINEAR_INTENT_TRANSACTION_REQUIRED", headers: {} },
+      { path: "/api/approvals/execute", args: ["approvals", "execute", "approval_1"],
+        status: 503, code: "LINEAR_INTENT_TRANSACTION_REQUIRED", headers: {} },
+    ] as const;
+    for (const item of cases) {
+      f.failureResponse(item.path, item.status,
+        { error: item.code, message: "private provider response" }, item.headers);
+      for (const json of [false, true]) {
+        const reply = await f.run([...item.args, ...(json ? ["--json"] : [])], env);
+        expect(reply.code).toBe(item.status === 401 ? 3 : 1);
+        expect(reply.stdout + reply.stderr).not.toContain("private provider response");
+        expect(reply.stderr).toContain(item.code);
+        if (item.code === "LINEAR_INTENT_TRANSACTION_REQUIRED") {
+          expect(reply.stderr).toContain("no issue change was sent");
+          expect(reply.stderr).toContain(item.path === "/api/approvals/execute" ? "approval_1"
+            : item.path === "/api/approvals" ? "linear-reservation" : "linear-direct");
+        }
+        if (json) {
+          const body = lastError(reply.stderr);
+          expect(body.error).toBe(item.code);
+          if (item.code === "LINEAR_INTENT_TRANSACTION_REQUIRED") {
+            expect(body.message).toContain("no issue change was sent");
+            expect(body.details).toEqual(item.path === "/api/approvals/execute"
+              ? { approvalId: "approval_1" }
+              : { idempotencyKey: item.path === "/api/approvals" ? "linear-reservation" : "linear-direct" });
+          }
+          if (item.code === "LINEAR_RATE_LIMITED") expect(body.details).toEqual({
+            retryAfterSeconds: 17, rateLimitResetAt: 1800000000000,
+          });
+        } else if (item.code === "LINEAR_RATE_LIMITED") {
+          expect(reply.stderr).toContain('"retryAfterSeconds":17');
+        }
+      }
+      f.clearFailureResponse();
+    }
+    f.failureResponse("/api/tools/execute", 403, { error: "LINEAR_PRIVATE_PROVIDER_SECRET" });
+    const unknown = await f.run(["tools", "run", "linear.read", "--json"], env);
+    expect(lastError(unknown.stderr).error).toBe("HTTP_ERROR");
+    expect(unknown.stderr).not.toContain("LINEAR_PRIVATE_PROVIDER_SECRET");
+    expect(f.committedMutations).toEqual([]);
   });
 
   it("preserves a proven GitHub preflight failure across both execution commands", async () => {

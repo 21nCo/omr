@@ -127,8 +127,8 @@ describe("OMR Worker HTTP boundary", () => {
   it("exposes an authenticated control-plane projection and team creation route", async () => {
     const calls: unknown[] = [];
     const controlPlane: ControlPlaneRouteServices = {
-      async overview(_request, workspaceId) {
-        calls.push({ operation: "overview", workspaceId });
+      async overview(_request, workspaceId, approvalId) {
+        calls.push({ operation: "overview", workspaceId, approvalId });
         return { selectedWorkspaceId: workspaceId, workspaces: [] };
       },
       async createTeam(_request, name) {
@@ -153,7 +153,7 @@ describe("OMR Worker HTTP boundary", () => {
     );
 
     const overview = await controlRouter.handle(new Request(
-      "https://omr.invalid/api/control-plane?workspaceId=workspace_1",
+      "https://omr.invalid/api/control-plane?workspaceId=workspace_1&approvalId=approval_old",
     ));
     const created = await controlRouter.handle(new Request(
       "https://omr.invalid/api/workspaces/team",
@@ -182,7 +182,7 @@ describe("OMR Worker HTTP boundary", () => {
     expect(grants.headers.get("cache-control")).toBe("no-store");
     expect(revoked.status).toBe(200);
     expect(calls).toEqual([
-      { operation: "overview", workspaceId: "workspace_1" },
+      { operation: "overview", workspaceId: "workspace_1", approvalId: "approval_old" },
       { operation: "create-team", name: "Runtime Team" },
       { operation: "list-manual-grants", cursor: "123:grant_1" },
       { operation: "revoke-manual-client", clientId: "client_1" },
@@ -315,6 +315,16 @@ describe("OMR Worker HTTP boundary", () => {
       redirectUri: "https://omr.invalid/app/oauth/callback", label: "GitHub",
       githubAccess: "repo admin",
     });
+    const linearOAuth = await request("/api/connections/oauth/start", {
+      workspaceId: "workspace_1", provider: "linear", ownership: "personal",
+      redirectUri: "https://omr.invalid/app/oauth/callback", label: "Linear",
+      linearAccess: "issue_write",
+    });
+    const invalidLinearOAuth = await request("/api/connections/oauth/start", {
+      workspaceId: "workspace_1", provider: "linear", ownership: "personal",
+      redirectUri: "https://omr.invalid/app/oauth/callback", label: "Linear",
+      linearAccess: "admin",
+    });
     const health = await request("/api/connections/health", { connectionId: "connection_key" });
     const selection = await request("/api/connections/select", {
       workspaceId: "workspace_1", provider: "linear", connectionId: "connection_key",
@@ -333,6 +343,11 @@ describe("OMR Worker HTTP boundary", () => {
     expect(apiKey.status).toBe(201);
     expect(oauth.status).toBe(201);
     expect(invalidOAuth.status).toBe(400);
+    expect(linearOAuth.status).toBe(201);
+    expect(invalidLinearOAuth.status).toBe(400);
+    expect(calls).toContainEqual({ operation: "oauth-start", input: expect.objectContaining({
+      provider: "linear", linearAccess: "issue_write",
+    }) });
     expect(calls).toContainEqual({ operation: "oauth-start", input: expect.objectContaining({
       provider: "github", githubAccess: "public_write",
     }) });
@@ -660,18 +675,29 @@ describe("OMR Worker HTTP boundary", () => {
 
   it("routes approval status and self-revocation with private responses", async () => {
     const calls: string[] = [];
-    const execution = { approvalStatus: async (_request: Request, id: string) => {
-      calls.push(`status:${id}`); return { id, status: "pending" };
+    const execution = { approvalStatus: async (_request: Request, id: string, workspaceId?: string) => {
+      calls.push(`status:${id}:${workspaceId ?? ""}`); return { id, status: "pending" };
+    }, reconcileUncertain: async (_request: Request, id: string, decision: string, workspaceId?: string) => {
+      calls.push(`reconcile:${id}:${decision}:${workspaceId ?? ""}`);
+      return { id, status: "consumed", reconciledAs: decision };
     } } as ExecutionRouteServices;
     const control = { revokeSelf: async (request: Request) => {
       calls.push(`revoke:${request.headers.get("authorization")}`);
       return { revoked: true };
     } } as ControlPlaneRouteServices;
     const tested = createOMRRouter(undefined, undefined, undefined, execution, control);
-    const status = await tested.handle(new Request("https://omr.invalid/api/approvals/status?approvalId=approval_1"));
+    const status = await tested.handle(new Request(
+      "https://omr.invalid/api/approvals/status?approvalId=approval_1&workspaceId=workspace_1"));
     expect(status.status).toBe(200);
     expect(status.headers.get("cache-control")).toBe("no-store");
     await expect(status.json()).resolves.toMatchObject({ id: "approval_1", status: "pending" });
+    const reconciled = await tested.handle(new Request("https://omr.invalid/api/approvals/reconcile", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ approvalId: "approval_1", decision: "effect_present", workspaceId: "workspace_1" }),
+    }));
+    expect(reconciled.status).toBe(200);
+    expect(reconciled.headers.get("cache-control")).toBe("no-store");
+    await expect(reconciled.json()).resolves.toMatchObject({ status: "consumed", reconciledAs: "effect_present" });
     const revoked = await tested.handle(new Request("https://omr.invalid/api/client-grants/revoke-self", {
       method: "POST", headers: { authorization: "Bearer fixture", "content-type": "application/json" },
       body: "{}",
@@ -679,7 +705,8 @@ describe("OMR Worker HTTP boundary", () => {
     expect(revoked.status).toBe(200);
     expect(revoked.headers.get("cache-control")).toBe("no-store");
     await expect(revoked.json()).resolves.toEqual({ revoked: true });
-    expect(calls).toEqual(["status:approval_1", "revoke:Bearer fixture"]);
+    expect(calls).toEqual(["status:approval_1:workspace_1",
+      "reconcile:approval_1:effect_present:workspace_1", "revoke:Bearer fixture"]);
   });
 
 });

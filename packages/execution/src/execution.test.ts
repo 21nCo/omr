@@ -52,6 +52,7 @@ async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes: st
       actions: {
         get_issue: action("get_issue", "read"),
         create_issue: action("create_issue", "write"),
+        update_issue: action("update_issue", "write"),
         typed_write: { ...action("typed_write", "write"), parameters: {
           type: "object", required: ["title"], properties: { title: { type: "string", minLength: 1 } },
           additionalProperties: false,
@@ -187,6 +188,68 @@ describe("execution service", () => {
       .rejects.toMatchObject({ code: "EXECUTION_CAPABILITY_DENIED" });
     workspaceStore.removeMembership(workspace.id, principal.userId);
     await expect(service.approvalStatus(principal, approval.id))
+      .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+  });
+
+  it.each(["linear.create_issue", "linear.update_issue"] as const)(
+    "recovers a lost %s reconciliation response for both decisions without another provider call", async (toolId) => {
+      for (const decision of ["effect_present", "effect_absent"] as const) {
+        const { actionCall, approvals, receipts, service, workspace, workspaceStore } = await fixture();
+        const principal = { kind: "client" as const, userId: "user_1", workspaceId: workspace.id,
+          clientId: "client_1", grantId: "grant_1", capabilities: ["tools:write", "approvals:create"] as
+            ("tools:write" | "approvals:create")[] };
+        const approval = await requestApproval(service, { principal, toolId, params: {} });
+        const receipt = { ...receiptForApproval(approval, "uncertain"),
+          errorCode: "provider_response_ambiguous" };
+        receipts.receipts.set(receipt.id, receipt);
+        approvals.approvals.set(approval.id, { ...approval, status: "uncertain",
+          executionReceiptId: receipt.id });
+
+        const [first, concurrent] = await Promise.all([
+          service.reconcileUncertain(principal, approval.id, decision),
+          service.reconcileUncertain(principal, approval.id, decision),
+        ]);
+        expect(first).toMatchObject({ id: approval.id, reconciledAs: decision,
+          status: decision === "effect_present" ? "consumed" : "failed" });
+        expect(concurrent).toMatchObject({ id: approval.id, reconciledAs: decision });
+        expect(await service.approvalStatus(principal, approval.id)).toMatchObject({
+          reconciledAs: decision, executionReceiptId: receipt.id });
+        expect(await service.reconcileUncertain(principal, approval.id, decision))
+          .toMatchObject({ reconciledAs: decision });
+        await expect(service.reconcileUncertain(principal, approval.id,
+          decision === "effect_present" ? "effect_absent" : "effect_present"))
+          .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+        for (const other of [
+          { ...principal, grantId: "grant_2" },
+          { ...principal, workspaceId: "other_workspace" },
+          { ...principal, userId: "other_actor" },
+        ]) {
+          await expect(service.approvalStatus(other, approval.id))
+            .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+          await expect(service.reconcileUncertain(other, approval.id, decision))
+            .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+        }
+        workspaceStore.removeMembership(workspace.id, principal.userId);
+        await expect(service.reconcileUncertain(principal, approval.id, decision))
+          .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+        expect(actionCall).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it("keeps browser reconciliation readback in its selected workspace", async () => {
+    const { approvals, receipts, service, workspace } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const approval = await requestApproval(service, { principal, toolId: "linear.create_issue", params: {} });
+    const receipt = { ...receiptForApproval(approval, "uncertain"),
+      errorCode: "provider_response_ambiguous" };
+    receipts.receipts.set(receipt.id, receipt);
+    approvals.approvals.set(approval.id, { ...approval, status: "uncertain", executionReceiptId: receipt.id });
+    await service.reconcileUncertain(principal, approval.id, "effect_present");
+    const otherWorkspace = { ...principal, workspaceId: "other_workspace" };
+    await expect(service.approvalStatus(otherWorkspace, approval.id))
+      .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    await expect(service.reconcileUncertain(otherWorkspace, approval.id, "effect_present"))
       .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
   });
 

@@ -4,7 +4,7 @@ import {
   ConnectionUnavailableError, isMissingRemoteConnection, markMissingRemoteConnection,
   type ConnectionAuthority, type ConnectionBindingRecord,
 } from "@oh-my-router/connections";
-import { ConfirmedGitHubWriteRejection, githubHttpFailure, hasRequiredScopes, ProviderPreflightError, type GitHubHttpFailure, type JsonValue, type ToolCatalog, type ToolManifest } from "@oh-my-router/tools";
+import { ConfirmedGitHubWriteRejection, githubHttpFailure, hasRequiredScopes, LinearProviderDenial, LinearProviderResponseAmbiguous, ProviderPreflightError, type GitHubHttpFailure, type JsonValue, type ToolCatalog, type ToolManifest } from "@oh-my-router/tools";
 import { approvalPreviewReady } from "./projection.js";
 
 export type ExecutionStatus = "reserved" | "running" | "succeeded" | "failed" | "uncertain";
@@ -18,6 +18,15 @@ export class ExecutionInvocationDeadlineError extends Error {
   constructor() {
     super("The invocation deadline expired");
     this.name = "ExecutionInvocationDeadlineError";
+  }
+}
+
+/** The approval store cannot reserve a Linear intent without an atomic transaction. */
+export class LinearIntentTransactionRequiredError extends Error {
+  readonly code = "LINEAR_INTENT_TRANSACTION_REQUIRED";
+  constructor() {
+    super("Linear intent reservation requires an owned transactional client");
+    this.name = "LinearIntentTransactionRequiredError";
   }
 }
 
@@ -89,6 +98,8 @@ export interface ExecutionReceipt {
 export interface ExecutionReceiptStore {
   findByIdempotency(input: { workspaceId: string; principalKey: string; idempotencyKey: string;
     deadlineAt?: number }): Promise<ExecutionReceipt | null>;
+  findForApproval(input: { workspaceId: string; actorUserId: string; approvalId: string;
+    receiptId: string }): Promise<ExecutionReceipt | null>;
   reserve(receipt: ExecutionReceipt, deadlineAt?: number): Promise<{ receipt: ExecutionReceipt; created: boolean }>;
   beginDispatch(receiptId: string, now: number, deadlineAt?: number): Promise<void>;
   succeed(receiptId: string, result: JsonValue, now: number, deadlineAt?: number): Promise<ExecutionReceipt>;
@@ -108,7 +119,8 @@ export type ApprovalStatus =
   | "executing"
   | "uncertain"
   | "consumed"
-  | "failed";
+  | "failed"
+  | "expired";
 
 export interface ExecutionApproval {
   id: string;
@@ -122,6 +134,8 @@ export interface ExecutionApproval {
   params: JsonValue;
   idempotencyKey: string;
   requestHash?: string;
+  intentHash?: string;
+  reconciledAs?: "effect_present" | "effect_absent" | null;
   status: ApprovalStatus;
   approvedBy: string | null;
   decidedAt: number | null;
@@ -150,11 +164,16 @@ export interface ExecutionApprovalStore {
   uncertain(input: { approvalId: string; receiptId: string | null; now: number;
     deadlineAt?: number }): Promise<ExecutionApproval>;
   fail(input: { approvalId: string; now: number; deadlineAt?: number }): Promise<ExecutionApproval>;
+  reconcile(input: { approvalId: string; actorUserId: string; principalKey: string;
+    decision: "effect_present" | "effect_absent"; now: number }): Promise<ExecutionApproval>;
   listForActor(input: {
     workspaceId: string;
     actorUserId: string;
     limit: number;
   }): Promise<ExecutionApproval[]>;
+  /** A bounded page of actionable Linear approvals outside recent history. */
+  listOutstandingLinearForActor(input: { workspaceId: string; actorUserId: string;
+    now: number; limit: number }): Promise<ExecutionApproval[]>;
 }
 
 export interface PlugFnActionPort {
@@ -340,6 +359,20 @@ export class GitHubWriteRejectedError extends Error {
   }
 }
 
+/** Safe Linear denial tied to an execution receipt. */
+export class LinearExecutionError extends Error {
+  readonly code: LinearProviderDenial["code"];
+  readonly retryAfterSeconds?: number;
+  readonly rateLimitResetAt?: number;
+  constructor(readonly receiptId: string, denial: LinearProviderDenial) {
+    super(denial.message);
+    this.name = "LinearExecutionError";
+    this.code = denial.code;
+    this.retryAfterSeconds = denial.retryAfterSeconds;
+    this.rateLimitResetAt = denial.rateLimitResetAt;
+  }
+}
+
 const inputValidators = new Map<string, Validator>();
 
 /** Validate the submitted value against the exact manifest schema used for approval. */
@@ -512,6 +545,13 @@ export class ExecutionService {
       idempotencyKey,
       requestHash: await hashJson({ manifestHash: manifest.hash, connectionId: connection.id,
         params, ttlMs }, this.fingerprintKey),
+      // Independent approval keys must not create a second live Linear intent.
+      intentHash: (manifest.id === "linear.issues.create" || manifest.id === "linear.issues.update")
+        ? await hashJson({
+        principalKey: principalKey(input.principal), workspaceId: input.principal.workspaceId,
+        connectionId: connection.id, providerConnectionId: connection.providerConnectionId,
+        toolId: manifest.id, params,
+        }, this.fingerprintKey) : undefined,
       status: "pending",
       approvedBy: null,
       decidedAt: null,
@@ -551,6 +591,29 @@ export class ExecutionService {
       throw new ApprovalUnavailableError();
     }
     return approval;
+  }
+
+  /** Record an actor's explicit provider-side decision for an uncertain Linear write. */
+  async reconcileUncertain(principal: ExecutionPrincipal, approvalId: string,
+    decision: "effect_present" | "effect_absent"): Promise<ExecutionApproval> {
+    const approval = await this.approvalStatus(principal, approvalId);
+    if (!approval.toolId.startsWith("linear.") ||
+        !["effect_present", "effect_absent"].includes(decision)) throw new ApprovalUnavailableError();
+    const recorded = (value: ExecutionApproval) => value.reconciledAs === decision &&
+      value.status === (decision === "effect_present" ? "consumed" : "failed") &&
+      Boolean(value.executionReceiptId);
+    if (recorded(approval)) return approval;
+    if (approval.status !== "uncertain") throw new ApprovalUnavailableError();
+    try {
+      return await this.requiredApprovals().reconcile({ approvalId, actorUserId: principal.userId,
+        principalKey: principalKey(principal), decision, now: this.now() });
+    } catch (error) {
+      // Another request may have committed while this one waited for the row.
+      if (!(error instanceof ApprovalUnavailableError)) throw error;
+      const settled = await this.approvalStatus(principal, approvalId);
+      if (recorded(settled)) return settled;
+      throw error;
+    }
   }
 
   /** Consume one approved intent with receipt-backed, replay-safe settlement. */
@@ -622,6 +685,7 @@ export class ExecutionService {
           !(principal.kind === "web" && principal.workspaceId === ""))) {
       throw new ApprovalUnavailableError();
     }
+    if (prior.reconciledAs) throw new ApprovalUnavailableError();
     if (prior.status !== "consumed" && prior.status !== "uncertain" &&
         prior.status !== "executing") return null;
     let receipt = await withinInvocationDeadline(deadlineAt,
@@ -633,13 +697,8 @@ export class ExecutionService {
     if (!receipt || !matchesApprovalReceipt(receipt, prior)) {
       throw new ApprovalUnavailableError();
     }
-    if (prior.status === "executing" && prior.executionReceiptId === null &&
-        this.now() - prior.updatedAt >= EXECUTION_STALE_AFTER_MS) {
-      prior = await this.reconcileStaleEffect(approvals, principal, prior, receipt, deadlineAt);
-      // Completion may have committed while reconciliation waited. Decide from
-      // the current exact receipt, not the snapshot read before that wait.
-      receipt = await this.settledApprovedReceipt(prior, deadlineAt);
-    }
+    ({ approval: prior, receipt } = await this.refreshStaleApprovedReceipt(
+      approvals, principal, prior, receipt, deadlineAt));
     if (receipt.status === "running" || receipt.status === "uncertain") {
       const manifest = this.approvedManifest(principal, prior);
       const effectivePrincipal: ExecutionPrincipal = { ...principal, workspaceId: prior.workspaceId };
@@ -666,6 +725,17 @@ export class ExecutionService {
       if (authorizedResult) return authorizedResult;
       throw error;
     }
+  }
+
+  /** Refresh a stale claim after its exact receipt and approval settle together. */
+  private async refreshStaleApprovedReceipt(approvals: ExecutionApprovalStore,
+    principal: ExecutionPrincipal, approval: ExecutionApproval, receipt: ExecutionReceipt,
+    deadlineAt: number): Promise<{ approval: ExecutionApproval; receipt: ExecutionReceipt }> {
+    if (approval.status !== "executing" || approval.executionReceiptId !== null ||
+        this.now() - approval.updatedAt < EXECUTION_STALE_AFTER_MS) return { approval, receipt };
+    const settled = await this.reconcileStaleEffect(approvals, principal, approval, receipt, deadlineAt);
+    // Completion may have committed while reconciliation waited.
+    return { approval: settled, receipt: await this.settledApprovedReceipt(settled, deadlineAt) };
   }
 
   /** Read back the receipt associated with a claimed approval after reconciliation. */
@@ -863,7 +933,7 @@ export class ExecutionService {
       // already durable. A later guard COMMIT failure cannot erase that result.
       if (state.succeededReceipt) return state.succeededReceipt;
       if (error instanceof ConnectionUnavailableError || error instanceof GitHubReadError || error instanceof GitHubWritePreflightError ||
-          error instanceof GitHubWriteRejectedError) throw error;
+          error instanceof GitHubWriteRejectedError || error instanceof LinearExecutionError) throw error;
       if (state.dispatchedReceiptId &&
           !(error instanceof ExecutionOutcomeUnknownError)) {
         const receiptId = state.dispatchedReceiptId;
@@ -911,8 +981,10 @@ export class ExecutionService {
     if (confirmed && await this.failDispatchedReceipt(receipt.id, confirmed.code, cleanupDeadlineAt)) {
       throw confirmed.error;
     }
+    const code = error instanceof LinearProviderResponseAmbiguous
+      ? "provider_response_ambiguous" : "provider_outcome_unknown";
     await withinInvocationDeadline(cleanupDeadlineAt, () =>
-      this.receipts.uncertain(receipt.id, "provider_outcome_unknown", this.now(), cleanupDeadlineAt))
+      this.receipts.uncertain(receipt.id, code, this.now(), cleanupDeadlineAt))
       .catch(() => undefined);
     throw new ExecutionOutcomeUnknownError(receipt.id);
   }
@@ -1029,6 +1101,9 @@ function confirmedDispatchFailure(error: unknown, manifest: ToolManifest,
   }
   if (manifest.id === "github.issues.commentPublic" && error instanceof ConfirmedGitHubWriteRejection) {
     return { code: "github_write_rejected", error: new GitHubWriteRejectedError(receiptId, error.failure) };
+  }
+  if (manifest.provider === "linear" && error instanceof LinearProviderDenial) {
+    return { code: `linear_${error.phase}_denied`, error: new LinearExecutionError(receiptId, error) };
   }
   return null;
 }
