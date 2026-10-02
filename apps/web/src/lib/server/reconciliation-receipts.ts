@@ -1,12 +1,29 @@
-import { publicApproval, type ExecutionApproval, type ExecutionReceipt, type ExecutionReceiptStore } from "@oh-my-router/execution";
+import { ApprovalUnavailableError, publicApproval, type ExecutionApproval, type ExecutionApprovalStore,
+  type ExecutionReceipt, type ExecutionReceiptStore } from "@oh-my-router/execution";
 import type { ToolManifest } from "@oh-my-router/tools";
 
-/** Merge bounded history with every still-actionable Linear approval. */
-export function visibleApprovals<T extends Pick<ExecutionApproval, "id">>(
-  recent: readonly T[], outstandingLinear: readonly T[],
+/** Merge bounded history with actionable Linear approvals and one exact recovery. */
+export function visibleApprovals<T extends Pick<ExecutionApproval, "id" | "status" | "expiresAt">>(
+  recent: readonly T[], outstandingLinear: readonly T[], recovered: T | null, now: number,
 ): T[] {
-  return [...new Map([...recent, ...outstandingLinear]
+  return [...new Map([...recent, ...outstandingLinear, ...(recovered ? [recovered] : [])]
+    .filter((approval) => approval.status === "uncertain" ||
+      !["pending", "approved"].includes(approval.status) || approval.expiresAt > now)
     .map((approval) => [approval.id, approval])).values()];
+}
+
+/** Recover one older Linear approval without scanning the actor's history. */
+export async function recoverLinearApproval(
+  store: ExecutionApprovalStore, approvalId: string | undefined,
+  workspaceId: string, actorUserId: string, now: number,
+): Promise<ExecutionApproval | null> {
+  if (!approvalId) return null;
+  const approval = await store.getForActor(approvalId, actorUserId);
+  if (approval.workspaceId !== workspaceId || !approval.toolId.startsWith("linear.") ||
+      (approval.status !== "uncertain" &&
+        !((approval.status === "pending" || approval.status === "approved") &&
+          approval.expiresAt > now))) throw new ApprovalUnavailableError();
+  return approval;
 }
 
 /** Browser execution and reconciliation must use the approval's original principal. */
@@ -29,12 +46,8 @@ export async function linearReconciliationReceipts(
 ): Promise<ExecutionReceipt[]> {
   const uncertain = approvals.filter((approval) => approval.status === "uncertain" &&
     approval.toolId.startsWith("linear.") && approval.executionReceiptId);
-  const found: (ExecutionReceipt | null)[] = [];
-  // Older unresolved approvals are unbounded, so cap concurrent DB lookups.
-  for (let index = 0; index < uncertain.length; index += 8) {
-    found.push(...await Promise.all(uncertain.slice(index, index + 8).map((approval) =>
-      receipts.findForApproval({ workspaceId, actorUserId, approvalId: approval.id,
-        receiptId: approval.executionReceiptId! }))));
-  }
+  const found = await Promise.all(uncertain.map((approval) =>
+    receipts.findForApproval({ workspaceId, actorUserId, approvalId: approval.id,
+      receiptId: approval.executionReceiptId! })));
   return found.filter((receipt): receipt is ExecutionReceipt => receipt !== null);
 }

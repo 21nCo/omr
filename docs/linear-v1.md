@@ -55,9 +55,14 @@ approval before any later identical change; reconciliation itself never
 dispatches a mutation.
 An exact linked receipt may still say `running` when its final state could not
 be persisted. A verified effect-present decision can close that approval; the
-no-effect choice stays unavailable. The browser includes unresolved Linear
-approvals even when they fall outside its 50 most recent approvals, and fetches
-their exact receipts for reconciliation.
+no-effect choice stays unavailable. The browser shows at most 50 current
+unresolved Linear approvals alongside recent history. Expired pending and
+approved requests have no action buttons. To recover an older unresolved
+approval, enter its exact approval ID in **Find an older Linear approval by ID**;
+OMR checks the current actor and selected OMR workspace before showing that
+approval and its linked receipt. A repeated issue action also selects its
+original approval by ID. CLI and MCP clients use their approval status and
+reconciliation commands with the original grant.
 
 The browser retains a request key for the selected action while its form and
 account stay the same. Repeating that submission reports the original approval

@@ -136,7 +136,7 @@ export interface ExecutionRouteServices {
 }
 
 export interface ControlPlaneRouteServices {
-  overview(request: Request, workspaceId?: string): Promise<unknown>;
+  overview(request: Request, workspaceId?: string, approvalId?: string): Promise<unknown>;
   createTeam(request: Request, name: string): Promise<unknown>;
   listManualGrants(request: Request, cursor?: string): Promise<unknown>;
   revokeManualClient(request: Request, clientId: string): Promise<unknown>;
@@ -523,8 +523,10 @@ export function createOMRRouter(
         method: "GET",
         path: "/api/control-plane",
         handler: async (request) => {
-          const workspaceId = new URL(request.url).searchParams.get("workspaceId") ?? undefined;
-          return Response.json(await controlPlaneServices.overview(request, workspaceId), {
+          const params = new URL(request.url).searchParams;
+          const workspaceId = params.get("workspaceId") ?? undefined;
+          const approvalId = params.get("approvalId") ?? undefined;
+          return Response.json(await controlPlaneServices.overview(request, workspaceId, approvalId), {
             headers: PRIVATE_RESPONSE,
           });
         },

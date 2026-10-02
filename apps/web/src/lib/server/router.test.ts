@@ -127,8 +127,8 @@ describe("OMR Worker HTTP boundary", () => {
   it("exposes an authenticated control-plane projection and team creation route", async () => {
     const calls: unknown[] = [];
     const controlPlane: ControlPlaneRouteServices = {
-      async overview(_request, workspaceId) {
-        calls.push({ operation: "overview", workspaceId });
+      async overview(_request, workspaceId, approvalId) {
+        calls.push({ operation: "overview", workspaceId, approvalId });
         return { selectedWorkspaceId: workspaceId, workspaces: [] };
       },
       async createTeam(_request, name) {
@@ -153,7 +153,7 @@ describe("OMR Worker HTTP boundary", () => {
     );
 
     const overview = await controlRouter.handle(new Request(
-      "https://omr.invalid/api/control-plane?workspaceId=workspace_1",
+      "https://omr.invalid/api/control-plane?workspaceId=workspace_1&approvalId=approval_old",
     ));
     const created = await controlRouter.handle(new Request(
       "https://omr.invalid/api/workspaces/team",
@@ -182,7 +182,7 @@ describe("OMR Worker HTTP boundary", () => {
     expect(grants.headers.get("cache-control")).toBe("no-store");
     expect(revoked.status).toBe(200);
     expect(calls).toEqual([
-      { operation: "overview", workspaceId: "workspace_1" },
+      { operation: "overview", workspaceId: "workspace_1", approvalId: "approval_old" },
       { operation: "create-team", name: "Runtime Team" },
       { operation: "list-manual-grants", cursor: "123:grant_1" },
       { operation: "revoke-manual-client", clientId: "client_1" },

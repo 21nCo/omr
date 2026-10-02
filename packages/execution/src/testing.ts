@@ -29,12 +29,14 @@ export class MemoryExecutionReceiptStore implements ExecutionReceiptStore {
       ? structuredClone(receipt) : null;
   }
 
-  async findForApproval(input: { workspaceId: string; actorUserId: string; approvalId: string;
+  findForApproval(input: { workspaceId: string; actorUserId: string; approvalId: string;
     receiptId: string }): Promise<ExecutionReceipt | null> {
-    const receipt = this.receipts.get(input.receiptId);
-    return receipt?.workspaceId === input.workspaceId && receipt.actorUserId === input.actorUserId &&
-      receipt.approvalId === input.approvalId && this.isMember(input.workspaceId, input.actorUserId)
-      ? structuredClone(receipt) : null;
+    return Promise.resolve().then(() => {
+      const receipt = this.receipts.get(input.receiptId);
+      return receipt?.workspaceId === input.workspaceId && receipt.actorUserId === input.actorUserId &&
+        receipt.approvalId === input.approvalId && this.isMember(input.workspaceId, input.actorUserId)
+        ? structuredClone(receipt) : null;
+    });
   }
 
   async reserve(receipt: ExecutionReceipt): Promise<{ receipt: ExecutionReceipt; created: boolean }> {
@@ -390,14 +392,20 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
       .map((approval) => structuredClone(approval));
   }
 
-  async listOutstandingLinearForActor(input: { workspaceId: string; actorUserId: string }): Promise<ExecutionApproval[]> {
-    if (!this.isMember(input.workspaceId, input.actorUserId)) return [];
-    return [...this.approvals.values()]
-      .filter((approval) => approval.workspaceId === input.workspaceId &&
-        approval.actorUserId === input.actorUserId && approval.toolId.startsWith("linear.") &&
-        ["pending", "approved", "uncertain"].includes(approval.status))
-      .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id))
-      .map((approval) => structuredClone(approval));
+  listOutstandingLinearForActor(input: { workspaceId: string; actorUserId: string;
+    now: number; limit: number }): Promise<ExecutionApproval[]> {
+    return Promise.resolve().then(() => {
+      if (!this.isMember(input.workspaceId, input.actorUserId)) return [];
+      return [...this.approvals.values()]
+        .filter((approval) => approval.workspaceId === input.workspaceId &&
+          approval.actorUserId === input.actorUserId && approval.toolId.startsWith("linear.") &&
+          (approval.status === "uncertain" ||
+            ((approval.status === "pending" || approval.status === "approved") &&
+              approval.expiresAt > input.now)))
+        .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id))
+        .slice(0, input.limit)
+        .map((approval) => structuredClone(approval));
+    });
   }
 
   private pendingForActor(approvalId: string, actorUserId: string, now: number): ExecutionApproval {

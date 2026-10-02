@@ -171,8 +171,9 @@ export interface ExecutionApprovalStore {
     actorUserId: string;
     limit: number;
   }): Promise<ExecutionApproval[]>;
-  /** Actionable Linear approvals remain discoverable outside recent history. */
-  listOutstandingLinearForActor(input: { workspaceId: string; actorUserId: string }): Promise<ExecutionApproval[]>;
+  /** A bounded page of actionable Linear approvals outside recent history. */
+  listOutstandingLinearForActor(input: { workspaceId: string; actorUserId: string;
+    now: number; limit: number }): Promise<ExecutionApproval[]>;
 }
 
 export interface PlugFnActionPort {

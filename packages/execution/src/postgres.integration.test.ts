@@ -169,15 +169,18 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
   it.each(["effect_present", "effect_absent"] as const)(
     "keeps old uncertain Linear approvals and exact receipts available for %s", async (decision) => {
       const { approval, receipt } = await uncertainLinearApproval("linear.issues.update");
-      for (let index = 0; index < 51; index++) {
+      for (let index = 0; index < 75; index++) {
         await runtime.approvals.create(approvalFixture(approval.createdAt + index + 1,
-          { status: "consumed" }));
+          { status: "uncertain" }));
       }
-      const actor = { workspaceId, actorUserId: approval.actorUserId };
+      const actor = { workspaceId, actorUserId: approval.actorUserId, now: Date.now(), limit: 50 };
       expect((await runtime.approvals.listForActor({ ...actor, limit: 50 }))
         .some((candidate) => candidate.id === approval.id)).toBe(false);
-      expect(await runtime.approvals.listOutstandingLinearForActor(actor))
-        .toMatchObject([{ id: approval.id, executionReceiptId: receipt.id }]);
+      const page = await runtime.approvals.listOutstandingLinearForActor(actor);
+      expect(page).toHaveLength(50);
+      expect(page.some((candidate) => candidate.id === approval.id)).toBe(false);
+      expect(await runtime.approvals.getForActor(approval.id, approval.actorUserId))
+        .toMatchObject({ id: approval.id, executionReceiptId: receipt.id });
       expect(await runtime.receipts.findForApproval({ ...actor,
         approvalId: approval.id, receiptId: receipt.id })).toMatchObject({ id: receipt.id });
       expect(await runtime.receipts.findForApproval({ ...actor, workspaceId: "foreign_workspace",
@@ -186,6 +189,8 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
         workspaceId: "foreign_workspace" })).toEqual([]);
       expect(await runtime.approvals.listOutstandingLinearForActor({ ...actor,
         actorUserId: "other_actor" })).toEqual([]);
+      await expect(runtime.approvals.getForActor(approval.id, "other_actor"))
+        .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
       const observer = new Client({ connectionString: connectionString! });
       await observer.connect();
       try {
@@ -204,9 +209,23 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
         decision, now: Date.now() })).toMatchObject({
           status: decision === "effect_present" ? "consumed" : "failed", reconciledAs: decision,
         });
-      expect(await runtime.approvals.listOutstandingLinearForActor(actor)).toEqual([]);
+      expect((await runtime.approvals.listOutstandingLinearForActor(actor))
+        .some((candidate) => candidate.id === approval.id)).toBe(false);
     },
   );
+
+  it("excludes expired pending and approved rows before applying the Linear overview limit", async () => {
+    const now = Date.now();
+    const expired = await runtime.approvals.create(approvalFixture(now - 120_000,
+      { status: "approved", expiresAt: now - 1 }));
+    const live = await runtime.approvals.create(approvalFixture(now,
+      { status: "pending", expiresAt: now + 60_000 }));
+    const actor = { workspaceId, actorUserId: live.actorUserId, now, limit: 1 };
+    expect(await runtime.approvals.listOutstandingLinearForActor(actor))
+      .toMatchObject([{ id: live.id }]);
+    expect((await runtime.approvals.listOutstandingLinearForActor({ ...actor, limit: 50 }))
+      .some((approval) => approval.id === expired.id)).toBe(false);
+  });
 
   it("reads the exact reconciliation receipt only for its current workspace member", async () => {
     const { approval, receipt } = await uncertainLinearApproval("linear.issues.update");

@@ -84,6 +84,8 @@
   let clockNow = Date.now();
   let error = "";
   let notice = "";
+  let recoveryInput = "";
+  let recoveredApprovalId = "";
   let teamName = "";
   let oauthProvider = "github";
   let oauthLabel = "";
@@ -177,7 +179,12 @@
   }
 
   const loadWorkspace = createWorkspaceCatalogLoader<Overview, Catalog>(
-    (workspaceId) => request<Overview>(`/api/control-plane${workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : ""}`),
+    (workspaceId) => {
+      const params = new URLSearchParams();
+      if (workspaceId) params.set("workspaceId", workspaceId);
+      if (recoveredApprovalId) params.set("approvalId", recoveredApprovalId);
+      return request<Overview>(`/api/control-plane${params.size ? `?${params}` : ""}`);
+    },
     (workspaceId) => request<Catalog>(`/api/tools?workspaceId=${encodeURIComponent(workspaceId)}&limit=100`),
     (state) => {
       const previousLinearAccountId = selectedLinearAccountId(overview, selectedWorkspaceId);
@@ -213,6 +220,8 @@
 
   async function switchWorkspace() {
     cancelAuthorization();
+    recoveredApprovalId = "";
+    recoveryInput = "";
     clearLinear();
     apiKey = "";
     await load();
@@ -280,13 +289,16 @@
     error = "";
     try {
       const idempotencyKey = await linearActionKeys.key(toolId, workspaceId, account.id, params);
-      const approval = await request<{ status: string }>("/api/approvals", {
+      const approval = await request<{ id: string; status: string }>("/api/approvals", {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ workspaceId, connectionId: account.id,
           toolId, params, idempotencyKey }),
       });
       if (generation !== linearGeneration || workspaceId !== selectedWorkspaceId ||
         account.id !== linearAccount()?.id) return;
+      recoveredApprovalId = ["pending", "approved", "uncertain"].includes(approval.status)
+        ? approval.id : "";
+      recoveryInput = recoveredApprovalId;
       notice = linearApprovalNotice(approval.status);
       await load();
     } catch (caught) {
@@ -316,6 +328,8 @@
         account.id === linearAccount()?.id);
       if (generation !== linearGeneration || workspaceId !== selectedWorkspaceId ||
           account.id !== linearAccount()?.id) return;
+      recoveredApprovalId = "";
+      recoveryInput = "";
       notice = "New Linear action started. Review the account and target before requesting approval.";
     } catch (caught) {
       if (generation === linearGeneration) error = caught instanceof Error ? caught.message : "Could not start another Linear action";
@@ -345,6 +359,11 @@
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
+      if (["reconcile:", "reject:", "execute:"].some((prefix) =>
+        name === `${prefix}${recoveredApprovalId}`)) {
+        recoveredApprovalId = "";
+        recoveryInput = "";
+      }
       notice = success;
       await load();
     } catch (caught) {
@@ -739,7 +758,15 @@
 
         <section class="panel approvals">
           <div class="panel-heading"><div><p class="kicker">Human in the loop</p><h2>Approvals</h2></div></div>
-          {#each overview.approvals.filter((item) => item.status === "pending" || item.status === "approved" ||
+          <form class="inline-form" onsubmit={(event) => { event.preventDefault(); recoveredApprovalId = recoveryInput.trim(); void load(); }}>
+            <label for="recover-approval">Find an older Linear approval by ID</label>
+            <input id="recover-approval" bind:value={recoveryInput} maxlength="128" placeholder="Approval ID" />
+            <button class="quiet compact" type="submit" disabled={Boolean(busy) || !recoveryInput.trim()}>Find approval</button>
+            {#if recoveredApprovalId}<button class="quiet compact" type="button" disabled={Boolean(busy)}
+              onclick={() => { recoveredApprovalId = ""; recoveryInput = ""; void load(); }}>Clear lookup</button>{/if}
+          </form>
+          {#each overview.approvals.filter((item) =>
+            ((item.status === "pending" || item.status === "approved") && item.expiresAt > clockNow) ||
             (item.status === "uncertain" && item.toolId.startsWith("linear."))) as approval}
             <article class="approval-card">
               <div class="approval-top"><strong>{approval.action} ({approval.toolId})</strong><span>Expires {timestamp(approval.expiresAt)}</span></div>
