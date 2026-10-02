@@ -9,7 +9,10 @@ import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
 import { ExecutionService, LinearExecutionError, publicApproval } from "@oh-my-router/execution";
 import { LinearIntentTransactionRequiredError } from "@oh-my-router/execution";
 import { OMRClient } from "@oh-my-router/client";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "@oh-my-router/execution/testing";
+import { createOMRMcpServer } from "../../packages/mcp/src/server.js";
 import { createProviderIntegrationConfig } from "../../apps/web/src/lib/server/cloudflare-runtime.js";
 import { createOMRRouter, type ExecutionRouteServices } from "../../apps/web/src/lib/server/router.js";
 
@@ -112,6 +115,62 @@ async function executionFixture(verified = false) {
 }
 
 describe("linear-adapter-contract", () => {
+  it("discovers the real Linear update schema over MCP and rejects invalid or empty changes before approval", async () => {
+    const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrLinearProvider] } });
+    const update = catalog.get("linear.issues.update")!;
+    const approvals: unknown[] = [];
+    const server = await createOMRMcpServer({ baseUrl: "https://omr.test", credential: "credential",
+      workspaceId: "omr-workspace", fetchImpl: async (request, init) => {
+        const path = new URL(typeof request === "string" ? request : request instanceof URL
+          ? request.href : request.url).pathname;
+        if (path === "/api/tools") return Response.json({ catalogSchemaVersion: "1.0.0",
+          revision: "linear-real-manifest", tools: [update] });
+        if (path === "/api/approvals") {
+          approvals.push(JSON.parse(String(init?.body)));
+          return Response.json({ id: "approval-1", status: "pending", expiresAt: Date.now() + 60_000 },
+            { status: 201 });
+        }
+        return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+      } });
+    const client = new Client({ name: "linear-contract-test", version: "1.0.0" }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const schema = (await client.listTools()).tools.find(({ name }) => name === update.id)?.inputSchema;
+      expect(schema).toMatchObject({ type: "object", required: expect.arrayContaining([
+        "linearWorkspaceId", "issueId", "_omrIdempotencyKey",
+      ]), properties: { linearWorkspaceId: expect.any(Object), issueId: expect.any(Object),
+        title: expect.any(Object), description: expect.any(Object), priority: expect.any(Object) } });
+      expect(schema?.anyOf).toHaveLength(3);
+      const target = { linearWorkspaceId: workspaceA, issueId: issueA,
+        _omrIdempotencyKey: "linear-update-1" };
+      for (const arguments_ of [target, { ...target, issueId: "../../foreign", title: "Changed" },
+        { ...target, title: "Changed", stateId: workspaceA },
+        { issueId: issueA, title: "Changed", _omrIdempotencyKey: "missing-workspace" }]) {
+        expect((await client.callTool({ name: update.id, arguments: arguments_ })).isError).toBe(true);
+      }
+      expect(approvals).toHaveLength(0);
+      for (const [index, change] of [{ title: "Changed" }, { description: "Updated details" },
+        { priority: 2 }].entries()) {
+        await expect(client.callTool({ name: update.id,
+          arguments: { ...target, ...change, _omrIdempotencyKey: `linear-update-${index}` } }))
+          .resolves.toMatchObject({
+            structuredContent: { status: "approval_required", executed: false, approvalId: "approval-1" },
+          });
+      }
+      expect(approvals).toEqual([{ title: "Changed" }, { description: "Updated details" },
+        { priority: 2 }].map((change, index) => ({
+        workspaceId: "omr-workspace", toolId: update.id,
+        params: { linearWorkspaceId: workspaceA, issueId: issueA, ...change },
+        idempotencyKey: `linear-update-${index}`,
+      })));
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it("publishes only the bounded typed issue journey and stays off until OMR-15 enables it", async () => {
     const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrLinearProvider] } });
     expect(catalog.list().map(({ id }) => id)).toEqual([

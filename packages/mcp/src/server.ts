@@ -18,11 +18,28 @@ const PROVIDERS_TOOL = "omr.catalog.providers";
 const IDEMPOTENCY_FIELD = "_omrIdempotencyKey";
 type VisibilityContext = { manifests?: Promise<Map<string, string>> };
 
-/** Keep malformed catalog schemas from becoming a non-object MCP tool surface. */
+/** Preserve object unions while giving MCP hosts a discoverable root object. */
 function objectSchema(value: unknown): McpFnObjectSchema {
-  if (value && typeof value === "object" && !Array.isArray(value) &&
-    (value as { type?: unknown }).type === "object") return value as McpFnObjectSchema;
-  return { type: "object", properties: {}, additionalProperties: true };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("OMR catalog tool has a non-object input schema");
+  }
+  const schema = value as Record<string, unknown>;
+  if (schema.type === "object") return schema as McpFnObjectSchema;
+  if (!Array.isArray(schema.anyOf) || !schema.anyOf.length ||
+    !schema.anyOf.every((branch) => branch && typeof branch === "object" &&
+      !Array.isArray(branch) && (branch as { type?: unknown }).type === "object")) {
+    throw new Error("OMR catalog tool has a non-object input schema");
+  }
+  const branches = schema.anyOf as McpFnObjectSchema[];
+  const properties: NonNullable<McpFnObjectSchema["properties"]> = {};
+  for (const branch of branches) {
+    for (const [name, property] of Object.entries(branch.properties ?? {})) {
+      if (!(name in properties)) properties[name] = property;
+    }
+  }
+  const required = (branches[0]?.required ?? []).filter((name) =>
+    branches.every((branch) => branch.required?.includes(name)));
+  return { ...schema, type: "object", properties, required };
 }
 
 /** Add a caller-owned idempotency key only to approval-requiring actions. */
@@ -32,16 +49,21 @@ function actionInputSchema(manifest: ToolManifest): McpFnObjectSchema {
     throw new Error(`OMR catalog tool ${manifest.id} conflicts with the MCP idempotency field`);
   }
   if (manifest.contract.effect === "read") return schema;
+  const idempotencyProperty = {
+    type: "string",
+    description: "Caller-generated stable key for this intended action. Reuse it after an uncertain response; use a new key for a new action.",
+  };
   return {
     ...schema,
     properties: {
       ...schema.properties,
-      [IDEMPOTENCY_FIELD]: {
-        type: "string",
-        description: "Caller-generated stable key for this intended action. Reuse it after an uncertain response; use a new key for a new action.",
-      },
+      [IDEMPOTENCY_FIELD]: idempotencyProperty,
     },
     required: [...(schema.required ?? []), IDEMPOTENCY_FIELD],
+    ...(Array.isArray(schema.anyOf) ? { anyOf: schema.anyOf.map((branch) => ({
+      ...branch as McpFnObjectSchema,
+      properties: { ...(branch as McpFnObjectSchema).properties, [IDEMPOTENCY_FIELD]: idempotencyProperty },
+    })) } : {}),
   };
 }
 
