@@ -71,6 +71,54 @@ describe("workspace catalog loading", () => {
         executionReceiptId: "receipt-old" }, approval.id, 10, true)).toBe(false);
     },
   );
+  it.each(["linear.issues.create", "linear.issues.update"])(
+    "hides retained %s approval controls until a fresh overview succeeds", async (toolId) => {
+      type ApprovalOverview = { selectedWorkspaceId: string; approvals: { id: string; toolId: string;
+        status: string; expiresAt: number }[] };
+      const states: WorkspaceCatalogState<ApprovalOverview, Catalog>[] = [];
+      let status = "pending";
+      let fetchOverview: () => Promise<ApprovalOverview> = async () => ({ selectedWorkspaceId: "A",
+        approvals: [{ id: "owned", toolId, status, expiresAt: 100 }] });
+      let failCatalog = false;
+      const load = createWorkspaceCatalogLoader<ApprovalOverview, Catalog>(
+        () => fetchOverview(),
+        async () => {
+          if (failCatalog) throw new Error("catalog unavailable");
+          return { providers: [{ provider: "linear", state: "ready" }] };
+        },
+        (state) => states.push(state),
+      );
+      const visible = (state: WorkspaceCatalogState<ApprovalOverview, Catalog>) =>
+        state.overview?.approvals.filter((approval) => visibleApprovalCard(
+          approval, "owned", 10, !state.loading && !state.error)) ?? [];
+
+      for (const approvalStatus of ["pending", "approved", "uncertain"]) {
+        status = approvalStatus;
+        await load("A");
+        expect(visible(states.at(-1)!)).toHaveLength(1);
+
+        let rejectOverview!: (error: Error) => void;
+        fetchOverview = () => new Promise<ApprovalOverview>((_resolve, reject) => { rejectOverview = reject; });
+        const refresh = load("A");
+        expect(states.at(-1)).toMatchObject({ loading: true, error: "", overview: { approvals: [{ status }] } });
+        expect(visible(states.at(-1)!)).toEqual([]);
+        rejectOverview(new Error("overview unavailable"));
+        await refresh;
+        expect(states.at(-1)).toMatchObject({ loading: false, error: "overview unavailable" });
+        expect(visible(states.at(-1)!)).toEqual([]);
+        fetchOverview = async () => ({ selectedWorkspaceId: "A",
+          approvals: [{ id: "owned", toolId, status, expiresAt: 100 }] });
+      }
+
+      failCatalog = true;
+      await load("A");
+      expect(states.at(-1)).toMatchObject({ error: "catalog unavailable" });
+      expect(visible(states.at(-1)!)).toEqual([]);
+      failCatalog = false;
+      await load("A");
+      expect(visible(states.at(-1)!)).toHaveLength(1);
+    },
+  );
   it("drops an expired automatic Linear approval before reload while preserving foreign-ID denial", async () => {
     const states: WorkspaceCatalogState<Overview, Catalog>[] = [];
     const requestedIds: string[] = [];

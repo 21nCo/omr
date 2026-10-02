@@ -14,13 +14,14 @@ export function expiredAutomaticApprovalLookup(
   return lookup !== null && lookup.id === selectedId && lookup.expiresAt <= now;
 }
 
-/** Render an older approval only when the current overview validated its ID. */
+/** Render approvals only from a fresh overview; older ones also need an exact ID. */
 export function visibleApprovalCard(approval: { id: string; toolId: string; status: string;
   expiresAt: number; executionReceiptId?: string | null; reconciledAs?: string | null },
   recoveredApprovalId: string, now: number, freshOverview: boolean): boolean {
+  if (!freshOverview) return false;
   if (["pending", "approved"].includes(approval.status) && approval.expiresAt > now) return true;
   if (approval.status === "uncertain" && approval.toolId.startsWith("linear.")) return true;
-  if (!freshOverview || approval.id !== recoveredApprovalId || !approval.toolId.startsWith("linear.")) return false;
+  if (approval.id !== recoveredApprovalId || !approval.toolId.startsWith("linear.")) return false;
   if (approval.status === "executing") return true;
   return Boolean(approval.executionReceiptId &&
     ((approval.status === "consumed" && approval.reconciledAs === "effect_present") ||
