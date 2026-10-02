@@ -1,0 +1,31 @@
+packages/plugfn-runtime/src/postgres.integration.test.ts
+  s_dbeaf6beea25e6::t_a8141e5fdf09f5 84-89
+packages/plugfn-runtime/src/linear.ts
+  s_ad500513bc9987::t_9b6687fbc350ae 39-47,54
+packages/cli/src/bin.ts
+  s_ad500513bc9987::t_97485059f1b799 632-649
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "876c6a31efd30b8eeb8ffbb415c75ed3327cc843",
+  "prompts": {},
+  "sessions": {
+    "s_ad500513bc9987": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0f222-fb22-76a5-a77e-b7c92826db44",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    },
+    "s_dbeaf6beea25e6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c886-73ef-72c2-b7ee-54bc7cc84533",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
