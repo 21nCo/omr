@@ -1,0 +1,66 @@
+apps/web/src/lib/oauth-review.ts
+  h_a39f9495f9ec1d 3,12
+apps/web/src/lib/server/cloudflare-runtime.test.ts
+  h_a39f9495f9ec1d 6,109-141
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 408-418,433-435,440-444,646-649,714-721
+apps/web/src/lib/server/router.ts
+  h_a39f9495f9ec1d 133-134,190-202,211,782-796
+apps/web/src/lib/server/scoped-catalog.test.ts
+  h_a39f9495f9ec1d 2,155-170
+apps/web/src/lib/server/scoped-catalog.ts
+  h_a39f9495f9ec1d 14,34-42
+apps/web/src/lib/workspace-catalog.test.ts
+  h_a39f9495f9ec1d 3-4,10-19
+apps/web/src/lib/workspace-catalog.ts
+  h_a39f9495f9ec1d 9-23
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 5,8,40,89,232,234,237-242,246-248,265,268-270,302-303,617,657,666,684,693,701-702,715-722
+docs/linear-v1.md
+  h_a39f9495f9ec1d 40-51,57-59,63-66
+packages/cli/README.md
+  h_a39f9495f9ec1d 40-44,47,50
+packages/cli/src/bin.ts
+  h_a39f9495f9ec1d 422,627-634,644
+packages/client/src/index.ts
+  h_a39f9495f9ec1d 235-239
+packages/connections/src/index.ts
+  h_a39f9495f9ec1d 32
+packages/connections/src/plugfn.ts
+  h_a39f9495f9ec1d 106-114,324-331
+packages/execution/migrations/0018_linear_intent_fence.sql
+  h_a39f9495f9ec1d 1-9
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 125-126,155-156,533-539,581-590,660
+packages/execution/src/postgres-approval-migration.test.ts
+  h_a39f9495f9ec1d 131-135
+packages/execution/src/postgres-approval-store.ts
+  h_a39f9495f9ec1d 33-34,46,82-89,96,98-99,114,130-143,145,500-518,574-575
+packages/execution/src/postgres.integration.test.ts
+  h_a39f9495f9ec1d 97-128
+packages/execution/src/projection.ts
+  h_a39f9495f9ec1d 128-129
+packages/execution/src/testing.ts
+  h_a39f9495f9ec1d 135-144,314-330
+packages/mcp/src/server.test.ts
+  h_a39f9495f9ec1d 96-98,118,173-177
+packages/mcp/src/server.ts
+  h_a39f9495f9ec1d 14,99-100,273-294,302
+packages/plugfn-runtime/src/linear.ts
+  h_a39f9495f9ec1d 29,31-33,39,41,45-46,53-55,65,76,86
+packages/tools/src/linear-errors.ts
+  h_a39f9495f9ec1d 27,35,43-66,78,80,83-84
+tests/acceptance/linear-adapter-contract.test.ts
+  h_a39f9495f9ec1d 3,9,86-107,118,122,162-166,203-204,206,216,241-315,424,431-432,445-453,499-564
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0e427284e2338a951c48cbf9926ef3e35ee7693e",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
