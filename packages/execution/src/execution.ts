@@ -98,6 +98,8 @@ export interface ExecutionReceipt {
 export interface ExecutionReceiptStore {
   findByIdempotency(input: { workspaceId: string; principalKey: string; idempotencyKey: string;
     deadlineAt?: number }): Promise<ExecutionReceipt | null>;
+  findForApproval(input: { workspaceId: string; actorUserId: string; approvalId: string;
+    receiptId: string }): Promise<ExecutionReceipt | null>;
   reserve(receipt: ExecutionReceipt, deadlineAt?: number): Promise<{ receipt: ExecutionReceipt; created: boolean }>;
   beginDispatch(receiptId: string, now: number, deadlineAt?: number): Promise<void>;
   succeed(receiptId: string, result: JsonValue, now: number, deadlineAt?: number): Promise<ExecutionReceipt>;

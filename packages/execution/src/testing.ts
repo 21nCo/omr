@@ -29,6 +29,14 @@ export class MemoryExecutionReceiptStore implements ExecutionReceiptStore {
       ? structuredClone(receipt) : null;
   }
 
+  async findForApproval(input: { workspaceId: string; actorUserId: string; approvalId: string;
+    receiptId: string }): Promise<ExecutionReceipt | null> {
+    const receipt = this.receipts.get(input.receiptId);
+    return receipt?.workspaceId === input.workspaceId && receipt.actorUserId === input.actorUserId &&
+      receipt.approvalId === input.approvalId && this.isMember(input.workspaceId, input.actorUserId)
+      ? structuredClone(receipt) : null;
+  }
+
   async reserve(receipt: ExecutionReceipt): Promise<{ receipt: ExecutionReceipt; created: boolean }> {
     const existingId = this.idempotency.get(key(receipt));
     if (existingId) {

@@ -18,10 +18,11 @@ export function selectedLinearAccountId<Connection extends { id: string; provide
 /** A completed ambiguous response can be checked for a definite absence. */
 export function linearEffectAbsentAvailable(
   approval: { executionReceiptId?: string | null },
-  receipts: readonly { id: string; errorCode: string | null }[],
+  receipts: readonly { id: string; status: string; errorCode: string | null }[],
 ): boolean {
   return Boolean(approval.executionReceiptId && receipts.some((receipt) =>
-    receipt.id === approval.executionReceiptId && receipt.errorCode === "provider_response_ambiguous"));
+    receipt.id === approval.executionReceiptId && receipt.status === "uncertain" &&
+    receipt.errorCode === "provider_response_ambiguous"));
 }
 
 /** A pending selection cannot reuse the previous account's browser controls. */

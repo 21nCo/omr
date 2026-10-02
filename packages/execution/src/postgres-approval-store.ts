@@ -521,47 +521,57 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     const query = <R extends object>(sql: string, values?: unknown[]) =>
       withinInvocationDeadline(deadlineAt, () => client.query<R>(sql, values));
     if (!connected) await withinInvocationDeadline(deadlineAt, () => client.connect());
-    await query("BEGIN");
-    await query("SELECT set_config('statement_timeout', $1, true)",
-      [`${Math.max(1, deadlineAt - Date.now())}ms`]);
-    // Reconciliation takes the approval lock before the receipt lock. Use
-    // the same order here so stale recovery and completion cannot deadlock.
-    const currentApproval = await query<{ workspace_id: string }>(
-      `SELECT workspace_id FROM omr_control.execution_approvals
-       WHERE id = $1 AND status = 'executing' FOR UPDATE`,
-      [input.approvalId],
-    );
-    if (currentApproval.rows[0]?.workspace_id !== input.receipt.workspaceId) {
-      throw new ApprovalUnavailableError();
+    try {
+      await query("BEGIN");
+      await query("SELECT set_config('statement_timeout', $1, true)",
+        [`${Math.max(1, deadlineAt - Date.now())}ms`]);
+      // Reconciliation takes the approval lock before the receipt lock. Use
+      // the same order here so stale recovery and completion cannot deadlock.
+      const currentApproval = await query<{ workspace_id: string }>(
+        `SELECT workspace_id FROM omr_control.execution_approvals
+         WHERE id = $1 AND status = 'executing' FOR UPDATE`,
+        [input.approvalId],
+      );
+      if (currentApproval.rows[0]?.workspace_id !== input.receipt.workspaceId) {
+        throw new ApprovalUnavailableError();
+      }
+      const locked = await query<{ workspace_id: string }>(
+        `SELECT receipt.workspace_id FROM omr_control.execution_receipts AS receipt
+         JOIN omr_control.execution_approvals AS approval ON ${EXACT_RECEIPT}
+         WHERE receipt.id = $1 AND approval.id = $2 AND receipt.status = 'running'
+           AND approval.status = 'executing'
+         FOR UPDATE OF receipt`,
+        [input.receipt.id, input.approvalId],
+      );
+      if (locked.rows[0]?.workspace_id !== input.receipt.workspaceId) {
+        throw new ApprovalUnavailableError();
+      }
+      const encrypted = await withinInvocationDeadline(deadlineAt, () =>
+        encryptJson(input.result, this.wrappingKey,
+          { kind: "receipt-result", workspaceId: input.receipt.workspaceId, id: input.receipt.id }));
+      await query(
+        `UPDATE omr_control.execution_receipts
+         SET status = 'succeeded', result_ciphertext = $2, result_iv = $3,
+             result_crypto_version = 1, completed_at = $4, updated_at = $4 WHERE id = $1`,
+        [input.receipt.id, encrypted.ciphertext, encrypted.iv, input.now],
+      );
+      await query(
+        `UPDATE omr_control.execution_approvals
+         SET status = 'consumed', execution_receipt_id = $2, updated_at = $3 WHERE id = $1`,
+        [input.approvalId, input.receipt.id, input.now],
+      );
+      await query("COMMIT");
+      return { ...input.receipt, status: "succeeded", result: input.result,
+        completedAt: input.now, updatedAt: input.now };
+    } catch (error) {
+      // A server statement timeout can win the race with our client deadline.
+      // The transaction must be rolled back before a fresh completion attempt.
+      await withinInvocationDeadline(Date.now() + 500, () => client.query("ROLLBACK"))
+        .catch(() => { client.connection?.stream.destroy(); });
+      if (error instanceof Error && "code" in error && error.code === "57014" &&
+          /statement timeout/i.test(error.message)) throw new ExecutionInvocationDeadlineError();
+      throw error;
     }
-    const locked = await query<{ workspace_id: string }>(
-      `SELECT receipt.workspace_id FROM omr_control.execution_receipts AS receipt
-       JOIN omr_control.execution_approvals AS approval ON ${EXACT_RECEIPT}
-       WHERE receipt.id = $1 AND approval.id = $2 AND receipt.status = 'running'
-         AND approval.status = 'executing'
-       FOR UPDATE OF receipt`,
-      [input.receipt.id, input.approvalId],
-    );
-    if (locked.rows[0]?.workspace_id !== input.receipt.workspaceId) {
-      throw new ApprovalUnavailableError();
-    }
-    const encrypted = await withinInvocationDeadline(deadlineAt, () =>
-      encryptJson(input.result, this.wrappingKey,
-        { kind: "receipt-result", workspaceId: input.receipt.workspaceId, id: input.receipt.id }));
-    await query(
-      `UPDATE omr_control.execution_receipts
-       SET status = 'succeeded', result_ciphertext = $2, result_iv = $3,
-           result_crypto_version = 1, completed_at = $4, updated_at = $4 WHERE id = $1`,
-      [input.receipt.id, encrypted.ciphertext, encrypted.iv, input.now],
-    );
-    await query(
-      `UPDATE omr_control.execution_approvals
-       SET status = 'consumed', execution_receipt_id = $2, updated_at = $3 WHERE id = $1`,
-      [input.approvalId, input.receipt.id, input.now],
-    );
-    await query("COMMIT");
-    return { ...input.receipt, status: "succeeded", result: input.result,
-      completedAt: input.now, updatedAt: input.now };
   }
 
   async fail(input: { approvalId: string; now: number; deadlineAt?: number }): Promise<ExecutionApproval> {

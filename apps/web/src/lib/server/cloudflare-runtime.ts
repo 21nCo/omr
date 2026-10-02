@@ -36,6 +36,7 @@ import {
 } from "./router.js";
 import { resolveScopedCatalog } from "./scoped-catalog.js";
 import { publicConnections, publicConnectionsAfterMutation } from "./connection-view.js";
+import { linearReconciliationReceipts } from "./reconciliation-receipts.js";
 
 type OMRBindings = Cloudflare.Env & {
   HYPERDRIVE?: { connectionString: string };
@@ -763,6 +764,7 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
             connections: [],
             approvals: [],
             executions: [],
+            reconciliationReceipts: [],
           };
         }
 
@@ -796,6 +798,8 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
           }),
         ]);
         const approvalCatalog = await createPlugFnToolCatalog(plugfn.plugfn, configuredProviders(plugfn.plugfn));
+        const reconciliationReceipts = await linearReconciliationReceipts(
+          approvals, activity.receipts, selected.workspace.id, session.actorId);
         return {
           actor: { id: session.actorId, email: session.primaryEmail ?? null },
           workspaces,
@@ -807,6 +811,7 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
           ),
           approvals: approvals.map((approval) => publicApproval(approval, approvalCatalog.get(approval.toolId))),
           executions: executions.map((receipt) => publicReceipt(receipt, false)),
+          reconciliationReceipts: reconciliationReceipts.map((receipt) => publicReceipt(receipt, false)),
         };
       } finally {
         await Promise.allSettled([identity.close(), connections?.close(), activity?.close(), plugfn?.close()]);

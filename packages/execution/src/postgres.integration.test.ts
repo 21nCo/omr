@@ -111,6 +111,48 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       return result.rows[0]!.pid;
     }, { timeout: 5_000, interval: 20 });
 
+  const uncertainLinearApproval = async (toolId: "linear.issues.create" | "linear.issues.update") => {
+    const now = Date.now();
+    const approval = approvalFixture(now, { toolId });
+    await runtime.approvals.create(approval);
+    await runtime.approvals.approve({ approvalId: approval.id, actorUserId: approval.actorUserId,
+      now: now + 1 });
+    await runtime.approvals.claim({ approvalId: approval.id, actorUserId: approval.actorUserId,
+      principalKey: approval.principalKey, now: now + 2, deadlineAt: Date.now() + 2_000 });
+    const receipt = receiptFixture(approval, now);
+    await runtime.receipts.reserve(receipt);
+    await runtime.receipts.beginDispatch(receipt.id, now + 3);
+    await runtime.receipts.uncertain(receipt.id, "provider_response_ambiguous", now + 4);
+    await runtime.approvals.uncertain({ approvalId: approval.id, receiptId: receipt.id, now: now + 5 });
+    return { approval, receipt, now };
+  };
+
+  it("reads the exact reconciliation receipt only for its current workspace member", async () => {
+    const { approval, receipt } = await uncertainLinearApproval("linear.issues.update");
+    const lookup = { workspaceId, actorUserId: approval.actorUserId,
+      approvalId: approval.id, receiptId: receipt.id };
+    await expect(runtime.receipts.findForApproval(lookup)).resolves.toMatchObject({
+      id: receipt.id, status: "uncertain", errorCode: "provider_response_ambiguous",
+    });
+    for (const wrong of [{ workspaceId: "foreign_workspace" }, { actorUserId: "other_actor" },
+      { approvalId: "approval_other" }, { receiptId: "execution_other" }]) {
+      await expect(runtime.receipts.findForApproval({ ...lookup, ...wrong })).resolves.toBeNull();
+    }
+    const observer = new Client({ connectionString: connectionString! });
+    await observer.connect();
+    try {
+      await observer.query(`DELETE FROM omr_control.workspace_memberships
+        WHERE workspace_id = $1 AND user_id = $2`, [workspaceId, approval.actorUserId]);
+      await expect(runtime.receipts.findForApproval(lookup)).resolves.toBeNull();
+    } finally {
+      await observer.query(`INSERT INTO omr_control.workspace_memberships
+        (id, workspace_id, user_id, role, created_at, updated_at)
+        VALUES ($1, $2, $3, 'member', $4, $4) ON CONFLICT DO NOTHING`,
+      [`membership_${crypto.randomUUID()}`, workspaceId, approval.actorUserId, Date.now()]);
+      await observer.end();
+    }
+  });
+
   it("fences concurrent Linear approval keys until an uncertain receipt is reconciled", async () => {
     const now = Date.now();
     const intentHash = `hmac-sha256-${"e".repeat(64)}`;
@@ -161,17 +203,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
 
   it.each(["effect_present", "effect_absent"] as const)(
     "does not reconcile %s after membership deletion wins the row lock", async (decision) => {
-      const now = Date.now();
-      const approval = approvalFixture(now, { toolId: "linear.issues.create" });
-      await runtime.approvals.create(approval);
-      await runtime.approvals.approve({ approvalId: approval.id, actorUserId: "execution_owner", now: now + 1 });
-      await runtime.approvals.claim({ approvalId: approval.id, actorUserId: "execution_owner",
-        principalKey: "web:execution_owner", now: now + 2, deadlineAt: Date.now() + 2_000 });
-      const receipt = receiptFixture(approval, now);
-      await runtime.receipts.reserve(receipt);
-      await runtime.receipts.beginDispatch(receipt.id, now + 3);
-      await runtime.receipts.uncertain(receipt.id, "provider_response_ambiguous", now + 4);
-      await runtime.approvals.uncertain({ approvalId: approval.id, receiptId: receipt.id, now: now + 5 });
+      const { approval, now } = await uncertainLinearApproval("linear.issues.create");
       const revoker = new Client({ connectionString: connectionString! });
       await revoker.connect();
       let pending: Promise<unknown> | undefined;
@@ -207,17 +239,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
 
   it.each(["effect_present", "effect_absent"] as const)(
     "finishes %s before a later membership deletion can commit", async (decision) => {
-      const now = Date.now();
-      const approval = approvalFixture(now, { toolId: "linear.issues.update" });
-      await runtime.approvals.create(approval);
-      await runtime.approvals.approve({ approvalId: approval.id, actorUserId: "execution_owner", now: now + 1 });
-      await runtime.approvals.claim({ approvalId: approval.id, actorUserId: "execution_owner",
-        principalKey: "web:execution_owner", now: now + 2, deadlineAt: Date.now() + 2_000 });
-      const receipt = receiptFixture(approval, now);
-      await runtime.receipts.reserve(receipt);
-      await runtime.receipts.beginDispatch(receipt.id, now + 3);
-      await runtime.receipts.uncertain(receipt.id, "provider_response_ambiguous", now + 4);
-      await runtime.approvals.uncertain({ approvalId: approval.id, receiptId: receipt.id, now: now + 5 });
+      const { approval, now } = await uncertainLinearApproval("linear.issues.update");
       const blocker = new Client({ connectionString: connectionString! });
       const revoker = new Client({ connectionString: connectionString! });
       await blocker.connect();

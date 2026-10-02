@@ -58,6 +58,7 @@
     connections: Connection[];
     approvals: Approval[];
     executions: Execution[];
+    reconciliationReceipts: Execution[];
   };
   type Provider = {
     provider: string;
@@ -756,7 +757,7 @@
                   <button class="quiet compact" disabled={Boolean(busy) || !approval.executionReceiptId}
                     onclick={() => void mutate(`reconcile:${approval.id}`, "/api/approvals/reconcile",
                       { approvalId: approval.id, decision: "effect_present" }, "Recorded that Linear applied this change.")}>I verified the change happened</button>
-                  {#if linearEffectAbsentAvailable(approval, overview.executions)}
+                  {#if linearEffectAbsentAvailable(approval, overview.reconciliationReceipts)}
                     <button class="danger compact" disabled={Boolean(busy)}
                       onclick={() => void mutate(`reconcile:${approval.id}`, "/api/approvals/reconcile",
                         { approvalId: approval.id, decision: "effect_absent" }, "Recorded that Linear did not apply this change.")}>I verified no change happened</button>

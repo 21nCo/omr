@@ -11,11 +11,13 @@ describe("workspace catalog loading", () => {
   it("offers no-effect reconciliation only for an observed completed ambiguous response", () => {
     const approval = { executionReceiptId: "receipt-A" };
     expect(linearEffectAbsentAvailable(approval, [{ id: "receipt-A",
-      errorCode: "provider_outcome_unknown" }])).toBe(false);
+      status: "uncertain", errorCode: "provider_outcome_unknown" }])).toBe(false);
     expect(linearEffectAbsentAvailable(approval, [{ id: "receipt-A",
-      errorCode: "provider_response_ambiguous" }])).toBe(true);
+      status: "uncertain", errorCode: "provider_response_ambiguous" }])).toBe(true);
     expect(linearEffectAbsentAvailable(approval, [{ id: "receipt-B",
-      errorCode: "provider_response_ambiguous" }])).toBe(false);
+      status: "uncertain", errorCode: "provider_response_ambiguous" }])).toBe(false);
+    expect(linearEffectAbsentAvailable(approval, [{ id: "receipt-A",
+      status: "running", errorCode: "provider_response_ambiguous" }])).toBe(false);
     expect(linearEffectAbsentAvailable(approval, [])).toBe(false);
   });
 
