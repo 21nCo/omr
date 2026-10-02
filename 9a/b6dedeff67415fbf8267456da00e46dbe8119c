@@ -1,0 +1,30 @@
+apps/web/src/lib/server/scoped-catalog.test.ts
+  h_a39f9495f9ec1d 156,160,169-170
+apps/web/src/lib/workspace-catalog.test.ts
+  h_a39f9495f9ec1d 3,12-41
+apps/web/src/lib/workspace-catalog.ts
+  h_a39f9495f9ec1d 9-16
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 5,90,185-189,232,300,309-310,343,377,412,710-712,805,810
+packages/cli/src/bin.ts
+  h_a39f9495f9ec1d 189-191,215,249,251-257
+packages/client/src/index.ts
+  h_a39f9495f9ec1d 34-35,40,45-52,120
+packages/plugfn-runtime/src/linear.ts
+  h_a39f9495f9ec1d 253-257,264
+tests/acceptance/cli-command-contract.test.ts
+  h_a39f9495f9ec1d 57-58,67-68,95,109,221-223,1535-1576
+tests/acceptance/linear-adapter-contract.test.ts
+  h_a39f9495f9ec1d 89,103,105-108,111,186-193,254-279
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9ab6dedeff67415fbf8267456da00e46dbe8119c",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
