@@ -130,9 +130,9 @@ export interface ExecutionRouteServices {
   approve(request: Request, approvalId: string): Promise<unknown>;
   reject(request: Request, approvalId: string): Promise<unknown>;
   executeApproved(request: Request, approvalId: string): Promise<unknown>;
-  approvalStatus?(request: Request, approvalId: string): Promise<unknown>;
+  approvalStatus?(request: Request, approvalId: string, workspaceId?: string): Promise<unknown>;
   reconcileUncertain?(request: Request, approvalId: string,
-    decision: "effect_present" | "effect_absent"): Promise<unknown>;
+    decision: "effect_present" | "effect_absent", workspaceId?: string): Promise<unknown>;
 }
 
 export interface ControlPlaneRouteServices {
@@ -781,7 +781,8 @@ export function createOMRRouter(
           const approvalId = new URL(request.url).searchParams.get("approvalId");
           if (!approvalId) throw new RequestInputError("approvalId is required");
           if (!executionServices.approvalStatus) throw new RuntimeUnavailableError("Approval status is unavailable");
-          return Response.json(await executionServices.approvalStatus(request, approvalId),
+          const workspaceId = new URL(request.url).searchParams.get("workspaceId") ?? undefined;
+          return Response.json(await executionServices.approvalStatus(request, approvalId, workspaceId),
             { headers: PRIVATE_RESPONSE });
         },
       },
@@ -792,11 +793,12 @@ export function createOMRRouter(
           const body = objectBody(await context.json());
           const approvalId = requiredString(body, "approvalId");
           const decision = requiredString(body, "decision");
+          const workspaceId = optionalString(body, "workspaceId");
           if (decision !== "effect_present" && decision !== "effect_absent") {
             throw new RequestInputError("decision must be effect_present or effect_absent");
           }
           if (!executionServices.reconcileUncertain) throw new RuntimeUnavailableError("Reconciliation is unavailable");
-          return Response.json(await executionServices.reconcileUncertain(request, approvalId, decision),
+          return Response.json(await executionServices.reconcileUncertain(request, approvalId, decision, workspaceId),
             { headers: PRIVATE_RESPONSE });
         },
       },

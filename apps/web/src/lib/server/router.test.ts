@@ -675,18 +675,27 @@ describe("OMR Worker HTTP boundary", () => {
 
   it("routes approval status and self-revocation with private responses", async () => {
     const calls: string[] = [];
-    const execution = { approvalStatus: async (_request: Request, id: string) => {
-      calls.push(`status:${id}`); return { id, status: "pending" };
+    const execution = { approvalStatus: async (_request: Request, id: string, workspaceId?: string) => {
+      calls.push(`status:${id}:${workspaceId ?? ""}`); return { id, status: "pending" };
+    }, reconcileUncertain: async (_request: Request, id: string, decision: string, workspaceId?: string) => {
+      calls.push(`reconcile:${id}:${decision}:${workspaceId ?? ""}`);
+      return { id, status: "consumed", reconciledAs: decision };
     } } as ExecutionRouteServices;
     const control = { revokeSelf: async (request: Request) => {
       calls.push(`revoke:${request.headers.get("authorization")}`);
       return { revoked: true };
     } } as ControlPlaneRouteServices;
     const tested = createOMRRouter(undefined, undefined, undefined, execution, control);
-    const status = await tested.handle(new Request("https://omr.invalid/api/approvals/status?approvalId=approval_1"));
+    const status = await tested.handle(new Request(
+      "https://omr.invalid/api/approvals/status?approvalId=approval_1&workspaceId=workspace_1"));
     expect(status.status).toBe(200);
     expect(status.headers.get("cache-control")).toBe("no-store");
     await expect(status.json()).resolves.toMatchObject({ id: "approval_1", status: "pending" });
+    const reconciled = await tested.handle(new Request("https://omr.invalid/api/approvals/reconcile", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ approvalId: "approval_1", decision: "effect_present", workspaceId: "workspace_1" }),
+    }));
+    await expect(reconciled.json()).resolves.toMatchObject({ status: "consumed", reconciledAs: "effect_present" });
     const revoked = await tested.handle(new Request("https://omr.invalid/api/client-grants/revoke-self", {
       method: "POST", headers: { authorization: "Bearer fixture", "content-type": "application/json" },
       body: "{}",
@@ -694,7 +703,8 @@ describe("OMR Worker HTTP boundary", () => {
     expect(revoked.status).toBe(200);
     expect(revoked.headers.get("cache-control")).toBe("no-store");
     await expect(revoked.json()).resolves.toEqual({ revoked: true });
-    expect(calls).toEqual(["status:approval_1", "revoke:Bearer fixture"]);
+    expect(calls).toEqual(["status:approval_1:workspace_1",
+      "reconcile:approval_1:effect_present:workspace_1", "revoke:Bearer fixture"]);
   });
 
 });

@@ -11,7 +11,7 @@ import {
   type ConnectionBindingRecord,
 } from "@oh-my-router/connections";
 import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
-import { decodeExecutionWrappingKey, deriveExecutionFingerprintKey, ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
+import { ApprovalUnavailableError, decodeExecutionWrappingKey, deriveExecutionFingerprintKey, ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
 import { connectPostgresExecutionReceipts } from "@oh-my-router/execution/postgres";
 import { connectPostgresIdentityRuntime } from "@oh-my-router/identity/postgres";
 import { connectPostgresPlugFn, verifiedGithubScopes, verifiedLinearScopes } from "@oh-my-router/plugfn-runtime";
@@ -705,16 +705,18 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
       const principal = await authenticate(event, request, undefined, undefined, allowRemoteMcp);
       return withExecution(async (service) => publicReceipt(await service.executeApproved(principal, approvalId)));
     },
-    async approvalStatus(request, approvalId) {
-      const principal = await authenticate(event, request, undefined, "approvals:create", allowRemoteMcp);
+    async approvalStatus(request, approvalId, workspaceId) {
+      const principal = await authenticate(event, request, workspaceId, "approvals:create", allowRemoteMcp);
+      if (principal.kind === "web" && !workspaceId) throw new ApprovalUnavailableError();
       return withExecution(async (service, catalog) => {
         const approval = await service.approvalStatus(principal, approvalId);
         return publicApproval(approval, catalog.get(approval.toolId));
       });
     },
-    async reconcileUncertain(request, approvalId, decision) {
+    async reconcileUncertain(request, approvalId, decision, workspaceId) {
       requireExecutionOrigin(request);
-      const principal = await authenticate(event, request, undefined, "approvals:create", allowRemoteMcp);
+      const principal = await authenticate(event, request, workspaceId, "approvals:create", allowRemoteMcp);
+      if (principal.kind === "web" && !workspaceId) throw new ApprovalUnavailableError();
       return withExecution(async (service, catalog) => {
         const approval = await service.reconcileUncertain(principal, approvalId, decision);
         return publicApproval(approval, catalog.get(approval.toolId));

@@ -597,10 +597,23 @@ export class ExecutionService {
   async reconcileUncertain(principal: ExecutionPrincipal, approvalId: string,
     decision: "effect_present" | "effect_absent"): Promise<ExecutionApproval> {
     const approval = await this.approvalStatus(principal, approvalId);
-    if (!approval.toolId.startsWith("linear.") || approval.status !== "uncertain" ||
+    if (!approval.toolId.startsWith("linear.") ||
         !["effect_present", "effect_absent"].includes(decision)) throw new ApprovalUnavailableError();
-    return this.requiredApprovals().reconcile({ approvalId, actorUserId: principal.userId,
-      principalKey: principalKey(principal), decision, now: this.now() });
+    const recorded = (value: ExecutionApproval) => value.reconciledAs === decision &&
+      value.status === (decision === "effect_present" ? "consumed" : "failed") &&
+      Boolean(value.executionReceiptId);
+    if (recorded(approval)) return approval;
+    if (approval.status !== "uncertain") throw new ApprovalUnavailableError();
+    try {
+      return await this.requiredApprovals().reconcile({ approvalId, actorUserId: principal.userId,
+        principalKey: principalKey(principal), decision, now: this.now() });
+    } catch (error) {
+      // Another request may have committed while this one waited for the row.
+      if (!(error instanceof ApprovalUnavailableError)) throw error;
+      const settled = await this.approvalStatus(principal, approvalId);
+      if (recorded(settled)) return settled;
+      throw error;
+    }
   }
 
   /** Consume one approved intent with receipt-backed, replay-safe settlement. */

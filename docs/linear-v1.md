@@ -39,7 +39,7 @@ team or issue is denied before mutation. Every create/update requires an OMR
 approval with the selected account and explicit target in its preview. The
 browser's approval card then has a separate execute step. CLI exposes approval
 request, status, execution, and reconciliation. MCP exposes approval request,
-execution, and reconciliation;
+status, execution, and reconciliation;
 review and approve the pending request in the browser control plane.
 For an uncertain Linear write, inspect the receipt and verify the issue in
 Linear before choosing **effect happened** in the browser,
@@ -60,9 +60,14 @@ unresolved Linear approvals alongside recent history. Expired pending and
 approved requests have no action buttons. To recover an older unresolved
 approval, enter its exact approval ID in **Find an older Linear approval by ID**;
 OMR checks the current actor and selected OMR workspace before showing that
-approval and its linked receipt. A repeated issue action also selects its
-original approval by ID. CLI and MCP clients use their approval status and
-reconciliation commands with the original grant.
+approval and its linked receipt. The same lookup recovers a recorded decision
+after a lost reconciliation response, including an approval older than the
+overview page. A repeated issue action also selects its original approval by
+ID. CLI clients use `omr approvals status`; MCP clients use
+`omr.approvals.status` with the original grant. Repeating the same
+reconciliation decision is safe and does not send another issue mutation;
+the opposite decision is denied. If neither the response nor status confirms
+the decision, keep the outcome unknown and inspect the approval before retrying.
 
 The browser retains a request key for the selected action while its form and
 account stay the same. Repeating that submission reports the original approval

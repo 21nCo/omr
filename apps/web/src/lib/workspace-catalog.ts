@@ -35,6 +35,30 @@ export function linearEffectPresentAvailable(
     (receipt.status === "running" || receipt.status === "uncertain")));
 }
 
+/** A lost write response is resolved only by an authenticated exact-ID status. */
+export function matchesLinearReconciliation(
+  approval: { id: string; status: string; reconciledAs?: string | null },
+  approvalId: string, decision: "effect_present" | "effect_absent",
+): boolean {
+  return approval.id === approvalId && approval.reconciledAs === decision &&
+    approval.status === (decision === "effect_present" ? "consumed" : "failed");
+}
+
+/** Read back an exact decision when the reconciliation reply is lost or malformed. */
+export async function recoverLinearReconciliation<T extends { id: string; status: string;
+  reconciledAs?: string | null }>(approvalId: string, decision: "effect_present" | "effect_absent",
+  write: () => Promise<T>, status: () => Promise<T>): Promise<T> {
+  try {
+    const reply = await write();
+    if (matchesLinearReconciliation(reply, approvalId, decision)) return reply;
+  } catch { /* The write may have committed before its response was lost. */ }
+  try {
+    const current = await status();
+    if (matchesLinearReconciliation(current, approvalId, decision)) return current;
+  } catch { /* No trustworthy readback is available. */ }
+  throw new Error("Reconciliation is unconfirmed. Check this approval before retrying; do not repeat the issue write.");
+}
+
 /** A pending selection cannot reuse the previous account's browser controls. */
 export function selectedReadyLinearConnection<Connection extends { provider: string; selected: boolean;
   status: string; readiness: string }>(state: {

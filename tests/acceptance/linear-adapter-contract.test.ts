@@ -720,7 +720,7 @@ describe("linear-adapter-contract", () => {
     const accepted = await router.handle(request("effect_absent"));
     expect(accepted.status).toBe(200);
     expect(accepted.headers.get("cache-control")).toBe("no-store");
-    expect(reconcileUncertain).toHaveBeenCalledWith(expect.any(Request), "approval_one", "effect_absent");
+    expect(reconcileUncertain).toHaveBeenCalledWith(expect.any(Request), "approval_one", "effect_absent", undefined);
   });
 
   it("projects unavailable intent reservation to HTTP and the shared client", async () => {

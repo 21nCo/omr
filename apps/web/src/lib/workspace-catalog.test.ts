@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { createWorkspaceCatalogLoader, linearEffectAbsentAvailable, linearEffectPresentAvailable, providerDisplayState,
+import { createWorkspaceCatalogLoader, linearEffectAbsentAvailable, linearEffectPresentAvailable,
+  recoverLinearReconciliation, providerDisplayState,
   selectedLinearAccountId, selectedReadyLinearConnection,
   type WorkspaceCatalogState } from "./workspace-catalog.js";
 
@@ -8,6 +9,31 @@ type Overview = { selectedWorkspaceId: string; connections: { provider: string; 
 type Catalog = { providers: { provider: string; state: string; available?: boolean; authMode?: string }[] };
 
 describe("workspace catalog loading", () => {
+  it.each(["effect_present", "effect_absent"] as const)(
+    "recovers a lost %s browser response by authenticated exact-ID status", async (decision) => {
+      const status = decision === "effect_present" ? "consumed" : "failed";
+      const read = async () => ({ id: "approval-old", status, reconciledAs: decision });
+      await expect(recoverLinearReconciliation("approval-old", decision,
+        async () => { throw new TypeError("response lost after commit"); }, read))
+        .resolves.toMatchObject({ id: "approval-old", status, reconciledAs: decision });
+      await expect(recoverLinearReconciliation("approval-old", decision,
+        async () => ({ id: "approval-other", status, reconciledAs: decision }), read))
+        .resolves.toMatchObject({ id: "approval-old" });
+      for (const invalid of [
+        { id: "approval-other", status, reconciledAs: decision },
+        { id: "approval-old", status: "uncertain", reconciledAs: decision },
+        { id: "approval-old", status, reconciledAs: decision === "effect_present" ? "effect_absent" : "effect_present" },
+      ]) {
+        await expect(recoverLinearReconciliation("approval-old", decision,
+          async () => { throw new TypeError("response lost after commit"); }, async () => invalid))
+          .rejects.toThrow("Reconciliation is unconfirmed");
+      }
+      await expect(recoverLinearReconciliation("approval-old", decision,
+        async () => { throw new TypeError("response lost after commit"); },
+        async () => { throw new Error("membership revoked"); }))
+        .rejects.toThrow("Reconciliation is unconfirmed");
+    },
+  );
   it("offers no-effect reconciliation only for an observed completed ambiguous response", () => {
     const approval = { executionReceiptId: "receipt-A" };
     expect(linearEffectAbsentAvailable(approval, [{ id: "receipt-A",

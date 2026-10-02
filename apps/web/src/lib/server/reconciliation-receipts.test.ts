@@ -79,7 +79,36 @@ describe("Linear reconciliation history", () => {
     },
   );
 
-  it("does not recover expired, unrelated, or settled approvals", async () => {
+  it.each(["linear.issues.create", "linear.issues.update"])(
+    "recovers a settled %s decision with an exact receipt in its original workspace", async (toolId) => {
+      let member = true;
+      const receipts = new MemoryExecutionReceiptStore(() => member);
+      const store = new MemoryExecutionApprovalStore(() => member, receipts);
+      const approval = { id: "approval-old", workspaceId: "workspace-A", actorUserId: "alice",
+        toolId, status: "consumed", reconciledAs: "effect_present",
+        executionReceiptId: "receipt-old", expiresAt: 0, createdAt: 1 } as ExecutionApproval;
+      store.approvals.set(approval.id, approval);
+      for (let index = 0; index < 120; index++) {
+        store.approvals.set(`approval-new-${index}`, { ...approval, id: `approval-new-${index}`,
+          status: "pending", reconciledAs: null, expiresAt: 100, createdAt: index + 1 });
+      }
+      const recent = await store.listForActor({ workspaceId: "workspace-A", actorUserId: "alice", limit: 50 });
+      expect(recent.some((item) => item.id === approval.id)).toBe(false);
+      expect(await recoverLinearApproval(store, approval.id, "workspace-A", "alice", 10))
+        .toMatchObject({ reconciledAs: "effect_present", executionReceiptId: "receipt-old" });
+      await expect(recoverLinearApproval(store, approval.id, "workspace-B", "alice", 10))
+        .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      await expect(recoverLinearApproval(store, approval.id, "workspace-A", "bob", 10))
+        .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      store.approvals.set(approval.id, { ...approval, status: "failed", reconciledAs: "effect_absent" });
+      expect(await recoverLinearApproval(store, approval.id, "workspace-A", "alice", 10))
+        .toMatchObject({ status: "failed", reconciledAs: "effect_absent" });
+      member = false;
+      await expect(recoverLinearApproval(store, approval.id, "workspace-A", "alice", 10))
+        .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    });
+
+  it("does not recover expired, unrelated, or unrecorded settled approvals", async () => {
     const receipts = new MemoryExecutionReceiptStore(() => true);
     const store = new MemoryExecutionApprovalStore(() => true, receipts);
     const approval = { id: "approval", workspaceId: "workspace-A", actorUserId: "alice",
@@ -91,6 +120,10 @@ describe("Linear reconciliation history", () => {
     await expect(recoverLinearApproval(store, approval.id, "workspace-A", "alice", 10))
       .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
     store.approvals.set(approval.id, { ...approval, status: "consumed", expiresAt: 100 });
+    await expect(recoverLinearApproval(store, approval.id, "workspace-A", "alice", 10))
+      .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    store.approvals.set(approval.id, { ...approval, status: "consumed", reconciledAs: "effect_absent",
+      executionReceiptId: "receipt-old" });
     await expect(recoverLinearApproval(store, approval.id, "workspace-A", "alice", 10))
       .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
   });

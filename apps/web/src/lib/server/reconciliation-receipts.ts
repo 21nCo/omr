@@ -12,15 +12,19 @@ export function visibleApprovals<T extends Pick<ExecutionApproval, "id" | "statu
     .map((approval) => [approval.id, approval])).values()];
 }
 
-/** Recover one older Linear approval without scanning the actor's history. */
+/** Recover one older Linear approval or its recorded decision without scanning history. */
 export async function recoverLinearApproval(
   store: ExecutionApprovalStore, approvalId: string | undefined,
   workspaceId: string, actorUserId: string, now: number,
 ): Promise<ExecutionApproval | null> {
   if (!approvalId) return null;
   const approval = await store.getForActor(approvalId, actorUserId);
+  const recorded = Boolean(approval.executionReceiptId) &&
+    ((approval.status === "consumed" && approval.reconciledAs === "effect_present") ||
+      (approval.status === "failed" && approval.reconciledAs === "effect_absent"));
   if (approval.workspaceId !== workspaceId || !approval.toolId.startsWith("linear.") ||
       (approval.status !== "uncertain" &&
+        !recorded &&
         !((approval.status === "pending" || approval.status === "approved") &&
           approval.expiresAt > now))) throw new ApprovalUnavailableError();
   return approval;

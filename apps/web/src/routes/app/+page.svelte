@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { beginGithubReconnect, createOAuthReviewController } from "$lib/oauth-review.js";
   import { connectionActions, connectionStatusLabel, providerRevocationGuidance } from "$lib/connection-ui.js";
-  import { createWorkspaceCatalogLoader, linearEffectAbsentAvailable, linearEffectPresentAvailable, providerDisplayState, selectedLinearAccountId, selectedReadyLinearConnection } from "$lib/workspace-catalog.js";
+  import { createWorkspaceCatalogLoader, linearEffectAbsentAvailable, linearEffectPresentAvailable, providerDisplayState, recoverLinearReconciliation, selectedLinearAccountId, selectedReadyLinearConnection } from "$lib/workspace-catalog.js";
   import { renderApprovalPreview } from "$lib/approval-preview.js";
   import { createLinearActionKeys, linearApprovalNotice } from "$lib/linear-action-keys.js";
   import { V1_PROVIDERS } from "@oh-my-router/tools";
@@ -40,6 +40,7 @@
     previewMode: "opaque" | "redacted" | "unavailable";
     connectionId: string;
     executionReceiptId?: string | null;
+    reconciledAs?: "effect_present" | "effect_absent" | null;
     createdAt: number;
     expiresAt: number;
   };
@@ -371,6 +372,34 @@
     } finally {
       busy = "";
     }
+  }
+
+  async function reconcileLinear(approvalId: string, decision: "effect_present" | "effect_absent") {
+    const workspaceId = selectedWorkspaceId;
+    busy = `reconcile:${approvalId}`;
+    clearLinear();
+    error = "";
+    notice = "";
+    const success = decision === "effect_present"
+      ? "Recorded that Linear applied this change." : "Recorded that Linear did not apply this change.";
+    try {
+      await recoverLinearReconciliation(approvalId, decision,
+        () => request<Approval>("/api/approvals/reconcile", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ approvalId, decision, workspaceId }),
+        }),
+        () => request<Approval>(`/api/approvals/status?${new URLSearchParams({ approvalId, workspaceId })}`));
+    } catch (caught) {
+      if (workspaceId === selectedWorkspaceId) error = caught instanceof Error ? caught.message : "Reconciliation is unconfirmed";
+      return;
+    } finally {
+      busy = "";
+    }
+    if (workspaceId !== selectedWorkspaceId) return;
+    recoveredApprovalId = approvalId;
+    recoveryInput = approvalId;
+    notice = success;
+    await load();
   }
 
   async function createTeam() {
@@ -767,7 +796,8 @@
           </form>
           {#each overview.approvals.filter((item) =>
             ((item.status === "pending" || item.status === "approved") && item.expiresAt > clockNow) ||
-            (item.status === "uncertain" && item.toolId.startsWith("linear."))) as approval}
+            (item.status === "uncertain" && item.toolId.startsWith("linear.")) ||
+            (item.id === recoveredApprovalId && Boolean(item.reconciledAs))) as approval}
             <article class="approval-card">
               <div class="approval-top"><strong>{approval.action} ({approval.toolId})</strong><span>Expires {timestamp(approval.expiresAt)}</span></div>
               <p class="approval-context">Effect: {approval.effect} · Account: {overview.connections.find((connection) => connection.id === approval.connectionId)?.label ?? "Unavailable"}</p>
@@ -787,16 +817,16 @@
                     <p class="approval-context">Record the verified outcome from the originating CLI or MCP client. This browser session cannot reconcile its grant.</p>
                   {:else}
                     <button class="quiet compact" disabled={Boolean(busy) || !linearEffectPresentAvailable(approval, overview.reconciliationReceipts)}
-                      onclick={() => void mutate(`reconcile:${approval.id}`, "/api/approvals/reconcile",
-                        { approvalId: approval.id, decision: "effect_present" }, "Recorded that Linear applied this change.")}>I verified the change happened</button>
+                      onclick={() => void reconcileLinear(approval.id, "effect_present")}>I verified the change happened</button>
                     {#if linearEffectAbsentAvailable(approval, overview.reconciliationReceipts)}
                       <button class="danger compact" disabled={Boolean(busy)}
-                        onclick={() => void mutate(`reconcile:${approval.id}`, "/api/approvals/reconcile",
-                          { approvalId: approval.id, decision: "effect_absent" }, "Recorded that Linear did not apply this change.")}>I verified no change happened</button>
+                        onclick={() => void reconcileLinear(approval.id, "effect_absent")}>I verified no change happened</button>
                     {:else}
                       <p class="approval-context">The request may still be running. OMR cannot safely record no change or allow a retry for this receipt.</p>
                     {/if}
                   {/if}
+                {:else if approval.reconciledAs}
+                  <p class="approval-context">Recorded decision for receipt {approval.executionReceiptId}: {approval.reconciledAs === "effect_present" ? "Linear applied the change" : "Linear did not apply the change"}. No issue write was repeated.</p>
                 {:else}
                   {#if approval.browserActionable}
                     <button class="primary compact" disabled={Boolean(busy) || !approval.previewReady} onclick={() => void mutate(`execute:${approval.id}`, "/api/approvals/execute", { approvalId: approval.id }, `Executed ${approval.toolId}.`)}>Execute approved change</button>
