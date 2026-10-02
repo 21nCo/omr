@@ -67,6 +67,9 @@ async function fixture() {
       response.writeHead(status, { "content-type": "application/json" });
       response.end(JSON.stringify(value));
     };
+    if (path === "/api/approvals/reconcile" && approvalStatus !== "uncertain") {
+      return answer(409, { error: "APPROVAL_UNAVAILABLE" });
+    }
     const malformed = malformedSuccess.get(path);
     if (malformed) {
       response.writeHead(path === "/api/approvals" ? 201 : 200, { "content-type": "application/json" });
@@ -165,6 +168,8 @@ async function fixture() {
         approvalStatus = reconciledAs === "effect_present" ? "consumed" : "failed";
         request.socket.destroy(); return;
       }
+      reconciledAs = String(body?.decision);
+      approvalStatus = reconciledAs === "effect_present" ? "consumed" : "failed";
       return answer(200, {
       id: body?.approvalId, workspaceId: "workspace_1", toolId: "linear.write",
       status: body?.decision === "effect_present" ? "consumed" : "failed",
@@ -510,14 +515,17 @@ describe("cli-command-contract", { timeout: 15_000 }, () => {
   it("validates reconciliation identity and reports effect-absent as a failed action", async () => {
     const f = await fixture();
     const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    f.setApproval("uncertain");
     const absent = await f.run(["approvals", "reconcile", "approval_1", "--decision", "effect_absent", "--json"], env);
     expect(absent.code).toBe(1);
     expect(JSON.parse(absent.stdout)).toMatchObject({ id: "approval_1", status: "failed",
       reconciledAs: "effect_absent" });
+    f.setApproval("uncertain");
     const present = await f.run(["approvals", "reconcile", "approval_1", "--decision", "effect_present", "--json"], env);
     expect(present.code).toBe(0);
     f.successReply("/api/approvals/reconcile", { id: "another", workspaceId: "workspace_1",
       toolId: "linear.write", status: "consumed", expiresAt: Date.now() + 600_000 });
+    f.setApproval("uncertain");
     expect((await f.run(["approvals", "reconcile", "approval_1", "--decision", "effect_present", "--json"], env)).code)
       .not.toBe(0);
     expect(f.calls.filter((call) => call.path === "/api/approvals/reconcile")).toHaveLength(3);
@@ -526,12 +534,22 @@ describe("cli-command-contract", { timeout: 15_000 }, () => {
   it("recovers a committed reconciliation after response loss and labels unresolved replies uncertain", async () => {
     const f = await fixture();
     const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    f.setApproval("uncertain");
     f.loseReconciliationReply();
     const recovered = await f.run(["approvals", "reconcile", "approval_1", "--decision", "effect_present", "--json"], env);
     expect(recovered.code).toBe(0);
     expect(JSON.parse(recovered.stdout)).toMatchObject({ status: "consumed", reconciledAs: "effect_present" });
 
+    const absentFixture = await fixture();
+    absentFixture.setApproval("uncertain");
+    absentFixture.loseReconciliationReply();
+    const absent = await absentFixture.run(["approvals", "reconcile", "approval_1", "--decision", "effect_absent", "--json"],
+      { OMR_BACKEND: absentFixture.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" });
+    expect(absent.code).toBe(1);
+    expect(JSON.parse(absent.stdout)).toMatchObject({ status: "failed", reconciledAs: "effect_absent" });
+
     const g = await fixture();
+    g.setApproval("uncertain");
     g.failureResponse("/api/approvals/reconcile", 503, { error: "SERVER_UNAVAILABLE" });
     const uncertain = await g.run(["approvals", "reconcile", "approval_1", "--decision", "effect_absent", "--json"],
       { OMR_BACKEND: g.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" });
@@ -541,6 +559,7 @@ describe("cli-command-contract", { timeout: 15_000 }, () => {
     expect(g.calls.map((call) => call.path)).toContain("/api/approvals/status");
 
     const h = await fixture();
+    h.setApproval("uncertain");
     h.successReply("/api/approvals/reconcile", { id: "approval_1", workspaceId: "workspace_1",
       toolId: "linear.write", status: "consumed", expiresAt: Date.now() + 600_000 });
     h.successReply("/api/approvals/status", { id: "approval_1", workspaceId: "workspace_1",

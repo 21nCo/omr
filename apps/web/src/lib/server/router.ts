@@ -44,6 +44,7 @@ import {
   GitHubWritePreflightError,
   GitHubWriteRejectedError,
   LinearExecutionError,
+  LinearIntentTransactionRequiredError,
   ExecutionIdempotencyConflictError,
   ExecutionInProgressError,
   ExecutionInvocationDeadlineError,
@@ -403,6 +404,9 @@ export function createOMRRouter(
       }
       if (error instanceof ExecutionIdempotencyConflictError) {
         return Response.json({ error: error.code }, { status: 409 });
+      }
+      if (error instanceof LinearIntentTransactionRequiredError) {
+        return Response.json({ error: error.code }, { status: 503, headers: PRIVATE_RESPONSE });
       }
       if (error instanceof ExecutionInProgressError) {
         return Response.json(

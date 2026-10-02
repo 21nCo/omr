@@ -44,6 +44,19 @@ describe("Linear browser action identity", () => {
       expect(await keys.key(toolId, "omr-A", "connection-A", params)).not.toBe(original);
     });
 
+  it.each(["linear.issues.create", "linear.issues.update"])(
+    "assigns a distinct %s key when title or target changes", async (toolId) => {
+      let next = 0;
+      const keys = createLinearActionKeys(() => `action-${++next}`);
+      const params = { linearWorkspaceId: "linear-A", teamId: "team-A", issueId: "issue-A", title: "First" };
+      const original = await keys.key(toolId, "omr-A", "connection-A", params);
+      expect(await keys.key(toolId, "omr-A", "connection-A", { ...params, title: "Second" }))
+        .not.toBe(original);
+      expect(await keys.key(toolId, "omr-A", "connection-A", { ...params,
+        [toolId.endsWith("create") ? "teamId" : "issueId"]: "target-B" })).not.toBe(original);
+      expect(await keys.key(toolId, "omr-A", "connection-A", params)).toBe(original);
+    });
+
   it("preserves the action on a failed probe, account switch, and denied storage", async () => {
     const keys = createLinearActionKeys(() => crypto.randomUUID(), () => { throw new Error("denied"); });
     const params = { linearWorkspaceId: "linear-A", teamId: "team-A", title: "Issue" };

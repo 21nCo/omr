@@ -21,6 +21,15 @@ export class ExecutionInvocationDeadlineError extends Error {
   }
 }
 
+/** The approval store cannot reserve a Linear intent without an atomic transaction. */
+export class LinearIntentTransactionRequiredError extends Error {
+  readonly code = "LINEAR_INTENT_TRANSACTION_REQUIRED";
+  constructor() {
+    super("Linear intent reservation requires an owned transactional client");
+    this.name = "LinearIntentTransactionRequiredError";
+  }
+}
+
 export async function withinInvocationDeadline<T>(deadlineAt: number, operation: () => Promise<T>): Promise<T> {
   const remaining = deadlineAt - Date.now();
   if (remaining <= 0) throw new ExecutionInvocationDeadlineError();

@@ -4,6 +4,7 @@ import type { JsonValue } from "@oh-my-router/tools";
 import {
   ApprovalUnavailableError,
   ExecutionIdempotencyConflictError,
+  LinearIntentTransactionRequiredError,
   ExecutionInvocationDeadlineError,
   ExecutionOutcomeUnknownError,
   EXECUTION_INVOCATION_DEADLINE_MS,
@@ -60,14 +61,6 @@ const { Client: PostgresClient } = pg;
 export type RunOwnedApprovalClient = <T>(deadlineAt: number,
   invoke: (client: Client, shutdownSignal: AbortSignal) => Promise<T>) => Promise<T>;
 type ApprovalQuery = <R extends QueryResultRow>(sql: string, values?: unknown[]) => Promise<QueryResult<R>>;
-
-export class LinearIntentTransactionRequiredError extends Error {
-  readonly code = "LINEAR_INTENT_TRANSACTION_REQUIRED";
-  constructor() {
-    super("Linear intent reservation requires an owned transactional client");
-    this.name = "LinearIntentTransactionRequiredError";
-  }
-}
 
 export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
   constructor(
@@ -387,7 +380,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
        WHERE approval.id = $1 AND approval.actor_user_id = $2 AND approval.principal_key = $3
          AND approval.status = 'uncertain' AND approval.execution_receipt_id IS NOT NULL
          AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
-           WHERE workspace_id = approval.workspace_id AND user_id = $2)
+           WHERE workspace_id = approval.workspace_id AND user_id = $2 FOR SHARE)
          AND EXISTS (SELECT 1 FROM omr_control.execution_receipts AS receipt
            WHERE receipt.id = approval.execution_receipt_id AND ${EXACT_RECEIPT}
              AND receipt.status IN ('running', 'succeeded', 'uncertain'))`,
@@ -591,7 +584,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
        WHERE approval.id = $1 AND approval.actor_user_id = $2 AND approval.principal_key = $3
          AND approval.status = 'uncertain' AND approval.execution_receipt_id IS NOT NULL
          AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
-           WHERE workspace_id = approval.workspace_id AND user_id = $2)
+           WHERE workspace_id = approval.workspace_id AND user_id = $2 FOR SHARE)
          AND EXISTS (SELECT 1 FROM omr_control.execution_receipts AS receipt
            WHERE receipt.id = approval.execution_receipt_id AND ${EXACT_RECEIPT}
              AND receipt.status = 'uncertain')

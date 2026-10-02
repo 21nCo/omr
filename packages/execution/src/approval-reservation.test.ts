@@ -27,7 +27,7 @@ describe("Linear approval reservation boundaries", () => {
     expect(query).not.toHaveBeenCalled();
   });
 
-  it("fails closed when an alias loses its target and for a nontransactional Postgres intent", async () => {
+  it("fails closed when a memory alias loses its target", async () => {
     const memory = new MemoryExecutionApprovalStore(() => true,
       new MemoryExecutionReceiptStore(() => true));
     await memory.create(approval("approval-A", "key-A"));
@@ -35,6 +35,9 @@ describe("Linear approval reservation boundaries", () => {
     memory.approvals.delete("approval-A");
     await expect(memory.create(approval("approval-C", "key-B")))
       .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+  });
+
+  it("rejects a nontransactional Postgres intent before querying", async () => {
     const query = vi.fn();
     const postgres = new PostgresExecutionApprovalStore({ query } as unknown as Client,
       new Uint8Array(32));

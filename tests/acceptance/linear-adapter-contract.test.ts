@@ -7,6 +7,8 @@ import { MemoryConnectionBindingStore } from "@oh-my-router/connections/testing"
 import { WorkspaceAuthority } from "@oh-my-router/identity";
 import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
 import { ExecutionService, LinearExecutionError, publicApproval } from "@oh-my-router/execution";
+import { LinearIntentTransactionRequiredError } from "@oh-my-router/execution";
+import { OMRClient } from "@oh-my-router/client";
 import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "@oh-my-router/execution/testing";
 import { createProviderIntegrationConfig } from "../../apps/web/src/lib/server/cloudflare-runtime.js";
 import { createOMRRouter, type ExecutionRouteServices } from "../../apps/web/src/lib/server/router.js";
@@ -621,5 +623,19 @@ describe("linear-adapter-contract", () => {
     expect(accepted.status).toBe(200);
     expect(accepted.headers.get("cache-control")).toBe("no-store");
     expect(reconcileUncertain).toHaveBeenCalledWith(expect.any(Request), "approval_one", "effect_absent");
+  });
+
+  it("projects unavailable intent reservation to HTTP and the shared client", async () => {
+    const requestApproval = vi.fn(async () => { throw new LinearIntentTransactionRequiredError(); });
+    const router = createOMRRouter(undefined, undefined, undefined, {
+      requestApproval,
+    } as unknown as ExecutionRouteServices);
+    const client = new OMRClient({ baseUrl: "https://omr.example", credential: "test",
+      fetchImpl: (input, init) => router.handle(new Request(input, init)) });
+    await expect(client.requestApproval({ workspaceId: workspaceA, toolId: "linear.issues.create",
+      params: { title: "No dispatch" }, idempotencyKey: "reservation-1" })).rejects.toMatchObject({
+      status: 503, body: { error: "LINEAR_INTENT_TRANSACTION_REQUIRED" },
+    });
+    expect(requestApproval).toHaveBeenCalledTimes(1);
   });
 });

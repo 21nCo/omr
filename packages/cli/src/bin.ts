@@ -624,35 +624,46 @@ async function approvalCommand(parsed: Parsed, action: string, subject: string,
     return approvalResult(await api.approvalStatus(subject), { id: subject, workspaceId });
   }
   if (action === "execute") return approvalExecute(subject, api, workspaceId);
-  if (action === "reconcile") {
-    const decision = required(parsed, "decision");
-    if (decision !== "effect_present" && decision !== "effect_absent") {
-      throw new CLIError("USAGE", "--decision must be effect_present or effect_absent", 2);
-    }
-    const settled = (reply: Record<string, unknown>) => reply.reconciledAs === decision &&
-      reply.status === (decision === "effect_present" ? "consumed" : "failed");
-    try {
-      const reply = checkedApproval(await api.reconcileUncertain(subject, decision),
-        "/api/approvals/reconcile", { id: subject, workspaceId });
-      if (!settled(reply)) invalidResponse("/api/approvals/reconcile");
-      return approvalResult(reply, { id: subject, workspaceId });
-    } catch (error) {
-      if (!(error instanceof OMRTransportError || error instanceof OMRProtocolError ||
-          (error instanceof OMRHttpError && error.status >= 500))) throw error;
-      try {
-        const status = checkedApproval(await api.approvalStatus(subject), "/api/approvals/status",
-          { id: subject, workspaceId });
-        if (settled(status)) return approvalResult(status, { id: subject, workspaceId });
-      } catch { /* Status may also be unavailable; keep the decision uncertain. */ }
-      throw new CLIError("APPROVAL_RECONCILIATION_UNCERTAIN",
-        "Reconciliation response cannot prove the decision. Check approval status before retrying the same decision; never execute the write again.",
-        23, { approvalId: subject, decision });
-    }
-  }
+  if (action === "reconcile") return reconcileApproval(parsed, subject, api, workspaceId);
   const connectionId = opt(parsed, "connection");
   const approval = await requestApproval(api, { workspaceId, toolId: subject, params: params(parsed),
     ...(connectionId ? { connectionId } : {}), idempotencyKey: required(parsed, "idempotency") });
   return approvalResult(approval, { workspaceId, toolId: subject, connectionId });
+}
+
+function validReconciliation(reply: Record<string, unknown>, decision: string): boolean {
+  return reply.reconciledAs === decision &&
+    reply.status === (decision === "effect_present" ? "consumed" : "failed");
+}
+
+async function recoverReconciliation(subject: string, decision: "effect_present" | "effect_absent",
+  api: OMRClient, workspaceId: string): Promise<void> {
+  try {
+    const status = checkedApproval(await api.approvalStatus(subject), "/api/approvals/status",
+      { id: subject, workspaceId });
+    if (validReconciliation(status, decision)) return approvalResult(status, { id: subject, workspaceId });
+  } catch { /* Status may also be unavailable; keep the decision uncertain. */ }
+  throw new CLIError("APPROVAL_RECONCILIATION_UNCERTAIN",
+    "Reconciliation response cannot prove the decision. Check approval status before retrying the same decision; never execute the write again.",
+    23, { approvalId: subject, decision });
+}
+
+async function reconcileApproval(parsed: Parsed, subject: string,
+  api: OMRClient, workspaceId: string): Promise<void> {
+  const decision = required(parsed, "decision");
+  if (decision !== "effect_present" && decision !== "effect_absent") {
+    throw new CLIError("USAGE", "--decision must be effect_present or effect_absent", 2);
+  }
+  try {
+    const reply = checkedApproval(await api.reconcileUncertain(subject, decision),
+      "/api/approvals/reconcile", { id: subject, workspaceId });
+    if (!validReconciliation(reply, decision)) invalidResponse("/api/approvals/reconcile");
+    return approvalResult(reply, { id: subject, workspaceId });
+  } catch (error) {
+    if (!(error instanceof OMRTransportError || error instanceof OMRProtocolError ||
+        (error instanceof OMRHttpError && error.status >= 500))) throw error;
+    return recoverReconciliation(subject, decision, api, workspaceId);
+  }
 }
 
 async function main(parsed: Parsed): Promise<void> {

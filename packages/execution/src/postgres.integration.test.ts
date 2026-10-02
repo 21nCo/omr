@@ -132,6 +132,113 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       principalKey: a.principalKey, idempotencyKey: a.idempotencyKey }))?.status).toBe("uncertain");
   });
 
+  it.each(["effect_present", "effect_absent"] as const)(
+    "does not reconcile %s after membership deletion wins the row lock", async (decision) => {
+      const now = Date.now();
+      const approval = approvalFixture(now, { toolId: "linear.issues.create" });
+      await runtime.approvals.create(approval);
+      await runtime.approvals.approve({ approvalId: approval.id, actorUserId: "execution_owner", now: now + 1 });
+      await runtime.approvals.claim({ approvalId: approval.id, actorUserId: "execution_owner",
+        principalKey: "web:execution_owner", now: now + 2, deadlineAt: Date.now() + 2_000 });
+      const receipt = receiptFixture(approval, now);
+      await runtime.receipts.reserve(receipt);
+      await runtime.receipts.beginDispatch(receipt.id, now + 3);
+      await runtime.receipts.uncertain(receipt.id, "provider_outcome_unknown", now + 4);
+      await runtime.approvals.uncertain({ approvalId: approval.id, receiptId: receipt.id, now: now + 5 });
+      const revoker = new Client({ connectionString: connectionString! });
+      await revoker.connect();
+      try {
+        await revoker.query("BEGIN");
+        await revoker.query(`DELETE FROM omr_control.workspace_memberships
+          WHERE workspace_id = $1 AND user_id = 'execution_owner'`, [workspaceId]);
+        let settled = false;
+        const pending = runtime.approvals.reconcile({ approvalId: approval.id,
+          actorUserId: "execution_owner", principalKey: "web:execution_owner", decision, now: now + 6 })
+          .then(() => { settled = true; return null; }, (error: unknown) => {
+            settled = true; return error;
+          });
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        expect(settled).toBe(false);
+        await revoker.query("COMMIT");
+        await expect(pending).resolves.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+        const state = await revoker.query<{ status: string; reconciled_as: string | null }>(
+          `SELECT status, reconciled_as FROM omr_control.execution_approvals WHERE id = $1`, [approval.id]);
+        expect(state.rows[0]).toEqual({ status: "uncertain", reconciled_as: null });
+      } finally {
+        await revoker.query("ROLLBACK").catch(() => undefined);
+        await revoker.query(`INSERT INTO omr_control.workspace_memberships
+          (id, workspace_id, user_id, role, created_at, updated_at)
+          VALUES ($1, $2, 'execution_owner', 'member', $3, $3) ON CONFLICT DO NOTHING`,
+        [`membership_${crypto.randomUUID()}`, workspaceId, Date.now()]);
+        await revoker.end();
+      }
+    });
+
+  it.each(["effect_present", "effect_absent"] as const)(
+    "finishes %s before a later membership deletion can commit", async (decision) => {
+      const now = Date.now();
+      const approval = approvalFixture(now, { toolId: "linear.issues.update" });
+      await runtime.approvals.create(approval);
+      await runtime.approvals.approve({ approvalId: approval.id, actorUserId: "execution_owner", now: now + 1 });
+      await runtime.approvals.claim({ approvalId: approval.id, actorUserId: "execution_owner",
+        principalKey: "web:execution_owner", now: now + 2, deadlineAt: Date.now() + 2_000 });
+      const receipt = receiptFixture(approval, now);
+      await runtime.receipts.reserve(receipt);
+      await runtime.receipts.beginDispatch(receipt.id, now + 3);
+      await runtime.receipts.uncertain(receipt.id, "provider_outcome_unknown", now + 4);
+      await runtime.approvals.uncertain({ approvalId: approval.id, receiptId: receipt.id, now: now + 5 });
+      const blocker = new Client({ connectionString: connectionString! });
+      const revoker = new Client({ connectionString: connectionString! });
+      await blocker.connect();
+      await revoker.connect();
+      const pauseKey = 983_721;
+      const trigger = `omr9_pause_${crypto.randomUUID().replaceAll("-", "")}`;
+      try {
+        await blocker.query(`CREATE FUNCTION omr_control.${trigger}() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN IF NEW.id = '${approval.id}' AND NEW.reconciled_as IS NOT NULL THEN
+            PERFORM pg_advisory_xact_lock(${pauseKey}); END IF; RETURN NEW; END $$`);
+        await blocker.query(`CREATE TRIGGER ${trigger} BEFORE UPDATE ON omr_control.execution_approvals
+          FOR EACH ROW EXECUTE FUNCTION omr_control.${trigger}()`);
+        await blocker.query("SELECT pg_advisory_lock($1)", [pauseKey]);
+        const pending = runtime.approvals.reconcile({ approvalId: approval.id,
+          actorUserId: "execution_owner", principalKey: "web:execution_owner", decision, now: now + 6 });
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        await revoker.query("BEGIN");
+        let deleted = false;
+        const deletion = revoker.query(`DELETE FROM omr_control.workspace_memberships
+          WHERE workspace_id = $1 AND user_id = 'execution_owner'`, [workspaceId])
+          .then(() => { deleted = true; });
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        expect(deleted).toBe(false);
+        await blocker.query("SELECT pg_advisory_unlock($1)", [pauseKey]);
+        await expect(pending).resolves.toMatchObject({
+          status: decision === "effect_present" ? "consumed" : "failed", reconciledAs: decision,
+        });
+        await deletion;
+        await revoker.query("COMMIT");
+        const state = await revoker.query<{ status: string; reconciled_as: string }>(
+          `SELECT status, reconciled_as FROM omr_control.execution_approvals WHERE id = $1`, [approval.id]);
+        expect(state.rows[0]).toEqual({
+          status: decision === "effect_present" ? "consumed" : "failed", reconciled_as: decision,
+        });
+        const membership = await revoker.query<{ count: string }>(
+          `SELECT count(*) FROM omr_control.workspace_memberships
+           WHERE workspace_id = $1 AND user_id = 'execution_owner'`, [workspaceId]);
+        expect(membership.rows[0]?.count).toBe("0");
+      } finally {
+        await blocker.query("SELECT pg_advisory_unlock($1)", [pauseKey]).catch(() => undefined);
+        await revoker.query("ROLLBACK").catch(() => undefined);
+        await revoker.query(`INSERT INTO omr_control.workspace_memberships
+          (id, workspace_id, user_id, role, created_at, updated_at)
+          VALUES ($1, $2, 'execution_owner', 'member', $3, $3) ON CONFLICT DO NOTHING`,
+        [`membership_${crypto.randomUUID()}`, workspaceId, Date.now()]);
+        await blocker.query(`DROP TRIGGER IF EXISTS ${trigger} ON omr_control.execution_approvals`);
+        await blocker.query(`DROP FUNCTION IF EXISTS omr_control.${trigger}()`);
+        await blocker.end();
+        await revoker.end();
+      }
+    });
+
   it("retains a coalesced key after settlement while allowing a deliberate new action", async () => {
     const now = Date.now();
     const intentHash = `hmac-sha256-${"c".repeat(64)}`;

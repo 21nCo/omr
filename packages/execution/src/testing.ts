@@ -131,8 +131,8 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
     if (alias) {
       if (alias.requestHash !== approval.requestHash) throw new ExecutionIdempotencyConflictError();
       const target = this.approvals.get(alias.id);
-      if (!target || target.workspaceId !== approval.workspaceId ||
-          target.principalKey !== approval.principalKey) throw new ApprovalUnavailableError();
+      if (target?.workspaceId !== approval.workspaceId ||
+          target?.principalKey !== approval.principalKey) throw new ApprovalUnavailableError();
       return structuredClone(target);
     }
     const existingId = this.idempotency.get(key);
