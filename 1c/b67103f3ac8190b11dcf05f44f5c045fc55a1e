@@ -1,0 +1,30 @@
+apps/web/src/lib/server/reconciliation-receipts.test.ts
+  h_a39f9495f9ec1d 138,149,155,159-165,192-211
+apps/web/src/lib/server/reconciliation-receipts.ts
+  h_a39f9495f9ec1d 15-18,26,28-34,58-70
+apps/web/src/lib/workspace-catalog.test.ts
+  h_a39f9495f9ec1d 4,12-73
+apps/web/src/lib/workspace-catalog.ts
+  h_a39f9495f9ec1d 17-29,68-83
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 5,89-90,173-177,186-187,192-193,199-224,263,837,842,844,846,857-858,865,868,878
+docs/linear-v1.md
+  h_a39f9495f9ec1d 71-73
+packages/cli/README.md
+  h_a39f9495f9ec1d 52
+packages/cli/src/bin.ts
+  h_a39f9495f9ec1d 192-197,214
+tests/acceptance/cli-command-contract.test.ts
+  h_a39f9495f9ec1d 1550-1555,1565-1569,1573-1578,1592
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1cb67103f3ac8190b11dcf05f44f5c045fc55a1e",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
