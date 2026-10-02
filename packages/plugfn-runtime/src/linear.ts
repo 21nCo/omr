@@ -250,12 +250,16 @@ export async function verifiedLinearScopes(runtime: {
   }): Promise<unknown>;
   connections: { get(connectionId: string): Promise<{ scopes?: string[] }> };
 }, input: { userId: string; workspaceId: string; connectionId: string }): Promise<readonly string[] | undefined> {
+  const scopes = (await runtime.connections.get(input.connectionId)).scopes;
+  if (!Array.isArray(scopes) || !scopes.every((scope) => typeof scope === "string")) return undefined;
+  // PlugFn enforces action scopes before dispatch. Surface the missing grant
+  // as a provider denial instead of allowing its generic scope error to break discovery.
+  if (!scopes.includes("read")) throw new LinearProviderDenial("read", "LINEAR_PERMISSION_DENIED");
   const result = await runtime.action("linear", "workspace.get", {
     userId: input.userId, connectionId: input.connectionId, params: {},
     actor: { userId: input.userId, tenantId: input.workspaceId, organizationId: input.workspaceId },
     retry: { maxAttempts: 1, backoff: "exponential" }, cache: false,
   });
   if (!z.object({ id, name: z.string() }).safeParse(result).success) return undefined;
-  const scopes = (await runtime.connections.get(input.connectionId)).scopes;
-  return Array.isArray(scopes) && scopes.every((scope) => typeof scope === "string") ? scopes : undefined;
+  return scopes;
 }

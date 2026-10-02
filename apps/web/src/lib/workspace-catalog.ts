@@ -6,6 +6,14 @@ export interface WorkspaceCatalogState<Overview, Catalog> {
   error: string;
 }
 
+/** Only an automatically selected live approval can expire out of recovery. */
+export function expiredAutomaticApprovalLookup(
+  lookup: { id: string; expiresAt: number } | null,
+  selectedId: string, now: number,
+): boolean {
+  return lookup !== null && lookup.id === selectedId && lookup.expiresAt <= now;
+}
+
 /** Bind Linear discovery to the selected account in the current workspace. */
 export function selectedLinearAccountId<Connection extends { id: string; provider: string; selected: boolean }>(
   overview: { selectedWorkspaceId: string | null; connections: readonly Connection[] } | null,

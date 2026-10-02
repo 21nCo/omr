@@ -153,10 +153,11 @@ describe("workspace-scoped discovery and manifest grants", () => {
     expect(onMissing).not.toHaveBeenCalled();
   });
 
-  it("isolates a Linear timeout and projects reconnect-required proof without hiding GitHub", async () => {
+  it("isolates Linear timeout, missing-read denial, and reconnect proof without hiding GitHub", async () => {
     const tools = await catalog();
     const reconnect = vi.fn(async () => {});
     for (const failure of [Object.assign(new Error("timeout"), { status: 408 }),
+      new LinearProviderDenial("read", "LINEAR_PERMISSION_DENIED"),
       new LinearProviderDenial("read", "LINEAR_RECONNECT_REQUIRED")]) {
       const visible = await resolveScopedCatalog(tools, providers,
         async (provider) => ({ id: `binding_${provider}`, providerConnectionId: provider }),
@@ -165,7 +166,8 @@ describe("workspace-scoped discovery and manifest grants", () => {
           return ["read"];
         }, async () => {}, reconnect);
       expect([...visible]).toEqual(["github.read"]);
-      expect(reconnect).toHaveBeenCalledTimes(failure instanceof LinearProviderDenial ? 1 : 0);
+      expect(reconnect).toHaveBeenCalledTimes(failure instanceof LinearProviderDenial &&
+        failure.code === "LINEAR_RECONNECT_REQUIRED" ? 1 : 0);
     }
     expect(reconnect).toHaveBeenCalledExactlyOnceWith("binding_linear");
   });

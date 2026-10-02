@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { beginGithubReconnect, createOAuthReviewController } from "$lib/oauth-review.js";
   import { connectionActions, connectionStatusLabel, providerRevocationGuidance } from "$lib/connection-ui.js";
-  import { createWorkspaceCatalogLoader, linearEffectAbsentAvailable, linearEffectPresentAvailable, providerDisplayState, recoverLinearReconciliation, selectedLinearAccountId, selectedReadyLinearConnection } from "$lib/workspace-catalog.js";
+  import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, linearEffectAbsentAvailable, linearEffectPresentAvailable, providerDisplayState, recoverLinearReconciliation, selectedLinearAccountId, selectedReadyLinearConnection } from "$lib/workspace-catalog.js";
   import { renderApprovalPreview } from "$lib/approval-preview.js";
   import { createLinearActionKeys, linearApprovalNotice } from "$lib/linear-action-keys.js";
   import { V1_PROVIDERS } from "@oh-my-router/tools";
@@ -87,6 +87,7 @@
   let notice = "";
   let recoveryInput = "";
   let recoveredApprovalId = "";
+  let automaticApprovalLookup: { id: string; expiresAt: number } | null = null;
   let teamName = "";
   let oauthProvider = "github";
   let oauthLabel = "";
@@ -181,6 +182,11 @@
 
   const loadWorkspace = createWorkspaceCatalogLoader<Overview, Catalog>(
     (workspaceId) => {
+      if (expiredAutomaticApprovalLookup(automaticApprovalLookup, recoveredApprovalId, Date.now())) {
+        recoveredApprovalId = "";
+        recoveryInput = "";
+        automaticApprovalLookup = null;
+      }
       const params = new URLSearchParams();
       if (workspaceId) params.set("workspaceId", workspaceId);
       if (recoveredApprovalId) params.set("approvalId", recoveredApprovalId);
@@ -223,6 +229,7 @@
     cancelAuthorization();
     recoveredApprovalId = "";
     recoveryInput = "";
+    automaticApprovalLookup = null;
     clearLinear();
     apiKey = "";
     await load();
@@ -290,7 +297,7 @@
     error = "";
     try {
       const idempotencyKey = await linearActionKeys.key(toolId, workspaceId, account.id, params);
-      const approval = await request<{ id: string; status: string }>("/api/approvals", {
+      const approval = await request<{ id: string; status: string; expiresAt: number }>("/api/approvals", {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ workspaceId, connectionId: account.id,
           toolId, params, idempotencyKey }),
@@ -299,6 +306,8 @@
         account.id !== linearAccount()?.id) return;
       recoveredApprovalId = ["pending", "approved", "uncertain"].includes(approval.status)
         ? approval.id : "";
+      automaticApprovalLookup = ["pending", "approved"].includes(approval.status)
+        ? { id: approval.id, expiresAt: approval.expiresAt } : null;
       recoveryInput = recoveredApprovalId;
       notice = linearApprovalNotice(approval.status);
       await load();
@@ -331,6 +340,7 @@
           account.id !== linearAccount()?.id) return;
       recoveredApprovalId = "";
       recoveryInput = "";
+      automaticApprovalLookup = null;
       notice = "New Linear action started. Review the account and target before requesting approval.";
     } catch (caught) {
       if (generation === linearGeneration) error = caught instanceof Error ? caught.message : "Could not start another Linear action";
@@ -364,6 +374,7 @@
         name === `${prefix}${recoveredApprovalId}`)) {
         recoveredApprovalId = "";
         recoveryInput = "";
+        automaticApprovalLookup = null;
       }
       notice = success;
       await load();
@@ -398,6 +409,7 @@
     if (workspaceId !== selectedWorkspaceId) return;
     recoveredApprovalId = approvalId;
     recoveryInput = approvalId;
+    automaticApprovalLookup = null;
     notice = success;
     await load();
   }
@@ -695,6 +707,9 @@
           <section class="panel" aria-label="Linear issue journey">
             <div class="panel-heading"><div><p class="kicker">Linear</p><h2>Issues</h2></div></div>
             <p>Selected account: {linearAccount()?.label ?? "Select a Linear account above"}. Choose the Linear workspace and team before reading or changing an issue. Changes wait for approval.</p>
+            {#if linearAccount() && !linearToolAvailable("linear.workspace.get")}
+              <p class="approval-context">Linear reads are unavailable for this grant. Reconnect with read access or select another account.</p>
+            {/if}
             <button class="quiet compact" disabled={Boolean(linearBusy) || !linearToolAvailable("linear.workspace.get")}
               onclick={() => void linearRead<{ id: string; name: string }>("workspace", "linear.workspace.get", {},
                 (value) => { clearLinear(); linearWorkspace = value; })}>Find Linear workspace</button>
@@ -787,12 +802,12 @@
 
         <section class="panel approvals">
           <div class="panel-heading"><div><p class="kicker">Human in the loop</p><h2>Approvals</h2></div></div>
-          <form class="inline-form" onsubmit={(event) => { event.preventDefault(); recoveredApprovalId = recoveryInput.trim(); void load(); }}>
+          <form class="inline-form" onsubmit={(event) => { event.preventDefault(); recoveredApprovalId = recoveryInput.trim(); automaticApprovalLookup = null; void load(); }}>
             <label for="recover-approval">Find an older Linear approval by ID</label>
             <input id="recover-approval" bind:value={recoveryInput} maxlength="128" placeholder="Approval ID" />
             <button class="quiet compact" type="submit" disabled={Boolean(busy) || !recoveryInput.trim()}>Find approval</button>
             {#if recoveredApprovalId}<button class="quiet compact" type="button" disabled={Boolean(busy)}
-              onclick={() => { recoveredApprovalId = ""; recoveryInput = ""; void load(); }}>Clear lookup</button>{/if}
+              onclick={() => { recoveredApprovalId = ""; recoveryInput = ""; automaticApprovalLookup = null; void load(); }}>Clear lookup</button>{/if}
           </form>
           {#each overview.approvals.filter((item) =>
             ((item.status === "pending" || item.status === "approved") && item.expiresAt > clockNow) ||

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createWorkspaceCatalogLoader, linearEffectAbsentAvailable, linearEffectPresentAvailable,
+import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, linearEffectAbsentAvailable, linearEffectPresentAvailable,
   recoverLinearReconciliation, providerDisplayState,
   selectedLinearAccountId, selectedReadyLinearConnection,
   type WorkspaceCatalogState } from "./workspace-catalog.js";
@@ -9,6 +9,36 @@ type Overview = { selectedWorkspaceId: string; connections: { provider: string; 
 type Catalog = { providers: { provider: string; state: string; available?: boolean; authMode?: string }[] };
 
 describe("workspace catalog loading", () => {
+  it("drops an expired automatic Linear approval before reload while preserving foreign-ID denial", async () => {
+    const states: WorkspaceCatalogState<Overview, Catalog>[] = [];
+    const requestedIds: string[] = [];
+    let automatic: { id: string; expiresAt: number } | null = { id: "approval-pending", expiresAt: 100 };
+    let selectedId = "approval-pending";
+    let now = 99;
+    const load = createWorkspaceCatalogLoader<Overview, Catalog>(
+      async (workspaceId) => {
+        if (expiredAutomaticApprovalLookup(automatic, selectedId, now)) {
+          automatic = null;
+          selectedId = "";
+        }
+        requestedIds.push(selectedId);
+        if (selectedId === "approval-pending" && now >= 100) throw new Error("Approval unavailable");
+        if (selectedId === "approval-foreign") throw new Error("Approval unavailable");
+        return { selectedWorkspaceId: workspaceId, connections: [{ provider: "github", status: "ready" }] };
+      },
+      async () => ({ providers: [{ provider: "github", state: "ready" }] }),
+      (state) => states.push(state),
+    );
+    await load("workspace-A");
+    now = 100;
+    await load("workspace-A");
+    expect(requestedIds).toEqual(["approval-pending", ""]);
+    expect(states.at(-1)).toMatchObject({ error: "", catalog: { providers: [{ provider: "github" }] } });
+    selectedId = "approval-foreign";
+    await load("workspace-A");
+    expect(requestedIds.at(-1)).toBe("approval-foreign");
+    expect(states.at(-1)).toMatchObject({ error: "Approval unavailable", catalog: null });
+  });
   it.each(["effect_present", "effect_absent"] as const)(
     "recovers a lost %s browser response by authenticated exact-ID status", async (decision) => {
       const status = decision === "effect_present" ? "consumed" : "failed";

@@ -186,6 +186,9 @@ function ambiguousMutationResponse(error: unknown,
   const validReceiptId = typeof body.receiptId === "string" &&
     /^(?:execution|receipt)_[A-Za-z0-9_-]{1,100}$/.test(body.receiptId);
   const receiptId = validReceiptId ? { receiptId: body.receiptId } : {};
+  // This Linear code is emitted only by a failed read or target preflight;
+  // the issue mutation has not been dispatched.
+  if (error.status === 502 && body.error === "LINEAR_QUERY_REJECTED") throw error;
   if (operation !== "approval request" &&
       ((error.status === 502 && body.error === "EXECUTION_FAILED" && validReceiptId) ||
        (error.status === 503 && body.error === "GITHUB_PREFLIGHT_UNAVAILABLE" && validReceiptId) ||
@@ -209,7 +212,7 @@ function failureCode(error: unknown, body: ReturnType<typeof httpBody>): string 
   if ((error instanceof OMRTransportError || error instanceof OMRProtocolError) &&
       ["/api/tools/execute", "/api/approvals/execute"].includes(error.path)) return "EXECUTION_EFFECT_UNCERTAIN";
   if (typeof body?.error === "string" &&
-      /^(?:EXECUTION|APPROVAL|CLIENT|DEVICE|CONNECTION|TOOL|WORKSPACE|REQUEST|AUTHFN|PROVIDER|RUNTIME|GITHUB)_[A-Z0-9_]{1,64}$/.test(body.error)) {
+      /^(?:(?:EXECUTION|APPROVAL|CLIENT|DEVICE|CONNECTION|TOOL|WORKSPACE|REQUEST|AUTHFN|PROVIDER|RUNTIME|GITHUB)_[A-Z0-9_]{1,64}|LINEAR_(?:RATE_LIMITED|RECONNECT_REQUIRED|PERMISSION_DENIED|TARGET_UNAVAILABLE|WORKSPACE_MISMATCH|INVALID_CHANGE|QUERY_REJECTED))$/.test(body.error)) {
     return body.error;
   }
   return error instanceof OMRHttpError ? "HTTP_ERROR" : "CLI_ERROR";
@@ -243,9 +246,15 @@ function failureMessage(error: unknown, code: string): string {
 }
 function failureDetails(error: unknown, body: ReturnType<typeof httpBody>): unknown {
   if (error instanceof CLIError) return error.details;
+  const details: { receiptId?: string; retryAfterSeconds?: number; rateLimitResetAt?: number } = {};
   if (typeof body?.receiptId === "string" &&
-      /^(?:execution|receipt)_[A-Za-z0-9_-]{1,100}$/.test(body.receiptId)) return { receiptId: body.receiptId };
-  return undefined;
+      /^(?:execution|receipt)_[A-Za-z0-9_-]{1,100}$/.test(body.receiptId)) details.receiptId = body.receiptId;
+  if (error instanceof OMRHttpError && typeof body?.error === "string" &&
+      body.error === "LINEAR_RATE_LIMITED") {
+    if (error.retryAfterSeconds !== undefined) details.retryAfterSeconds = error.retryAfterSeconds;
+    if (error.rateLimitResetAt !== undefined) details.rateLimitResetAt = error.rateLimitResetAt;
+  }
+  return Object.keys(details).length ? details : undefined;
 }
 function fail(error: unknown, json: boolean): void {
   const body = httpBody(error);

@@ -86,7 +86,7 @@ function linearFixture(remote: string = workspaceA) {
 }
 
 /** Share the scoped approval stores and provider spy across write boundary cases. */
-async function executionFixture() {
+async function executionFixture(verified = false) {
   const store = new MemoryWorkspaceStore();
   const workspaces = new WorkspaceAuthority(store);
   const { workspace } = await workspaces.provisionPersonalWorkspace({ userId: "alice" });
@@ -100,11 +100,15 @@ async function executionFixture() {
   const dispatch = vi.fn(async (_provider: string, action: string, options: { params: unknown }) =>
     omrLinearProvider.actions[action]!.execute(options.params, linear.context));
   let scopes = ["read", "write"];
+  const proofAction = vi.fn(async () => ({ id: workspaceA, name: "Workspace" }));
   const service = new ExecutionService(catalog, connections, { action: dispatch }, receipts,
-    async () => scopes, Date.now, approvals, undefined, new Uint8Array(32).fill(7));
+    (connectionId, _binding, principal) => verified
+      ? verifiedLinearScopes({ action: proofAction, connections: { get: async () => ({ scopes }) } }, {
+        connectionId, userId: principal.userId, workspaceId: principal.workspaceId,
+      }) : Promise.resolve(scopes), Date.now, approvals, undefined, new Uint8Array(32).fill(7));
   const principal = { kind: "web" as const, userId: "alice", workspaceId: workspace.id };
   return { workspaces, workspace, connections, binding, receipts, approvals, linear, dispatch,
-    service, principal, setScopes: (next: string[]) => { scopes = next; } };
+    service, principal, proofAction, setScopes: (next: string[]) => { scopes = next; } };
 }
 
 describe("linear-adapter-contract", () => {
@@ -179,7 +183,14 @@ describe("linear-adapter-contract", () => {
     }));
     action.mockResolvedValueOnce({ id: workspaceB, name: 3 });
     expect(await verifiedLinearScopes({ action, connections: { get } }, input)).toBeUndefined();
-    expect(get).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledTimes(2);
+    get.mockResolvedValueOnce({ scopes: ["write"] });
+    await expect(verifiedLinearScopes({ action, connections: { get } }, input))
+      .rejects.toMatchObject({ code: "LINEAR_PERMISSION_DENIED" });
+    expect(action).toHaveBeenCalledTimes(2);
+    get.mockResolvedValueOnce({ scopes: undefined });
+    expect(await verifiedLinearScopes({ action, connections: { get } }, input)).toBeUndefined();
+    expect(action).toHaveBeenCalledTimes(2);
   });
 
   it("maps workspace, teams and issues from the selected token and blocks foreign targets before mutation", async () => {
@@ -238,6 +249,32 @@ describe("linear-adapter-contract", () => {
     await connections.revoke("alice", binding.id);
     await expect(service.executeApproved(principal, update.id)).rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
     expect(linear.mutations()).toHaveLength(1);
+  });
+
+  it("denies reads and both approved issue writes when the recorded Linear grant loses read", async () => {
+    const { binding, service, principal, setScopes, linear, proofAction } = await executionFixture(true);
+    const create = { linearWorkspaceId: workspaceA, teamId: teamA, title: "New" };
+    const update = { linearWorkspaceId: workspaceA, issueId: issueA, title: "Updated" };
+    const createApproval = await service.requestApproval({ principal, toolId: "linear.issues.create",
+      connectionId: binding.id, params: create, idempotencyKey: "missing-read-create" });
+    const updateApproval = await service.requestApproval({ principal, toolId: "linear.issues.update",
+      connectionId: binding.id, params: update, idempotencyKey: "missing-read-update" });
+    await service.approve(createApproval.id, "alice");
+    await service.approve(updateApproval.id, "alice");
+    const probesBefore = proofAction.mock.calls.length;
+    setScopes(["write"]);
+    await expect(service.execute({ principal, toolId: "linear.issues.get",
+      params: { linearWorkspaceId: workspaceA, issueId: issueA } }))
+      .rejects.toMatchObject({ code: "LINEAR_PERMISSION_DENIED" });
+    await expect(service.requestApproval({ principal, toolId: "linear.issues.create",
+      connectionId: binding.id, params: { ...create, title: "Another" }, idempotencyKey: "missing-read-new" }))
+      .rejects.toMatchObject({ code: "LINEAR_PERMISSION_DENIED" });
+    for (const approval of [createApproval, updateApproval]) {
+      await expect(service.executeApproved(principal, approval.id))
+        .rejects.toMatchObject({ code: "LINEAR_PERMISSION_DENIED" });
+    }
+    expect(proofAction).toHaveBeenCalledTimes(probesBefore);
+    expect(linear.mutations()).toHaveLength(0);
   });
 
   it("coalesces concurrent approval requests for one Linear intent and releases a rejected one", async () => {
