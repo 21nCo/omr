@@ -125,7 +125,8 @@ export function approvalPreviewReady(
 /** Approval parameters remain encrypted in storage; API and UI previews mask secrets. */
 export function publicApproval(approval: ExecutionApproval, manifest?: ToolManifest | null) {
   const { principalKey: _principalKey, providerConnectionId: _providerConnectionId,
-    idempotencyKey: _idempotencyKey, requestHash: _requestHash, ...visible } = approval;
+    idempotencyKey: _idempotencyKey, requestHash: _requestHash,
+    intentHash: _intentHash, ...visible } = approval;
   const manifestCurrent = manifest?.hash === approval.manifestHash;
   const sensitive = manifest?.contract.sensitiveKeys.map(parseSensitiveKey).filter((key): key is string[] => key !== null) ?? [];
   // With no declared secret fields, the catalog cannot tell us which values

@@ -130,6 +130,8 @@ export interface ExecutionRouteServices {
   reject(request: Request, approvalId: string): Promise<unknown>;
   executeApproved(request: Request, approvalId: string): Promise<unknown>;
   approvalStatus?(request: Request, approvalId: string): Promise<unknown>;
+  reconcileUncertain?(request: Request, approvalId: string,
+    decision: "effect_present" | "effect_absent"): Promise<unknown>;
 }
 
 export interface ControlPlaneRouteServices {
@@ -185,21 +187,28 @@ function githubErrorResponse(error: GitHubRouteError): Response {
   return Response.json(body, { status: githubStatus(error.code), headers });
 }
 
+/** Return the public HTTP status for one safe Linear failure code. */
+function linearStatus(code: LinearProviderDenial["code"]): number {
+  switch (code) {
+    case "LINEAR_RATE_LIMITED": return 429;
+    case "LINEAR_RECONNECT_REQUIRED": return 401;
+    case "LINEAR_TARGET_UNAVAILABLE": return 404;
+    case "LINEAR_WORKSPACE_MISMATCH": return 409;
+    case "LINEAR_QUERY_REJECTED": return 502;
+    case "LINEAR_INVALID_CHANGE": return 422;
+    default: return 403;
+  }
+}
+
 /** Linear GraphQL limits can arrive with HTTP 400; expose only safe timing metadata. */
 function linearErrorResponse(error: LinearExecutionError | LinearProviderDenial): Response {
-  const status = error.code === "LINEAR_RATE_LIMITED" ? 429
-    : error.code === "LINEAR_RECONNECT_REQUIRED" ? 401
-    : error.code === "LINEAR_TARGET_UNAVAILABLE" ? 404
-    : error.code === "LINEAR_WORKSPACE_MISMATCH" ? 409
-    : error.code === "LINEAR_QUERY_REJECTED" ? 502
-    : error.code === "LINEAR_INVALID_CHANGE" ? 422 : 403;
   const headers: Record<string, string> = { ...PRIVATE_RESPONSE };
   if (error.code === "LINEAR_RATE_LIMITED") {
     if (error.retryAfterSeconds !== undefined) headers["retry-after"] = String(error.retryAfterSeconds);
     if (error.rateLimitResetAt !== undefined) headers["x-ratelimit-requests-reset"] = String(error.rateLimitResetAt);
   }
   return Response.json({ error: error.code, message: error.message,
-    ...("receiptId" in error ? { receiptId: error.receiptId } : {}) }, { status, headers });
+    ...("receiptId" in error ? { receiptId: error.receiptId } : {}) }, { status: linearStatus(error.code), headers });
 }
 
 /** Require a JSON object before reading route-specific fields. */
@@ -767,6 +776,21 @@ export function createOMRRouter(
           if (!approvalId) throw new RequestInputError("approvalId is required");
           if (!executionServices.approvalStatus) throw new RuntimeUnavailableError("Approval status is unavailable");
           return Response.json(await executionServices.approvalStatus(request, approvalId),
+            { headers: PRIVATE_RESPONSE });
+        },
+      },
+      {
+        method: "POST",
+        path: "/api/approvals/reconcile",
+        handler: async (request, context) => {
+          const body = objectBody(await context.json());
+          const approvalId = requiredString(body, "approvalId");
+          const decision = requiredString(body, "decision");
+          if (decision !== "effect_present" && decision !== "effect_absent") {
+            throw new RequestInputError("decision must be effect_present or effect_absent");
+          }
+          if (!executionServices.reconcileUncertain) throw new RuntimeUnavailableError("Reconciliation is unavailable");
+          return Response.json(await executionServices.reconcileUncertain(request, approvalId, decision),
             { headers: PRIVATE_RESPONSE });
         },
       },

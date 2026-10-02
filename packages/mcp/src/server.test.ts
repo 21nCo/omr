@@ -93,6 +93,9 @@ describe("OMR MCP server", () => {
       if (url.pathname === "/api/approvals/execute") {
         return Response.json({ id: "receipt-1", status: "succeeded" });
       }
+      if (url.pathname === "/api/approvals/reconcile") {
+        return Response.json({ id: "approval-1", status: "failed", reconciledAs: "effect_absent" });
+      }
       return Response.json({ error: "NOT_FOUND" }, { status: 404 });
     };
     const server = await createOMRMcpServer({
@@ -112,6 +115,7 @@ describe("OMR MCP server", () => {
       "demo.read",
       "demo.write",
       "omr.approvals.execute",
+      "omr.approvals.reconcile",
       "omr.catalog.providers",
       "omr.catalog.refresh",
       "omr.connections.list",
@@ -166,6 +170,11 @@ describe("OMR MCP server", () => {
     })).resolves.toMatchObject({
       structuredContent: { id: "receipt-1", status: "succeeded" },
     });
+    await expect(client.callTool({ name: "omr.approvals.reconcile",
+      arguments: { approvalId: "approval-1", decision: "effect_absent" } }))
+      .resolves.toMatchObject({ structuredContent: { reconciledAs: "effect_absent" } });
+    expect(requests.find(({ path }) => path === "/api/approvals/reconcile")?.body)
+      .toEqual({ approvalId: "approval-1", decision: "effect_absent" });
 
     expect(requests.filter(({ path }) => path === "/api/tools/execute")).toHaveLength(1);
     expect(requests.find(({ path }) => path === "/api/tools/execute")?.body).toMatchObject({

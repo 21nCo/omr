@@ -132,6 +132,16 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
       }
       return structuredClone(existing);
     }
+    if (approval.intentHash) {
+      const live = [...this.approvals.values()].find((candidate) =>
+        candidate.workspaceId === approval.workspaceId &&
+        candidate.principalKey === approval.principalKey &&
+        candidate.intentHash === approval.intentHash &&
+        ["pending", "approved", "executing", "uncertain"].includes(candidate.status) &&
+        (candidate.status === "executing" || candidate.status === "uncertain" ||
+          candidate.expiresAt > approval.createdAt));
+      if (live) return structuredClone(live);
+    }
     if (this.approvals.has(approval.id)) throw new ApprovalUnavailableError();
     this.approvals.set(approval.id, structuredClone(approval));
     this.idempotency.set(key, approval.id);
@@ -297,6 +307,23 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
       this.assertReceiptOwnership(approval, input.receiptId).status)) throw new ApprovalUnavailableError();
     approval.status = "uncertain";
     approval.executionReceiptId = input.receiptId;
+    approval.updatedAt = input.now;
+    return structuredClone(approval);
+  }
+
+  /** Mirror the durable intent decision for fixture-backed execution tests. */
+  async reconcile(input: { approvalId: string; actorUserId: string; principalKey: string;
+    decision: "effect_present" | "effect_absent"; now: number }): Promise<ExecutionApproval> {
+    const approval = this.approvals.get(input.approvalId);
+    if (!approval || approval.actorUserId !== input.actorUserId ||
+        approval.principalKey !== input.principalKey || !this.isMember(approval.workspaceId, input.actorUserId) ||
+        approval.status !== "uncertain" || !approval.executionReceiptId ||
+        this.assertReceiptOwnership(approval, approval.executionReceiptId).status !== "uncertain") {
+      throw new ApprovalUnavailableError();
+    }
+    approval.status = input.decision === "effect_present" ? "consumed" : "failed";
+    approval.reconciledAs = input.decision;
+    approval.decidedAt = input.now;
     approval.updatedAt = input.now;
     return structuredClone(approval);
   }

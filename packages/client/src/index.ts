@@ -232,6 +232,11 @@ export class OMRClient {
     return this.get(`/api/approvals/status?approvalId=${encodeURIComponent(approvalId)}`);
   }
 
+  /** Submit a verified Linear outcome without redispatching the write. */
+  reconcileUncertain(approvalId: string, decision: "effect_present" | "effect_absent"): Promise<unknown> {
+    return this.post("/api/approvals/reconcile", { approvalId, decision });
+  }
+
   revokeSelf(): Promise<unknown> {
     return this.post("/api/client-grants/revoke-self", {});
   }

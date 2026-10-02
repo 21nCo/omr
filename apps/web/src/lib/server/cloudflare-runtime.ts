@@ -405,6 +405,17 @@ function configuredProviders(plugfn: Awaited<ReturnType<typeof connectPlugFn>>["
   return new Set(statuses(plugfn).filter((status) => status.available).map((status) => status.provider));
 }
 
+/** Prove the selected provider grant before exposing tools or dispatching actions. */
+async function verifiedProviderScopes(
+  plugfn: Awaited<ReturnType<typeof connectPlugFn>>["plugfn"],
+  input: { provider: string; connectionId: string; userId: string; workspaceId: string },
+): Promise<readonly string[] | undefined> {
+  const { provider, connectionId, userId, workspaceId } = input;
+  if (provider === "github") return verifiedGithubScopes(plugfn, { userId, workspaceId, connectionId });
+  if (provider === "linear") return verifiedLinearScopes(plugfn, { userId, workspaceId, connectionId });
+  return (await plugfn.connections.get(connectionId)).scopes;
+}
+
 /** Project accessible bindings, using effective GitHub grants instead of requested scopes. */
 export async function scopedToolIds(
   catalog: Awaited<ReturnType<typeof createPlugFnToolCatalog>>,
@@ -419,14 +430,17 @@ export async function scopedToolIds(
     catalog,
     statuses(plugfn, bindings),
     (provider) => authority.resolve({ actorUserId: principal.userId, workspaceId, provider }),
-    async (connectionId, provider) => provider === "github"
-      ? verifiedGithubScopes(plugfn, { userId: principal.userId, workspaceId, connectionId })
-      : provider === "linear"
-        ? verifiedLinearScopes(plugfn, { userId: principal.userId, workspaceId, connectionId })
-        : (await plugfn.connections.get(connectionId)).scopes,
+    (connectionId, provider) => verifiedProviderScopes(plugfn, {
+      provider, connectionId, userId: principal.userId, workspaceId,
+    }),
     async (bindingId) => {
       missing.add(bindingId);
       await markMissingRemoteConnection(authority, bindingId);
+    },
+    async (bindingId) => {
+      missing.add(bindingId);
+      await authority.recordHealth({ connectionId: bindingId, status: "needs_reauth",
+        readiness: "unavailable", reason: "linear_reconnect_required" }).catch(() => undefined);
     },
   );
   return {
@@ -629,15 +643,10 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
         connectionRuntime.connections,
         plugfn.plugfn,
         execution.receipts,
-        async (connectionId, connection, principal) => connection.provider === "github"
-          ? verifiedGithubScopes(plugfn!.plugfn, {
-            userId: principal.userId, workspaceId: principal.workspaceId, connectionId,
-          })
-          : connection.provider === "linear"
-            ? verifiedLinearScopes(plugfn!.plugfn, {
-              userId: principal.userId, workspaceId: principal.workspaceId, connectionId,
-            })
-          : (await plugfn!.plugfn.connections.get(connectionId)).scopes,
+        (connectionId, connection, principal) => verifiedProviderScopes(plugfn!.plugfn, {
+          provider: connection.provider, connectionId,
+          userId: principal.userId, workspaceId: principal.workspaceId,
+        }),
         Date.now,
         execution.approvals,
         execution.invocationGuard,
@@ -699,6 +708,14 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
       const principal = await authenticate(event, request, undefined, "approvals:create", allowRemoteMcp);
       return withExecution(async (service, catalog) => {
         const approval = await service.approvalStatus(principal, approvalId);
+        return publicApproval(approval, catalog.get(approval.toolId));
+      });
+    },
+    async reconcileUncertain(request, approvalId, decision) {
+      requireExecutionOrigin(request);
+      const principal = await authenticate(event, request, undefined, "approvals:create", allowRemoteMcp);
+      return withExecution(async (service, catalog) => {
+        const approval = await service.reconcileUncertain(principal, approvalId, decision);
         return publicApproval(approval, catalog.get(approval.toolId));
       });
     },

@@ -1,11 +1,22 @@
 import { describe, expect, it } from "vitest";
 
-import { createWorkspaceCatalogLoader, providerDisplayState, type WorkspaceCatalogState } from "./workspace-catalog.js";
+import { createWorkspaceCatalogLoader, providerDisplayState, selectedReadyLinearConnection,
+  type WorkspaceCatalogState } from "./workspace-catalog.js";
 
 type Overview = { selectedWorkspaceId: string; connections: { provider: string; status: string }[] };
 type Catalog = { providers: { provider: string; state: string; available?: boolean; authMode?: string }[] };
 
 describe("workspace catalog loading", () => {
+  it("hides an old selected Linear account throughout a workspace or account switch", () => {
+    const prior = { selectedWorkspaceId: "A", connections: [{ provider: "linear", selected: true,
+      status: "active", readiness: "ready", id: "old-account" }] };
+    const selected = (selectedWorkspaceId: string, loading: boolean, busy: string) =>
+      selectedReadyLinearConnection({ overview: prior, selectedWorkspaceId, loading, busy });
+    expect(selected("A", false, "")?.id).toBe("old-account");
+    expect(selected("A", false, "select:new-account")).toBeUndefined();
+    expect(selected("A", true, "")).toBeUndefined();
+    expect(selected("B", false, "")).toBeUndefined();
+  });
   it("keeps the overview and chosen OAuth provider during a same-workspace refresh", async () => {
     const states: WorkspaceCatalogState<Overview, Catalog>[] = [];
     const providers = [

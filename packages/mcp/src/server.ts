@@ -11,6 +11,7 @@ import type { JsonValue, ToolManifest } from "@oh-my-router/tools";
 const CONNECTIONS_TOOL = "omr.connections.list";
 const SELECT_CONNECTION_TOOL = "omr.connections.select";
 const EXECUTE_APPROVAL_TOOL = "omr.approvals.execute";
+const RECONCILE_APPROVAL_TOOL = "omr.approvals.reconcile";
 const REFRESH_CATALOG_TOOL = "omr.catalog.refresh";
 const PROVIDERS_TOOL = "omr.catalog.providers";
 const IDEMPOTENCY_FIELD = "_omrIdempotencyKey";
@@ -95,7 +96,8 @@ export async function createOMRMcpServer(input: {
   }
   const manifests = await discoverManifests();
 
-  const reservedNames = new Set([CONNECTIONS_TOOL, SELECT_CONNECTION_TOOL, EXECUTE_APPROVAL_TOOL, REFRESH_CATALOG_TOOL, PROVIDERS_TOOL]);
+  const reservedNames = new Set([CONNECTIONS_TOOL, SELECT_CONNECTION_TOOL, EXECUTE_APPROVAL_TOOL,
+    RECONCILE_APPROVAL_TOOL, REFRESH_CATALOG_TOOL, PROVIDERS_TOOL]);
   const collision = manifests.find((manifest) => reservedNames.has(manifest.id));
   if (collision) throw new Error(`OMR catalog tool ${collision.id} conflicts with an MCP control tool`);
 
@@ -268,6 +270,28 @@ export async function createOMRMcpServer(input: {
         return structuredResult(structured(await client.executeApproved(String(args.approvalId))));
       },
     },
+    {
+      name: RECONCILE_APPROVAL_TOOL,
+      title: "Reconcile an Uncertain Linear Approval",
+      description: "After checking Linear independently, record whether an uncertain issue change happened. An effect_absent decision permits a new approval for the same change.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          approvalId: { type: "string", description: "The uncertain Linear approval id." },
+          decision: { type: "string", enum: ["effect_present", "effect_absent"],
+            description: "The outcome you verified in the selected Linear workspace." },
+        },
+        required: ["approvalId", "decision"],
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      metadata: { surface: "omr-control-plane" },
+      async handler(args) {
+        const decision = String(args.decision);
+        if (decision !== "effect_present" && decision !== "effect_absent") throw new Error("Invalid decision");
+        return structuredResult(structured(await client.reconcileUncertain(String(args.approvalId), decision)));
+      },
+    },
   );
 
   registry.registerAll(tools);
@@ -275,7 +299,7 @@ export async function createOMRMcpServer(input: {
     info: {
       name: "oh-my-router",
       version: "0.0.0",
-      instructions: "Use omr.catalog.providers to inspect the workspace-scoped v1 provider states, including unavailable providers. Tools are projected from the authenticated OMR catalog. For multiple ready connections, list and select one with omr.connections.list and omr.connections.select. Call omr.catalog.refresh after connection or selection changes; changed schemas require restarting this session. Revoked tools are hidden on the next list and call. Write, destructive, and unknown-effect calls create an OMR approval instead of executing immediately. After approval in the OMR control plane, call omr.approvals.execute with the returned approvalId.",
+      instructions: "Use omr.catalog.providers to inspect the workspace-scoped v1 provider states, including unavailable providers. Tools are projected from the authenticated OMR catalog. For multiple ready connections, list and select one with omr.connections.list and omr.connections.select. Call omr.catalog.refresh after connection or selection changes; changed schemas require restarting this session. Revoked tools are hidden on the next list and call. Write, destructive, and unknown-effect calls create an OMR approval instead of executing immediately. After approval in the OMR control plane, call omr.approvals.execute with the returned approvalId. Verify an uncertain Linear result in Linear before calling omr.approvals.reconcile.",
     },
     transports: ["stdio", "streamable-http"],
     registry,

@@ -29,6 +29,7 @@ export {
   type GithubAccess,
   type LinearAccess,
   githubScopes,
+  linearScopes,
 } from "./plugfn.js";
 
 export { isMissingRemoteConnection, markMissingRemoteConnection } from "./remote.js";

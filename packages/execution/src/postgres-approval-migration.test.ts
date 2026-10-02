@@ -128,6 +128,11 @@ describeDatabase("approval migration from origin/dev schema", () => {
       expect(Number(rolledBackCrypto.rows[0]?.count)).toBe(0);
       await migrate("0017_ciphertext_context");
       await migrate("0017_ciphertext_context");
+      await migrate("0018_linear_intent_fence");
+      await migrate("0018_linear_intent_fence");
+      const fence = await client.query<{ intent_hash: string | null; reconciled_as: string | null }>(
+        `SELECT intent_hash, reconciled_as FROM ${qualified}.execution_approvals WHERE id = 'approval_old'`);
+      expect(fence.rows[0]).toEqual({ intent_hash: null, reconciled_as: null });
       const legacyVersion = await client.query<{ params_crypto_version: number }>(
         `SELECT params_crypto_version FROM ${qualified}.execution_approvals WHERE id = 'approval_old'`);
       expect(legacyVersion.rows[0]?.params_crypto_version).toBe(0);

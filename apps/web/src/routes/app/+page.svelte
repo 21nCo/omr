@@ -2,9 +2,10 @@
   import { onMount } from "svelte";
   import { beginGithubReconnect, createOAuthReviewController } from "$lib/oauth-review.js";
   import { connectionActions, connectionStatusLabel, providerRevocationGuidance } from "$lib/connection-ui.js";
-  import { createWorkspaceCatalogLoader, providerDisplayState } from "$lib/workspace-catalog.js";
+  import { createWorkspaceCatalogLoader, providerDisplayState, selectedReadyLinearConnection } from "$lib/workspace-catalog.js";
   import { renderApprovalPreview } from "$lib/approval-preview.js";
   import { V1_PROVIDERS } from "@oh-my-router/tools";
+  import type { LinearAccess } from "@oh-my-router/connections";
 
   type WorkspaceAccess = {
     workspace: { id: string; name: string; kind: "personal" | "team" };
@@ -36,6 +37,7 @@
     previewReady: boolean;
     previewMode: "opaque" | "redacted" | "unavailable";
     connectionId: string;
+    executionReceiptId?: string | null;
     createdAt: number;
     expiresAt: number;
   };
@@ -84,7 +86,7 @@
   let oauthLabel = "";
   let oauthOwnership: "personal" | "workspace" = "personal";
   let githubAccess: "profile" | "public_write" | "private_repositories" = "profile";
-  let linearAccess: "read" | "issue_write" = "read";
+  let linearAccess: LinearAccess = "read";
   type LinearTeam = { id: string; name: string; key: string };
   type LinearIssue = { id: string; identifier: string; title: string; description: string | null;
     url: string; team: { id: string; name: string }; state: { id: string; name: string } | null };
@@ -227,15 +229,23 @@
     linearUpdateDescription = "";
   }
 
+  /** Hide a selected account while overview and catalog are changing. */
   function linearAccount(): Connection | undefined {
-    return overview?.connections.find((entry) => entry.provider === "linear" && entry.selected &&
-      entry.status === "active" && entry.readiness === "ready");
+    return selectedReadyLinearConnection({ overview, selectedWorkspaceId, loading, busy });
   }
 
+  /** Use the effective catalog grant to decide whether a Linear control is usable. */
+  function linearToolAvailable(toolId: string): boolean {
+    return Boolean(linearAccount() && catalog?.tools.some((tool) => tool.id === toolId));
+  }
+
+  /** Publish only a read that still belongs to the selected account generation. */
   async function linearRead<T>(name: string, toolId: string, params: object,
     publish: (value: T) => void) {
     const account = linearAccount();
-    if (!account) { error = "Select a ready Linear account first."; return; }
+    if (!account || linearBusy || !linearToolAvailable(toolId)) {
+      error = "Select a ready Linear account and available action first."; return;
+    }
     const generation = linearGeneration;
     const workspaceId = selectedWorkspaceId;
     linearBusy = name;
@@ -252,9 +262,12 @@
     } finally { if (generation === linearGeneration) linearBusy = ""; }
   }
 
+  /** Ask for consent only while the selected account has this write action. */
   async function linearApproval(toolId: "linear.issues.create" | "linear.issues.update", params: object) {
     const account = linearAccount();
-    if (!account) { error = "Select a ready Linear account first."; return; }
+    if (!account || linearBusy || !linearToolAvailable(toolId)) {
+      error = "Issue write access is unavailable for the selected Linear account."; return;
+    }
     const generation = linearGeneration;
     const workspaceId = selectedWorkspaceId;
     linearBusy = "approval";
@@ -286,7 +299,8 @@
   }
 
   async function mutate(name: string, path: string, body: unknown, success: string) {
-    if (name.startsWith("select:") || name.startsWith("refresh:") || name.startsWith("health:")) clearLinear();
+    if (name.startsWith("select:") || name.startsWith("refresh:") || name.startsWith("health:") ||
+        name.startsWith("reconcile:")) clearLinear();
     if (name.startsWith("execute:") && overview?.approvals.some((approval) =>
       name === `execute:${approval.id}` && approval.toolId.startsWith("linear."))) clearLinear();
     busy = name;
@@ -600,7 +614,7 @@
           <section class="panel" aria-label="Linear issue journey">
             <div class="panel-heading"><div><p class="kicker">Linear</p><h2>Issues</h2></div></div>
             <p>Selected account: {linearAccount()?.label ?? "Select a Linear account above"}. Choose the Linear workspace and team before reading or changing an issue. Changes wait for approval.</p>
-            <button class="quiet compact" disabled={Boolean(linearBusy) || !linearAccount()}
+            <button class="quiet compact" disabled={Boolean(linearBusy) || !linearToolAvailable("linear.workspace.get")}
               onclick={() => void linearRead<{ id: string; name: string }>("workspace", "linear.workspace.get", {},
                 (value) => { clearLinear(); linearWorkspace = value; })}>Find Linear workspace</button>
             {#if linearWorkspace}
@@ -640,6 +654,7 @@
                         (value) => { linearIssues = [...linearIssues, ...value.nodes];
                           linearIssuesCursor = value.pageInfo.hasNextPage ? value.pageInfo.endCursor : null; })}>More issues</button>
                   {/if}
+                  {#if linearToolAvailable("linear.issues.create")}
                   <form class="inset" onsubmit={(event) => { event.preventDefault(); void linearApproval("linear.issues.create",
                     { linearWorkspaceId: linearWorkspace?.id, teamId: linearTeamId,
                       title: linearCreateTitle, description: linearCreateDescription }); }}>
@@ -648,6 +663,7 @@
                     <label>Description<textarea bind:value={linearCreateDescription} maxlength="20000"></textarea></label>
                     <button class="primary compact" type="submit" disabled={Boolean(linearBusy) || !linearCreateTitle.trim()}>Request creation approval</button>
                   </form>
+                  {/if}
                 {/if}
               {/if}
               {#if linearIssues.length}
@@ -665,6 +681,7 @@
               {/if}
               {#if linearIssue}
                 <p><a href={linearIssue.url} target="_blank" rel="noopener noreferrer">{linearIssue.identifier}</a> · {linearIssue.state?.name ?? "No state"}</p>
+                {#if linearToolAvailable("linear.issues.update")}
                 <form class="inset" onsubmit={(event) => { event.preventDefault(); void linearApproval("linear.issues.update",
                   { linearWorkspaceId: linearWorkspace?.id, issueId: linearIssue?.id,
                     ...linearUpdateChanges() }); }}>
@@ -673,6 +690,7 @@
                   <label>Description<textarea bind:value={linearUpdateDescription} maxlength="20000"></textarea></label>
                   <button class="primary compact" type="submit" disabled={Boolean(linearBusy) || !linearUpdateTitle.trim() || !Object.keys(linearUpdateChanges()).length}>Request update approval</button>
                 </form>
+                {/if}
               {/if}
             {/if}
           </section>
@@ -680,7 +698,8 @@
 
         <section class="panel approvals">
           <div class="panel-heading"><div><p class="kicker">Human in the loop</p><h2>Approvals</h2></div></div>
-          {#each overview.approvals.filter((item) => item.status === "pending" || item.status === "approved") as approval}
+          {#each overview.approvals.filter((item) => item.status === "pending" || item.status === "approved" ||
+            (item.status === "uncertain" && item.toolId.startsWith("linear."))) as approval}
             <article class="approval-card">
               <div class="approval-top"><strong>{approval.action} ({approval.toolId})</strong><span>Expires {timestamp(approval.expiresAt)}</span></div>
               <p class="approval-context">Effect: {approval.effect} · Account: {overview.connections.find((connection) => connection.id === approval.connectionId)?.label ?? "Unavailable"}</p>
@@ -693,6 +712,14 @@
                 {#if approval.status === "pending"}
                   <button class="primary compact" disabled={Boolean(busy) || !approval.previewReady} onclick={() => void mutate(`approve:${approval.id}`, "/api/approvals/approve", { approvalId: approval.id }, `Approved ${approval.toolId}.`)}>Approve</button>
                   <button class="danger compact" disabled={Boolean(busy)} onclick={() => void mutate(`reject:${approval.id}`, "/api/approvals/reject", { approvalId: approval.id }, `Rejected ${approval.toolId}.`)}>Reject</button>
+                {:else if approval.status === "uncertain"}
+                  <p class="approval-context">The Linear outcome is unknown. Check receipt {approval.executionReceiptId ?? "pending"} against the selected Linear workspace and issue before recording a decision.</p>
+                  <button class="quiet compact" disabled={Boolean(busy) || !approval.executionReceiptId}
+                    onclick={() => void mutate(`reconcile:${approval.id}`, "/api/approvals/reconcile",
+                      { approvalId: approval.id, decision: "effect_present" }, "Recorded that Linear applied this change.")}>I verified the change happened</button>
+                  <button class="danger compact" disabled={Boolean(busy) || !approval.executionReceiptId}
+                    onclick={() => void mutate(`reconcile:${approval.id}`, "/api/approvals/reconcile",
+                      { approvalId: approval.id, decision: "effect_absent" }, "Recorded that Linear did not apply this change.")}>I verified no change happened</button>
                 {:else}
                   <button class="primary compact" disabled={Boolean(busy) || !approval.previewReady} onclick={() => void mutate(`execute:${approval.id}`, "/api/approvals/execute", { approvalId: approval.id }, `Executed ${approval.toolId}.`)}>Execute approved change</button>
                 {/if}

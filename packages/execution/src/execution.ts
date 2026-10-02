@@ -122,6 +122,8 @@ export interface ExecutionApproval {
   params: JsonValue;
   idempotencyKey: string;
   requestHash?: string;
+  intentHash?: string;
+  reconciledAs?: "effect_present" | "effect_absent" | null;
   status: ApprovalStatus;
   approvedBy: string | null;
   decidedAt: number | null;
@@ -150,6 +152,8 @@ export interface ExecutionApprovalStore {
   uncertain(input: { approvalId: string; receiptId: string | null; now: number;
     deadlineAt?: number }): Promise<ExecutionApproval>;
   fail(input: { approvalId: string; now: number; deadlineAt?: number }): Promise<ExecutionApproval>;
+  reconcile(input: { approvalId: string; actorUserId: string; principalKey: string;
+    decision: "effect_present" | "effect_absent"; now: number }): Promise<ExecutionApproval>;
   listForActor(input: {
     workspaceId: string;
     actorUserId: string;
@@ -526,6 +530,13 @@ export class ExecutionService {
       idempotencyKey,
       requestHash: await hashJson({ manifestHash: manifest.hash, connectionId: connection.id,
         params, ttlMs }, this.fingerprintKey),
+      // Independent approval keys must not create a second live Linear intent.
+      intentHash: (manifest.id === "linear.issues.create" || manifest.id === "linear.issues.update")
+        ? await hashJson({
+        principalKey: principalKey(input.principal), workspaceId: input.principal.workspaceId,
+        connectionId: connection.id, providerConnectionId: connection.providerConnectionId,
+        toolId: manifest.id, params,
+        }, this.fingerprintKey) : undefined,
       status: "pending",
       approvedBy: null,
       decidedAt: null,
@@ -565,6 +576,16 @@ export class ExecutionService {
       throw new ApprovalUnavailableError();
     }
     return approval;
+  }
+
+  /** Record an actor's explicit provider-side decision for an uncertain Linear write. */
+  async reconcileUncertain(principal: ExecutionPrincipal, approvalId: string,
+    decision: "effect_present" | "effect_absent"): Promise<ExecutionApproval> {
+    const approval = await this.approvalStatus(principal, approvalId);
+    if (!approval.toolId.startsWith("linear.") || approval.status !== "uncertain" ||
+        !["effect_present", "effect_absent"].includes(decision)) throw new ApprovalUnavailableError();
+    return this.requiredApprovals().reconcile({ approvalId, actorUserId: principal.userId,
+      principalKey: principalKey(principal), decision, now: this.now() });
   }
 
   /** Consume one approved intent with receipt-backed, replay-safe settlement. */
@@ -636,6 +657,7 @@ export class ExecutionService {
           !(principal.kind === "web" && principal.workspaceId === ""))) {
       throw new ApprovalUnavailableError();
     }
+    if (prior.reconciledAs) throw new ApprovalUnavailableError();
     if (prior.status !== "consumed" && prior.status !== "uncertain" &&
         prior.status !== "executing") return null;
     let receipt = await withinInvocationDeadline(deadlineAt,

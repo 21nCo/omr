@@ -11,6 +11,7 @@ export async function resolveScopedCatalog(
   resolveBinding: (provider: string) => Promise<{ id: string; providerConnectionId: string }>,
   remoteScopes: (connectionId: string, provider: string) => Promise<readonly string[] | undefined>,
   onRemoteMissing: (bindingId: string) => Promise<void>,
+  onReconnectRequired?: (bindingId: string) => Promise<void>,
 ): Promise<Set<string>> {
   return usableToolIds(catalog, providers, async (provider) => {
     let binding: { id: string; providerConnectionId: string };
@@ -30,8 +31,15 @@ export async function resolveScopedCatalog(
       // GitHub profile proof is provider-local. Contain its HTTP denials and
       // identifiable outages without swallowing unrelated callback failures.
       if (provider === "github" && githubProofUnavailable(error)) return null;
-      if (provider === "linear" &&
-        (error instanceof LinearProviderDenial || githubProofUnavailable(error))) return null;
+      if (provider === "linear") {
+        if (error instanceof LinearProviderDenial && error.code === "LINEAR_RECONNECT_REQUIRED") {
+          await onReconnectRequired?.(binding.id);
+          return null;
+        }
+        if (error instanceof LinearProviderDenial ||
+            (error && typeof error === "object" && "status" in error && error.status === 408) ||
+            githubProofUnavailable(error)) return null;
+      }
       throw error;
     }
   });

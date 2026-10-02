@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryAdapter, plugFn } from "plugfn";
-import { createPlugFnToolCatalog, hasRequiredScopes, LinearProviderDenial } from "@oh-my-router/tools";
+import { createPlugFnToolCatalog, hasRequiredScopes, LinearProviderDenial, linearDenial } from "@oh-my-router/tools";
 import { omrLinearProvider, verifiedLinearScopes } from "@oh-my-router/plugfn-runtime";
 import { ConnectionAuthority, PlugFnConnectionOrchestrator } from "@oh-my-router/connections";
 import { MemoryConnectionBindingStore } from "@oh-my-router/connections/testing";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
 import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
-import { ExecutionService, LinearExecutionError } from "@oh-my-router/execution";
+import { ExecutionService, LinearExecutionError, publicApproval } from "@oh-my-router/execution";
 import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "@oh-my-router/execution/testing";
 import { createProviderIntegrationConfig } from "../../apps/web/src/lib/server/cloudflare-runtime.js";
 import { createOMRRouter, type ExecutionRouteServices } from "../../apps/web/src/lib/server/router.js";
@@ -83,6 +83,28 @@ function linearFixture(remote: string = workspaceA) {
     setReadFailure: (value: typeof readFailure) => { readFailure = value; } };
 }
 
+/** Share the scoped approval stores and provider spy across write boundary cases. */
+async function executionFixture() {
+  const store = new MemoryWorkspaceStore();
+  const workspaces = new WorkspaceAuthority(store);
+  const { workspace } = await workspaces.provisionPersonalWorkspace({ userId: "alice" });
+  const connections = new ConnectionAuthority(new MemoryConnectionBindingStore(store));
+  const binding = await connections.attach({ actorUserId: "alice", workspaceId: workspace.id,
+    provider: "linear", providerConnectionId: "remote_linear_A", ownership: "personal", label: "A" });
+  const receipts = new MemoryExecutionReceiptStore(() => true);
+  const approvals = new MemoryExecutionApprovalStore(() => true, receipts);
+  const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrLinearProvider] } });
+  const linear = linearFixture();
+  const dispatch = vi.fn(async (_provider: string, action: string, options: { params: unknown }) =>
+    omrLinearProvider.actions[action]!.execute(options.params, linear.context));
+  let scopes = ["read", "write"];
+  const service = new ExecutionService(catalog, connections, { action: dispatch }, receipts,
+    async () => scopes, Date.now, approvals, undefined, new Uint8Array(32).fill(7));
+  const principal = { kind: "web" as const, userId: "alice", workspaceId: workspace.id };
+  return { workspaces, workspace, connections, binding, receipts, approvals, linear, dispatch,
+    service, principal, setScopes: (next: string[]) => { scopes = next; } };
+}
+
 describe("linear-adapter-contract", () => {
   it("publishes only the bounded typed issue journey and stays off until OMR-15 enables it", async () => {
     const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrLinearProvider] } });
@@ -93,10 +115,11 @@ describe("linear-adapter-contract", () => {
     expect(catalog.get("linear.comments.create")).toBeNull();
     expect(catalog.get("linear.projects.create")).toBeNull();
     const create = catalog.get("linear.issues.create")!;
-    expect(create.contract).toMatchObject({ effect: "write", requiredScopes: ["write"], retry: "never",
+    expect(create.contract).toMatchObject({ effect: "write", requiredScopes: ["read", "write"], retry: "never",
       resources: [{ kind: "linear_workspace", parameter: "linearWorkspaceId" },
         { kind: "team", parameter: "teamId" }] });
     expect(hasRequiredScopes(create, ["read"])).toBe(false);
+    expect(hasRequiredScopes(create, ["write"])).toBe(false);
     expect(catalog.get("linear.issues.list")?.contract.pagination).toEqual({
       kind: "cursor", cursorParameter: "after", maxPageSize: 50 });
     expect(() => omrLinearProvider.actions["issues.create"]!.parameters.parse({
@@ -136,6 +159,11 @@ describe("linear-adapter-contract", () => {
     expect(getAuthUrl.mock.calls[1]?.[0]).toMatchObject({ scopes: ["read", "write"] });
     await expect(orchestrator.startOAuth({ ...base, provider: "github", linearAccess: "issue_write" }))
       .rejects.toThrow("Linear access applies only to Linear");
+    await expect(orchestrator.startOAuth({ ...base, linearAccess: "admin" as never }))
+      .rejects.toThrow("Unknown Linear access tier");
+    await expect(orchestrator.startOAuth({ ...base, scopes: ["read", "admin"] }))
+      .rejects.toThrow("Linear scopes must match the selected access tier");
+    expect(getAuthUrl).toHaveBeenCalledTimes(2);
   });
 
   it("probes the selected token before trusting its recorded grant", async () => {
@@ -172,23 +200,10 @@ describe("linear-adapter-contract", () => {
   });
 
   it("fences create and update behind approval, selected account, and revocation", async () => {
-    const store = new MemoryWorkspaceStore();
-    const workspaces = new WorkspaceAuthority(store);
-    const { workspace } = await workspaces.provisionPersonalWorkspace({ userId: "alice" });
+    const { workspaces, workspace, connections, binding, linear, dispatch, service, principal,
+      setScopes } = await executionFixture();
     const other = await workspaces.createTeam({ ownerUserId: "alice", name: "Other" });
-    const connections = new ConnectionAuthority(new MemoryConnectionBindingStore(store));
-    const binding = await connections.attach({ actorUserId: "alice", workspaceId: workspace.id,
-      provider: "linear", providerConnectionId: "remote_linear_A", ownership: "personal", label: "A" });
-    const receipts = new MemoryExecutionReceiptStore(() => true);
-    const approvals = new MemoryExecutionApprovalStore(() => true, receipts);
-    const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrLinearProvider] } });
-    const linear = linearFixture();
-    const dispatch = vi.fn(async (_provider: string, action: string, options: { params: unknown }) =>
-      omrLinearProvider.actions[action]!.execute(options.params, linear.context));
-    let scopes = ["read"];
-    const service = new ExecutionService(catalog, connections, { action: dispatch }, receipts,
-      async () => scopes, Date.now, approvals, undefined, new Uint8Array(32).fill(7));
-    const principal = { kind: "web" as const, userId: "alice", workspaceId: workspace.id };
+    setScopes(["read"]);
     await expect(service.requestApproval({ principal, toolId: "linear.issues.create",
       params: { linearWorkspaceId: workspaceA, teamId: teamA, title: "  " },
       idempotencyKey: "blank-title" })).rejects.toMatchObject({ code: "EXECUTION_INPUT_INVALID" });
@@ -198,7 +213,7 @@ describe("linear-adapter-contract", () => {
     const params = { linearWorkspaceId: workspaceA, teamId: teamA, title: "New" };
     await expect(service.requestApproval({ principal, toolId: "linear.issues.create", params,
       idempotencyKey: "linear-create" })).rejects.toThrow("write");
-    scopes = ["read", "write"];
+    setScopes(["read", "write"]);
     const approval = await service.requestApproval({ principal, toolId: "linear.issues.create", params,
       connectionId: binding.id, idempotencyKey: "linear-create" });
     await expect(service.execute({ principal, toolId: "linear.issues.create", params }))
@@ -220,6 +235,81 @@ describe("linear-adapter-contract", () => {
     await service.approve(update.id, "alice");
     await connections.revoke("alice", binding.id);
     await expect(service.executeApproved(principal, update.id)).rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
+    expect(linear.mutations()).toHaveLength(1);
+  });
+
+  it("coalesces concurrent approval requests for one Linear intent and releases a rejected one", async () => {
+    const { binding, connections, linear, service, principal } = await executionFixture();
+    const params = { linearWorkspaceId: workspaceA, teamId: teamA, title: "One intent" };
+    const [first, duplicate] = await Promise.all([
+      service.requestApproval({ principal, toolId: "linear.issues.create", params,
+        connectionId: binding.id, idempotencyKey: "pending-one" }),
+      service.requestApproval({ principal, toolId: "linear.issues.create", params: { ...params },
+        connectionId: binding.id, idempotencyKey: "pending-two" }),
+    ]);
+    expect(duplicate.id).toBe(first.id);
+    expect(publicApproval(duplicate)).not.toHaveProperty("intentHash");
+    expect(linear.mutations()).toHaveLength(0);
+    const otherTarget = await service.requestApproval({ principal, toolId: "linear.issues.create",
+      params: { ...params, teamId: teamB }, connectionId: binding.id, idempotencyKey: "other-target" });
+    expect(otherTarget.id).not.toBe(first.id);
+    const otherAccount = await connections.attach({ actorUserId: "alice", workspaceId: principal.workspaceId,
+      provider: "linear", providerConnectionId: "remote_linear_B", ownership: "personal", label: "B" });
+    const otherAccountApproval = await service.requestApproval({ principal, toolId: "linear.issues.create",
+      params, connectionId: otherAccount.id, idempotencyKey: "other-account" });
+    expect(otherAccountApproval.id).not.toBe(first.id);
+    await service.reject(first.id, "alice");
+    const afterRejection = await service.requestApproval({ principal, toolId: "linear.issues.create",
+      params, connectionId: binding.id, idempotencyKey: "after-rejection" });
+    expect(afterRejection.id).not.toBe(first.id);
+  });
+
+  it("requires an explicit recorded decision before retrying an uncertain Linear create", async () => {
+    const { binding, linear, service, principal, receipts } = await executionFixture();
+    const params = { linearWorkspaceId: workspaceA, teamId: teamA, title: "Reconcile me" };
+    linear.setFailure("ambiguous");
+    const approval = await service.requestApproval({ principal, toolId: "linear.issues.create",
+      params, connectionId: binding.id, idempotencyKey: "reconcile-first" });
+    await service.approve(approval.id, "alice");
+    await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({
+      code: "EXECUTION_OUTCOME_UNKNOWN",
+    });
+    const repeated = await service.requestApproval({ principal, toolId: "linear.issues.create",
+      params, connectionId: binding.id, idempotencyKey: "reconcile-fresh" });
+    expect(repeated.id).toBe(approval.id);
+    expect(linear.mutations()).toHaveLength(1);
+    await expect(service.reconcileUncertain({ ...principal, workspaceId: "foreign_workspace" },
+      approval.id, "effect_absent")).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    expect(linear.mutations()).toHaveLength(1);
+    const reconciled = await service.reconcileUncertain(principal, approval.id, "effect_absent");
+    expect(reconciled).toMatchObject({ status: "failed", reconciledAs: "effect_absent" });
+    expect(receipts.receipts.get(reconciled.executionReceiptId!)?.status).toBe("uncertain");
+    expect(linear.mutations()).toHaveLength(1);
+    await expect(service.executeApproved(principal, approval.id))
+      .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    const next = await service.requestApproval({ principal, toolId: "linear.issues.create",
+      params, connectionId: binding.id, idempotencyKey: "reconcile-next" });
+    expect(next.id).not.toBe(approval.id);
+    linear.setFailure(null);
+    await service.approve(next.id, "alice");
+    await service.executeApproved(principal, next.id);
+    expect(linear.mutations()).toHaveLength(2);
+  });
+
+  it("closes an effect-present Linear update without replaying its dispatched mutation", async () => {
+    const { binding, linear, service, principal } = await executionFixture();
+    const params = { linearWorkspaceId: workspaceA, issueId: issueA, title: "Observed update" };
+    linear.setFailure("ambiguous");
+    const approval = await service.requestApproval({ principal, toolId: "linear.issues.update",
+      params, connectionId: binding.id, idempotencyKey: "observed-update" });
+    await service.approve(approval.id, "alice");
+    await expect(service.executeApproved(principal, approval.id))
+      .rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN" });
+    expect(linear.mutations()).toHaveLength(1);
+    expect(await service.reconcileUncertain(principal, approval.id, "effect_present"))
+      .toMatchObject({ status: "consumed", reconciledAs: "effect_present" });
+    await expect(service.executeApproved(principal, approval.id))
+      .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
     expect(linear.mutations()).toHaveLength(1);
   });
 
@@ -331,27 +421,15 @@ describe("linear-adapter-contract", () => {
 
   it.each(["issues.create", "issues.update"] as const)(
     "keeps %s receipts uncertain for partial mutation data and transport failures", async (action) => {
-      const store = new MemoryWorkspaceStore();
-      const { workspace } = await new WorkspaceAuthority(store).provisionPersonalWorkspace({ userId: "alice" });
-      const connections = new ConnectionAuthority(new MemoryConnectionBindingStore(store));
-      const binding = await connections.attach({ actorUserId: "alice", workspaceId: workspace.id,
-        provider: "linear", providerConnectionId: "remote_linear_A", ownership: "personal", label: "A" });
-      const receipts = new MemoryExecutionReceiptStore(() => true);
-      const approvals = new MemoryExecutionApprovalStore(() => true, receipts);
-      const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrLinearProvider] } });
-      const linear = linearFixture();
-      const dispatch = vi.fn(async (_provider: string, selected: string, options: { params: unknown }) =>
-        omrLinearProvider.actions[selected]!.execute(options.params, linear.context));
-      const service = new ExecutionService(catalog, connections, { action: dispatch }, receipts,
-        async () => ["read", "write"], Date.now, approvals, undefined, new Uint8Array(32).fill(7));
-      const principal = { kind: "web" as const, userId: "alice", workspaceId: workspace.id };
+      const { binding, receipts, linear, service, principal } = await executionFixture();
       const params = action === "issues.create"
         ? { linearWorkspaceId: workspaceA, teamId: teamA, title: "New" }
         : { linearWorkspaceId: workspaceA, issueId: issueA, title: "Updated" };
 
       for (const failure of ["partial", "partial-http", "null-data", "errors-only", "ambiguous"] as const) {
         linear.setFailure(failure);
-        const approval = await service.requestApproval({ principal, toolId: `linear.${action}`, params,
+        const distinctParams = { ...params, title: `${params.title}-${failure}` };
+        const approval = await service.requestApproval({ principal, toolId: `linear.${action}`, params: distinctParams,
           connectionId: binding.id, idempotencyKey: `${action}-${failure}` });
         const before = linear.mutations().length;
         await service.approve(approval.id, "alice");
@@ -363,6 +441,15 @@ describe("linear-adapter-contract", () => {
         expect([...receipts.receipts.values()].find((receipt) => receipt.approvalId === approval.id))
           .toMatchObject({ status: failure === "errors-only" ? "failed" : "uncertain" });
         await expect(service.executeApproved(principal, approval.id)).rejects.toBeDefined();
+        expect(linear.mutations()).toHaveLength(before + 1);
+        const repeated = await service.requestApproval({ principal, toolId: `linear.${action}`,
+          params: distinctParams, connectionId: binding.id, idempotencyKey: `fresh-${action}-${failure}` });
+        if (failure !== "errors-only") {
+          expect(repeated.id).toBe(approval.id);
+          await expect(service.executeApproved(principal, repeated.id)).rejects.toBeDefined();
+        } else {
+          expect(repeated.id).not.toBe(approval.id);
+        }
         expect(linear.mutations()).toHaveLength(before + 1);
       }
     });
@@ -408,5 +495,71 @@ describe("linear-adapter-contract", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.json()).toEqual({ error: "LINEAR_RATE_LIMITED", receiptId: "receipt_linear",
       message: "Linear rate limit reached. Retry after its reset window." });
+  });
+
+  it.each(["RATELIMITED", "AUTHENTICATION_ERROR", "FORBIDDEN"])(
+    "finds a later %s GraphQL denial without treating partial write data as a denial", (code) => {
+      const failure = { status: 400, headers: { "Retry-After": "29" }, data: {
+        errors: [{ message: "generic" }, { extensions: { code } }],
+      } };
+      const expected = { RATELIMITED: "LINEAR_RATE_LIMITED",
+        AUTHENTICATION_ERROR: "LINEAR_RECONNECT_REQUIRED", FORBIDDEN: "LINEAR_PERMISSION_DENIED" }[code];
+      expect(linearDenial(failure, "read")).toMatchObject({ code: expected });
+      expect(linearDenial(failure, "write")).toMatchObject({ code: expected });
+      expect(linearDenial({ ...failure, data: { ...failure.data, data: null } }, "write")).toBeNull();
+      if (code === "RATELIMITED") expect(linearDenial(failure, "read")?.retryAfterSeconds).toBe(29);
+    });
+
+  it("classifies read and preflight transport outages without attempting a mutation", async () => {
+    const linear = linearFixture();
+    linear.post.mockRejectedValueOnce(Object.assign(new Error("private upstream"), { status: 503 }));
+    await expect(omrLinearProvider.actions["workspace.get"]!.execute({}, linear.context))
+      .rejects.toMatchObject({ code: "LINEAR_QUERY_REJECTED", phase: "read" });
+    linear.post.mockRejectedValueOnce(new TypeError("fetch failed"));
+    await expect(omrLinearProvider.actions["issues.create"]!.execute({
+      linearWorkspaceId: workspaceA, teamId: teamA, title: "New",
+    }, linear.context)).rejects.toMatchObject({ code: "LINEAR_QUERY_REJECTED", phase: "preflight" });
+    expect(linear.mutations()).toHaveLength(0);
+  });
+
+  it("preserves GraphQL response timing in a public read rate limit", async () => {
+    const linear = linearFixture();
+    linear.post.mockResolvedValueOnce({
+      headers: { "Retry-After": "17", "X-RateLimit-Requests-Reset": "1800000000000" },
+      data: { errors: [{ extensions: { code: "RATELIMITED" } }] },
+    });
+    const denial = await omrLinearProvider.actions["workspace.get"]!.execute({}, linear.context)
+      .catch((error: unknown) => error) as LinearProviderDenial;
+    expect(denial).toMatchObject({ code: "LINEAR_RATE_LIMITED", retryAfterSeconds: 17,
+      rateLimitResetAt: 1800000000000 });
+    const router = createOMRRouter(undefined, undefined, undefined, {
+      execute: async () => { throw new LinearExecutionError("receipt_rate", denial); },
+    } as unknown as ExecutionRouteServices);
+    const response = await router.handle(new Request("https://omr.example/api/tools/execute", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspaceId: "omr_A", toolId: "linear.workspace.get", params: {} }),
+    }));
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("17");
+    expect(response.headers.get("x-ratelimit-requests-reset")).toBe("1800000000000");
+  });
+
+  it("validates a reconciliation decision at the HTTP protocol boundary", async () => {
+    const reconcileUncertain = vi.fn(async () => ({ id: "approval_one", status: "failed",
+      reconciledAs: "effect_absent" }));
+    const router = createOMRRouter(undefined, undefined, undefined, {
+      reconcileUncertain,
+    } as unknown as ExecutionRouteServices);
+    const request = (decision: string) => new Request("https://omr.example/api/approvals/reconcile", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ approvalId: "approval_one", decision }),
+    });
+    const rejected = await router.handle(request("retry"));
+    expect(rejected.status).toBe(400);
+    expect(reconcileUncertain).not.toHaveBeenCalled();
+    const accepted = await router.handle(request("effect_absent"));
+    expect(accepted.status).toBe(200);
+    expect(accepted.headers.get("cache-control")).toBe("no-store");
+    expect(reconcileUncertain).toHaveBeenCalledWith(expect.any(Request), "approval_one", "effect_absent");
   });
 });

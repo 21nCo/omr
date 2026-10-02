@@ -419,7 +419,7 @@ const commandActions: Record<string, Record<string, CommandAction>> = {
   workspaces: { list: "none", show: "none", use: "subject" },
   connections: { list: "none", select: "subject" },
   tools: { list: "none", search: "none", inspect: "subject", get: "subject", run: "subject" },
-  approvals: { request: "subject", status: "subject", execute: "subject" },
+  approvals: { request: "subject", status: "subject", execute: "subject", reconcile: "subject" },
 };
 
 function validateCommand(command: string, action: string | undefined, subject: string | undefined): void {
@@ -624,6 +624,14 @@ async function approvalCommand(parsed: Parsed, action: string, subject: string,
     return approvalResult(await api.approvalStatus(subject), { id: subject, workspaceId });
   }
   if (action === "execute") return approvalExecute(subject, api, workspaceId);
+  if (action === "reconcile") {
+    const decision = required(parsed, "decision");
+    if (decision !== "effect_present" && decision !== "effect_absent") {
+      throw new CLIError("USAGE", "--decision must be effect_present or effect_absent", 2);
+    }
+    result(await api.reconcileUncertain(subject, decision));
+    return;
+  }
   const connectionId = opt(parsed, "connection");
   const approval = await requestApproval(api, { workspaceId, toolId: subject, params: params(parsed),
     ...(connectionId ? { connectionId } : {}), idempotencyKey: required(parsed, "idempotency") });
@@ -633,7 +641,7 @@ async function approvalCommand(parsed: Parsed, action: string, subject: string,
 async function main(parsed: Parsed): Promise<void> {
   const [command, action, subject, ...extra] = parsed.positionals;
   if (parsed.options.has("help") || !command || command === "help") {
-    result({ usage: "omr login|logout|profiles list|use|show|workspaces list|show|use|connections list|select|tools list|search|inspect|run|approvals request|status|execute" });
+    result({ usage: "omr login|logout|profiles list|use|show|workspaces list|show|use|connections list|select|tools list|search|inspect|run|approvals request|status|execute|reconcile" });
     return;
   }
   if (extra.length) throw new CLIError("INPUT_INVALID", "Too many positional arguments", 2);

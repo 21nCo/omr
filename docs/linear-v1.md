@@ -37,17 +37,32 @@ optional description and priority in one selected team. `issues.update` accepts
 only title, description and priority on one selected issue. A missing or foreign
 team or issue is denied before mutation. Every create/update requires an OMR
 approval with the selected account and explicit target in its preview. The
-browser's approval card then has a separate execute step. CLI and MCP use the
-same approval request, status, approval, and execution protocol.
+browser's approval card then has a separate execute step. CLI exposes approval
+request, status, execution, and reconciliation. MCP exposes approval request,
+execution, and reconciliation;
+review and approve the pending request in the browser control plane.
+For an uncertain Linear write, inspect the receipt and verify the issue in
+Linear before choosing **effect happened** or **no effect** in the browser,
+`omr approvals reconcile <approvalId> --decision effect_present|effect_absent`,
+or `omr.approvals.reconcile` in MCP. This decision is recorded against the
+original approval. A verified no-effect decision permits a retry; an
+effect-present decision closes the attempt. Either decision requires a new
+approval before any later identical change; reconciliation itself never
+dispatches a mutation.
 
 A definite Linear read or preflight denial fails safely. GraphQL
 `RATELIMITED`, a token rejection, and a permission denial return safe error
 codes; rate limit responses expose available reset timing. A definite
 mutation rejection settles its receipt. A transport failure or incomplete
-mutation result with GraphQL errors after dispatch stays uncertain and must be
-reconciled in Linear before any new approval. Unknown read or preflight query
+mutation result with GraphQL errors after dispatch stays uncertain. Repeating
+the same issue change returns its existing unresolved approval, including when
+a fresh idempotency key is supplied. Unknown read or preflight query
 errors return `LINEAR_QUERY_REJECTED`, never an issue-change error. See
 [Linear rate limits](https://linear.app/developers/rate-limiting).
+
+Apply execution migration `0018_linear_intent_fence.sql` before serving the
+Linear write journey. Drain older Worker writers during that change: they do
+not populate the intent hash and cannot participate in the new approval fence.
 
 `tests/acceptance/linear-adapter-contract.test.ts` exercises the typed schemas,
 OAuth tiers, selected Linear workspace and issue targets, approval, OMR workspace

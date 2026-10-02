@@ -24,6 +24,7 @@ export class LinearProviderDenial extends Error {
   }
 }
 
+/** Read rate timing from either Fetch Headers or a provider header object. */
 function header(error: object, name: string): unknown {
   if (!("headers" in error) || !error.headers) return undefined;
   if (error.headers instanceof Headers) return error.headers.get(name);
@@ -31,11 +32,36 @@ function header(error: object, name: string): unknown {
   return Object.entries(error.headers).find(([key]) => key.toLowerCase() === name)?.[1];
 }
 
+/** Accept only unsigned integral provider timing values. */
 function integer(value: unknown): number | undefined {
   if (typeof value !== "string" && typeof value !== "number") return undefined;
   if (!/^\d+$/.test(String(value))) return undefined;
   const number = Number(value);
   return Number.isSafeInteger(number) ? number : undefined;
+}
+
+/** Prefer a recognized provider denial even when a generic GraphQL error comes first. */
+function graphDenialCode(data: unknown): string | undefined {
+  if (!data || typeof data !== "object" || !("errors" in data) || !Array.isArray(data.errors)) return undefined;
+  for (const error of data.errors) {
+    if (!error || typeof error !== "object" || !("extensions" in error) ||
+        !error.extensions || typeof error.extensions !== "object" || !("code" in error.extensions)) continue;
+    const code = error.extensions.code;
+    if (["RATELIMITED", "AUTHENTICATION_ERROR", "FORBIDDEN"].includes(String(code))) return String(code);
+  }
+  return undefined;
+}
+
+/** Map a provider status or recognized GraphQL code without exposing its message. */
+function denialCode(status: unknown, graphCode: string | undefined,
+  phase: LinearProviderDenial["phase"]): LinearProviderDenial["code"] | null {
+  if (graphCode === "RATELIMITED" || status === 429) return "LINEAR_RATE_LIMITED";
+  if (graphCode === "AUTHENTICATION_ERROR" || status === 401) return "LINEAR_RECONNECT_REQUIRED";
+  if (graphCode === "FORBIDDEN" || status === 403) return "LINEAR_PERMISSION_DENIED";
+  if (phase === "write" && status === 422) return "LINEAR_INVALID_CHANGE";
+  if (phase === "write") return null;
+  if (status === 404) return "LINEAR_TARGET_UNAVAILABLE";
+  return "LINEAR_QUERY_REJECTED";
 }
 
 /** Only a provider HTTP response or GraphQL error can settle a write. */
@@ -49,21 +75,13 @@ export function linearDenial(error: unknown, phase: LinearProviderDenial["phase"
   // GraphQL execution data can be partial even when HTTP reports an error.
   // Non-null propagation can also make data null after the mutation ran.
   if (phase === "write" && data && typeof data === "object" && "data" in data) return null;
-  const errors = data && typeof data === "object" && "errors" in data ? data.errors : undefined;
-  const graphCode = Array.isArray(errors) && errors[0] && typeof errors[0] === "object" &&
-    "extensions" in errors[0] && errors[0].extensions && typeof errors[0].extensions === "object" &&
-    "code" in errors[0].extensions ? errors[0].extensions.code : undefined;
+  const graphCode = graphDenialCode(data);
   if (status !== 400 && status !== 401 && status !== 403 && status !== 404 &&
-      status !== 422 && status !== 429 && graphCode === undefined) return null;
+      status !== 408 && status !== 422 && status !== 429 && graphCode === undefined) return null;
   // A generic mutation error can follow a committed side effect. Preserve the
   // shared receipt's uncertain outcome unless the provider proved a denial.
-  if (phase === "write" && !["RATELIMITED", "AUTHENTICATION_ERROR", "FORBIDDEN"].includes(String(graphCode)) &&
-    status !== 401 && status !== 403 && status !== 429) return null;
-  const code = graphCode === "RATELIMITED" || status === 429 ? "LINEAR_RATE_LIMITED"
-    : status === 401 || graphCode === "AUTHENTICATION_ERROR" ? "LINEAR_RECONNECT_REQUIRED"
-    : status === 403 || graphCode === "FORBIDDEN" ? "LINEAR_PERMISSION_DENIED"
-    : status === 404 ? "LINEAR_TARGET_UNAVAILABLE"
-    : phase === "write" ? "LINEAR_INVALID_CHANGE" : "LINEAR_QUERY_REJECTED";
+  const code = denialCode(status, graphCode, phase);
+  if (!code) return null;
   const resetMs = integer(header(error, "x-ratelimit-requests-reset")) ??
     integer(header(error, "x-ratelimit-endpoint-requests-reset"));
   return new LinearProviderDenial(phase, code, {

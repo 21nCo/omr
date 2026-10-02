@@ -30,6 +30,8 @@ interface ApprovalRow {
   params_crypto_version: number;
   idempotency_key: string;
   request_hash: string | null;
+  intent_hash: string | null;
+  reconciled_as: "effect_present" | "effect_absent" | null;
   status: ApprovalStatus;
   approved_by: string | null;
   decided_at: string | null;
@@ -41,7 +43,7 @@ interface ApprovalRow {
 
 const COLUMNS = `id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash,
   connection_id, provider_connection_id, params_ciphertext, params_iv, params_crypto_version,
-  idempotency_key, request_hash,
+  idempotency_key, request_hash, intent_hash, reconciled_as,
   status, approved_by, decided_at, expires_at, execution_receipt_id, created_at, updated_at`;
 const EXACT_RECEIPT = `receipt.approval_id = approval.id
   AND receipt.workspace_id = approval.workspace_id
@@ -77,16 +79,24 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
   }
 
   async create(approval: ExecutionApproval): Promise<ExecutionApproval> {
+    if (approval.intentHash) {
+      await this.query(
+        `UPDATE omr_control.execution_approvals SET status = 'failed', updated_at = $4
+         WHERE workspace_id = $1 AND principal_key = $2 AND intent_hash = $3
+           AND status IN ('pending', 'approved') AND expires_at <= $4`,
+        [approval.workspaceId, approval.principalKey, approval.intentHash, approval.createdAt],
+      );
+    }
     const encrypted = await encryptJson(approval.params, this.wrappingKey,
       { kind: "approval-params", workspaceId: approval.workspaceId, id: approval.id });
     const result = await this.query<ApprovalRow>(
       `INSERT INTO omr_control.execution_approvals
          (id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash,
           connection_id, provider_connection_id, params_ciphertext, params_iv, params_crypto_version,
-          idempotency_key, request_hash,
+          idempotency_key, request_hash, intent_hash,
           status, approved_by, decided_at, expires_at, execution_receipt_id, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11, $12, $13, $14, $15, $16, $17, $18, $19)
-       ON CONFLICT (workspace_id, principal_key, idempotency_key) DO NOTHING
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+       ON CONFLICT DO NOTHING
        RETURNING ${COLUMNS}`,
       [
         approval.id,
@@ -101,6 +111,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
         encrypted.iv,
         approval.idempotencyKey,
         approval.requestHash ?? null,
+        approval.intentHash ?? null,
         approval.status,
         approval.approvedBy,
         approval.decidedAt,
@@ -116,11 +127,22 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
        WHERE workspace_id = $1 AND principal_key = $2 AND idempotency_key = $3`,
       [approval.workspaceId, approval.principalKey, approval.idempotencyKey],
     );
-    if (!existing.rows[0]) throw new Error("Approval reservation disappeared");
-    if (existing.rows[0].request_hash !== approval.requestHash) {
-      throw new ExecutionIdempotencyConflictError();
+    if (existing.rows[0]) {
+      if (existing.rows[0].request_hash !== approval.requestHash) {
+        throw new ExecutionIdempotencyConflictError();
+      }
+      return this.toApproval(existing.rows[0]);
     }
-    return this.toApproval(existing.rows[0]);
+    if (approval.intentHash) {
+      const live = await this.query<ApprovalRow>(
+        `SELECT ${COLUMNS} FROM omr_control.execution_approvals
+         WHERE workspace_id = $1 AND principal_key = $2 AND intent_hash = $3
+           AND status IN ('pending', 'approved', 'executing', 'uncertain')`,
+        [approval.workspaceId, approval.principalKey, approval.intentHash],
+      );
+      if (live.rows[0]) return this.toApproval(live.rows[0]);
+    }
+    throw new Error("Approval reservation disappeared");
   }
 
   async getForActor(approvalId: string, actorUserId: string,
@@ -475,6 +497,25 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     );
   }
 
+  /** Atomically close a verified uncertain intent while preserving its receipt audit. */
+  async reconcile(input: { approvalId: string; actorUserId: string; principalKey: string;
+    decision: "effect_present" | "effect_absent"; now: number }): Promise<ExecutionApproval> {
+    return this.transition(
+      `UPDATE omr_control.execution_approvals AS approval
+       SET status = CASE WHEN $4 = 'effect_present' THEN 'consumed' ELSE 'failed' END,
+           reconciled_as = $4, decided_at = $5, updated_at = $5
+       WHERE approval.id = $1 AND approval.actor_user_id = $2 AND approval.principal_key = $3
+         AND approval.status = 'uncertain' AND approval.execution_receipt_id IS NOT NULL
+         AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
+           WHERE workspace_id = approval.workspace_id AND user_id = $2)
+         AND EXISTS (SELECT 1 FROM omr_control.execution_receipts AS receipt
+           WHERE receipt.id = approval.execution_receipt_id AND ${EXACT_RECEIPT}
+             AND receipt.status = 'uncertain')
+       RETURNING ${COLUMNS}`,
+      [input.approvalId, input.actorUserId, input.principalKey, input.decision, input.now],
+    );
+  }
+
   async uncertain(input: {
     approvalId: string;
     receiptId: string | null;
@@ -530,6 +571,8 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
         row.params_crypto_version),
       idempotencyKey: row.idempotency_key,
       ...(row.request_hash ? { requestHash: row.request_hash } : {}),
+      ...(row.intent_hash ? { intentHash: row.intent_hash } : {}),
+      ...(row.reconciled_as ? { reconciledAs: row.reconciled_as } : {}),
       status: row.status,
       approvedBy: row.approved_by,
       decidedAt: row.decided_at === null ? null : Number(row.decided_at),

@@ -26,29 +26,33 @@ const updateParams = z.union([
 ]);
 const pageInfo = z.object({ hasNextPage: z.boolean(), endCursor: z.string().nullable() });
 
+/** Build the bounded Linear action policy, including read probes for writes. */
 function contract(effect: "read" | "write", resources: ActionContract["resources"] = [],
-  pagination: ActionContract["pagination"] = { kind: "none" }): ActionContract {
-  return { version: "1.0.0", effect, requiredScopes: effect === "read" ? ["read"] : ["write"],
-    resources, sensitiveKeys: ["description"], pagination,
+  pagination?: ActionContract["pagination"]): ActionContract {
+  return { version: "1.0.0", effect, requiredScopes: effect === "read" ? ["read"] : ["read", "write"],
+    resources, sensitiveKeys: ["description"], pagination: pagination ?? { kind: "none" },
     retry: effect === "read" ? "safe" : "never" };
 }
 
 type Phase = LinearProviderDenial["phase"];
 
-/** Definite GraphQL denials must bypass PlugFn's 429 retry loop. */
+/** Parse one GraphQL exchange without treating partial write data as a denial. */
 async function query(context: ActionContext, source: string, variables: Record<string, unknown>, phase: Phase) {
-  let response: { data: { data?: Record<string, unknown>; errors?: unknown[] } };
+  let response: { data: { data?: Record<string, unknown>; errors?: unknown[] }; headers?: unknown };
   try {
     response = await context.http.post(context.provider.baseUrl, { query: source, variables });
   } catch (error) {
-    throw linearDenial(error, phase) ?? error;
+    throw linearDenial(error, phase) ??
+      (phase === "write" ? error : new LinearProviderDenial(phase, "LINEAR_QUERY_REJECTED"));
   }
   const body = response?.data;
   if (Array.isArray(body?.errors) && body.errors.length) {
     // A nested field error may follow a completed mutation. Let the action
     // validate any returned outcome; incomplete results remain uncertain.
     if (phase !== "write" || !body?.data || typeof body.data !== "object") {
-      throw linearDenial({ status: 400, data: body }, phase) ?? new Error("Linear GraphQL request failed");
+      throw linearDenial({ status: 400, data: body, headers: response.headers }, phase) ??
+        (phase === "write" ? new Error("Linear GraphQL request failed")
+          : new LinearProviderDenial(phase, "LINEAR_QUERY_REJECTED"));
     }
   }
   if (!body?.data || typeof body.data !== "object") {
@@ -58,6 +62,7 @@ async function query(context: ActionContext, source: string, variables: Record<s
   return body.data;
 }
 
+/** Verify that the token's organization matches an explicitly selected target. */
 async function organization(context: ActionContext, expected?: string, phase: Phase = "read") {
   const data = await query(context, "query OmrWorkspace { organization { id name } }", {}, phase);
   const org = z.object({ id, name: z.string().min(1) }).safeParse(data.organization);
@@ -68,6 +73,7 @@ async function organization(context: ActionContext, expected?: string, phase: Ph
   return org.data;
 }
 
+/** Preflight a create target before sending an issue mutation. */
 async function selectedTeam(context: ActionContext, workspace: string, target: string) {
   await organization(context, workspace, "preflight");
   const data = await query(context, "query OmrTeam($id: String!) { team(id: $id) { id name } }",
@@ -77,6 +83,7 @@ async function selectedTeam(context: ActionContext, workspace: string, target: s
   }
 }
 
+/** Preflight an update target before sending an issue mutation. */
 async function selectedIssue(context: ActionContext, workspace: string, target: string) {
   await organization(context, workspace, "preflight");
   const data = await query(context, "query OmrIssueTarget($id: String!) { issue(id: $id) { id team { id } } }",

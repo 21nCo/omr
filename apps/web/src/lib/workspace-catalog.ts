@@ -6,6 +6,21 @@ export interface WorkspaceCatalogState<Overview, Catalog> {
   error: string;
 }
 
+/** A pending selection cannot reuse the previous account's browser controls. */
+export function selectedReadyLinearConnection<Connection extends { provider: string; selected: boolean;
+  status: string; readiness: string }>(state: {
+  overview: { selectedWorkspaceId: string | null; connections: readonly Connection[] } | null;
+  selectedWorkspaceId: string;
+  loading: boolean;
+  busy: string;
+}): Connection | undefined {
+  if (state.loading || state.busy || state.overview?.selectedWorkspaceId !== state.selectedWorkspaceId) {
+    return undefined;
+  }
+  return state.overview.connections.find((connection) => connection.provider === "linear" && connection.selected &&
+    connection.status === "active" && connection.readiness === "ready");
+}
+
 /** Missing discovery is unknown; a known catalog missing a provider is unsupported. */
 export function providerDisplayState<State extends string>(
   catalog: { providers: readonly { provider: string; state: State }[] } | null,

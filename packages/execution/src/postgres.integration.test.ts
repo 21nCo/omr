@@ -94,6 +94,38 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     ...overrides,
   });
 
+  it("fences concurrent Linear approval keys until an uncertain receipt is reconciled", async () => {
+    const now = Date.now();
+    const intentHash = `hmac-sha256-${"e".repeat(64)}`;
+    const first = approvalFixture(now, { toolId: "linear.issues.create", intentHash,
+      providerConnectionId: "remote_linear_one" });
+    const second = approvalFixture(now, { toolId: first.toolId, intentHash,
+      providerConnectionId: first.providerConnectionId });
+    const [a, b] = await Promise.all([runtime.approvals.create(first), runtime.approvals.create(second)]);
+    expect(a.id).toBe(b.id);
+    await runtime.approvals.approve({ approvalId: a.id, actorUserId: a.actorUserId, now: now + 1 });
+    await runtime.approvals.claim({ approvalId: a.id, actorUserId: a.actorUserId,
+      principalKey: a.principalKey, now: now + 2, deadlineAt: Date.now() + 2_000 });
+    const receipt = receiptFixture(a, now);
+    await runtime.receipts.reserve(receipt);
+    await runtime.receipts.beginDispatch(receipt.id, now + 3);
+    await runtime.receipts.uncertain(receipt.id, "provider_outcome_unknown", now + 4);
+    await runtime.approvals.uncertain({ approvalId: a.id, receiptId: receipt.id, now: now + 5 });
+    const fresh = approvalFixture(now + 6, { toolId: a.toolId, intentHash,
+      providerConnectionId: a.providerConnectionId });
+    expect((await runtime.approvals.create(fresh)).id).toBe(a.id);
+    await expect(runtime.approvals.reconcile({ approvalId: a.id, actorUserId: "wrong_actor",
+      principalKey: a.principalKey, decision: "effect_absent", now: now + 7 }))
+      .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    const reconciled = await runtime.approvals.reconcile({ approvalId: a.id,
+      actorUserId: a.actorUserId, principalKey: a.principalKey,
+      decision: "effect_absent", now: now + 8 });
+    expect(reconciled).toMatchObject({ status: "failed", reconciledAs: "effect_absent" });
+    expect((await runtime.approvals.create(fresh)).id).toBe(fresh.id);
+    expect((await runtime.receipts.findByIdempotency({ workspaceId,
+      principalKey: a.principalKey, idempotencyKey: a.idempotencyKey }))?.status).toBe("uncertain");
+  });
+
   it("reserves idempotently and encrypts successful results at rest", async () => {
     const now = Date.now();
     const receipt: ExecutionReceipt = {
