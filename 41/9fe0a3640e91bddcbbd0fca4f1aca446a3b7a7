@@ -1,0 +1,21 @@
+packages/cli/src/bin.ts
+  s_ad500513bc9987::t_97485059f1b799 632-649
+packages/plugfn-runtime/src/linear.ts
+  s_ad500513bc9987::t_9b6687fbc350ae 39-47,54
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "419fe0a3640e91bddcbbd0fca4f1aca446a3b7a7",
+  "prompts": {},
+  "sessions": {
+    "s_ad500513bc9987": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0f222-fb22-76a5-a77e-b7c92826db44",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
