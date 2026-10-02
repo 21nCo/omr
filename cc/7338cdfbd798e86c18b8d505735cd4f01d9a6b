@@ -1,0 +1,60 @@
+.env.example
+  h_a39f9495f9ec1d 33
+README.md
+  h_a39f9495f9ec1d 94-96
+apps/web/src/lib/linear-action-keys.ts
+  h_a39f9495f9ec1d 17-18,61-62
+apps/web/src/lib/oauth-review.test.ts
+  h_a39f9495f9ec1d 28-37
+apps/web/src/lib/oauth-review.ts
+  h_a39f9495f9ec1d 3,13
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 17,155-156,419,444,447
+apps/web/src/lib/server/reconciliation-receipts.ts
+  h_a39f9495f9ec1d 29-30,58-59
+apps/web/src/lib/server/router.ts
+  h_a39f9495f9ec1d 28,37,48,82,218-232,297-303,463-465,684,693
+apps/web/src/lib/server/scoped-catalog.test.ts
+  h_a39f9495f9ec1d 2,174-193
+apps/web/src/lib/server/scoped-catalog.ts
+  h_a39f9495f9ec1d 5,14,37,43-49
+apps/web/src/lib/workspace-catalog.ts
+  h_a39f9495f9ec1d 23-25,98,116-138
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 5,9,17,100-112,143,148-149,196-197,245,252,284,410-515,518,521-522,551,555,593-594,621-629,645,847-856,858,984-1048,1052,1075,1080,1083,1089
+docs/slack-v1.md
+  h_a39f9495f9ec1d 1-70
+packages/connections/src/index.ts
+  h_a39f9495f9ec1d 31,34
+packages/connections/src/plugfn.ts
+  h_a39f9495f9ec1d 105-116,324,337-339,343,349-353
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 7,376-387,560-562,613,949-950,998,1122-1124
+packages/execution/src/index.ts
+  h_a39f9495f9ec1d 11
+packages/execution/src/postgres-approval-store.ts
+  h_a39f9495f9ec1d 647
+packages/execution/src/testing.ts
+  h_a39f9495f9ec1d 401-402
+packages/plugfn-runtime/src/index.ts
+  h_a39f9495f9ec1d 24,44,122
+packages/plugfn-runtime/src/slack.ts
+  h_a39f9495f9ec1d 1-190
+packages/tools/src/index.ts
+  h_a39f9495f9ec1d 19
+packages/tools/src/slack-errors.ts
+  h_a39f9495f9ec1d 1-68
+tests/acceptance/slack-adapter-contract.test.ts
+  h_a39f9495f9ec1d 1-392
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cc7338cdfbd798e86c18b8d505735cd4f01d9a6b",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
