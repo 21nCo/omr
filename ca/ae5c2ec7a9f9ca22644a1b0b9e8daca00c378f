@@ -1,0 +1,48 @@
+apps/web/src/lib/linear-action-keys.test.ts
+  h_a39f9495f9ec1d 1-23
+apps/web/src/lib/linear-action-keys.ts
+  h_a39f9495f9ec1d 1-34
+apps/web/src/lib/server/scoped-catalog.test.ts
+  h_a39f9495f9ec1d 168
+apps/web/src/lib/server/scoped-catalog.ts
+  h_a39f9495f9ec1d 27-28,34-52
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 7,108,278-279,282,286-294,303-314,688-691,719-722
+docs/linear-v1.md
+  h_a39f9495f9ec1d 53-59,70-71,73-75
+packages/cli/README.md
+  h_a39f9495f9ec1d 39
+packages/cli/src/bin.ts
+  h_a39f9495f9ec1d 12,632-638
+packages/execution/migrations/0019_linear_approval_aliases.sql
+  h_a39f9495f9ec1d 1-19
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 111-112,673-674,703-713
+packages/execution/src/postgres-approval-migration.test.ts
+  h_a39f9495f9ec1d 133-134
+packages/execution/src/postgres-approval-store.ts
+  h_a39f9495f9ec1d 9,62,84-119,121-122,124-126,131,163,165,177,180-181,184-191,193-217
+packages/execution/src/postgres.integration.test.ts
+  h_a39f9495f9ec1d 79,116-117,126-130,135-176
+packages/execution/src/testing.ts
+  h_a39f9495f9ec1d 121,127,129-133,143-147,155-179,344,346-359
+packages/mcp/src/server.test.ts
+  h_a39f9495f9ec1d 186-220
+packages/plugfn-runtime/src/linear.ts
+  h_a39f9495f9ec1d 45-47
+tests/acceptance/cli-command-contract.test.ts
+  h_a39f9495f9ec1d 160-164,500-515
+tests/acceptance/linear-adapter-contract.test.ts
+  h_a39f9495f9ec1d 305-307,317-360,594-606
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "caae5c2ec7a9f9ca22644a1b0b9e8daca00c378f",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
