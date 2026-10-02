@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, linearEffectAbsentAvailable, linearEffectPresentAvailable,
-  recoverLinearReconciliation, providerDisplayState,
+  recoverLinearReconciliation, recoverWorkspaceOverview, providerDisplayState, visibleApprovalCard,
   selectedLinearAccountId, selectedReadyLinearConnection,
   type WorkspaceCatalogState } from "./workspace-catalog.js";
 
@@ -9,6 +9,68 @@ type Overview = { selectedWorkspaceId: string; connections: { provider: string; 
 type Catalog = { providers: { provider: string; state: string; available?: boolean; authMode?: string }[] };
 
 describe("workspace catalog loading", () => {
+  it("retires a denied recovery hint and loads the current workspace without stale approval controls", async () => {
+    const ids: string[] = [];
+    let retired = false;
+    const fetchOverview = async (id: string) => {
+      ids.push(id);
+      if (id) throw Object.assign(new Error("unavailable"), { code: "APPROVAL_UNAVAILABLE" });
+      return { selectedWorkspaceId: "A", approvals: [] };
+    };
+    const unavailable = (error: unknown) => (error as { code?: string }).code === "APPROVAL_UNAVAILABLE";
+    await expect(recoverWorkspaceOverview("foreign-or-stale", fetchOverview, unavailable, () => { retired = true; }))
+      .resolves.toEqual({ overview: { selectedWorkspaceId: "A", approvals: [] }, lookupUnavailable: true });
+    expect(ids).toEqual(["foreign-or-stale", ""]);
+    expect(retired).toBe(true);
+    expect(visibleApprovalCard({ id: "approval-old", toolId: "linear.issues.update", status: "consumed",
+      expiresAt: 0 }, "approval-old", 10, false)).toBe(false);
+    await expect(recoverWorkspaceOverview("foreign-or-stale", async () => { throw new Error("database down"); }, unavailable))
+      .rejects.toThrow("database down");
+  });
+
+  it("refreshes the catalog after a foreign lookup denial and removes a stale approval card", async () => {
+    type ApprovalOverview = { selectedWorkspaceId: string; approvals: { id: string; toolId: string;
+      status: string; expiresAt: number }[] };
+    const states: WorkspaceCatalogState<ApprovalOverview, Catalog>[] = [];
+    let denied = false;
+    let lookup = "approval-old";
+    const load = createWorkspaceCatalogLoader<ApprovalOverview, Catalog>(
+      async () => (await recoverWorkspaceOverview(lookup, async (id) => {
+        if (id && denied) throw Object.assign(new Error("unavailable"), { code: "APPROVAL_UNAVAILABLE" });
+        return { selectedWorkspaceId: "A", approvals: id
+          ? [{ id, toolId: "linear.issues.create", status: "approved", expiresAt: 100 }]
+          : [] };
+      }, (error) => (error as { code?: string }).code === "APPROVAL_UNAVAILABLE",
+      () => { lookup = ""; })).overview,
+      async () => ({ providers: [{ provider: "linear", state: "ready" }] }),
+      (state) => states.push(state),
+    );
+    await load("A");
+    expect(states.at(-1)?.overview?.approvals).toHaveLength(1);
+    denied = true;
+    await load("A");
+    expect(lookup).toBe("");
+    expect(states.at(-1)).toMatchObject({ loading: false, error: "", catalog: {
+      providers: [{ provider: "linear", state: "ready" }] }, overview: { approvals: [] } });
+  });
+
+  it.each(["linear.issues.create", "linear.issues.update"])(
+    "shows only current or verified %s approval states", (toolId) => {
+      const approval = { id: "approval-old", toolId, status: "approved", expiresAt: 10 };
+      expect(visibleApprovalCard(approval, approval.id, 10, true)).toBe(false);
+      expect(visibleApprovalCard({ ...approval, status: "rejected" }, approval.id, 1, true)).toBe(false);
+      expect(visibleApprovalCard({ ...approval, status: "consumed" }, approval.id, 1, true)).toBe(false);
+      expect(visibleApprovalCard({ ...approval, status: "executing" }, approval.id, 10, true)).toBe(true);
+      for (const [status, reconciledAs] of [["consumed", "effect_present"], ["failed", "effect_absent"]]) {
+        expect(visibleApprovalCard({ ...approval, status, reconciledAs, executionReceiptId: "receipt-old" },
+          approval.id, 10, true)).toBe(true);
+        expect(visibleApprovalCard({ ...approval, status, reconciledAs, executionReceiptId: "receipt-old" },
+          approval.id, 10, false)).toBe(false);
+      }
+      expect(visibleApprovalCard({ ...approval, status: "consumed", reconciledAs: "effect_absent",
+        executionReceiptId: "receipt-old" }, approval.id, 10, true)).toBe(false);
+    },
+  );
   it("drops an expired automatic Linear approval before reload while preserving foreign-ID denial", async () => {
     const states: WorkspaceCatalogState<Overview, Catalog>[] = [];
     const requestedIds: string[] = [];

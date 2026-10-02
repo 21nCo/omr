@@ -14,6 +14,19 @@ export function expiredAutomaticApprovalLookup(
   return lookup !== null && lookup.id === selectedId && lookup.expiresAt <= now;
 }
 
+/** Render an older approval only when the current overview validated its ID. */
+export function visibleApprovalCard(approval: { id: string; toolId: string; status: string;
+  expiresAt: number; executionReceiptId?: string | null; reconciledAs?: string | null },
+  recoveredApprovalId: string, now: number, freshOverview: boolean): boolean {
+  if (["pending", "approved"].includes(approval.status) && approval.expiresAt > now) return true;
+  if (approval.status === "uncertain" && approval.toolId.startsWith("linear.")) return true;
+  if (!freshOverview || approval.id !== recoveredApprovalId || !approval.toolId.startsWith("linear.")) return false;
+  if (approval.status === "executing") return true;
+  return Boolean(approval.executionReceiptId &&
+    ((approval.status === "consumed" && approval.reconciledAs === "effect_present") ||
+      (approval.status === "failed" && approval.reconciledAs === "effect_absent")));
+}
+
 /** Bind Linear discovery to the selected account in the current workspace. */
 export function selectedLinearAccountId<Connection extends { id: string; provider: string; selected: boolean }>(
   overview: { selectedWorkspaceId: string | null; connections: readonly Connection[] } | null,
@@ -50,6 +63,22 @@ export function matchesLinearReconciliation(
 ): boolean {
   return approval.id === approvalId && approval.reconciledAs === decision &&
     approval.status === (decision === "effect_present" ? "consumed" : "failed");
+}
+
+/** A denied exact lookup must not leave the previous overview as the only visible state. */
+export async function recoverWorkspaceOverview<Overview>(approvalId: string,
+  fetchOverview: (approvalId: string) => Promise<Overview>,
+  isUnavailable: (error: unknown) => boolean,
+  onUnavailable: () => void = () => {},
+): Promise<{ overview: Overview; lookupUnavailable: boolean }> {
+  if (!approvalId) return { overview: await fetchOverview(""), lookupUnavailable: false };
+  try {
+    return { overview: await fetchOverview(approvalId), lookupUnavailable: false };
+  } catch (error) {
+    if (!isUnavailable(error)) throw error;
+    onUnavailable();
+    return { overview: await fetchOverview(""), lookupUnavailable: true };
+  }
 }
 
 /** Read back an exact decision when the reconciliation reply is lost or malformed. */

@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { beginGithubReconnect, createOAuthReviewController } from "$lib/oauth-review.js";
   import { connectionActions, connectionStatusLabel, providerRevocationGuidance } from "$lib/connection-ui.js";
-  import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, linearEffectAbsentAvailable, linearEffectPresentAvailable, providerDisplayState, recoverLinearReconciliation, selectedLinearAccountId, selectedReadyLinearConnection } from "$lib/workspace-catalog.js";
+  import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, linearEffectAbsentAvailable, linearEffectPresentAvailable, providerDisplayState, recoverLinearReconciliation, recoverWorkspaceOverview, selectedLinearAccountId, selectedReadyLinearConnection, visibleApprovalCard } from "$lib/workspace-catalog.js";
   import { renderApprovalPreview } from "$lib/approval-preview.js";
   import { createLinearActionKeys, linearApprovalNotice } from "$lib/linear-action-keys.js";
   import { V1_PROVIDERS } from "@oh-my-router/tools";
@@ -86,6 +86,8 @@
   let error = "";
   let notice = "";
   let recoveryInput = "";
+  let recoveryError = "";
+  let overviewRequestGeneration = 0;
   let recoveredApprovalId = "";
   let automaticApprovalLookup: { id: string; expiresAt: number } | null = null;
   let teamName = "";
@@ -168,6 +170,11 @@
     return providerDisplayState(catalog, provider);
   }
 
+  class OMRResponseError extends Error {
+    code: string;
+    constructor(code: string, message: string) { super(message); this.code = code; }
+  }
+
   async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetch(path, { credentials: "same-origin", ...init });
     const body = await response.json().catch(() => ({})) as { error?: string; message?: string };
@@ -176,21 +183,45 @@
       location.assign(`/login?returnTo=${encodeURIComponent(location.pathname + location.search)}`);
       throw new Error("Authentication required");
     }
-    if (!response.ok) throw new Error(body.message ?? body.error ?? `Request failed (${response.status})`);
+    if (!response.ok) throw new OMRResponseError(body.error ?? "HTTP_ERROR",
+      body.message ?? body.error ?? `Request failed (${response.status})`);
     return body as T;
   }
 
   const loadWorkspace = createWorkspaceCatalogLoader<Overview, Catalog>(
-    (workspaceId) => {
+    async (workspaceId) => {
+      const generation = ++overviewRequestGeneration;
       if (expiredAutomaticApprovalLookup(automaticApprovalLookup, recoveredApprovalId, Date.now())) {
         recoveredApprovalId = "";
         recoveryInput = "";
         automaticApprovalLookup = null;
       }
-      const params = new URLSearchParams();
-      if (workspaceId) params.set("workspaceId", workspaceId);
-      if (recoveredApprovalId) params.set("approvalId", recoveredApprovalId);
-      return request<Overview>(`/api/control-plane${params.size ? `?${params}` : ""}`);
+      const lookup = recoveredApprovalId;
+      const result = await recoverWorkspaceOverview(lookup, (approvalId) => {
+        const params = new URLSearchParams();
+        if (workspaceId) params.set("workspaceId", workspaceId);
+        if (approvalId) params.set("approvalId", approvalId);
+        return request<Overview>(`/api/control-plane${params.size ? `?${params}` : ""}`);
+      }, (error) => error instanceof OMRResponseError && error.code === "APPROVAL_UNAVAILABLE",
+      () => {
+        if (generation === overviewRequestGeneration && recoveredApprovalId === lookup) {
+          recoveredApprovalId = "";
+          automaticApprovalLookup = null;
+          recoveryError = "That approval is unavailable in this workspace.";
+        }
+      });
+      if (generation === overviewRequestGeneration) {
+        const recovered = lookup && result.overview.approvals.some((approval) =>
+          approval.id === lookup && visibleApprovalCard(approval, lookup, Date.now(), true));
+        if (lookup && !recovered && recoveredApprovalId === lookup) {
+          recoveredApprovalId = "";
+          automaticApprovalLookup = null;
+          recoveryError = "That approval is unavailable in this workspace.";
+        } else if (!result.lookupUnavailable) {
+          recoveryError = "";
+        }
+      }
+      return result.overview;
     },
     (workspaceId) => request<Catalog>(`/api/tools?workspaceId=${encodeURIComponent(workspaceId)}&limit=100`),
     (state) => {
@@ -229,6 +260,7 @@
     cancelAuthorization();
     recoveredApprovalId = "";
     recoveryInput = "";
+    recoveryError = "";
     automaticApprovalLookup = null;
     clearLinear();
     apiKey = "";
@@ -802,17 +834,16 @@
 
         <section class="panel approvals">
           <div class="panel-heading"><div><p class="kicker">Human in the loop</p><h2>Approvals</h2></div></div>
-          <form class="inline-form" onsubmit={(event) => { event.preventDefault(); recoveredApprovalId = recoveryInput.trim(); automaticApprovalLookup = null; void load(); }}>
+          <form class="inline-form" onsubmit={(event) => { event.preventDefault(); recoveredApprovalId = recoveryInput.trim(); recoveryError = ""; automaticApprovalLookup = null; void load(); }}>
             <label for="recover-approval">Find an older Linear approval by ID</label>
             <input id="recover-approval" bind:value={recoveryInput} maxlength="128" placeholder="Approval ID" />
             <button class="quiet compact" type="submit" disabled={Boolean(busy) || !recoveryInput.trim()}>Find approval</button>
             {#if recoveredApprovalId}<button class="quiet compact" type="button" disabled={Boolean(busy)}
-              onclick={() => { recoveredApprovalId = ""; recoveryInput = ""; automaticApprovalLookup = null; void load(); }}>Clear lookup</button>{/if}
+              onclick={() => { recoveredApprovalId = ""; recoveryInput = ""; recoveryError = ""; automaticApprovalLookup = null; void load(); }}>Clear lookup</button>{/if}
           </form>
+          {#if recoveryError}<p class="approval-context" role="status">{recoveryError}</p>{/if}
           {#each overview.approvals.filter((item) =>
-            ((item.status === "pending" || item.status === "approved") && item.expiresAt > clockNow) ||
-            (item.status === "uncertain" && item.toolId.startsWith("linear.")) ||
-            item.id === recoveredApprovalId) as approval}
+            visibleApprovalCard(item, recoveredApprovalId, clockNow, !loading && !error)) as approval}
             <article class="approval-card">
               <div class="approval-top"><strong>{approval.action} ({approval.toolId})</strong><span>Expires {timestamp(approval.expiresAt)}</span></div>
               <p class="approval-context">Effect: {approval.effect} · Account: {overview.connections.find((connection) => connection.id === approval.connectionId)?.label ?? "Unavailable"}</p>
@@ -823,18 +854,18 @@
               <pre>{renderApprovalPreview(approval.params)}</pre>
               <div class="actions">
                 {#if approval.status === "pending"}
-                  <button class="primary compact" disabled={Boolean(busy) || !approval.previewReady} onclick={() => void mutate(`approve:${approval.id}`, "/api/approvals/approve", { approvalId: approval.id }, `Approved ${approval.toolId}.`)}>Approve</button>
-                  <button class="danger compact" disabled={Boolean(busy)} onclick={() => void mutate(`reject:${approval.id}`, "/api/approvals/reject", { approvalId: approval.id }, `Rejected ${approval.toolId}.`)}>Reject</button>
+                  <button class="primary compact" disabled={Boolean(busy) || Boolean(error) || loading || !approval.previewReady} onclick={() => void mutate(`approve:${approval.id}`, "/api/approvals/approve", { approvalId: approval.id }, `Approved ${approval.toolId}.`)}>Approve</button>
+                  <button class="danger compact" disabled={Boolean(busy) || Boolean(error) || loading} onclick={() => void mutate(`reject:${approval.id}`, "/api/approvals/reject", { approvalId: approval.id }, `Rejected ${approval.toolId}.`)}>Reject</button>
                   {#if !approval.browserActionable}<p class="approval-context">After approval, execute this action from the originating CLI or MCP client.</p>{/if}
                 {:else if approval.status === "uncertain"}
                   <p class="approval-context">The Linear outcome is unknown. Check receipt {approval.executionReceiptId ?? "pending"} against the selected Linear workspace and issue before recording a decision.</p>
                   {#if !approval.browserActionable}
                     <p class="approval-context">Record the verified outcome from the originating CLI or MCP client. This browser session cannot reconcile its grant.</p>
                   {:else}
-                    <button class="quiet compact" disabled={Boolean(busy) || !linearEffectPresentAvailable(approval, overview.reconciliationReceipts)}
+                    <button class="quiet compact" disabled={Boolean(busy) || Boolean(error) || loading || !linearEffectPresentAvailable(approval, overview.reconciliationReceipts)}
                       onclick={() => void reconcileLinear(approval.id, "effect_present")}>I verified the change happened</button>
                     {#if linearEffectAbsentAvailable(approval, overview.reconciliationReceipts)}
-                      <button class="danger compact" disabled={Boolean(busy)}
+                      <button class="danger compact" disabled={Boolean(busy) || Boolean(error) || loading}
                         onclick={() => void reconcileLinear(approval.id, "effect_absent")}>I verified no change happened</button>
                     {:else}
                       <p class="approval-context">The request may still be running. OMR cannot safely record no change or allow a retry for this receipt.</p>
@@ -844,7 +875,7 @@
                   <p class="approval-context">Recorded decision for receipt {approval.executionReceiptId}: {approval.reconciledAs === "effect_present" ? "Linear applied the change" : "Linear did not apply the change"}. No issue write was repeated.</p>
                 {:else if approval.status === "approved"}
                   {#if approval.browserActionable}
-                    <button class="primary compact" disabled={Boolean(busy) || !approval.previewReady} onclick={() => void mutate(`execute:${approval.id}`, "/api/approvals/execute", { approvalId: approval.id }, `Executed ${approval.toolId}.`)}>Execute approved change</button>
+                    <button class="primary compact" disabled={Boolean(busy) || Boolean(error) || loading || !approval.previewReady} onclick={() => void mutate(`execute:${approval.id}`, "/api/approvals/execute", { approvalId: approval.id }, `Executed ${approval.toolId}.`)}>Execute approved change</button>
                   {:else}
                     <p class="approval-context">Execute this approved action from the originating CLI or MCP client. This browser session cannot use its grant.</p>
                   {/if}

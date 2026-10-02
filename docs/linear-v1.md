@@ -68,6 +68,9 @@ ID. CLI clients use `omr approvals status`; MCP clients use
 reconciliation decision is safe and does not send another issue mutation;
 the opposite decision is denied. If neither the response nor status confirms
 the decision, keep the outcome unknown and inspect the approval before retrying.
+An expired, rejected, or ordinarily completed lookup is retired from the
+browser view; a mistyped or foreign ID is denied, and the current workspace
+overview loads without showing controls from that lookup.
 
 The browser retains a request key for the selected action while its form and
 account stay the same. Repeating that submission reports the original approval

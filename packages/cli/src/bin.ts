@@ -189,6 +189,12 @@ function ambiguousMutationResponse(error: unknown,
   // This Linear code is emitted only by a failed read or target preflight;
   // the issue mutation has not been dispatched.
   if (error.status === 502 && body.error === "LINEAR_QUERY_REJECTED") throw error;
+  // Intent reservation failed before an approval or provider call could begin.
+  if (error.status === 503 && body.error === "LINEAR_INTENT_TRANSACTION_REQUIRED") {
+    throw new CLIError("LINEAR_INTENT_TRANSACTION_REQUIRED",
+      "Linear intent could not be reserved atomically; no issue change was sent. Retry with the same request identity after the service is available.",
+      1, identity);
+  }
   if (operation !== "approval request" &&
       ((error.status === 502 && body.error === "EXECUTION_FAILED" && validReceiptId) ||
        (error.status === 503 && body.error === "GITHUB_PREFLIGHT_UNAVAILABLE" && validReceiptId) ||
@@ -205,6 +211,7 @@ function httpBody(error: unknown): { error?: unknown; receiptId?: unknown } | nu
   return error instanceof OMRHttpError ? error.body as { error?: unknown; receiptId?: unknown } | null : null;
 }
 const publicLinearCodes = new Set([
+  "LINEAR_INTENT_TRANSACTION_REQUIRED",
   "LINEAR_RATE_LIMITED", "LINEAR_RECONNECT_REQUIRED", "LINEAR_PERMISSION_DENIED",
   "LINEAR_TARGET_UNAVAILABLE", "LINEAR_WORKSPACE_MISMATCH", "LINEAR_INVALID_CHANGE",
   "LINEAR_QUERY_REJECTED",

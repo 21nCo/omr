@@ -1547,6 +1547,12 @@ syncBuiltinESMExports();
         status: 401, code: "LINEAR_RECONNECT_REQUIRED", headers: {} },
       { path: "/api/approvals/execute", args: ["approvals", "execute", "approval_1"],
         status: 502, code: "LINEAR_QUERY_REJECTED", headers: {} },
+      { path: "/api/approvals", args: ["approvals", "request", "linear.write", "--idempotency", "linear-reservation"],
+        status: 503, code: "LINEAR_INTENT_TRANSACTION_REQUIRED", headers: {} },
+      { path: "/api/tools/execute", args: ["tools", "run", "linear.read", "--idempotency", "linear-direct"],
+        status: 503, code: "LINEAR_INTENT_TRANSACTION_REQUIRED", headers: {} },
+      { path: "/api/approvals/execute", args: ["approvals", "execute", "approval_1"],
+        status: 503, code: "LINEAR_INTENT_TRANSACTION_REQUIRED", headers: {} },
     ] as const;
     for (const item of cases) {
       f.failureResponse(item.path, item.status,
@@ -1556,9 +1562,20 @@ syncBuiltinESMExports();
         expect(reply.code).toBe(item.status === 401 ? 3 : 1);
         expect(reply.stdout + reply.stderr).not.toContain("private provider response");
         expect(reply.stderr).toContain(item.code);
+        if (item.code === "LINEAR_INTENT_TRANSACTION_REQUIRED") {
+          expect(reply.stderr).toContain("no issue change was sent");
+          expect(reply.stderr).toContain(item.path === "/api/approvals/execute" ? "approval_1"
+            : item.path === "/api/approvals" ? "linear-reservation" : "linear-direct");
+        }
         if (json) {
           const body = lastError(reply.stderr);
           expect(body.error).toBe(item.code);
+          if (item.code === "LINEAR_INTENT_TRANSACTION_REQUIRED") {
+            expect(body.message).toContain("no issue change was sent");
+            expect(body.details).toEqual(item.path === "/api/approvals/execute"
+              ? { approvalId: "approval_1" }
+              : { idempotencyKey: item.path === "/api/approvals" ? "linear-reservation" : "linear-direct" });
+          }
           if (item.code === "LINEAR_RATE_LIMITED") expect(body.details).toEqual({
             retryAfterSeconds: 17, rateLimitResetAt: 1800000000000,
           });
@@ -1572,6 +1589,7 @@ syncBuiltinESMExports();
     const unknown = await f.run(["tools", "run", "linear.read", "--json"], env);
     expect(lastError(unknown.stderr).error).toBe("HTTP_ERROR");
     expect(unknown.stderr).not.toContain("LINEAR_PRIVATE_PROVIDER_SECRET");
+    expect(f.committedMutations).toEqual([]);
   });
 
   it("preserves a proven GitHub preflight failure across both execution commands", async () => {

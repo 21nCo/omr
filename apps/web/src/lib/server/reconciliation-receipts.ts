@@ -12,7 +12,10 @@ export function visibleApprovals<T extends Pick<ExecutionApproval, "id" | "statu
     .map((approval) => [approval.id, approval])).values()];
 }
 
-/** Recover one older Linear approval or its recorded decision without scanning history. */
+/** Recover one older Linear approval or its recorded decision without scanning history.
+ * An owned but retired hint must not take down the workspace overview. Unknown or
+ * foreign IDs still fail the actor/workspace boundary.
+ */
 export async function recoverLinearApproval(
   store: ExecutionApprovalStore, approvalId: string | undefined,
   workspaceId: string, actorUserId: string, now: number,
@@ -20,13 +23,15 @@ export async function recoverLinearApproval(
   if (!approvalId) return null;
   const approval = await store.getForActor(approvalId, actorUserId);
   const recorded = approval.reconciledAs;
-  const validDecision = !recorded || (Boolean(approval.executionReceiptId) &&
+  const validDecision = Boolean(approval.executionReceiptId) &&
     ((approval.status === "consumed" && recorded === "effect_present") ||
-      (approval.status === "failed" && recorded === "effect_absent")));
-  if (approval.workspaceId !== workspaceId || !approval.toolId.startsWith("linear.") ||
-      !validDecision ||
-      ((approval.status === "pending" || approval.status === "approved") &&
-        approval.expiresAt <= now)) throw new ApprovalUnavailableError();
+      (approval.status === "failed" && recorded === "effect_absent"));
+  if (approval.workspaceId !== workspaceId || !approval.toolId.startsWith("linear.")) {
+    throw new ApprovalUnavailableError();
+  }
+  if ((["pending", "approved"].includes(approval.status) && approval.expiresAt <= now) ||
+      (!["pending", "approved", "executing", "uncertain"].includes(approval.status) && !validDecision) ||
+      (recorded && !validDecision)) return null;
   return approval;
 }
 
@@ -50,11 +55,18 @@ export async function linearReconciliationReceipts(
 ): Promise<ExecutionReceipt[]> {
   const uncertain = approvals.filter((approval) => approval.status === "uncertain" &&
     approval.toolId.startsWith("linear.") && approval.executionReceiptId);
-  const found: (ExecutionReceipt | null)[] = [];
-  for (let index = 0; index < uncertain.length; index += 8) {
-    found.push(...await Promise.all(uncertain.slice(index, index + 8).map((approval) =>
-      receipts.findForApproval({ workspaceId, actorUserId, approvalId: approval.id,
-        receiptId: approval.executionReceiptId! }))));
-  }
+  const found: (ExecutionReceipt | null)[] = new Array(uncertain.length);
+  let next = 0;
+  const readNext = async (): Promise<void> => {
+    const index = next++;
+    if (index >= uncertain.length) return;
+    const approval = uncertain[index]!;
+    found[index] = await receipts.findForApproval({ workspaceId, actorUserId, approvalId: approval.id,
+      receiptId: approval.executionReceiptId! });
+    await readNext();
+  };
+  const results = await Promise.allSettled(Array.from({ length: Math.min(8, uncertain.length) }, () => readNext()));
+  const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+  if (failed) throw failed.reason;
   return found.filter((receipt): receipt is ExecutionReceipt => receipt !== null);
 }
