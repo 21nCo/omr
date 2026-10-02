@@ -1,0 +1,40 @@
+apps/web/src/lib/workspace-catalog.test.ts
+  h_a39f9495f9ec1d 3-4,11-50
+apps/web/src/lib/workspace-catalog.ts
+  h_a39f9495f9ec1d 9-26
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 5,181,187,759-765
+docs/linear-v1.md
+  h_a39f9495f9ec1d 45,48-52
+packages/cli/README.md
+  h_a39f9495f9ec1d 50
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 7,966-967,969
+packages/execution/src/postgres-approval-store.ts
+  h_a39f9495f9ec1d 590-591
+packages/execution/src/postgres.integration.test.ts
+  h_a39f9495f9ec1d 138-148,173,219
+packages/execution/src/testing.ts
+  h_a39f9495f9ec1d 354-359
+packages/mcp/src/server.ts
+  h_a39f9495f9ec1d 276
+packages/plugfn-runtime/src/linear.ts
+  h_a39f9495f9ec1d 4,44-48,67,72,198-200,227-229
+packages/tools/src/index.ts
+  h_a39f9495f9ec1d 18
+packages/tools/src/linear-errors.ts
+  h_a39f9495f9ec1d 27-34
+tests/acceptance/linear-adapter-contract.test.ts
+  h_a39f9495f9ec1d 272-274,290-292,305-364
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bf20cfe18d5bf23eb55ded511866d13671a582ee",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
