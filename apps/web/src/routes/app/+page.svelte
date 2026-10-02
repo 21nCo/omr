@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { beginGithubReconnect, createOAuthReviewController } from "$lib/oauth-review.js";
   import { connectionActions, connectionStatusLabel, providerRevocationGuidance } from "$lib/connection-ui.js";
-  import { createWorkspaceCatalogLoader, linearEffectAbsentAvailable, providerDisplayState, selectedLinearAccountId, selectedReadyLinearConnection } from "$lib/workspace-catalog.js";
+  import { createWorkspaceCatalogLoader, linearEffectAbsentAvailable, linearEffectPresentAvailable, providerDisplayState, selectedLinearAccountId, selectedReadyLinearConnection } from "$lib/workspace-catalog.js";
   import { renderApprovalPreview } from "$lib/approval-preview.js";
   import { createLinearActionKeys, linearApprovalNotice } from "$lib/linear-action-keys.js";
   import { V1_PROVIDERS } from "@oh-my-router/tools";
@@ -754,7 +754,7 @@
                   <button class="danger compact" disabled={Boolean(busy)} onclick={() => void mutate(`reject:${approval.id}`, "/api/approvals/reject", { approvalId: approval.id }, `Rejected ${approval.toolId}.`)}>Reject</button>
                 {:else if approval.status === "uncertain"}
                   <p class="approval-context">The Linear outcome is unknown. Check receipt {approval.executionReceiptId ?? "pending"} against the selected Linear workspace and issue before recording a decision.</p>
-                  <button class="quiet compact" disabled={Boolean(busy) || !approval.executionReceiptId}
+                  <button class="quiet compact" disabled={Boolean(busy) || !linearEffectPresentAvailable(approval, overview.reconciliationReceipts)}
                     onclick={() => void mutate(`reconcile:${approval.id}`, "/api/approvals/reconcile",
                       { approvalId: approval.id, decision: "effect_present" }, "Recorded that Linear applied this change.")}>I verified the change happened</button>
                   {#if linearEffectAbsentAvailable(approval, overview.reconciliationReceipts)}

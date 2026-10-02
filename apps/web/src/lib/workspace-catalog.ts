@@ -25,6 +25,16 @@ export function linearEffectAbsentAvailable(
     receipt.errorCode === "provider_response_ambiguous"));
 }
 
+/** The actor can close a verified effect only with its exact active receipt. */
+export function linearEffectPresentAvailable(
+  approval: { executionReceiptId?: string | null },
+  receipts: readonly { id: string; status: string }[],
+): boolean {
+  return Boolean(approval.executionReceiptId && receipts.some((receipt) =>
+    receipt.id === approval.executionReceiptId &&
+    (receipt.status === "running" || receipt.status === "uncertain")));
+}
+
 /** A pending selection cannot reuse the previous account's browser controls. */
 export function selectedReadyLinearConnection<Connection extends { provider: string; selected: boolean;
   status: string; readiness: string }>(state: {

@@ -36,7 +36,7 @@ import {
 } from "./router.js";
 import { resolveScopedCatalog } from "./scoped-catalog.js";
 import { publicConnections, publicConnectionsAfterMutation } from "./connection-view.js";
-import { linearReconciliationReceipts } from "./reconciliation-receipts.js";
+import { linearReconciliationReceipts, visibleApprovals } from "./reconciliation-receipts.js";
 
 type OMRBindings = Cloudflare.Env & {
   HYPERDRIVE?: { connectionString: string };
@@ -777,7 +777,7 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
           resultWrappingKey: executionWrappingKey(event),
         });
         const connectionService = new PlugFnConnectionOrchestrator(connections.connections, plugfn.plugfn);
-        const [availableConnections, orphanedConnections, approvals, executions] = await Promise.all([
+        const [availableConnections, orphanedConnections, recentApprovals, outstandingLinear, executions] = await Promise.all([
           connectionService.listAvailable({
             actorUserId: session.actorId,
             workspaceId: selected.workspace.id,
@@ -791,12 +791,17 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
             workspaceId: selected.workspace.id,
             limit: 50,
           }),
+          activity.approvals.listOutstandingLinearForActor({
+            actorUserId: session.actorId,
+            workspaceId: selected.workspace.id,
+          }),
           activity.receipts.listForActor({
             actorUserId: session.actorId,
             workspaceId: selected.workspace.id,
             limit: 50,
           }),
         ]);
+        const approvals = visibleApprovals(recentApprovals, outstandingLinear);
         const approvalCatalog = await createPlugFnToolCatalog(plugfn.plugfn, configuredProviders(plugfn.plugfn));
         const reconciliationReceipts = await linearReconciliationReceipts(
           approvals, activity.receipts, selected.workspace.id, session.actorId);

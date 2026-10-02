@@ -53,6 +53,11 @@ decision for a completed response permits a retry; an
 effect-present decision closes the attempt. Either decision requires a new
 approval before any later identical change; reconciliation itself never
 dispatches a mutation.
+An exact linked receipt may still say `running` when its final state could not
+be persisted. A verified effect-present decision can close that approval; the
+no-effect choice stays unavailable. The browser includes unresolved Linear
+approvals even when they fall outside its 50 most recent approvals, and fetches
+their exact receipts for reconciliation.
 
 The browser retains a request key for the selected action while its form and
 account stay the same. Repeating that submission reports the original approval

@@ -326,6 +326,40 @@ describe("linear-adapter-contract", () => {
     expect(linear.mutations()).toHaveLength(1);
   });
 
+  it.each(["linear.issues.create", "linear.issues.update"] as const)(
+    "closes a verified %s effect when receipt persistence left it running", async (toolId) => {
+      const { binding, linear, service, principal, receipts, approvals } = await executionFixture();
+      const params = toolId === "linear.issues.create"
+        ? { linearWorkspaceId: workspaceA, teamId: teamA, title: "Verified effect" }
+        : { linearWorkspaceId: workspaceA, issueId: issueA, title: "Verified effect" };
+      linear.setFailure("ambiguous");
+      const approval = await service.requestApproval({ principal, toolId, params,
+        connectionId: binding.id, idempotencyKey: `${toolId}-running` });
+      await service.approve(approval.id, principal.userId);
+      await expect(service.executeApproved(principal, approval.id))
+        .rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN" });
+      const linked = approvals.approvals.get(approval.id)!;
+      const receipt = receipts.receipts.get(linked.executionReceiptId!)!;
+      // Simulate a crash after the approval became uncertain but before the
+      // receipt's uncertain-state write persisted.
+      receipt.status = "running";
+      receipt.errorCode = null;
+      receipt.completedAt = null;
+      const retry = await service.requestApproval({ principal, toolId, params,
+        connectionId: binding.id, idempotencyKey: `${toolId}-retry` });
+      expect(retry.id).toBe(approval.id);
+      await expect(service.reconcileUncertain(principal, approval.id, "effect_absent"))
+        .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      await expect(service.reconcileUncertain({ ...principal, workspaceId: "foreign_workspace" },
+        approval.id, "effect_present")).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      expect(await service.reconcileUncertain(principal, approval.id, "effect_present"))
+        .toMatchObject({ status: "consumed", reconciledAs: "effect_present" });
+      await expect(service.executeApproved(principal, approval.id))
+        .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      expect(linear.mutations()).toHaveLength(1);
+    },
+  );
+
   it("does not release a timed-out write while its provider promise can still complete", async () => {
     const { binding, dispatch, service, principal, receipts } = await executionFixture();
     const params = { linearWorkspaceId: workspaceA, teamId: teamA, title: "Late create" };

@@ -2,10 +2,18 @@ import { describe, expect, it } from "vitest";
 import type { ExecutionApproval, ExecutionReceipt } from "@oh-my-router/execution";
 import { MemoryExecutionReceiptStore } from "@oh-my-router/execution/testing";
 
-import { linearEffectAbsentAvailable } from "../workspace-catalog.js";
-import { linearReconciliationReceipts } from "./reconciliation-receipts.js";
+import { linearEffectAbsentAvailable, linearEffectPresentAvailable } from "../workspace-catalog.js";
+import { linearReconciliationReceipts, visibleApprovals } from "./reconciliation-receipts.js";
 
 describe("Linear reconciliation history", () => {
+  it("keeps an unresolved old approval visible after 51 newer approvals", async () => {
+    const recent = Array.from({ length: 50 }, (_, index) => ({ id: `approval-new-${index}` }));
+    const outstanding = [{ id: "approval-old" }, { id: "approval-new-0" }];
+    expect(recent.some((approval) => approval.id === "approval-old")).toBe(false);
+    expect(visibleApprovals(recent, outstanding).map((approval) => approval.id))
+      .toEqual([...recent.map((approval) => approval.id), "approval-old"]);
+  });
+
   it("retains an exact old receipt outside 50 recent executions and scopes it to its approval", async () => {
     let member = true;
     const store = new MemoryExecutionReceiptStore(() => member);
@@ -26,6 +34,7 @@ describe("Linear reconciliation history", () => {
     const exact = await linearReconciliationReceipts([approval], store, "workspace-A", "alice");
     expect(exact.map((receipt) => receipt.id)).toEqual([old.id]);
     expect(linearEffectAbsentAvailable(approval, exact)).toBe(true);
+    expect(linearEffectPresentAvailable(approval, exact)).toBe(true);
     expect(await linearReconciliationReceipts([approval], store, "workspace-B", "alice")).toEqual([]);
     expect(await linearReconciliationReceipts([approval], store, "workspace-A", "bob")).toEqual([]);
     expect(await linearReconciliationReceipts([{ ...approval, id: "approval-other" }],
@@ -49,6 +58,8 @@ describe("Linear reconciliation history", () => {
       errorCode: "provider_response_ambiguous" });
     expect(linearEffectAbsentAvailable(approval,
       await linearReconciliationReceipts([approval], store, "workspace-A", "alice"))).toBe(false);
+    expect(linearEffectPresentAvailable(approval,
+      await linearReconciliationReceipts([approval], store, "workspace-A", "alice"))).toBe(true);
     expect(await linearReconciliationReceipts([{ ...approval, status: "consumed" }],
       store, "workspace-A", "alice")).toEqual([]);
   });

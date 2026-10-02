@@ -127,6 +127,87 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     return { approval, receipt, now };
   };
 
+  it.each(["linear.issues.create", "linear.issues.update"] as const)(
+    "reconciles an exact running %s receipt only as effect present", async (toolId) => {
+      const { approval, receipt, now } = await uncertainLinearApproval(toolId);
+      const observer = new Client({ connectionString: connectionString! });
+      await observer.connect();
+      try {
+        await observer.query(`UPDATE omr_control.execution_receipts
+          SET status = 'running', error_code = NULL, completed_at = NULL WHERE id = $1`, [receipt.id]);
+        const decision = { approvalId: approval.id, actorUserId: approval.actorUserId,
+          principalKey: approval.principalKey, now: now + 6 };
+        await expect(runtime.approvals.reconcile({ ...decision, decision: "effect_absent" }))
+          .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+        await expect(runtime.approvals.reconcile({ ...decision, actorUserId: "other_actor",
+          decision: "effect_present" })).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+        await observer.query(`DELETE FROM omr_control.workspace_memberships
+          WHERE workspace_id = $1 AND user_id = $2`, [workspaceId, approval.actorUserId]);
+        try {
+          await expect(runtime.approvals.reconcile({ ...decision, decision: "effect_present" }))
+            .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+        } finally {
+          await observer.query(`INSERT INTO omr_control.workspace_memberships
+            (id, workspace_id, user_id, role, created_at, updated_at)
+            VALUES ($1, $2, $3, 'member', $4, $4) ON CONFLICT DO NOTHING`,
+          [`membership_${crypto.randomUUID()}`, workspaceId, approval.actorUserId, Date.now()]);
+        }
+        expect(await runtime.approvals.reconcile({ ...decision, decision: "effect_present" }))
+          .toMatchObject({ status: "consumed", reconciledAs: "effect_present",
+            executionReceiptId: receipt.id });
+        await expect(runtime.approvals.reconcile({ ...decision, decision: "effect_present" }))
+          .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+        const stored = await observer.query<{ status: string }>(
+          `SELECT status FROM omr_control.execution_receipts WHERE id = $1`, [receipt.id]);
+        expect(stored.rows[0]?.status).toBe("running");
+      } finally {
+        await observer.end();
+      }
+    },
+  );
+
+  it.each(["effect_present", "effect_absent"] as const)(
+    "keeps old uncertain Linear approvals and exact receipts available for %s", async (decision) => {
+      const { approval, receipt } = await uncertainLinearApproval("linear.issues.update");
+      for (let index = 0; index < 51; index++) {
+        await runtime.approvals.create(approvalFixture(approval.createdAt + index + 1,
+          { status: "consumed" }));
+      }
+      const actor = { workspaceId, actorUserId: approval.actorUserId };
+      expect((await runtime.approvals.listForActor({ ...actor, limit: 50 }))
+        .some((candidate) => candidate.id === approval.id)).toBe(false);
+      expect(await runtime.approvals.listOutstandingLinearForActor(actor))
+        .toMatchObject([{ id: approval.id, executionReceiptId: receipt.id }]);
+      expect(await runtime.receipts.findForApproval({ ...actor,
+        approvalId: approval.id, receiptId: receipt.id })).toMatchObject({ id: receipt.id });
+      expect(await runtime.receipts.findForApproval({ ...actor, workspaceId: "foreign_workspace",
+        approvalId: approval.id, receiptId: receipt.id })).toBeNull();
+      expect(await runtime.approvals.listOutstandingLinearForActor({ ...actor,
+        workspaceId: "foreign_workspace" })).toEqual([]);
+      expect(await runtime.approvals.listOutstandingLinearForActor({ ...actor,
+        actorUserId: "other_actor" })).toEqual([]);
+      const observer = new Client({ connectionString: connectionString! });
+      await observer.connect();
+      try {
+        await observer.query(`DELETE FROM omr_control.workspace_memberships
+          WHERE workspace_id = $1 AND user_id = $2`, [workspaceId, approval.actorUserId]);
+        expect(await runtime.approvals.listOutstandingLinearForActor(actor)).toEqual([]);
+      } finally {
+        await observer.query(`INSERT INTO omr_control.workspace_memberships
+          (id, workspace_id, user_id, role, created_at, updated_at)
+          VALUES ($1, $2, $3, 'member', $4, $4) ON CONFLICT DO NOTHING`,
+        [`membership_${crypto.randomUUID()}`, workspaceId, approval.actorUserId, Date.now()]);
+        await observer.end();
+      }
+      expect(await runtime.approvals.reconcile({ approvalId: approval.id,
+        actorUserId: approval.actorUserId, principalKey: approval.principalKey,
+        decision, now: Date.now() })).toMatchObject({
+          status: decision === "effect_present" ? "consumed" : "failed", reconciledAs: decision,
+        });
+      expect(await runtime.approvals.listOutstandingLinearForActor(actor)).toEqual([]);
+    },
+  );
+
   it("reads the exact reconciliation receipt only for its current workspace member", async () => {
     const { approval, receipt } = await uncertainLinearApproval("linear.issues.update");
     const lookup = { workspaceId, actorUserId: approval.actorUserId,

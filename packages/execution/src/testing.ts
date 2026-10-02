@@ -363,7 +363,8 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
         throw new ApprovalUnavailableError();
       }
       const receipt = this.assertReceiptOwnership(approval, approval.executionReceiptId);
-      if (receipt.status !== "uncertain" ||
+      if ((receipt.status !== "uncertain" &&
+          !(input.decision === "effect_present" && receipt.status === "running")) ||
           (input.decision === "effect_absent" && receipt.errorCode !== "provider_response_ambiguous")) {
         throw new ApprovalUnavailableError();
       }
@@ -386,6 +387,16 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
       )
       .sort((left, right) => right.createdAt - left.createdAt)
       .slice(0, input.limit)
+      .map((approval) => structuredClone(approval));
+  }
+
+  async listOutstandingLinearForActor(input: { workspaceId: string; actorUserId: string }): Promise<ExecutionApproval[]> {
+    if (!this.isMember(input.workspaceId, input.actorUserId)) return [];
+    return [...this.approvals.values()]
+      .filter((approval) => approval.workspaceId === input.workspaceId &&
+        approval.actorUserId === input.actorUserId && approval.toolId.startsWith("linear.") &&
+        ["pending", "approved", "uncertain"].includes(approval.status))
+      .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id))
       .map((approval) => structuredClone(approval));
   }
 

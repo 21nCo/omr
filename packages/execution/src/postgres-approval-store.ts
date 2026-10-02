@@ -597,7 +597,8 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
            WHERE workspace_id = approval.workspace_id AND user_id = $2 FOR SHARE)
          AND EXISTS (SELECT 1 FROM omr_control.execution_receipts AS receipt
            WHERE receipt.id = approval.execution_receipt_id AND ${EXACT_RECEIPT}
-             AND receipt.status = 'uncertain'
+             AND (receipt.status = 'uncertain' OR
+               ($4 = 'effect_present' AND receipt.status = 'running'))
              AND ($4 <> 'effect_absent' OR receipt.error_code = 'provider_response_ambiguous'))
        RETURNING ${COLUMNS}`,
       [input.approvalId, input.actorUserId, input.principalKey, input.decision, input.now],
@@ -634,6 +635,19 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
        ORDER BY created_at DESC, id DESC
        LIMIT $3`,
       [input.workspaceId, input.actorUserId, input.limit],
+    );
+    return Promise.all(result.rows.map((row) => this.toApproval(row)));
+  }
+
+  async listOutstandingLinearForActor(input: { workspaceId: string; actorUserId: string }): Promise<ExecutionApproval[]> {
+    const result = await this.query<ApprovalRow>(
+      `SELECT ${COLUMNS} FROM omr_control.execution_approvals
+       WHERE workspace_id = $1 AND actor_user_id = $2
+         AND tool_id LIKE 'linear.%' AND status IN ('pending', 'approved', 'uncertain')
+         AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
+           WHERE workspace_id = $1 AND user_id = $2)
+       ORDER BY created_at DESC, id DESC`,
+      [input.workspaceId, input.actorUserId],
     );
     return Promise.all(result.rows.map((row) => this.toApproval(row)));
   }

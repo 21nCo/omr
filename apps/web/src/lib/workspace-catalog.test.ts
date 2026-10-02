@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createWorkspaceCatalogLoader, linearEffectAbsentAvailable, providerDisplayState,
+import { createWorkspaceCatalogLoader, linearEffectAbsentAvailable, linearEffectPresentAvailable, providerDisplayState,
   selectedLinearAccountId, selectedReadyLinearConnection,
   type WorkspaceCatalogState } from "./workspace-catalog.js";
 
@@ -19,6 +19,15 @@ describe("workspace catalog loading", () => {
     expect(linearEffectAbsentAvailable(approval, [{ id: "receipt-A",
       status: "running", errorCode: "provider_response_ambiguous" }])).toBe(false);
     expect(linearEffectAbsentAvailable(approval, [])).toBe(false);
+  });
+
+  it("offers effect-present only with the exact running or uncertain receipt", () => {
+    const approval = { executionReceiptId: "receipt-A" };
+    expect(linearEffectPresentAvailable(approval, [])).toBe(false);
+    expect(linearEffectPresentAvailable(approval, [{ id: "receipt-B", status: "running" }])).toBe(false);
+    expect(linearEffectPresentAvailable(approval, [{ id: "receipt-A", status: "failed" }])).toBe(false);
+    expect(linearEffectPresentAvailable(approval, [{ id: "receipt-A", status: "running" }])).toBe(true);
+    expect(linearEffectPresentAvailable(approval, [{ id: "receipt-A", status: "uncertain" }])).toBe(true);
   });
 
   it("clears a Linear issue selected under another account during a same-workspace refresh", async () => {
