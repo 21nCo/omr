@@ -3,9 +3,40 @@ import type { ExecutionApproval, ExecutionReceipt } from "@oh-my-router/executio
 import { MemoryExecutionReceiptStore } from "@oh-my-router/execution/testing";
 
 import { linearEffectAbsentAvailable, linearEffectPresentAvailable } from "../workspace-catalog.js";
-import { linearReconciliationReceipts, visibleApprovals } from "./reconciliation-receipts.js";
+import { linearReconciliationReceipts, publicBrowserApproval, visibleApprovals } from "./reconciliation-receipts.js";
 
 describe("Linear reconciliation history", () => {
+  it.each(["pending", "approved", "uncertain"] as const)(
+    "keeps %s client-grant approvals visible but reserves browser execution for its own principal", (status) => {
+      const approval = { id: `approval-${status}`, status, toolId: "linear.issues.update",
+        actorUserId: "alice", workspaceId: "workspace-A", principalKey: "web:alice",
+        params: {}, manifestHash: "manifest", executionReceiptId: "receipt-A" } as ExecutionApproval;
+      const web = publicBrowserApproval(approval, null, "alice", "workspace-A");
+      expect(web.browserActionable).toBe(true);
+      const client = { ...approval, principalKey: "client:cli:grant:grant-A" };
+      const visible = publicBrowserApproval(client, null, "alice", "workspace-A");
+      expect(visible).toMatchObject({ id: approval.id, status, browserActionable: false });
+      expect(JSON.stringify(visible)).not.toContain("grant-A");
+      expect(publicBrowserApproval(approval, null, "alice", "workspace-B").browserActionable).toBe(false);
+      expect(publicBrowserApproval(approval, null, "bob", "workspace-A").browserActionable).toBe(false);
+      expect(publicBrowserApproval(client, null, "alice", "workspace-B").browserActionable).toBe(false);
+    },
+  );
+
+  it.each(["linear.issues.create", "linear.issues.update"])(
+    "does not let a browser reconcile a %s client receipt even when either decision has exact evidence", (toolId) => {
+      const approval = { id: "approval-A", status: "uncertain", toolId,
+        actorUserId: "alice", workspaceId: "workspace-A",
+        principalKey: "client:mcp:grant:grant-A", executionReceiptId: "receipt-A",
+        params: {}, manifestHash: "manifest" } as ExecutionApproval;
+      const receipts = [{ id: "receipt-A", status: "uncertain",
+        errorCode: "provider_response_ambiguous" }];
+      expect(linearEffectPresentAvailable(approval, receipts)).toBe(true);
+      expect(linearEffectAbsentAvailable(approval, receipts)).toBe(true);
+      expect(publicBrowserApproval(approval, null, "alice", "workspace-A").browserActionable).toBe(false);
+    },
+  );
+
   it("keeps an unresolved old approval visible after 51 newer approvals", async () => {
     const recent = Array.from({ length: 50 }, (_, index) => ({ id: `approval-new-${index}` }));
     const outstanding = [{ id: "approval-old" }, { id: "approval-new-0" }];

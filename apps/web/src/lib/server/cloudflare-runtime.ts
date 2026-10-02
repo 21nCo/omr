@@ -36,7 +36,7 @@ import {
 } from "./router.js";
 import { resolveScopedCatalog } from "./scoped-catalog.js";
 import { publicConnections, publicConnectionsAfterMutation } from "./connection-view.js";
-import { linearReconciliationReceipts, visibleApprovals } from "./reconciliation-receipts.js";
+import { linearReconciliationReceipts, publicBrowserApproval, visibleApprovals } from "./reconciliation-receipts.js";
 
 type OMRBindings = Cloudflare.Env & {
   HYPERDRIVE?: { connectionString: string };
@@ -814,7 +814,8 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
             [...availableConnections, ...orphanedConnections.map((binding) => ({ ...binding,
               cleanupOnly: true, selectable: false }))],
           ),
-          approvals: approvals.map((approval) => publicApproval(approval, approvalCatalog.get(approval.toolId))),
+          approvals: approvals.map((approval) => publicBrowserApproval(
+            approval, approvalCatalog.get(approval.toolId), session.actorId, selected.workspace.id)),
           executions: executions.map((receipt) => publicReceipt(receipt, false)),
           reconciliationReceipts: reconciliationReceipts.map((receipt) => publicReceipt(receipt, false)),
         };

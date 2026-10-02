@@ -36,6 +36,7 @@
     resources: { kind: string; parameter?: string }[];
     manifestCurrent: boolean;
     previewReady: boolean;
+    browserActionable: boolean;
     previewMode: "opaque" | "redacted" | "unavailable";
     connectionId: string;
     executionReceiptId?: string | null;
@@ -752,20 +753,29 @@
                 {#if approval.status === "pending"}
                   <button class="primary compact" disabled={Boolean(busy) || !approval.previewReady} onclick={() => void mutate(`approve:${approval.id}`, "/api/approvals/approve", { approvalId: approval.id }, `Approved ${approval.toolId}.`)}>Approve</button>
                   <button class="danger compact" disabled={Boolean(busy)} onclick={() => void mutate(`reject:${approval.id}`, "/api/approvals/reject", { approvalId: approval.id }, `Rejected ${approval.toolId}.`)}>Reject</button>
+                  {#if !approval.browserActionable}<p class="approval-context">After approval, execute this action from the originating CLI or MCP client.</p>{/if}
                 {:else if approval.status === "uncertain"}
                   <p class="approval-context">The Linear outcome is unknown. Check receipt {approval.executionReceiptId ?? "pending"} against the selected Linear workspace and issue before recording a decision.</p>
-                  <button class="quiet compact" disabled={Boolean(busy) || !linearEffectPresentAvailable(approval, overview.reconciliationReceipts)}
-                    onclick={() => void mutate(`reconcile:${approval.id}`, "/api/approvals/reconcile",
-                      { approvalId: approval.id, decision: "effect_present" }, "Recorded that Linear applied this change.")}>I verified the change happened</button>
-                  {#if linearEffectAbsentAvailable(approval, overview.reconciliationReceipts)}
-                    <button class="danger compact" disabled={Boolean(busy)}
-                      onclick={() => void mutate(`reconcile:${approval.id}`, "/api/approvals/reconcile",
-                        { approvalId: approval.id, decision: "effect_absent" }, "Recorded that Linear did not apply this change.")}>I verified no change happened</button>
+                  {#if !approval.browserActionable}
+                    <p class="approval-context">Record the verified outcome from the originating CLI or MCP client. This browser session cannot reconcile its grant.</p>
                   {:else}
-                    <p class="approval-context">The request may still be running. OMR cannot safely record no change or allow a retry for this receipt.</p>
+                    <button class="quiet compact" disabled={Boolean(busy) || !linearEffectPresentAvailable(approval, overview.reconciliationReceipts)}
+                      onclick={() => void mutate(`reconcile:${approval.id}`, "/api/approvals/reconcile",
+                        { approvalId: approval.id, decision: "effect_present" }, "Recorded that Linear applied this change.")}>I verified the change happened</button>
+                    {#if linearEffectAbsentAvailable(approval, overview.reconciliationReceipts)}
+                      <button class="danger compact" disabled={Boolean(busy)}
+                        onclick={() => void mutate(`reconcile:${approval.id}`, "/api/approvals/reconcile",
+                          { approvalId: approval.id, decision: "effect_absent" }, "Recorded that Linear did not apply this change.")}>I verified no change happened</button>
+                    {:else}
+                      <p class="approval-context">The request may still be running. OMR cannot safely record no change or allow a retry for this receipt.</p>
+                    {/if}
                   {/if}
                 {:else}
-                  <button class="primary compact" disabled={Boolean(busy) || !approval.previewReady} onclick={() => void mutate(`execute:${approval.id}`, "/api/approvals/execute", { approvalId: approval.id }, `Executed ${approval.toolId}.`)}>Execute approved change</button>
+                  {#if approval.browserActionable}
+                    <button class="primary compact" disabled={Boolean(busy) || !approval.previewReady} onclick={() => void mutate(`execute:${approval.id}`, "/api/approvals/execute", { approvalId: approval.id }, `Executed ${approval.toolId}.`)}>Execute approved change</button>
+                  {:else}
+                    <p class="approval-context">Execute this approved action from the originating CLI or MCP client. This browser session cannot use its grant.</p>
+                  {/if}
                 {/if}
               </div>
             </article>
