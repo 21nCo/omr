@@ -26,7 +26,8 @@ export async function recoverLinearApproval(
   const validDecision = Boolean(approval.executionReceiptId) &&
     ((approval.status === "consumed" && recorded === "effect_present") ||
       (approval.status === "failed" && recorded === "effect_absent"));
-  if (approval.workspaceId !== workspaceId || !approval.toolId.startsWith("linear.")) {
+  if (approval.workspaceId !== workspaceId ||
+      !(approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post")) {
     throw new ApprovalUnavailableError();
   }
   if ((["pending", "approved"].includes(approval.status) && approval.expiresAt <= now) ||
@@ -54,7 +55,8 @@ export async function linearReconciliationReceipts(
   workspaceId: string, actorUserId: string,
 ): Promise<ExecutionReceipt[]> {
   const uncertain = approvals.filter((approval) => approval.status === "uncertain" &&
-    approval.toolId.startsWith("linear.") && approval.executionReceiptId);
+    (approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post") &&
+    approval.executionReceiptId);
   const found: (ExecutionReceipt | null)[] = new Array(uncertain.length);
   let next = 0;
   const readNext = async (): Promise<void> => {

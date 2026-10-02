@@ -4,7 +4,7 @@ import {
   ConnectionUnavailableError, isMissingRemoteConnection, markMissingRemoteConnection,
   type ConnectionAuthority, type ConnectionBindingRecord,
 } from "@oh-my-router/connections";
-import { ConfirmedGitHubWriteRejection, githubHttpFailure, hasRequiredScopes, LinearProviderDenial, LinearProviderResponseAmbiguous, ProviderPreflightError, type GitHubHttpFailure, type JsonValue, type ToolCatalog, type ToolManifest } from "@oh-my-router/tools";
+import { ConfirmedGitHubWriteRejection, githubHttpFailure, hasRequiredScopes, LinearProviderDenial, LinearProviderResponseAmbiguous, ProviderPreflightError, SlackProviderDenial, SlackProviderResponseAmbiguous, type GitHubHttpFailure, type JsonValue, type ToolCatalog, type ToolManifest } from "@oh-my-router/tools";
 import { approvalPreviewReady } from "./projection.js";
 
 export type ExecutionStatus = "reserved" | "running" | "succeeded" | "failed" | "uncertain";
@@ -373,6 +373,18 @@ export class LinearExecutionError extends Error {
   }
 }
 
+/** Safe Slack denial tied to an execution receipt. */
+export class SlackExecutionError extends Error {
+  readonly code: SlackProviderDenial["code"];
+  readonly retryAfterSeconds?: number;
+  constructor(readonly receiptId: string, denial: SlackProviderDenial) {
+    super(denial.message);
+    this.name = "SlackExecutionError";
+    this.code = denial.code;
+    this.retryAfterSeconds = denial.retryAfterSeconds;
+  }
+}
+
 const inputValidators = new Map<string, Validator>();
 
 /** Validate the submitted value against the exact manifest schema used for approval. */
@@ -545,8 +557,9 @@ export class ExecutionService {
       idempotencyKey,
       requestHash: await hashJson({ manifestHash: manifest.hash, connectionId: connection.id,
         params, ttlMs }, this.fingerprintKey),
-      // Independent approval keys must not create a second live Linear intent.
-      intentHash: (manifest.id === "linear.issues.create" || manifest.id === "linear.issues.update")
+      // Independent approval keys must not create a second live provider intent.
+      intentHash: (manifest.id === "linear.issues.create" || manifest.id === "linear.issues.update" ||
+        manifest.id === "slack.messages.post")
         ? await hashJson({
         principalKey: principalKey(input.principal), workspaceId: input.principal.workspaceId,
         connectionId: connection.id, providerConnectionId: connection.providerConnectionId,
@@ -597,7 +610,7 @@ export class ExecutionService {
   async reconcileUncertain(principal: ExecutionPrincipal, approvalId: string,
     decision: "effect_present" | "effect_absent"): Promise<ExecutionApproval> {
     const approval = await this.approvalStatus(principal, approvalId);
-    if (!approval.toolId.startsWith("linear.") ||
+    if (!(approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post") ||
         !["effect_present", "effect_absent"].includes(decision)) throw new ApprovalUnavailableError();
     const recorded = (value: ExecutionApproval) => value.reconciledAs === decision &&
       value.status === (decision === "effect_present" ? "consumed" : "failed") &&
@@ -933,7 +946,8 @@ export class ExecutionService {
       // already durable. A later guard COMMIT failure cannot erase that result.
       if (state.succeededReceipt) return state.succeededReceipt;
       if (error instanceof ConnectionUnavailableError || error instanceof GitHubReadError || error instanceof GitHubWritePreflightError ||
-          error instanceof GitHubWriteRejectedError || error instanceof LinearExecutionError) throw error;
+          error instanceof GitHubWriteRejectedError || error instanceof LinearExecutionError ||
+          error instanceof SlackExecutionError) throw error;
       if (state.dispatchedReceiptId &&
           !(error instanceof ExecutionOutcomeUnknownError)) {
         const receiptId = state.dispatchedReceiptId;
@@ -981,7 +995,7 @@ export class ExecutionService {
     if (confirmed && await this.failDispatchedReceipt(receipt.id, confirmed.code, cleanupDeadlineAt)) {
       throw confirmed.error;
     }
-    const code = error instanceof LinearProviderResponseAmbiguous
+    const code = error instanceof LinearProviderResponseAmbiguous || error instanceof SlackProviderResponseAmbiguous
       ? "provider_response_ambiguous" : "provider_outcome_unknown";
     await withinInvocationDeadline(cleanupDeadlineAt, () =>
       this.receipts.uncertain(receipt.id, code, this.now(), cleanupDeadlineAt))
@@ -1104,6 +1118,9 @@ function confirmedDispatchFailure(error: unknown, manifest: ToolManifest,
   }
   if (manifest.provider === "linear" && error instanceof LinearProviderDenial) {
     return { code: `linear_${error.phase}_denied`, error: new LinearExecutionError(receiptId, error) };
+  }
+  if (manifest.provider === "slack" && error instanceof SlackProviderDenial) {
+    return { code: `slack_${error.phase}_denied`, error: new SlackExecutionError(receiptId, error) };
   }
   return null;
 }

@@ -20,8 +20,9 @@ export function visibleApprovalCard(approval: { id: string; toolId: string; stat
   recoveredApprovalId: string, now: number, freshOverview: boolean): boolean {
   if (!freshOverview) return false;
   if (["pending", "approved"].includes(approval.status) && approval.expiresAt > now) return true;
-  if (approval.status === "uncertain" && approval.toolId.startsWith("linear.")) return true;
-  if (approval.id !== recoveredApprovalId || !approval.toolId.startsWith("linear.")) return false;
+  const reconcilable = approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post";
+  if (approval.status === "uncertain" && reconcilable) return true;
+  if (approval.id !== recoveredApprovalId || !reconcilable) return false;
   if (approval.status === "executing") return true;
   return Boolean(approval.executionReceiptId &&
     ((approval.status === "consumed" && approval.reconciledAs === "effect_present") ||
@@ -94,7 +95,7 @@ export async function recoverLinearReconciliation<T extends { id: string; status
     const current = await status();
     if (matchesLinearReconciliation(current, approvalId, decision)) return current;
   } catch { /* No trustworthy readback is available. */ }
-  throw new Error("Reconciliation is unconfirmed. Check this approval before retrying; do not repeat the issue write.");
+  throw new Error("Reconciliation is unconfirmed. Check this approval before retrying; do not repeat the provider write.");
 }
 
 /** A pending selection cannot reuse the previous account's browser controls. */
@@ -110,6 +111,29 @@ export function selectedReadyLinearConnection<Connection extends { provider: str
   }
   return state.overview.connections.find((connection) => connection.provider === "linear" && connection.selected &&
     connection.status === "active" && connection.readiness === "ready");
+}
+
+/** Keep Slack controls on the currently selected workspace and ready bot binding. */
+export function selectedReadySlackConnection<Connection extends { provider: string; selected: boolean;
+  status: string; readiness: string; workspaceId: string }>(state: {
+  overview: { selectedWorkspaceId: string | null; connections: readonly Connection[] } | null;
+  selectedWorkspaceId: string;
+  loading: boolean;
+  busy: string;
+}): Connection | undefined {
+  if (state.loading || state.busy || state.overview?.selectedWorkspaceId !== state.selectedWorkspaceId) return undefined;
+  return state.overview.connections.find((connection) => connection.provider === "slack" && connection.selected &&
+    connection.status === "active" && connection.readiness === "ready" &&
+    connection.workspaceId === state.selectedWorkspaceId);
+}
+
+export function selectedSlackAccountId<Connection extends { id: string; provider: string; selected: boolean;
+  workspaceId: string }>(overview: {
+  selectedWorkspaceId: string | null; connections: readonly Connection[]
+} | null, workspaceId: string): string | null {
+  if (overview?.selectedWorkspaceId !== workspaceId) return null;
+  return overview.connections.find((connection) => connection.provider === "slack" && connection.selected &&
+    connection.workspaceId === workspaceId)?.id ?? null;
 }
 
 /** Missing discovery is unknown; a known catalog missing a provider is unsupported. */

@@ -8,6 +8,7 @@ export {
   GitHubWritePreflightError,
   GitHubWriteRejectedError,
   LinearExecutionError,
+  SlackExecutionError,
   LinearIntentTransactionRequiredError,
   ExecutionIdempotencyConflictError,
   ExecutionInProgressError,

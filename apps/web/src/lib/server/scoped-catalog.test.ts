@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { LinearProviderDenial, ToolCatalog, type ProviderStatus } from "@oh-my-router/tools";
+import { LinearProviderDenial, SlackProviderDenial, ToolCatalog, type ProviderStatus } from "@oh-my-router/tools";
 import { markMissingRemoteConnection, type ConnectionAuthority } from "@oh-my-router/connections";
 
 import { resolveScopedCatalog } from "./scoped-catalog.js";
@@ -170,5 +170,25 @@ describe("workspace-scoped discovery and manifest grants", () => {
         failure.code === "LINEAR_RECONNECT_REQUIRED" ? 1 : 0);
     }
     expect(reconnect).toHaveBeenCalledExactlyOnceWith("binding_linear");
+  });
+
+  it("hides only Slack when the selected bot proof requires reconnect", async () => {
+    const tools = await ToolCatalog.create({ providers: { list: () => ["github", "slack"].map((name) => ({
+      name, displayName: name, version: "1.0.0", description: "",
+      actions: { read: { name: "read", displayName: "Read", description: "Read resource",
+        parameters: {}, returns: {}, contract: { version: "1.0.0", effect: "read" as const,
+          requiredScopes: ["read"], resources: [], sensitiveKeys: [],
+          pagination: { kind: "none" as const }, retry: "never" as const } } },
+    })) } }, (schema) => schema as Record<string, never>);
+    const reconnect = vi.fn(async () => {});
+    const visible = await resolveScopedCatalog(tools,
+      providers.map((entry) => ({ ...entry, provider: entry.provider === "linear" ? "slack" : entry.provider })),
+      async (provider) => ({ id: `binding_${provider}`, providerConnectionId: provider }),
+      async (provider) => {
+        if (provider === "slack") throw new SlackProviderDenial("read", "SLACK_RECONNECT_REQUIRED");
+        return ["read"];
+      }, async () => {}, reconnect);
+    expect([...visible]).toEqual(["github.read"]);
+    expect(reconnect).toHaveBeenCalledExactlyOnceWith("binding_slack", "slack");
   });
 });

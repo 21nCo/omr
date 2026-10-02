@@ -398,7 +398,8 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
       if (!this.isMember(input.workspaceId, input.actorUserId)) return [];
       return [...this.approvals.values()]
         .filter((approval) => approval.workspaceId === input.workspaceId &&
-          approval.actorUserId === input.actorUserId && approval.toolId.startsWith("linear.") &&
+          approval.actorUserId === input.actorUserId &&
+          (approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post") &&
           (approval.status === "uncertain" ||
             ((approval.status === "pending" || approval.status === "approved") &&
               approval.expiresAt > input.now)))

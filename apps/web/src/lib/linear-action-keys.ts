@@ -14,7 +14,8 @@ export function linearApprovalNotice(status: string): string {
 
 /** Keep retry identities across a browser reload without storing issue text. */
 export function createLinearActionKeys(makeKey: () => string,
-  storage?: () => Pick<Storage, "getItem" | "setItem" | "removeItem">) {
+  storage?: () => Pick<Storage, "getItem" | "setItem" | "removeItem">,
+  provider = "Linear") {
   const current = new Map<string, string>();
   const fingerprint = async (toolId: string, workspaceId: string, connectionId: string,
     params: object): Promise<string> => {
@@ -57,8 +58,8 @@ export function createLinearActionKeys(makeKey: () => string,
       const approval = await probe(idempotencyKey);
       if (!["consumed", "rejected", "failed", "expired"].includes(approval.status)) {
         throw new Error(approval.status === "uncertain"
-          ? "Verify and reconcile this uncertain Linear action before starting another."
-          : "This Linear action is still active. Finish or reject it before starting another.");
+          ? `Verify this uncertain ${provider} action before starting another.`
+          : `This ${provider} action is still active. Finish or reject it before starting another.`);
       }
       const identity = await fingerprint(toolId, workspaceId, connectionId, params);
       if (!stillSelected()) return;
