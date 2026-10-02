@@ -49,6 +49,8 @@ async function fixture() {
   let catalogHeld = false;
   let selectionOverride: Record<string, unknown> | undefined;
   let approvalStatus: string = "pending";
+  let reconciledAs: string | undefined;
+  let reconciliationReplyLost = false;
   let expiresAt = Date.now() + 600_000;
   const malformedSuccess = new Map<string, "json" | "empty" | "shape">();
   const successOverride = new Map<string, unknown>();
@@ -156,12 +158,19 @@ async function fixture() {
         status: approvalStatus, expiresAt });
     }
     if (path === "/api/approvals/status") return answer(200, { id: "approval_1", workspaceId: "workspace_1",
-      toolId: "linear.write", connectionId: "connection_1", status: approvalStatus, expiresAt });
-    if (path === "/api/approvals/reconcile") return answer(200, {
+      toolId: "linear.write", connectionId: "connection_1", status: approvalStatus, reconciledAs, expiresAt });
+    if (path === "/api/approvals/reconcile") {
+      if (reconciliationReplyLost) {
+        reconciledAs = String(body?.decision);
+        approvalStatus = reconciledAs === "effect_present" ? "consumed" : "failed";
+        request.socket.destroy(); return;
+      }
+      return answer(200, {
       id: body?.approvalId, workspaceId: "workspace_1", toolId: "linear.write",
       status: body?.decision === "effect_present" ? "consumed" : "failed",
       reconciledAs: body?.decision, expiresAt,
     });
+    }
     if (path === "/api/approvals/execute") {
       if (approvalStatus === "executing") return answer(409,
         { error: "EXECUTION_IN_PROGRESS", receiptId: "receipt_approved_running" });
@@ -219,8 +228,9 @@ async function fixture() {
     emptyCatalog: () => { emptyCatalog = true; },
     setGrantWorkspace: (value: string) => { grantWorkspace = value; },
     setApproval: (status: string, expiry = Date.now() + 600_000) => {
-    approvalStatus = status; expiresAt = expiry;
-  }, revoke: () => { revoked = true; } };
+    approvalStatus = status; reconciledAs = undefined; expiresAt = expiry;
+  }, loseReconciliationReply: () => { reconciliationReplyLost = true; },
+    revoke: () => { revoked = true; } };
 }
 
 // These contracts launch multiple CLI processes per case; parallel suites can delay their startup.
@@ -511,6 +521,35 @@ describe("cli-command-contract", { timeout: 15_000 }, () => {
     expect((await f.run(["approvals", "reconcile", "approval_1", "--decision", "effect_present", "--json"], env)).code)
       .not.toBe(0);
     expect(f.calls.filter((call) => call.path === "/api/approvals/reconcile")).toHaveLength(3);
+  });
+
+  it("recovers a committed reconciliation after response loss and labels unresolved replies uncertain", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    f.loseReconciliationReply();
+    const recovered = await f.run(["approvals", "reconcile", "approval_1", "--decision", "effect_present", "--json"], env);
+    expect(recovered.code).toBe(0);
+    expect(JSON.parse(recovered.stdout)).toMatchObject({ status: "consumed", reconciledAs: "effect_present" });
+
+    const g = await fixture();
+    g.failureResponse("/api/approvals/reconcile", 503, { error: "SERVER_UNAVAILABLE" });
+    const uncertain = await g.run(["approvals", "reconcile", "approval_1", "--decision", "effect_absent", "--json"],
+      { OMR_BACKEND: g.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" });
+    expect(uncertain.code).toBe(23);
+    expect(lastError(uncertain.stderr)).toMatchObject({ error: "APPROVAL_RECONCILIATION_UNCERTAIN",
+      details: { approvalId: "approval_1", decision: "effect_absent" } });
+    expect(g.calls.map((call) => call.path)).toContain("/api/approvals/status");
+
+    const h = await fixture();
+    h.successReply("/api/approvals/reconcile", { id: "approval_1", workspaceId: "workspace_1",
+      toolId: "linear.write", status: "consumed", expiresAt: Date.now() + 600_000 });
+    h.successReply("/api/approvals/status", { id: "approval_1", workspaceId: "workspace_1",
+      toolId: "linear.write", status: "consumed", reconciledAs: "effect_present",
+      expiresAt: Date.now() + 600_000 });
+    const malformed = await h.run(["approvals", "reconcile", "approval_1", "--decision", "effect_present", "--json"],
+      { OMR_BACKEND: h.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" });
+    expect(malformed.code).toBe(0);
+    expect(JSON.parse(malformed.stdout)).toMatchObject({ reconciledAs: "effect_present" });
   });
 
   it("emits a generated retry key before dispatch and replays it after an interrupted run", async () => {

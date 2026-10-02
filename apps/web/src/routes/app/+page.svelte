@@ -4,7 +4,7 @@
   import { connectionActions, connectionStatusLabel, providerRevocationGuidance } from "$lib/connection-ui.js";
   import { createWorkspaceCatalogLoader, providerDisplayState, selectedReadyLinearConnection } from "$lib/workspace-catalog.js";
   import { renderApprovalPreview } from "$lib/approval-preview.js";
-  import { createLinearActionKeys } from "$lib/linear-action-keys.js";
+  import { createLinearActionKeys, linearApprovalNotice } from "$lib/linear-action-keys.js";
   import { V1_PROVIDERS } from "@oh-my-router/tools";
   import type { LinearAccess } from "@oh-my-router/connections";
 
@@ -283,15 +283,7 @@
       });
       if (generation !== linearGeneration || workspaceId !== selectedWorkspaceId ||
         account.id !== linearAccount()?.id) return;
-      if (approval.status === "consumed") {
-        notice = "This Linear action already completed. Start a new action to repeat the same change.";
-      } else if (approval.status === "uncertain") {
-        notice = "This Linear action has an uncertain outcome. Verify it in Linear before reconciliation.";
-      } else if (approval.status === "pending" || approval.status === "approved") {
-        notice = "Linear issue change awaits your approval below. Review the account and target before approving.";
-      } else {
-        notice = "This Linear action is closed. Start a new action if a change is still needed.";
-      }
+      notice = linearApprovalNotice(approval.status);
       await load();
     } catch (caught) {
       if (generation === linearGeneration) {
@@ -305,10 +297,24 @@
     const account = linearAccount();
     if (!account || linearBusy) return;
     const generation = linearGeneration;
+    const workspaceId = selectedWorkspaceId;
     linearBusy = "reset";
+    error = "";
+    notice = "";
     try {
-      await linearActionKeys.reset(toolId, selectedWorkspaceId, account.id, params);
-      if (generation === linearGeneration) notice = "New Linear action started. Review the account and target before requesting approval.";
+      // Replaying the same key recovers state after a lost response without
+      // dispatching a provider mutation.
+      await linearActionKeys.resetAfterSettlement(toolId, workspaceId, account.id, params,
+        (idempotencyKey) => request<{ status: string }>("/api/approvals", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId, connectionId: account.id, toolId, params, idempotencyKey }),
+      }), () => generation === linearGeneration && workspaceId === selectedWorkspaceId &&
+        account.id === linearAccount()?.id);
+      if (generation !== linearGeneration || workspaceId !== selectedWorkspaceId ||
+          account.id !== linearAccount()?.id) return;
+      notice = "New Linear action started. Review the account and target before requesting approval.";
+    } catch (caught) {
+      if (generation === linearGeneration) error = caught instanceof Error ? caught.message : "Could not start another Linear action";
     } finally { if (generation === linearGeneration) linearBusy = ""; }
   }
 

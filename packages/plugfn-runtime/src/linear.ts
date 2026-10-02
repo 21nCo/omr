@@ -36,17 +36,22 @@ function contract(effect: "read" | "write", resources: ActionContract["resources
 
 type Phase = LinearProviderDenial["phase"];
 
+/** Keep read failures typed while retaining uncertainty after a dispatched write. */
+function queryFailure(error: unknown, phase: Phase): unknown {
+  if (error && typeof error === "object" && "code" in error && error.code === "CONNECTION_NOT_FOUND") {
+    return error;
+  }
+  return linearDenial(error, phase) ??
+    (phase === "write" ? error : new LinearProviderDenial(phase, "LINEAR_QUERY_REJECTED"));
+}
+
 /** Parse one GraphQL exchange without treating partial write data as a denial. */
 async function query(context: ActionContext, source: string, variables: Record<string, unknown>, phase: Phase) {
   let response: { data: { data?: Record<string, unknown>; errors?: unknown[] }; headers?: unknown };
   try {
     response = await context.http.post(context.provider.baseUrl, { query: source, variables });
   } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "CONNECTION_NOT_FOUND") {
-      throw error;
-    }
-    throw linearDenial(error, phase) ??
-      (phase === "write" ? error : new LinearProviderDenial(phase, "LINEAR_QUERY_REJECTED"));
+    throw queryFailure(error, phase);
   }
   const body = response?.data;
   if (Array.isArray(body?.errors) && body.errors.length) {

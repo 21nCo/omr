@@ -124,12 +124,16 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
     private readonly receipts: MemoryExecutionReceiptStore) {}
 
   async create(approval: ExecutionApproval): Promise<ExecutionApproval> {
+    if (approval.intentHash && !approval.requestHash) throw new ExecutionIdempotencyConflictError();
     this.expirePending(approval);
     const key = `${approval.workspaceId}\u0000${approval.principalKey}\u0000${approval.idempotencyKey}`;
     const alias = this.aliases.get(key);
     if (alias) {
       if (alias.requestHash !== approval.requestHash) throw new ExecutionIdempotencyConflictError();
-      return structuredClone(this.approvals.get(alias.id)!);
+      const target = this.approvals.get(alias.id);
+      if (!target || target.workspaceId !== approval.workspaceId ||
+          target.principalKey !== approval.principalKey) throw new ApprovalUnavailableError();
+      return structuredClone(target);
     }
     const existingId = this.idempotency.get(key);
     if (existingId) {

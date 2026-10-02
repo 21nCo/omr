@@ -130,7 +130,29 @@ describeDatabase("approval migration from origin/dev schema", () => {
       await migrate("0017_ciphertext_context");
       await migrate("0018_linear_intent_fence");
       await migrate("0018_linear_intent_fence");
-      await migrate("0019_linear_approval_aliases");
+      const aliasMigration = readFileSync(new URL("../migrations/0019_linear_approval_aliases.sql", import.meta.url),
+        "utf8").replaceAll("omr_control.", `${qualified}.`);
+      const validationBoundary = aliasMigration.indexOf("COMMIT;");
+      expect(validationBoundary).toBeGreaterThan(0);
+      await client.query(aliasMigration.slice(0, validationBoundary + "COMMIT;".length));
+      const concurrentWriter = new Client({ connectionString: databaseUrl! });
+      const validator = new Client({ connectionString: databaseUrl! });
+      await concurrentWriter.connect();
+      await validator.connect();
+      try {
+        await concurrentWriter.query("BEGIN");
+        await concurrentWriter.query(`UPDATE ${qualified}.execution_approvals
+          SET updated_at = updated_at + 1 WHERE id = 'approval_old'`);
+        await validator.query("SET lock_timeout = '500ms'");
+        // VALIDATE uses SHARE UPDATE EXCLUSIVE, compatible with a live writer.
+        await expect(validator.query(aliasMigration.slice(validationBoundary + "COMMIT;".length)))
+          .resolves.toBeDefined();
+        await concurrentWriter.query("COMMIT");
+      } finally {
+        await concurrentWriter.query("ROLLBACK").catch(() => undefined);
+        await concurrentWriter.end();
+        await validator.end();
+      }
       await migrate("0019_linear_approval_aliases");
       const fence = await client.query<{ intent_hash: string | null; reconciled_as: string | null }>(
         `SELECT intent_hash, reconciled_as FROM ${qualified}.execution_approvals WHERE id = 'approval_old'`);
