@@ -157,6 +157,11 @@ async function fixture() {
     }
     if (path === "/api/approvals/status") return answer(200, { id: "approval_1", workspaceId: "workspace_1",
       toolId: "linear.write", connectionId: "connection_1", status: approvalStatus, expiresAt });
+    if (path === "/api/approvals/reconcile") return answer(200, {
+      id: body?.approvalId, workspaceId: "workspace_1", toolId: "linear.write",
+      status: body?.decision === "effect_present" ? "consumed" : "failed",
+      reconciledAs: body?.decision, expiresAt,
+    });
     if (path === "/api/approvals/execute") {
       if (approvalStatus === "executing") return answer(409,
         { error: "EXECUTION_IN_PROGRESS", receiptId: "receipt_approved_running" });
@@ -490,6 +495,22 @@ describe("cli-command-contract", { timeout: 15_000 }, () => {
     expect(lastError(lostAutomatic.stderr)).toMatchObject({ error: "APPROVAL_DELIVERY_UNCERTAIN",
       details: { idempotencyKey: expect.any(String) } });
     expect(errorDetails(lostAutomatic.stderr).idempotencyKey).toMatch(/^[a-f0-9-]{36}$/);
+  });
+
+  it("validates reconciliation identity and reports effect-absent as a failed action", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    const absent = await f.run(["approvals", "reconcile", "approval_1", "--decision", "effect_absent", "--json"], env);
+    expect(absent.code).toBe(1);
+    expect(JSON.parse(absent.stdout)).toMatchObject({ id: "approval_1", status: "failed",
+      reconciledAs: "effect_absent" });
+    const present = await f.run(["approvals", "reconcile", "approval_1", "--decision", "effect_present", "--json"], env);
+    expect(present.code).toBe(0);
+    f.successReply("/api/approvals/reconcile", { id: "another", workspaceId: "workspace_1",
+      toolId: "linear.write", status: "consumed", expiresAt: Date.now() + 600_000 });
+    expect((await f.run(["approvals", "reconcile", "approval_1", "--decision", "effect_present", "--json"], env)).code)
+      .not.toBe(0);
+    expect(f.calls.filter((call) => call.path === "/api/approvals/reconcile")).toHaveLength(3);
   });
 
   it("emits a generated retry key before dispatch and replays it after an interrupted run", async () => {

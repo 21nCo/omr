@@ -4,6 +4,7 @@
   import { connectionActions, connectionStatusLabel, providerRevocationGuidance } from "$lib/connection-ui.js";
   import { createWorkspaceCatalogLoader, providerDisplayState, selectedReadyLinearConnection } from "$lib/workspace-catalog.js";
   import { renderApprovalPreview } from "$lib/approval-preview.js";
+  import { createLinearActionKeys } from "$lib/linear-action-keys.js";
   import { V1_PROVIDERS } from "@oh-my-router/tools";
   import type { LinearAccess } from "@oh-my-router/connections";
 
@@ -104,6 +105,7 @@
   let linearUpdateDescription = "";
   let linearBusy = "";
   let linearGeneration = 0;
+  const linearActionKeys = createLinearActionKeys(() => crypto.randomUUID(), () => sessionStorage);
   let credentialProvider = "";
   let credentialLabel = "";
   let credentialOwnership: "personal" | "workspace" = "personal";
@@ -273,19 +275,40 @@
     linearBusy = "approval";
     error = "";
     try {
-      await request("/api/approvals", {
+      const idempotencyKey = await linearActionKeys.key(toolId, workspaceId, account.id, params);
+      const approval = await request<{ status: string }>("/api/approvals", {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ workspaceId, connectionId: account.id,
-          toolId, params, idempotencyKey: crypto.randomUUID() }),
+          toolId, params, idempotencyKey }),
       });
       if (generation !== linearGeneration || workspaceId !== selectedWorkspaceId ||
         account.id !== linearAccount()?.id) return;
-      notice = "Linear issue change awaits your approval below. Review the account and target before approving.";
+      if (approval.status === "consumed") {
+        notice = "This Linear action already completed. Start a new action to repeat the same change.";
+      } else if (approval.status === "uncertain") {
+        notice = "This Linear action has an uncertain outcome. Verify it in Linear before reconciliation.";
+      } else if (approval.status === "pending" || approval.status === "approved") {
+        notice = "Linear issue change awaits your approval below. Review the account and target before approving.";
+      } else {
+        notice = "This Linear action is closed. Start a new action if a change is still needed.";
+      }
       await load();
     } catch (caught) {
       if (generation === linearGeneration) {
         error = caught instanceof Error ? caught.message : "Could not request Linear approval";
       }
+    } finally { if (generation === linearGeneration) linearBusy = ""; }
+  }
+
+  /** A deliberate identical write gets a new key after the old action settles. */
+  async function resetLinearAction(toolId: "linear.issues.create" | "linear.issues.update", params: object) {
+    const account = linearAccount();
+    if (!account || linearBusy) return;
+    const generation = linearGeneration;
+    linearBusy = "reset";
+    try {
+      await linearActionKeys.reset(toolId, selectedWorkspaceId, account.id, params);
+      if (generation === linearGeneration) notice = "New Linear action started. Review the account and target before requesting approval.";
     } finally { if (generation === linearGeneration) linearBusy = ""; }
   }
 
@@ -662,6 +685,10 @@
                     <label>Title<input bind:value={linearCreateTitle} maxlength="255" required /></label>
                     <label>Description<textarea bind:value={linearCreateDescription} maxlength="20000"></textarea></label>
                     <button class="primary compact" type="submit" disabled={Boolean(linearBusy) || !linearCreateTitle.trim()}>Request creation approval</button>
+                    <button class="quiet compact" type="button" disabled={Boolean(linearBusy)}
+                      onclick={() => void resetLinearAction("linear.issues.create",
+                        { linearWorkspaceId: linearWorkspace?.id, teamId: linearTeamId,
+                          title: linearCreateTitle, description: linearCreateDescription })}>Start a new creation action</button>
                   </form>
                   {/if}
                 {/if}
@@ -689,6 +716,10 @@
                   <label>Title<input bind:value={linearUpdateTitle} maxlength="255" required /></label>
                   <label>Description<textarea bind:value={linearUpdateDescription} maxlength="20000"></textarea></label>
                   <button class="primary compact" type="submit" disabled={Boolean(linearBusy) || !linearUpdateTitle.trim() || !Object.keys(linearUpdateChanges()).length}>Request update approval</button>
+                  <button class="quiet compact" type="button" disabled={Boolean(linearBusy)}
+                    onclick={() => void resetLinearAction("linear.issues.update",
+                      { linearWorkspaceId: linearWorkspace?.id, issueId: linearIssue?.id,
+                        ...linearUpdateChanges() })}>Start a new update action</button>
                 </form>
                 {/if}
               {/if}

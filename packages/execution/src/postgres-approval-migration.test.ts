@@ -130,6 +130,8 @@ describeDatabase("approval migration from origin/dev schema", () => {
       await migrate("0017_ciphertext_context");
       await migrate("0018_linear_intent_fence");
       await migrate("0018_linear_intent_fence");
+      await migrate("0019_linear_approval_aliases");
+      await migrate("0019_linear_approval_aliases");
       const fence = await client.query<{ intent_hash: string | null; reconciled_as: string | null }>(
         `SELECT intent_hash, reconciled_as FROM ${qualified}.execution_approvals WHERE id = 'approval_old'`);
       expect(fence.rows[0]).toEqual({ intent_hash: null, reconciled_as: null });

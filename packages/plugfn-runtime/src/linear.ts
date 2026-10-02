@@ -42,6 +42,9 @@ async function query(context: ActionContext, source: string, variables: Record<s
   try {
     response = await context.http.post(context.provider.baseUrl, { query: source, variables });
   } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "CONNECTION_NOT_FOUND") {
+      throw error;
+    }
     throw linearDenial(error, phase) ??
       (phase === "write" ? error : new LinearProviderDenial(phase, "LINEAR_QUERY_REJECTED"));
   }

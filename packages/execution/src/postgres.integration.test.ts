@@ -76,6 +76,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     principalKey: "web:execution_owner", toolId: "linear.create_issue",
     manifestHash: `sha256-${"d".repeat(64)}`, connectionId,
     providerConnectionId: `plug_${crypto.randomUUID()}`, params: {},
+    requestHash: `hmac-sha256-${"a".repeat(64)}`,
     idempotencyKey: `approval_${crypto.randomUUID()}`, status: "pending",
     approvedBy: null, decidedAt: null, expiresAt: now + 60_000,
     executionReceiptId: null, createdAt: now, updatedAt: now,
@@ -112,7 +113,8 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     await runtime.receipts.uncertain(receipt.id, "provider_outcome_unknown", now + 4);
     await runtime.approvals.uncertain({ approvalId: a.id, receiptId: receipt.id, now: now + 5 });
     const fresh = approvalFixture(now + 6, { toolId: a.toolId, intentHash,
-      providerConnectionId: a.providerConnectionId });
+      providerConnectionId: a.providerConnectionId,
+      manifestHash: `sha256-${"f".repeat(64)}` });
     expect((await runtime.approvals.create(fresh)).id).toBe(a.id);
     await expect(runtime.approvals.reconcile({ approvalId: a.id, actorUserId: "wrong_actor",
       principalKey: a.principalKey, decision: "effect_absent", now: now + 7 }))
@@ -121,9 +123,55 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       actorUserId: a.actorUserId, principalKey: a.principalKey,
       decision: "effect_absent", now: now + 8 });
     expect(reconciled).toMatchObject({ status: "failed", reconciledAs: "effect_absent" });
-    expect((await runtime.approvals.create(fresh)).id).toBe(fresh.id);
+    expect((await runtime.approvals.create(second)).id).toBe(a.id);
+    expect((await runtime.approvals.create(fresh)).id).toBe(a.id);
+    const afterAbsent = approvalFixture(now + 9, { toolId: a.toolId, intentHash,
+      providerConnectionId: a.providerConnectionId, manifestHash: fresh.manifestHash });
+    expect((await runtime.approvals.create(afterAbsent)).id).toBe(afterAbsent.id);
     expect((await runtime.receipts.findByIdempotency({ workspaceId,
       principalKey: a.principalKey, idempotencyKey: a.idempotencyKey }))?.status).toBe("uncertain");
+  });
+
+  it("retains a coalesced key after settlement while allowing a deliberate new action", async () => {
+    const now = Date.now();
+    const intentHash = `hmac-sha256-${"c".repeat(64)}`;
+    const first = approvalFixture(now, { toolId: "linear.issues.update", intentHash,
+      providerConnectionId: "remote_linear_one" });
+    const retry = approvalFixture(now + 1, { toolId: first.toolId, intentHash,
+      providerConnectionId: first.providerConnectionId });
+    const initial = await runtime.approvals.create(first);
+    expect((await runtime.approvals.create(retry)).id).toBe(initial.id);
+    const client = new Client({ connectionString: connectionString! });
+    await client.connect();
+    try {
+      await client.query(`UPDATE omr_control.execution_approvals SET status = 'consumed' WHERE id = $1`,
+        [initial.id]);
+    } finally {
+      await client.end();
+    }
+    expect(await runtime.approvals.create(retry)).toMatchObject({ id: initial.id, status: "consumed" });
+    const deliberate = approvalFixture(now + 2, { toolId: first.toolId, intentHash,
+      providerConnectionId: first.providerConnectionId });
+    expect((await runtime.approvals.create(deliberate)).id).toBe(deliberate.id);
+  });
+
+  it("reports an expired key and replaces a stale pending manifest before dispatch", async () => {
+    const now = Date.now();
+    const intentHash = `hmac-sha256-${"b".repeat(64)}`;
+    const expired = approvalFixture(now, { toolId: "linear.issues.create", intentHash,
+      providerConnectionId: "remote_linear_one", expiresAt: now + 1 });
+    await runtime.approvals.create(expired);
+    const oldKeyRetry = approvalFixture(now + 2, { ...expired, id: `approval_${crypto.randomUUID()}`,
+      createdAt: now + 2, updatedAt: now + 2 });
+    expect((await runtime.approvals.create(oldKeyRetry)).status).toBe("expired");
+    const next = approvalFixture(now + 3, { toolId: expired.toolId, intentHash,
+      providerConnectionId: expired.providerConnectionId });
+    expect((await runtime.approvals.create(next)).id).toBe(next.id);
+    const changedManifest = approvalFixture(now + 4, { toolId: expired.toolId, intentHash,
+      providerConnectionId: expired.providerConnectionId,
+      manifestHash: `sha256-${"e".repeat(64)}` });
+    expect((await runtime.approvals.create(changedManifest)).id).toBe(changedManifest.id);
+    expect((await runtime.approvals.getForActor(next.id, next.actorUserId)).status).toBe("failed");
   });
 
   it("reserves idempotently and encrypts successful results at rest", async () => {

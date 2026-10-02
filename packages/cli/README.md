@@ -36,7 +36,7 @@ omr connections list --provider linear --json
 omr connections select <connection-id> --provider linear --json
 omr tools list --provider linear --effect read --limit 20 --json
 omr tools search --query 'find issue' --json
-omr tools inspect linear.get_issue --json
+omr tools inspect linear.issues.get --json
 omr tools run linear.issues.get --params '{"linearWorkspaceId":"<uuid>","issueId":"<uuid>"}' --json
 omr tools run linear.issues.get --params @input.json --json
 cat input.json | omr tools run linear.issues.get --params - --json

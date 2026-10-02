@@ -302,6 +302,9 @@ describe("linear-adapter-contract", () => {
     linear.setFailure("ambiguous");
     const approval = await service.requestApproval({ principal, toolId: "linear.issues.update",
       params, connectionId: binding.id, idempotencyKey: "observed-update" });
+    const coalesced = await service.requestApproval({ principal, toolId: "linear.issues.update",
+      params, connectionId: binding.id, idempotencyKey: "observed-update-retry" });
+    expect(coalesced.id).toBe(approval.id);
     await service.approve(approval.id, "alice");
     await expect(service.executeApproved(principal, approval.id))
       .rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN" });
@@ -311,6 +314,50 @@ describe("linear-adapter-contract", () => {
     await expect(service.executeApproved(principal, approval.id))
       .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
     expect(linear.mutations()).toHaveLength(1);
+    const sameAction = await service.requestApproval({ principal, toolId: "linear.issues.update",
+      params, connectionId: binding.id, idempotencyKey: "observed-update-retry" });
+    expect(sameAction).toMatchObject({ id: approval.id, status: "consumed" });
+  });
+
+  it.each(["linear.issues.create", "linear.issues.update"] as const)(
+    "retains a coalesced %s retry key after successful settlement", async (toolId) => {
+      const { binding, linear, service, principal } = await executionFixture();
+      const params = toolId === "linear.issues.create"
+        ? { linearWorkspaceId: workspaceA, teamId: teamA, title: "One issue" }
+        : { linearWorkspaceId: workspaceA, issueId: issueA, title: "One update" };
+      const first = await service.requestApproval({ principal, toolId, params,
+        connectionId: binding.id, idempotencyKey: `${toolId}-first` });
+      const coalesced = await service.requestApproval({ principal, toolId, params,
+        connectionId: binding.id, idempotencyKey: `${toolId}-repeat` });
+      expect(coalesced.id).toBe(first.id);
+      await service.approve(first.id, "alice");
+      await service.executeApproved(principal, first.id);
+      const retry = await service.requestApproval({ principal, toolId, params,
+        connectionId: binding.id, idempotencyKey: `${toolId}-repeat` });
+      expect(retry).toMatchObject({ id: first.id, status: "consumed" });
+      expect(linear.mutations()).toHaveLength(1);
+      const deliberate = await service.requestApproval({ principal, toolId, params,
+        connectionId: binding.id, idempotencyKey: `${toolId}-new-action` });
+      expect(deliberate.id).not.toBe(first.id);
+    });
+
+  it("preserves expired and manifest-stale predispatch intents while allowing a new request", async () => {
+    const { binding, service, principal, approvals } = await executionFixture();
+    const params = { linearWorkspaceId: workspaceA, teamId: teamA, title: "Expiring" };
+    const first = await service.requestApproval({ principal, toolId: "linear.issues.create", params,
+      connectionId: binding.id, idempotencyKey: "expiring-first" });
+    approvals.approvals.get(first.id)!.expiresAt = Date.now() - 1;
+    expect((await service.requestApproval({ principal, toolId: "linear.issues.create", params,
+      connectionId: binding.id, idempotencyKey: "expiring-first" })).status).toBe("expired");
+    const next = await service.requestApproval({ principal, toolId: "linear.issues.create", params,
+      connectionId: binding.id, idempotencyKey: "expiring-next" });
+    expect(next.id).not.toBe(first.id);
+    expect((await service.approvalStatus(principal, first.id)).status).toBe("expired");
+    approvals.approvals.get(next.id)!.manifestHash = "stale-manifest";
+    const current = await service.requestApproval({ principal, toolId: "linear.issues.create", params,
+      connectionId: binding.id, idempotencyKey: "manifest-next" });
+    expect(current.id).not.toBe(next.id);
+    expect((await service.approvalStatus(principal, next.id)).status).toBe("failed");
   });
 
   it("runs the OAuth, PlugFn, OMR approval and GraphQL journey with zero early mutations", async () => {
@@ -542,6 +589,19 @@ describe("linear-adapter-contract", () => {
     expect(response.status).toBe(429);
     expect(response.headers.get("retry-after")).toBe("17");
     expect(response.headers.get("x-ratelimit-requests-reset")).toBe("1800000000000");
+  });
+
+  it("preserves a missing connection through read and write preflight", async () => {
+    const linear = linearFixture();
+    const missing = Object.assign(new Error("missing connection"), { code: "CONNECTION_NOT_FOUND" });
+    linear.post.mockRejectedValueOnce(missing);
+    await expect(omrLinearProvider.actions["workspace.get"]!.execute({}, linear.context))
+      .rejects.toMatchObject({ code: "CONNECTION_NOT_FOUND" });
+    linear.post.mockRejectedValueOnce(missing);
+    await expect(omrLinearProvider.actions["issues.create"]!.execute({
+      linearWorkspaceId: workspaceA, teamId: teamA, title: "No mutation",
+    }, linear.context)).rejects.toMatchObject({ code: "CONNECTION_NOT_FOUND" });
+    expect(linear.mutations()).toHaveLength(0);
   });
 
   it("validates a reconciliation decision at the HTTP protocol boundary", async () => {

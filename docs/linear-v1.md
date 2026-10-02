@@ -50,6 +50,13 @@ effect-present decision closes the attempt. Either decision requires a new
 approval before any later identical change; reconciliation itself never
 dispatches a mutation.
 
+The browser retains a request key for the selected action while its form and
+account stay the same. Repeating that submission reports the original approval
+even after success or an effect-present reconciliation. Use **Start a new
+creation action** or **Start a new update action** to deliberately repeat
+identical values. CLI and MCP callers supply their own stable key and must
+reuse it for retries; a new key represents a new action after settlement.
+
 A definite Linear read or preflight denial fails safely. GraphQL
 `RATELIMITED`, a token rejection, and a permission denial return safe error
 codes; rate limit responses expose available reset timing. A definite
@@ -60,9 +67,12 @@ a fresh idempotency key is supplied. Unknown read or preflight query
 errors return `LINEAR_QUERY_REJECTED`, never an issue-change error. See
 [Linear rate limits](https://linear.app/developers/rate-limiting).
 
-Apply execution migration `0018_linear_intent_fence.sql` before serving the
+Apply execution migrations `0018_linear_intent_fence.sql` and
+`0019_linear_approval_aliases.sql` before serving the
 Linear write journey. Drain older Worker writers during that change: they do
-not populate the intent hash and cannot participate in the new approval fence.
+not populate the intent hash or key aliases and cannot participate in the
+approval fence. An expired pending approval reports `expired`; its key remains
+bound to that history while a new key can request a new approval.
 
 `tests/acceptance/linear-adapter-contract.test.ts` exercises the typed schemas,
 OAuth tiers, selected Linear workspace and issue targets, approval, OMR workspace

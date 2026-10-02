@@ -165,6 +165,7 @@ describe("workspace-scoped discovery and manifest grants", () => {
           return ["read"];
         }, async () => {}, reconnect);
       expect([...visible]).toEqual(["github.read"]);
+      expect(reconnect).toHaveBeenCalledTimes(failure instanceof LinearProviderDenial ? 1 : 0);
     }
     expect(reconnect).toHaveBeenCalledExactlyOnceWith("binding_linear");
   });

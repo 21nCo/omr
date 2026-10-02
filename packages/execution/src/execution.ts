@@ -108,7 +108,8 @@ export type ApprovalStatus =
   | "executing"
   | "uncertain"
   | "consumed"
-  | "failed";
+  | "failed"
+  | "expired";
 
 export interface ExecutionApproval {
   id: string;
@@ -669,13 +670,8 @@ export class ExecutionService {
     if (!receipt || !matchesApprovalReceipt(receipt, prior)) {
       throw new ApprovalUnavailableError();
     }
-    if (prior.status === "executing" && prior.executionReceiptId === null &&
-        this.now() - prior.updatedAt >= EXECUTION_STALE_AFTER_MS) {
-      prior = await this.reconcileStaleEffect(approvals, principal, prior, receipt, deadlineAt);
-      // Completion may have committed while reconciliation waited. Decide from
-      // the current exact receipt, not the snapshot read before that wait.
-      receipt = await this.settledApprovedReceipt(prior, deadlineAt);
-    }
+    ({ approval: prior, receipt } = await this.refreshStaleApprovedReceipt(
+      approvals, principal, prior, receipt, deadlineAt));
     if (receipt.status === "running" || receipt.status === "uncertain") {
       const manifest = this.approvedManifest(principal, prior);
       const effectivePrincipal: ExecutionPrincipal = { ...principal, workspaceId: prior.workspaceId };
@@ -702,6 +698,17 @@ export class ExecutionService {
       if (authorizedResult) return authorizedResult;
       throw error;
     }
+  }
+
+  /** Refresh a stale claim after its exact receipt and approval settle together. */
+  private async refreshStaleApprovedReceipt(approvals: ExecutionApprovalStore,
+    principal: ExecutionPrincipal, approval: ExecutionApproval, receipt: ExecutionReceipt,
+    deadlineAt: number): Promise<{ approval: ExecutionApproval; receipt: ExecutionReceipt }> {
+    if (approval.status !== "executing" || approval.executionReceiptId !== null ||
+        this.now() - approval.updatedAt < EXECUTION_STALE_AFTER_MS) return { approval, receipt };
+    const settled = await this.reconcileStaleEffect(approvals, principal, approval, receipt, deadlineAt);
+    // Completion may have committed while reconciliation waited.
+    return { approval: settled, receipt: await this.settledApprovedReceipt(settled, deadlineAt) };
   }
 
   /** Read back the receipt associated with a claimed approval after reconciliation. */

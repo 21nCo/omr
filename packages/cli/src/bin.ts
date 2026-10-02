@@ -9,7 +9,7 @@ import { CLIENT_CAPABILITIES, type ClientCapability } from "@oh-my-router/client
 import type { JsonValue, ToolEffect } from "@oh-my-router/tools";
 
 type Parsed = { positionals: string[]; options: Map<string, string | true> };
-const valueOptions = new Set(["profile", "url", "kind", "name", "capabilities", "workspace", "provider", "query", "effect", "params", "params-file", "connection", "idempotency", "limit", "cursor"]);
+const valueOptions = new Set(["profile", "url", "kind", "name", "capabilities", "workspace", "provider", "query", "effect", "params", "params-file", "connection", "idempotency", "limit", "cursor", "decision"]);
 const flagOptions = new Set(["json", "help", "local"]);
 const store = new OMRProfileStore();
 
@@ -629,8 +629,13 @@ async function approvalCommand(parsed: Parsed, action: string, subject: string,
     if (decision !== "effect_present" && decision !== "effect_absent") {
       throw new CLIError("USAGE", "--decision must be effect_present or effect_absent", 2);
     }
-    result(await api.reconcileUncertain(subject, decision));
-    return;
+    const reply = checkedApproval(await api.reconcileUncertain(subject, decision),
+      "/api/approvals/reconcile", { id: subject, workspaceId });
+    if (reply.reconciledAs !== decision ||
+        reply.status !== (decision === "effect_present" ? "consumed" : "failed")) {
+      invalidResponse("/api/approvals/reconcile");
+    }
+    return approvalResult(reply, { id: subject, workspaceId });
   }
   const connectionId = opt(parsed, "connection");
   const approval = await requestApproval(api, { workspaceId, toolId: subject, params: params(parsed),

@@ -6,6 +6,7 @@ import {
   ExecutionIdempotencyConflictError,
   ExecutionInvocationDeadlineError,
   ExecutionOutcomeUnknownError,
+  EXECUTION_INVOCATION_DEADLINE_MS,
   EXECUTION_STALE_AFTER_MS,
   withinInvocationDeadline,
   type ApprovalStatus,
@@ -58,6 +59,7 @@ const { Client: PostgresClient } = pg;
 
 export type RunOwnedApprovalClient = <T>(deadlineAt: number,
   invoke: (client: Client, shutdownSignal: AbortSignal) => Promise<T>) => Promise<T>;
+type ApprovalQuery = <R extends QueryResultRow>(sql: string, values?: unknown[]) => Promise<QueryResult<R>>;
 
 export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
   constructor(
@@ -79,17 +81,54 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
   }
 
   async create(approval: ExecutionApproval): Promise<ExecutionApproval> {
+    if (!this.runOwnedClient) return this.createWithQuery(approval, (sql, values) => this.query(sql, values));
+    const deadlineAt = Date.now() + EXECUTION_INVOCATION_DEADLINE_MS;
+    return this.runOwnedClient(deadlineAt, async (client) => {
+      const query: ApprovalQuery = (sql, values) =>
+        withinInvocationDeadline(deadlineAt, () => client.query(sql, values));
+      await query("BEGIN");
+      try {
+        // One actor's approval keys and intent reservations share a commit boundary.
+        await query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+          [JSON.stringify([approval.workspaceId, approval.principalKey])]);
+        const reserved = await this.createWithQuery(approval, query);
+        await query("COMMIT");
+        return reserved;
+      } catch (error) {
+        await query("ROLLBACK").catch(() => undefined);
+        throw error;
+      }
+    });
+  }
+
+  private async createWithQuery(approval: ExecutionApproval, query: ApprovalQuery): Promise<ExecutionApproval> {
+    await query(
+      `UPDATE omr_control.execution_approvals SET status = 'expired', updated_at = $3
+       WHERE workspace_id = $1 AND principal_key = $2
+         AND status IN ('pending', 'approved') AND expires_at <= $3`,
+      [approval.workspaceId, approval.principalKey, approval.createdAt],
+    );
+    const alias = await query<{ approval_id: string; request_hash: string }>(
+      `SELECT approval_id, request_hash FROM omr_control.execution_approval_aliases
+       WHERE workspace_id = $1 AND principal_key = $2 AND idempotency_key = $3`,
+      [approval.workspaceId, approval.principalKey, approval.idempotencyKey],
+    );
+    if (alias.rows[0]) {
+      if (alias.rows[0].request_hash !== approval.requestHash) throw new ExecutionIdempotencyConflictError();
+      return this.getAliasedApproval(alias.rows[0].approval_id, approval, query);
+    }
     if (approval.intentHash) {
-      await this.query(
-        `UPDATE omr_control.execution_approvals SET status = 'failed', updated_at = $4
+      await query(
+        `UPDATE omr_control.execution_approvals SET status = 'failed', updated_at = $5
          WHERE workspace_id = $1 AND principal_key = $2 AND intent_hash = $3
-           AND status IN ('pending', 'approved') AND expires_at <= $4`,
-        [approval.workspaceId, approval.principalKey, approval.intentHash, approval.createdAt],
+           AND manifest_hash <> $4 AND status IN ('pending', 'approved')`,
+        [approval.workspaceId, approval.principalKey, approval.intentHash, approval.manifestHash,
+          approval.createdAt],
       );
     }
     const encrypted = await encryptJson(approval.params, this.wrappingKey,
       { kind: "approval-params", workspaceId: approval.workspaceId, id: approval.id });
-    const result = await this.query<ApprovalRow>(
+    const insert = () => query<ApprovalRow>(
       `INSERT INTO omr_control.execution_approvals
          (id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash,
           connection_id, provider_connection_id, params_ciphertext, params_iv, params_crypto_version,
@@ -121,8 +160,9 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
         approval.updatedAt,
       ],
     );
+    const result = await insert();
     if (result.rows[0]) return this.toApproval(result.rows[0]);
-    const existing = await this.query<ApprovalRow>(
+    const existing = await query<ApprovalRow>(
       `SELECT ${COLUMNS} FROM omr_control.execution_approvals
        WHERE workspace_id = $1 AND principal_key = $2 AND idempotency_key = $3`,
       [approval.workspaceId, approval.principalKey, approval.idempotencyKey],
@@ -134,15 +174,47 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
       return this.toApproval(existing.rows[0]);
     }
     if (approval.intentHash) {
-      const live = await this.query<ApprovalRow>(
+      const live = await query<ApprovalRow>(
         `SELECT ${COLUMNS} FROM omr_control.execution_approvals
          WHERE workspace_id = $1 AND principal_key = $2 AND intent_hash = $3
-           AND status IN ('pending', 'approved', 'executing', 'uncertain')`,
+           AND status IN ('pending', 'approved', 'executing', 'uncertain')
+         FOR UPDATE`,
         [approval.workspaceId, approval.principalKey, approval.intentHash],
       );
-      if (live.rows[0]) return this.toApproval(live.rows[0]);
+      if (live.rows[0]) {
+        await this.recordAlias(approval, live.rows[0].id, query);
+        return this.getAliasedApproval(live.rows[0].id, approval, query);
+      }
+      // The conflicting intent may have been reconciled while the insert
+      // waited. Reattempt once under the same actor reservation.
+      const retried = await insert();
+      if (retried.rows[0]) return this.toApproval(retried.rows[0]);
     }
-    throw new Error("Approval reservation disappeared");
+    throw new ExecutionIdempotencyConflictError();
+  }
+
+  private async getAliasedApproval(id: string, approval: ExecutionApproval,
+    query: ApprovalQuery): Promise<ExecutionApproval> {
+    const result = await query<ApprovalRow>(
+      `SELECT ${COLUMNS} FROM omr_control.execution_approvals
+       WHERE id = $1 AND workspace_id = $2 AND principal_key = $3`,
+      [id, approval.workspaceId, approval.principalKey]);
+    if (!result.rows[0]) throw new ApprovalUnavailableError();
+    return this.toApproval(result.rows[0]);
+  }
+
+  private async recordAlias(approval: ExecutionApproval, targetId: string,
+    query: ApprovalQuery): Promise<void> {
+    const result = await query<{ approval_id: string; request_hash: string }>(
+      `INSERT INTO omr_control.execution_approval_aliases
+         (workspace_id, principal_key, idempotency_key, request_hash, approval_id)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (workspace_id, principal_key, idempotency_key) DO UPDATE
+         SET approval_id = execution_approval_aliases.approval_id
+       RETURNING approval_id, request_hash`,
+      [approval.workspaceId, approval.principalKey, approval.idempotencyKey, approval.requestHash, targetId]);
+    if (result.rows[0]?.request_hash !== approval.requestHash ||
+        result.rows[0]?.approval_id !== targetId) throw new ExecutionIdempotencyConflictError();
   }
 
   async getForActor(approvalId: string, actorUserId: string,
