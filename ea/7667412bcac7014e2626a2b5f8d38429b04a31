@@ -1,0 +1,26 @@
+apps/web/src/lib/server/reconciliation-receipts.test.ts
+  h_a39f9495f9ec1d 5-6,112-142,155,160-183
+apps/web/src/lib/server/reconciliation-receipts.ts
+  h_a39f9495f9ec1d 22-25,27-29,53-58
+apps/web/src/lib/server/router.test.ts
+  h_a39f9495f9ec1d 698-699
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 815,845,851-854
+packages/cli/src/bin.ts
+  h_a39f9495f9ec1d 207-211,220-221
+packages/execution/src/postgres.integration.test.ts
+  h_a39f9495f9ec1d 219,221-222
+packages/mcp/src/server.test.ts
+  h_a39f9495f9ec1d 227-229,252-258,268-271,284-289
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ea7667412bcac7014e2626a2b5f8d38429b04a31",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
