@@ -12,3 +12,12 @@ export function notionApprovalNotice(status: string): string {
     default: return "This Notion page approval is unavailable. Check its status before starting another change.";
   }
 }
+
+/** Retain the returned ID even while execution is in flight or the form changes. */
+export function notionApprovalRecovery(approval: { id: string; status: string; expiresAt: number }) {
+  return {
+    id: ["pending", "approved", "executing", "uncertain"].includes(approval.status) ? approval.id : "",
+    automaticLookup: ["pending", "approved"].includes(approval.status)
+      ? { id: approval.id, expiresAt: approval.expiresAt } : null,
+  };
+}

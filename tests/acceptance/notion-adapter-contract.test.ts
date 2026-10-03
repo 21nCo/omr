@@ -250,6 +250,50 @@ describe("notion-adapter-contract", () => {
     });
 
   it.each(["pages.create", "pages.update"] as const)(
+    "settles missing remote during %s preflight, but not after write dispatch", async (action) => {
+      const f = await serviceFixture();
+      const toolId = `notion.${action}`;
+      const params = action === "pages.create"
+        ? { parentPageId: parentId, title: "Child" }
+        : { pageId: childId, title: "Renamed" };
+      const request = (idempotencyKey: string) => f.service.requestApproval({
+        principal: f.principal, toolId, params, connectionId: f.binding.id, idempotencyKey,
+      });
+      const missing = Object.assign(new Error("remote connection absent"), { code: "CONNECTION_NOT_FOUND" });
+      const preflight = await request("preflight-missing");
+      await f.service.approve(preflight.id, "alice");
+      f.notion.get.mockRejectedValueOnce(missing);
+      await expect(f.service.executeApproved(f.principal, preflight.id)).rejects.toMatchObject({
+        code: "NOTION_RECONNECT_REQUIRED", receiptId: expect.any(String),
+      });
+      expect(f.notion.writes()).toBe(0);
+      expect((await f.service.approvalStatus(f.principal, preflight.id)).status).toBe("failed");
+      expect([...f.receipts.receipts.values()].find((receipt) => receipt.approvalId === preflight.id))
+        .toMatchObject({ status: "failed", errorCode: "notion_preflight_denied" });
+      await expect(request("before-reconnect")).rejects.toMatchObject({
+        code: "CONNECTION_ACCESS_DENIED",
+      });
+      await f.connections.recordHealth({ connectionId: f.binding.id,
+        status: "active", readiness: "ready" });
+      expect((await request("preflight-missing-retry")).id).not.toBe(preflight.id);
+
+      const dispatched = await request("write-missing");
+      await f.service.approve(dispatched.id, "alice");
+      if (action === "pages.create") f.notion.post.mockRejectedValueOnce(missing);
+      else f.notion.patch.mockRejectedValueOnce(missing);
+      await expect(f.service.executeApproved(f.principal, dispatched.id))
+        .rejects.toBeInstanceOf(ExecutionOutcomeUnknownError);
+      expect(f.notion.writes()).toBe(1);
+      expect((await f.service.approvalStatus(f.principal, dispatched.id)).status).toBe("uncertain");
+      expect([...f.receipts.receipts.values()].find((receipt) => receipt.approvalId === dispatched.id))
+        .toMatchObject({ status: "uncertain" });
+      await expect(request("write-missing-retry")).rejects.toMatchObject({
+        code: "CONNECTION_ACCESS_DENIED",
+      });
+      expect(f.notion.writes()).toBe(1);
+    });
+
+  it.each(["pages.create", "pages.update"] as const)(
     "keeps a divergent %s response uncertain after one provider write", async (action) => {
       const fixture = notionFixture();
       fixture.setReturnedTitle("A different title");

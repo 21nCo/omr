@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { authorizationScopes, connectionActions, connectionAfterNotionProof, connectionStatusLabel, notionAccessGuidance, notionJourneyGuidance, providerRevocationGuidance } from "./connection-ui.js";
+import { authorizationScopes, connectionActions, connectionAfterNotionProof, connectionStatusLabel, notionAccessGuidance, notionConnectionProviderState, notionJourneyAvailable, notionJourneyGuidance, providerRevocationGuidance } from "./connection-ui.js";
 
 const team = { id: "connection_1", provider: "slack", ownership: "workspace" as const,
   ownerUserId: null, status: "active", readiness: "ready", selected: false };
@@ -21,12 +21,34 @@ describe("connection control UI policy", () => {
     expect(connectionActions(projected, "user_admin", "admin", "expired").canSelect).toBe(false);
     expect(connectionActions(projected, "user_admin", "admin", "expired").canReconnect).toBe(false);
     expect(connectionAfterNotionProof(other, "binding_notion")).toEqual(other);
-    expect(notionJourneyGuidance([current, other], "workspace_1", "notion_access_restricted"))
+    expect(notionJourneyGuidance([current, other], "workspace_1", "notion_access_restricted", current.id))
       .toContain("Contact Notion support");
     expect(notionJourneyGuidance([other], "workspace_1")).toBeNull();
     expect(notionJourneyGuidance([{ ...current, selected: false, readiness: "unavailable",
       healthReason: "notion_access_restricted" }], "workspace_1")).toContain("Contact Notion support");
     expect(notionJourneyGuidance([current], "workspace_1")).toBeNull();
+  });
+
+  it("keeps a different ready Notion account selectable and its journey visible", () => {
+    const blocked = { ...team, provider: "notion", id: "blocked", workspaceId: "workspace_1",
+      status: "needs_reauth", readiness: "unavailable", selected: true,
+      healthReason: "notion_access_restricted" };
+    const ready = { ...blocked, id: "ready", status: "active", readiness: "ready",
+      selected: false, healthReason: null };
+    expect(notionJourneyGuidance([blocked, ready], "workspace_1", "notion_access_restricted", blocked.id))
+      .toBeNull();
+    expect(notionJourneyAvailable([blocked, ready], "workspace_1", "expired", blocked.id)).toBe(true);
+    expect(connectionActions(ready, "user_admin", "admin",
+      notionConnectionProviderState(ready, "expired", blocked.id)).canSelect).toBe(true);
+    expect(notionJourneyGuidance([{ ...blocked, selected: false }, { ...ready, selected: true }],
+      "workspace_1", "notion_access_restricted", blocked.id)).toBeNull();
+    expect(notionJourneyGuidance([ready], "workspace_1", "notion_access_restricted", blocked.id))
+      .toBeNull();
+    expect(notionJourneyGuidance([blocked], "workspace_2", "notion_access_restricted", blocked.id))
+      .toBeNull();
+    expect(notionJourneyAvailable([blocked, ready], "workspace_2", "expired", blocked.id)).toBe(false);
+    expect(notionJourneyGuidance([blocked], "workspace_1", "notion_access_restricted", blocked.id))
+      .toContain("Contact Notion support");
   });
 
   it("allows members to select and probe team accounts but reserves lifecycle mutations for admins", () => {

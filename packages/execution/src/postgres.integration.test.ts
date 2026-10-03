@@ -234,6 +234,26 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
         actorUserId: "other_actor" })).toEqual([]);
     });
 
+  it.each(["notion.pages.create", "notion.pages.update"] as const)(
+    "finds an executing %s approval beyond recent history within its actor and workspace", async (toolId) => {
+      const now = Date.now();
+      const executing = await runtime.approvals.create(approvalFixture(now - 100_000,
+        { toolId, status: "executing", expiresAt: now - 1 }));
+      for (let index = 0; index < 60; index++) {
+        await runtime.approvals.create(approvalFixture(now - 60_000 + index,
+          { status: "consumed" }));
+      }
+      const actor = { workspaceId, actorUserId: executing.actorUserId, now, limit: 50 };
+      expect((await runtime.approvals.listForActor(actor)).some((item) => item.id === executing.id))
+        .toBe(false);
+      expect((await runtime.approvals.listOutstandingProviderForActor(actor)).map((item) => item.id))
+        .toContain(executing.id);
+      expect(await runtime.approvals.listOutstandingProviderForActor({ ...actor,
+        workspaceId: "foreign_workspace" })).toEqual([]);
+      expect(await runtime.approvals.listOutstandingProviderForActor({ ...actor,
+        actorUserId: "other_actor" })).toEqual([]);
+    });
+
   it("excludes expired pending and approved rows before applying the Linear overview limit", async () => {
     const now = Date.now();
     const live = await runtime.approvals.create(approvalFixture(now - 120_000,

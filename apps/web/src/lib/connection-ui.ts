@@ -45,18 +45,38 @@ export function connectionAfterNotionProof<Connection extends ConnectionDisplay>
     healthReason: "notion_access_restricted", selected: false };
 }
 
-/** Keep the Notion journey closed while the selected integration needs support. */
+/** Scope a proof denial to its binding; another ready integration can be selected. */
 export function notionJourneyGuidance(
-  connections: readonly (Pick<ConnectionDisplay, "provider" | "status" | "readiness" | "selected" | "healthReason"> &
+  connections: readonly (Pick<ConnectionDisplay, "id" | "provider" | "status" | "readiness" | "selected" | "healthReason"> &
     { workspaceId: string })[], workspaceId: string, proofIssue?: string | null,
+  proofBindingId?: string,
 ): string | null {
   const scoped = connections.filter((connection) => connection.provider === "notion" &&
     connection.workspaceId === workspaceId);
-  const readySelection = scoped.some((connection) => connection.selected &&
-    connection.status === "active" && connection.readiness === "ready");
-  return notionAccessGuidance(proofIssue,
-    readySelection ? null : scoped.find((connection) =>
-      connection.healthReason === "notion_access_restricted")?.healthReason);
+  if (scoped.some((connection) => connection.id !== proofBindingId &&
+      connection.status === "active" && connection.readiness === "ready")) return null;
+  const deniedProof = proofBindingId && scoped.some((connection) => connection.id === proofBindingId)
+    ? proofIssue : null;
+  return notionAccessGuidance(deniedProof,
+    scoped.find((connection) => connection.healthReason === "notion_access_restricted")?.healthReason);
+}
+
+/** A failed proof for one binding must not disable selection of another ready one. */
+export function notionConnectionProviderState(connection: ConnectionDisplay,
+  providerState: string, proofBindingId?: string): string {
+  return connection.provider === "notion" && providerState === "expired" &&
+    connection.id !== proofBindingId && connection.status === "active" &&
+    connection.readiness === "ready" ? "ready" : providerState;
+}
+
+/** Keep the chooser visible when a ready Notion binding can replace a denied one. */
+export function notionJourneyAvailable(connections: readonly (ConnectionDisplay & { workspaceId: string })[],
+  workspaceId: string, providerState: string, proofBindingId?: string): boolean {
+  if (providerState === "ready") return true;
+  return providerState === "expired" && connections.some((connection) =>
+    connection.provider === "notion" && connection.workspaceId === workspaceId &&
+    connection.id !== proofBindingId && connection.status === "active" &&
+    connection.readiness === "ready");
 }
 
 /** Derive visible actions from server state, ownership, role, and provider readiness. */

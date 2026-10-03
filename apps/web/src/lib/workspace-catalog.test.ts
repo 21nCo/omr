@@ -9,6 +9,14 @@ type Overview = { selectedWorkspaceId: string; connections: { provider: string; 
 type Catalog = { providers: { provider: string; state: string; available?: boolean; authMode?: string }[] };
 
 describe("workspace catalog loading", () => {
+  it.each(["notion.pages.create", "notion.pages.update"])(
+    "shows a fresh executing %s card after reload without an exact lookup", (toolId) => {
+      const approval = { id: "executing-old", toolId, status: "executing", expiresAt: 0 };
+      expect(visibleApprovalCard(approval, "", 100, true)).toBe(true);
+      expect(visibleApprovalCard(approval, "", 100, false)).toBe(false);
+      expect(visibleApprovalCard({ ...approval, toolId: "linear.issues.update" }, "", 100, true))
+        .toBe(false);
+    });
   it("lets a stalled Slack read be abandoned while keeping approval and reset locked", () => {
     expect(slackChannelSelectionLocked("slack.messages.list")).toBe(false);
     expect(slackChannelSelectionLocked("slack.channels.list")).toBe(false);

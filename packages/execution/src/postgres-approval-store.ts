@@ -647,6 +647,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
          AND (tool_id LIKE 'linear.%' OR tool_id = 'slack.messages.post' OR
            tool_id IN ('notion.pages.create', 'notion.pages.update'))
          AND (status = 'uncertain' OR
+           (status = 'executing' AND tool_id IN ('notion.pages.create', 'notion.pages.update')) OR
            (status IN ('pending', 'approved') AND expires_at > $3))
          AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
            WHERE workspace_id = $1 AND user_id = $2)

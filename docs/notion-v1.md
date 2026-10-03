@@ -50,7 +50,8 @@ rate-limit responses use safe error codes. A 429 with Notion's
 restricted: retrying will not help, and the user should contact Notion
 support. OMR marks that connection unavailable during catalog proof and shows
 the support instruction in the connection list; it does not offer the page
-journey until access is restored. Other 429 and 529 responses retain
+journey for that connection until access is restored. Another ready integration
+in the same OMR workspace can still be selected. Other 429 and 529 responses retain
 `Retry-After` when available.
 Reads may retry transient failures; writes make one provider attempt.
 

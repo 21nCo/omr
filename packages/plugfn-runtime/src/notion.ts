@@ -62,7 +62,13 @@ async function call(context: ActionContext, method: "get" | "post" | "patch", pa
     else response = await context.http.patch(url, body ?? {});
     return response.data;
   } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "CONNECTION_NOT_FOUND") throw error;
+    if (error && typeof error === "object" && "code" in error && error.code === "CONNECTION_NOT_FOUND") {
+      // The selected-page GET is complete before a mutation can be entered.
+      // A missing remote connection after POST/PATCH remains uncertain.
+      if (phase === "preflight") throw new NotionProviderDenial(phase, "NOTION_RECONNECT_REQUIRED",
+        undefined, true);
+      throw error;
+    }
     throw notionDenial(error, phase) ?? (phase === "write" ? error
       : new NotionProviderDenial(phase, "NOTION_QUERY_REJECTED"));
   }

@@ -1006,7 +1006,8 @@ export class ExecutionService {
   private async handleAuthorizedDispatchFailure(error: unknown, input: AuthorizedInput,
     receipt: ExecutionReceipt, cleanupDeadlineAt: number, state: AuthorizedRunState): Promise<never> {
     state.missingRemoteAfterInvoke = isMissingRemoteConnection(error) ||
-      isMissingGithubCommentPreflight(error, input.manifest);
+      isMissingGithubCommentPreflight(error, input.manifest) ||
+      (error instanceof NotionProviderDenial && error.phase === "preflight" && error.missingRemote);
     const confirmed = confirmedDispatchFailure(error, input.manifest, receipt.id);
     if (confirmed && await this.failDispatchedReceipt(receipt.id, confirmed.code, cleanupDeadlineAt)) {
       throw confirmed.error;

@@ -23,6 +23,8 @@ export function visibleApprovalCard(approval: { id: string; toolId: string; stat
   const reconcilable = approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post" ||
     approval.toolId === "notion.pages.create" || approval.toolId === "notion.pages.update";
   if (approval.status === "uncertain" && reconcilable) return true;
+  if (approval.status === "executing" &&
+      (approval.toolId === "notion.pages.create" || approval.toolId === "notion.pages.update")) return true;
   if (approval.id !== recoveredApprovalId || !reconcilable) return false;
   if (approval.status === "executing") return true;
   return Boolean(approval.executionReceiptId &&

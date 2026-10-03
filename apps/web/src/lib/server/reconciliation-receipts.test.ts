@@ -8,6 +8,28 @@ import { providerReconciliationReceipts, publicBrowserApproval, recoverProviderA
   visibleApprovals } from "./reconciliation-receipts.js";
 
 describe("Linear reconciliation history", () => {
+  it.each(["notion.pages.create", "notion.pages.update"])(
+    "discovers an old executing %s approval after reload beyond recent history", async (toolId) => {
+      const receipts = new MemoryExecutionReceiptStore(() => true);
+      const store = new MemoryExecutionApprovalStore(() => true, receipts);
+      const old = { id: "executing-old", workspaceId: "workspace-A", actorUserId: "alice",
+        principalKey: "web:alice", toolId, status: "executing", expiresAt: 0,
+        createdAt: 1, executionReceiptId: "receipt-old" } as ExecutionApproval;
+      store.approvals.set(old.id, old);
+      for (let index = 0; index < 60; index++) store.approvals.set(`terminal-${index}`,
+        { ...old, id: `terminal-${index}`, status: "consumed", createdAt: index + 2 });
+      const actor = { workspaceId: old.workspaceId, actorUserId: old.actorUserId, now: 100, limit: 50 };
+      const recent = await store.listForActor(actor);
+      expect(recent.some((approval) => approval.id === old.id)).toBe(false);
+      const outstanding = await store.listOutstandingProviderForActor(actor);
+      expect(outstanding.map((approval) => approval.id)).toContain(old.id);
+      const visible = visibleApprovals(recent, outstanding, null, actor.now);
+      expect(visible.some((approval) => approval.id === old.id)).toBe(true);
+      expect(await store.listOutstandingProviderForActor({ ...actor, workspaceId: "workspace-B" }))
+        .toEqual([]);
+      expect(await store.listOutstandingProviderForActor({ ...actor, actorUserId: "bob" }))
+        .toEqual([]);
+    });
   it.each(["notion.pages.create", "notion.pages.update", "linear.issues.update", "slack.messages.post"])(
     "discovers an old uncertain %s receipt without a recovery hint", async (toolId) => {
       const receipts = new MemoryExecutionReceiptStore(() => true);

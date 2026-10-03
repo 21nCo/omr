@@ -402,6 +402,7 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
           (approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post" ||
             approval.toolId === "notion.pages.create" || approval.toolId === "notion.pages.update") &&
           (approval.status === "uncertain" ||
+            (approval.status === "executing" && approval.toolId.startsWith("notion.")) ||
             ((approval.status === "pending" || approval.status === "approved") &&
               approval.expiresAt > input.now)))
         .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id))

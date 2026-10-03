@@ -9,12 +9,13 @@ import { assertConnectionWorkspace, checkAuthorizedConnectionHealth, createProvi
 import { createOMRRouter, type ConnectionRouteServices } from "./router.js";
 
 /** Give catalog isolation tests identical read contracts for each selected provider. */
-async function readActionCatalog(names: string[]) {
+async function readActionCatalog(names: string[], noScopeProviders: string[] = []) {
   const definitions = new Map(names.map((name) => [name, {
     name, displayName: name, version: "1.0.0", description: name,
     auth: { type: "oauth2" }, actions: { read: {
       name: "read", displayName: "Read", description: "Read resource", parameters: {}, returns: {},
-      contract: { version: "1.0.0", effect: "read" as const, requiredScopes: ["read"],
+      contract: { version: "1.0.0", effect: "read" as const,
+        requiredScopes: noScopeProviders.includes(name) ? [] : ["read"],
         resources: [], sensitiveKeys: [], pagination: { kind: "none" as const }, retry: "never" as const },
     } },
   }]));
@@ -121,6 +122,40 @@ describe("CLI self-revocation", () => {
 });
 
 describe("Worker scoped provider catalog", () => {
+  it("proves a selected ready Notion binding without inheriting an old restricted binding", async () => {
+    const { definitions, catalog } = await readActionCatalog(["github", "notion"], ["notion"]);
+    const bindings = [
+      { id: "old_notion", provider: "notion", providerConnectionId: "remote_old",
+        status: "needs_reauth", readiness: "unavailable" },
+      { id: "ready_notion", provider: "notion", providerConnectionId: "remote_ready",
+        status: "active", readiness: "ready" },
+      { id: "ready_github", provider: "github", providerConnectionId: "remote_github",
+        status: "active", readiness: "ready" },
+    ];
+    const recordHealth = vi.fn(async () => undefined);
+    const authority = { resolve: vi.fn(async ({ provider, workspaceId }:
+      { provider: string; workspaceId: string }) => {
+      expect(workspaceId).toBe("workspace_1");
+      return bindings.find((binding) => binding.id ===
+        (provider === "notion" ? "ready_notion" : "ready_github"))!;
+    }), recordHealth };
+    const action = vi.fn(async (provider: string) => provider === "notion"
+      ? { object: "user", id: "11111111-1111-4111-8111-111111111111", type: "bot" }
+      : { verifiedScopes: ["read"] });
+    const plugfn = { providers: { get: (provider: string) => definitions.get(provider) },
+      config: { integrations: { github: {}, notion: {} } }, action,
+      connections: { get: vi.fn(async () => ({ scopes: ["read"] })) } };
+    const result = await scopedToolIds(catalog, plugfn as never, authority as never,
+      { kind: "web", userId: "user_1", workspaceId: "workspace_1" }, "workspace_1", bindings as never);
+    expect([...result.allowedToolIds].sort()).toEqual(["github.read", "notion.read"]);
+    expect(result.providers.find(({ provider }) => provider === "notion")?.state).toBe("ready");
+    expect(result.providers.find(({ provider }) => provider === "notion")?.proofIssue).toBeUndefined();
+    expect(action).toHaveBeenCalledWith("notion", "connection.verify", expect.objectContaining({
+      connectionId: "remote_ready",
+    }));
+    expect(recordHealth).not.toHaveBeenCalled();
+  });
+
   it("marks a blocked Notion proof unavailable immediately and preserves sibling discovery", async () => {
     const { definitions, catalog } = await readActionCatalog(["github", "notion"]);
     const bindings = ["github", "notion"].map((provider) => ({ id: `binding_${provider}`, provider,

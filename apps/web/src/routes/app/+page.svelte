@@ -1,12 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { beginGithubReconnect, createOAuthReviewController } from "$lib/oauth-review.js";
-  import { connectionActions, connectionAfterNotionProof, connectionStatusLabel, notionAccessGuidance, notionJourneyGuidance, providerRevocationGuidance } from "$lib/connection-ui.js";
+  import { connectionActions, connectionAfterNotionProof, connectionStatusLabel, notionAccessGuidance, notionConnectionProviderState, notionJourneyAvailable, notionJourneyGuidance, providerRevocationGuidance } from "$lib/connection-ui.js";
   import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, effectAbsentAvailable, effectPresentAvailable, providerDisplayState, recoverProviderReconciliation, recoverWorkspaceOverview, sameSlackPostParams, sameSlackReadSelection, selectedLinearAccountId, selectedReadyLinearConnection, selectedReadyNotionConnection, selectedReadySlackConnection, selectedSlackAccountId, slackChannelSelectionLocked, visibleApprovalCard } from "$lib/workspace-catalog.js";
   import { renderApprovalPreview } from "$lib/approval-preview.js";
   import { createLinearActionKeys, linearApprovalNotice } from "$lib/linear-action-keys.js";
   import { createControlPlaneRequest, OMRResponseError } from "$lib/control-plane-request.js";
-  import { notionApprovalNotice } from "$lib/notion-approval-notice.js";
+  import { notionApprovalNotice, notionApprovalRecovery } from "$lib/notion-approval-notice.js";
   import { notionSearchParams } from "$lib/notion-search-params.js";
   import { slackApprovalNotice } from "$lib/slack-approval-notice.js";
   import { V1_PROVIDERS } from "@oh-my-router/tools";
@@ -188,7 +188,8 @@
 
   function actions(connection: Connection, now: number) {
     return connectionActions(effectiveConnection(connection), overview?.actor.id ?? "",
-      selectedAccess()?.membership.role ?? "member", providerState(connection.provider), now);
+      selectedAccess()?.membership.role ?? "member", notionConnectionProviderState(connection,
+        providerState(connection.provider), catalog?.providers.find((entry) => entry.provider === "notion")?.proofBindingId), now);
   }
 
   function revocationGuidance(connection: Connection): string | null {
@@ -209,7 +210,8 @@
 
   function notionGuidance(): string | null {
     return notionJourneyGuidance(overview?.connections ?? [], selectedWorkspaceId,
-      catalog?.providers.find((entry) => entry.provider === "notion")?.proofIssue);
+      catalog?.providers.find((entry) => entry.provider === "notion")?.proofIssue,
+      catalog?.providers.find((entry) => entry.provider === "notion")?.proofBindingId);
   }
 
   function effectiveConnection(connection: Connection): Connection {
@@ -494,15 +496,15 @@
       });
       if (generation !== notionGeneration || workspaceId !== selectedWorkspaceId ||
           account.id !== notionAccount()?.id) return;
+      const recovery = notionApprovalRecovery(approval);
+      recoveredApprovalId = recovery.id;
+      automaticApprovalLookup = recovery.automaticLookup;
+      recoveryInput = recoveredApprovalId;
       if (JSON.stringify(params) !== JSON.stringify(notionParams(toolId))) {
         await load();
         notice = "The Notion destination or title changed. Review the created approval before requesting another.";
         return;
       }
-      recoveredApprovalId = ["pending", "approved", "uncertain"].includes(approval.status) ? approval.id : "";
-      automaticApprovalLookup = ["pending", "approved"].includes(approval.status)
-        ? { id: approval.id, expiresAt: approval.expiresAt } : null;
-      recoveryInput = recoveredApprovalId;
       notice = notionApprovalNotice(approval.status);
       await load();
     } catch (caught) {
@@ -942,7 +944,8 @@
                       <span>{revocationGuidance(connection)}</span>
                     {/if}
                   </div>
-                  <span class:ready={actions(connection, clockNow).canSelect} class="status">{connectionStatusLabel(effectiveConnection(connection), providerState(connection.provider))}</span>
+                  <span class:ready={actions(connection, clockNow).canSelect} class="status">{connectionStatusLabel(effectiveConnection(connection), notionConnectionProviderState(connection,
+                    providerState(connection.provider), catalog?.providers.find((entry) => entry.provider === "notion")?.proofBindingId))}</span>
                   {#if actions(connection, clockNow).canSelect}
                     <button
                       class="quiet compact"
@@ -1146,7 +1149,8 @@
           </section>
         {/if}
 
-        {#if catalog?.providers.find((entry) => entry.provider === "notion")?.state === "ready" && !notionGuidance()}
+        {#if notionJourneyAvailable(overview.connections, selectedWorkspaceId,
+          providerState("notion"), catalog?.providers.find((entry) => entry.provider === "notion")?.proofBindingId) && !notionGuidance()}
           <section class="panel" aria-label="Notion page journey">
             <div class="panel-heading"><div><p class="kicker">Notion</p><h2>Shared pages</h2></div></div>
             <p>Selected integration: {notionAccount()?.label ?? "Select a Notion account above"}. Search shows content shared with that integration. Choose and read a page before creating a child or renaming it. Every change waits for separate approval.</p>

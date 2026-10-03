@@ -3,7 +3,7 @@ export class NotionProviderDenial extends Error {
     "NOTION_PERMISSION_DENIED" | "NOTION_ACCESS_RESTRICTED" | "NOTION_TARGET_UNAVAILABLE" |
     "NOTION_INVALID_CHANGE" | "NOTION_QUERY_REJECTED";
   constructor(readonly phase: "read" | "preflight" | "write", code: NotionProviderDenial["code"],
-    readonly retryAfterSeconds?: number) {
+    readonly retryAfterSeconds?: number, readonly missingRemote = false) {
     super({
       NOTION_RATE_LIMITED: "Notion rate limit reached. Retry after its reset window.",
       NOTION_RECONNECT_REQUIRED: "Notion rejected this connection. Reconnect the account.",
