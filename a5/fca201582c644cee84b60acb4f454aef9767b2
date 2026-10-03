@@ -1,0 +1,22 @@
+apps/web/src/lib/notion-row-boundary.test.ts
+  h_a39f9495f9ec1d 1-50
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 125-126,496-500,503-505,1233-1235
+docs/notion-v1.md
+  h_a39f9495f9ec1d 15-18
+packages/plugfn-runtime/src/notion.ts
+  h_a39f9495f9ec1d 187-192
+tests/acceptance/notion-adapter-contract.test.ts
+  h_a39f9495f9ec1d 32-33,43-45,54,76,199-233
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a5fca201582c644cee84b60acb4f454aef9767b2",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
