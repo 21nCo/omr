@@ -1,0 +1,18 @@
+packages/mcp/src/server.test.ts
+  h_a39f9495f9ec1d 420-476
+packages/mcp/src/session.test.ts
+  h_a39f9495f9ec1d 6-66
+packages/mcp/src/session.ts
+  h_a39f9495f9ec1d 1-21,31-36
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8df592a13a02f6ec0d8bb012b1ed2e94ba08ebd9",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
