@@ -186,7 +186,7 @@ function normalizeLabel(value: string): string {
 /** Reject scope lists that bypass a selected tier or invent Notion OAuth scopes. */
 function assertTierScopes(provider: string, supplied: string[] | undefined,
   expected: string[] | undefined): void {
-  if (provider === "notion" && supplied?.length) {
+  if (provider === "notion" && supplied !== undefined) {
     throw new ConnectionInputError("Notion access is selected on its shared-content consent screen");
   }
   if (!supplied || (provider !== "linear" && provider !== "slack")) return;

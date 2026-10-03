@@ -42,23 +42,9 @@ async function providerProofUnavailable(provider: string, bindingId: string, err
     return true;
   }
   if (provider === "github") return githubProofUnavailable(error);
-  if (provider === "slack") {
-    if (error instanceof SlackProviderDenial) {
-      if (error.code === "SLACK_RECONNECT_REQUIRED") await onReconnectRequired?.(bindingId, provider);
-      if (error.code === "SLACK_PERMISSION_DENIED" || error.code === "SLACK_WORKSPACE_MISMATCH") {
-        await onPermanentDenial?.(bindingId, error.code);
-      }
-      return true;
-    }
-    return githubProofUnavailable(error);
-  }
-  if (provider === "notion") {
-    if (error instanceof NotionProviderDenial) {
-      if (error.code === "NOTION_RECONNECT_REQUIRED") await onReconnectRequired?.(bindingId, provider);
-      return true;
-    }
-    return githubProofUnavailable(error);
-  }
+  if (provider === "slack") return slackProofUnavailable(bindingId, error,
+    onReconnectRequired, onPermanentDenial);
+  if (provider === "notion") return notionProofUnavailable(bindingId, error, onReconnectRequired);
   if (provider !== "linear") return false;
   if (error instanceof LinearProviderDenial && error.code === "LINEAR_RECONNECT_REQUIRED") {
     await onReconnectRequired?.(bindingId);
@@ -67,6 +53,28 @@ async function providerProofUnavailable(provider: string, bindingId: string, err
   return error instanceof LinearProviderDenial ||
     (error !== null && typeof error === "object" && "status" in error && error.status === 408) ||
     githubProofUnavailable(error);
+}
+
+/** Contain a Slack proof failure without exposing another provider's catalog. */
+async function slackProofUnavailable(bindingId: string, error: unknown,
+  onReconnectRequired?: (bindingId: string, provider?: string) => Promise<void>,
+  onPermanentDenial?: (bindingId: string, code: "SLACK_PERMISSION_DENIED" | "SLACK_WORKSPACE_MISMATCH") => Promise<void>,
+): Promise<boolean> {
+  if (!(error instanceof SlackProviderDenial)) return githubProofUnavailable(error);
+  if (error.code === "SLACK_RECONNECT_REQUIRED") await onReconnectRequired?.(bindingId, "slack");
+  if (error.code === "SLACK_PERMISSION_DENIED" || error.code === "SLACK_WORKSPACE_MISMATCH") {
+    await onPermanentDenial?.(bindingId, error.code);
+  }
+  return true;
+}
+
+/** A revoked Notion token needs a reconnect, while transient denial stays provider-local. */
+async function notionProofUnavailable(bindingId: string, error: unknown,
+  onReconnectRequired?: (bindingId: string, provider?: string) => Promise<void>,
+): Promise<boolean> {
+  if (!(error instanceof NotionProviderDenial)) return githubProofUnavailable(error);
+  if (error.code === "NOTION_RECONNECT_REQUIRED") await onReconnectRequired?.(bindingId, "notion");
+  return true;
 }
 
 /** Whether a failed GitHub account proof identifies an unavailable provider. */

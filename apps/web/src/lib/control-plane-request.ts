@@ -3,8 +3,12 @@ const PROVIDER_RECONNECT_ERRORS = new Set([
   "NOTION_RECONNECT_REQUIRED",
 ]);
 
+/** Keep a provider error code available to the reconnect UI. */
 export class OMRResponseError extends Error {
-  constructor(readonly code: string, message: string) { super(message); }
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = "OMRResponseError";
+  }
 }
 
 /** Keep provider revocation in the control plane so the account can be reconnected. */

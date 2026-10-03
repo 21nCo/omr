@@ -8,6 +8,35 @@ import { providerReconciliationReceipts, publicBrowserApproval, recoverProviderA
   visibleApprovals } from "./reconciliation-receipts.js";
 
 describe("Linear reconciliation history", () => {
+  it.each(["notion.pages.create", "notion.pages.update", "linear.issues.update", "slack.messages.post"])(
+    "discovers an old uncertain %s receipt without a recovery hint", async (toolId) => {
+      const receipts = new MemoryExecutionReceiptStore(() => true);
+      const store = new MemoryExecutionApprovalStore(() => true, receipts);
+      const old = { id: "old", workspaceId: "workspace-A", actorUserId: "alice",
+        principalKey: "web:alice", toolId, status: "uncertain", expiresAt: 0,
+        createdAt: 1, executionReceiptId: "receipt-old" } as ExecutionApproval;
+      store.approvals.set(old.id, old);
+      receipts.receipts.set("receipt-old", { id: "receipt-old", approvalId: old.id,
+        workspaceId: old.workspaceId, actorUserId: old.actorUserId, principalKey: old.principalKey,
+        toolId, status: "uncertain", errorCode: "provider_response_ambiguous" } as ExecutionReceipt);
+      for (let index = 0; index < 60; index++) {
+        store.approvals.set(`terminal-${index}`, { ...old, id: `terminal-${index}`,
+          status: "consumed", executionReceiptId: null, createdAt: index + 2 });
+      }
+      const actor = { workspaceId: "workspace-A", actorUserId: "alice", now: 100, limit: 50 };
+      const recent = await store.listForActor(actor);
+      expect(recent.some((item) => item.id === old.id)).toBe(false);
+      const outstanding = await store.listOutstandingProviderForActor(actor);
+      expect(outstanding.map((item) => item.id)).toEqual([old.id]);
+      const visible = visibleApprovals(recent, outstanding, null, actor.now);
+      expect((await providerReconciliationReceipts(visible, receipts,
+        actor.workspaceId, actor.actorUserId)).map((receipt) => receipt.id)).toEqual(["receipt-old"]);
+      expect(await store.listOutstandingProviderForActor({ ...actor, workspaceId: "workspace-B" }))
+        .toEqual([]);
+      expect(await store.listOutstandingProviderForActor({ ...actor, actorUserId: "bob" }))
+        .toEqual([]);
+    });
+
   it.each(["pending", "approved", "uncertain"] as const)(
     "keeps %s client-grant approvals visible but reserves browser execution for its own principal", (status) => {
       const approval = { id: `approval-${status}`, status, toolId: "linear.issues.update",
@@ -57,7 +86,7 @@ describe("Linear reconciliation history", () => {
           status: "pending", expiresAt: index % 2 ? 100 : 0 });
       }
       const actor = { workspaceId: "workspace-A", actorUserId: "alice", now: 50, limit: 50 };
-      const page = await store.listOutstandingLinearForActor(actor);
+      const page = await store.listOutstandingProviderForActor(actor);
       expect(page).toHaveLength(50);
       expect(page.some((approval) => approval.id === old.id)).toBe(false);
       const recent = await store.listForActor({ ...actor, limit: 50 });

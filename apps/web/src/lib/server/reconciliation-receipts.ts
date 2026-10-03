@@ -4,9 +4,9 @@ import type { ToolManifest } from "@oh-my-router/tools";
 
 /** Merge bounded history with actionable provider approvals and one exact recovery. */
 export function visibleApprovals<T extends Pick<ExecutionApproval, "id" | "status" | "expiresAt">>(
-  recent: readonly T[], outstandingLinear: readonly T[], recovered: T | null, now: number,
+  recent: readonly T[], outstandingProvider: readonly T[], recovered: T | null, now: number,
 ): T[] {
-  return [...new Map([...recent, ...outstandingLinear, ...(recovered ? [recovered] : [])]
+  return [...new Map([...recent, ...outstandingProvider, ...(recovered ? [recovered] : [])]
     .filter((approval) => approval.status === "uncertain" ||
       !["pending", "approved"].includes(approval.status) || approval.expiresAt > now)
     .map((approval) => [approval.id, approval])).values()];

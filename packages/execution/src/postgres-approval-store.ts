@@ -639,12 +639,13 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     return Promise.all(result.rows.map((row) => this.toApproval(row)));
   }
 
-  async listOutstandingLinearForActor(input: { workspaceId: string; actorUserId: string;
+  async listOutstandingProviderForActor(input: { workspaceId: string; actorUserId: string;
     now: number; limit: number }): Promise<ExecutionApproval[]> {
     const result = await this.query<ApprovalRow>(
       `SELECT ${COLUMNS} FROM omr_control.execution_approvals
        WHERE workspace_id = $1 AND actor_user_id = $2
-         AND (tool_id LIKE 'linear.%' OR tool_id = 'slack.messages.post')
+         AND (tool_id LIKE 'linear.%' OR tool_id = 'slack.messages.post' OR
+           tool_id IN ('notion.pages.create', 'notion.pages.update'))
          AND (status = 'uncertain' OR
            (status IN ('pending', 'approved') AND expires_at > $3))
          AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships

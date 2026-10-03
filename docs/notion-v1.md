@@ -32,6 +32,9 @@ integration immediately before any write. The approval preview includes the
 selected account and page target; title text is redacted there. Review it in
 the request form before requesting approval. Approving alone does not
 write; the originating browser, CLI, or MCP client must separately execute.
+OMR trims leading and trailing title whitespace and treats dashed, undashed,
+and case variants of a page ID as the same live write intent. A blank title
+is rejected before approval.
 The OMR workspace and account binding are checked again at execution, so a
 revoked or switched connection cannot be reused. Browser results from an old
 workspace or account are discarded.

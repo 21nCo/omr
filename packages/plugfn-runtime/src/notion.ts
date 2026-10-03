@@ -1,7 +1,7 @@
 import { notionProvider } from "@plugfn/providers";
 import type { Action, ActionContext, ActionContract, Provider } from "plugfn";
 import { z } from "zod";
-import { NotionProviderDenial, NotionProviderResponseAmbiguous, notionDenial } from "@oh-my-router/tools";
+import { canonicalNotionId, canonicalNotionWriteParams, NotionProviderDenial, NotionProviderResponseAmbiguous, notionDenial } from "@oh-my-router/tools";
 
 const id = z.string().regex(/^(?:[a-f0-9]{32}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i);
 const title = z.string().trim().min(1).max(200);
@@ -17,6 +17,7 @@ const item = z.object({ type: z.enum(["page", "database"]), id, title: z.string(
 const page = z.object({ id, title: z.string(), url: z.string().url(), parent });
 const bot = z.object({ object: z.literal("user"), id, type: z.literal("bot") });
 
+/** Restrict the exposed adapter to bounded reads and single-attempt writes. */
 function contract(effect: "read" | "write", resources: ActionContract["resources"] = [],
   paginated = false): ActionContract {
   return { version: "1.0.0", effect, requiredScopes: [], resources,
@@ -25,11 +26,13 @@ function contract(effect: "read" | "write", resources: ActionContract["resources
     retry: effect === "read" ? "safe" : "never" };
 }
 
+/** Read the page's actual title property, whose name varies by workspace. */
 function pageTitle(properties: z.infer<typeof rawPage>["properties"]): { name: string; text: string } | null {
   const found = Object.entries(properties).find(([, value]) => value.type === "title" && Array.isArray(value.title));
   return found ? { name: found[0], text: found[1].title!.map((entry) => entry.plain_text).join("") } : null;
 }
 
+/** Exclude malformed, archived and trashed pages from read and write targets. */
 function visiblePage(value: unknown): z.infer<typeof rawPage> | null {
   const parsed = rawPage.safeParse(value);
   return parsed.success && !parsed.data.archived && !parsed.data.in_trash ? parsed.data : null;
@@ -39,7 +42,7 @@ function visiblePage(value: unknown): z.infer<typeof rawPage> | null {
 function searchItem(value: unknown): z.infer<typeof item> | null {
   const foundPage = visiblePage(value);
   if (foundPage) return { type: "page", id: foundPage.id,
-    title: pageTitle(foundPage.properties)?.text ?? "Untitled", url: foundPage.url };
+    title: pageTitle(foundPage.properties)?.text || "Untitled", url: foundPage.url };
   const database = rawDatabase.safeParse(value);
   if (database.success && !database.data.archived && !database.data.in_trash) {
     return { type: "database", id: database.data.id,
@@ -53,9 +56,10 @@ async function call(context: ActionContext, method: "get" | "post" | "patch", pa
   body: object | undefined, phase: NotionProviderDenial["phase"]): Promise<unknown> {
   try {
     const url = `${context.provider.baseUrl}${path}`;
-    const response = method === "get" ? await context.http.get(url)
-      : method === "post" ? await context.http.post(url, body ?? {})
-        : await context.http.patch(url, body ?? {});
+    let response;
+    if (method === "get") response = await context.http.get(url);
+    else if (method === "post") response = await context.http.post(url, body ?? {});
+    else response = await context.http.patch(url, body ?? {});
     return response.data;
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "CONNECTION_NOT_FOUND") throw error;
@@ -64,10 +68,11 @@ async function call(context: ActionContext, method: "get" | "post" | "patch", pa
   }
 }
 
+/** Preflight the exact page through the selected integration's token. */
 async function selectedPage(context: ActionContext, pageId: string,
   phase: NotionProviderDenial["phase"]): Promise<z.infer<typeof rawPage>> {
   const found = visiblePage(await call(context, "get", `/pages/${pageId}`, undefined, phase));
-  if (!found || found.id.replaceAll("-", "").toLowerCase() !== pageId.replaceAll("-", "").toLowerCase()) {
+  if (!found || canonicalNotionId(found.id) !== canonicalNotionId(pageId)) {
     throw new NotionProviderDenial(phase, "NOTION_TARGET_UNAVAILABLE");
   }
   return found;
@@ -117,7 +122,7 @@ const get: Action = {
   contract: contract("read", [{ kind: "page", parameter: "pageId" }]),
   execute: async (params, context) => {
     const found = await selectedPage(context, params.pageId, "read");
-    return { id: found.id, title: pageTitle(found.properties)?.text ?? "Untitled",
+    return { id: found.id, title: pageTitle(found.properties)?.text || "Untitled",
       url: found.url, parent: found.parent };
   },
 };
@@ -128,16 +133,21 @@ const create: Action = {
   parameters: z.object({ parentPageId: id, title }).strict(), returns: page,
   contract: contract("write", [{ kind: "parent_page", parameter: "parentPageId" }]),
   execute: async (params, context) => {
-    await selectedPage(context, params.parentPageId, "preflight");
+    const canonical = canonicalNotionWriteParams("notion.pages.create", params);
+    if (!canonical || !("parentPageId" in canonical)) {
+      throw new NotionProviderDenial("preflight", "NOTION_INVALID_CHANGE");
+    }
+    await selectedPage(context, canonical.parentPageId, "preflight");
     const result = await call(context, "post", "/pages", {
-      parent: { type: "page_id", page_id: params.parentPageId },
-      properties: { title: { type: "title", title: [{ type: "text", text: { content: params.title } }] } },
+      parent: { type: "page_id", page_id: canonical.parentPageId },
+      properties: { title: { type: "title", title: [{ type: "text", text: { content: canonical.title } }] } },
     }, "write");
     const found = visiblePage(result);
-    if (!found || found.parent.page_id?.replaceAll("-", "").toLowerCase() !==
-      params.parentPageId.replaceAll("-", "").toLowerCase()) throw new NotionProviderResponseAmbiguous();
+    if (!found || canonicalNotionId(found.parent.page_id) !== canonical.parentPageId) {
+      throw new NotionProviderResponseAmbiguous();
+    }
     const actualTitle = pageTitle(found.properties)?.text;
-    if (!actualTitle) throw new NotionProviderResponseAmbiguous();
+    if (actualTitle !== canonical.title) throw new NotionProviderResponseAmbiguous();
     return { id: found.id, title: actualTitle,
       url: found.url, parent: found.parent };
   },
@@ -149,17 +159,20 @@ const update: Action = {
   parameters: z.object({ pageId: id, title }).strict(), returns: page,
   contract: contract("write", [{ kind: "page", parameter: "pageId" }]),
   execute: async (params, context) => {
-    const before = await selectedPage(context, params.pageId, "preflight");
+    const canonical = canonicalNotionWriteParams("notion.pages.update", params);
+    if (!canonical || !("pageId" in canonical)) {
+      throw new NotionProviderDenial("preflight", "NOTION_INVALID_CHANGE");
+    }
+    const before = await selectedPage(context, canonical.pageId, "preflight");
     const property = pageTitle(before.properties);
     if (!property) throw new NotionProviderDenial("preflight", "NOTION_TARGET_UNAVAILABLE");
-    const result = await call(context, "patch", `/pages/${params.pageId}`, {
-      properties: { [property.name]: { type: "title", title: [{ type: "text", text: { content: params.title } }] } },
+    const result = await call(context, "patch", `/pages/${canonical.pageId}`, {
+      properties: { [property.name]: { type: "title", title: [{ type: "text", text: { content: canonical.title } }] } },
     }, "write");
     const found = visiblePage(result);
-    if (!found || found.id.replaceAll("-", "").toLowerCase() !==
-      params.pageId.replaceAll("-", "").toLowerCase()) throw new NotionProviderResponseAmbiguous();
+    if (!found || canonicalNotionId(found.id) !== canonical.pageId) throw new NotionProviderResponseAmbiguous();
     const actualTitle = pageTitle(found.properties)?.text;
-    if (!actualTitle) throw new NotionProviderResponseAmbiguous();
+    if (actualTitle !== canonical.title) throw new NotionProviderResponseAmbiguous();
     return { id: found.id, title: actualTitle,
       url: found.url, parent: found.parent };
   },

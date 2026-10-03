@@ -4,7 +4,7 @@ import {
   ConnectionUnavailableError, isMissingRemoteConnection, markMissingRemoteConnection,
   type ConnectionAuthority, type ConnectionBindingRecord,
 } from "@oh-my-router/connections";
-import { ConfirmedGitHubWriteRejection, githubHttpFailure, hasRequiredScopes, LinearProviderDenial, LinearProviderResponseAmbiguous, NotionProviderDenial, NotionProviderResponseAmbiguous, ProviderPreflightError, SlackProviderDenial, SlackProviderResponseAmbiguous, type GitHubHttpFailure, type JsonValue, type ToolCatalog, type ToolManifest } from "@oh-my-router/tools";
+import { canonicalNotionWriteParams, ConfirmedGitHubWriteRejection, githubHttpFailure, hasRequiredScopes, LinearProviderDenial, LinearProviderResponseAmbiguous, NotionProviderDenial, NotionProviderResponseAmbiguous, ProviderPreflightError, SlackProviderDenial, SlackProviderResponseAmbiguous, type GitHubHttpFailure, type JsonValue, type ToolCatalog, type ToolManifest } from "@oh-my-router/tools";
 import { approvalPreviewReady } from "./projection.js";
 
 export type ExecutionStatus = "reserved" | "running" | "succeeded" | "failed" | "uncertain";
@@ -171,8 +171,8 @@ export interface ExecutionApprovalStore {
     actorUserId: string;
     limit: number;
   }): Promise<ExecutionApproval[]>;
-  /** A bounded page of actionable Linear approvals outside recent history. */
-  listOutstandingLinearForActor(input: { workspaceId: string; actorUserId: string;
+  /** A bounded page of actionable provider approvals outside recent history. */
+  listOutstandingProviderForActor(input: { workspaceId: string; actorUserId: string;
     now: number; limit: number }): Promise<ExecutionApproval[]>;
 }
 
@@ -534,14 +534,17 @@ export class ExecutionService {
       throw new ExecutionCapabilityDeniedError("approvals:create");
     }
     assertJson(input.params);
-    if (!validToolInput(manifest, input.params)) throw new ExecutionInputError("Invalid tool parameters");
-    if (!approvalPreviewReady(manifest, manifest.hash, input.params)) {
+    const notionParams = manifest.id === "notion.pages.create" || manifest.id === "notion.pages.update"
+      ? canonicalNotionWriteParams(manifest.id, input.params) : undefined;
+    if (notionParams === null) throw new ExecutionInputError("Invalid tool parameters");
+    const params = structuredClone(notionParams ?? input.params) as JsonValue;
+    if (!validToolInput(manifest, params)) throw new ExecutionInputError("Invalid tool parameters");
+    if (!approvalPreviewReady(manifest, manifest.hash, params)) {
       throw new ExecutionInputError("This tool has no complete, safely redacted approval preview");
     }
     if (typeof input.idempotencyKey !== "string" || !IDEMPOTENCY_KEY.test(input.idempotencyKey)) {
       throw new ExecutionInputError("Invalid idempotency key");
     }
-    const params = structuredClone(input.params);
     const ttlMs = input.ttlMs ?? 10 * 60_000;
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 60_000 || ttlMs > 60 * 60_000) {
       throw new ExecutionInputError("Approval lifetime must be between one minute and one hour");

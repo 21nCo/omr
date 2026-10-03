@@ -5,7 +5,7 @@ import { ConnectionAuthority, PlugFnConnectionOrchestrator } from "@oh-my-router
 import { MemoryConnectionBindingStore } from "@oh-my-router/connections/testing";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
 import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
-import { ExecutionOutcomeUnknownError, ExecutionService, NotionExecutionError } from "@oh-my-router/execution";
+import { ExecutionInputError, ExecutionOutcomeUnknownError, ExecutionService, NotionExecutionError } from "@oh-my-router/execution";
 import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "@oh-my-router/execution/testing";
 import { createProviderIntegrationConfig } from "../../apps/web/src/lib/server/cloudflare-runtime.js";
 import { selectedReadyNotionConnection } from "../../apps/web/src/lib/workspace-catalog.js";
@@ -30,12 +30,13 @@ function notionFixture() {
   let shared = true;
   let denial: { status: number; data: { code: string }; headers?: Headers } | null = null;
   let malformedWrite = false;
+  let returnedTitle: string | null = null;
   const get = vi.fn(async (url: string) => {
     if (url.endsWith("/users/me")) return { data: { object: "user", id: parentId, type: "bot" } };
-    if (url.endsWith(`/pages/${parentId}`)) return shared
+    if (url.endsWith(`/pages/${parentId}`) || url.endsWith(`/pages/${parentId.replaceAll("-", "")}`)) return shared
       ? { data: page(parentId, databaseId, "Destination") }
       : Promise.reject({ status: 404, data: { code: "object_not_found" } });
-    if (url.endsWith(`/pages/${childId}`)) return { data: page(childId) };
+    if (url.endsWith(`/pages/${childId}`) || url.endsWith(`/pages/${childId.replaceAll("-", "")}`)) return { data: page(childId) };
     if (url.endsWith(`/pages/${foreignId}`)) return Promise.reject({ status: 404,
       data: { code: "object_not_found" } });
     throw new Error(`Unexpected GET ${url}`);
@@ -44,27 +45,31 @@ function notionFixture() {
     if (url.endsWith("/search")) return { data: { results: [page(parentId), {
       object: "database", id: databaseId, url: `https://www.notion.so/${databaseId}`,
       title: [{ plain_text: "Projects" }],
-    }, { ...page(foreignId), archived: true }, { object: "page", id: "broken" }],
+    }, { ...page(childId), properties: { Name: { type: "title", title: [] } } },
+    { ...page(foreignId), archived: true }, { object: "page", id: "broken" }],
     has_more: false, next_cursor: null } };
     if (url.endsWith("/pages")) {
       if (denial) return Promise.reject(denial);
       return { data: malformedWrite ? { id: childId } : page(childId, parentId,
-        String((body.properties as { title: { title: { text: { content: string } }[] } }).title.title[0]?.text.content)) };
+        returnedTitle ?? String((body.properties as { title: { title: { text: { content: string } }[] } }).title.title[0]?.text.content)) };
     }
     throw new Error(`Unexpected POST ${url}`);
   });
   const patch = vi.fn(async (url: string, body: Record<string, unknown>) => {
-    if (!url.endsWith(`/pages/${childId}`)) throw new Error(`Unexpected PATCH ${url}`);
+    if (!url.endsWith(`/pages/${childId}`) && !url.endsWith(`/pages/${childId.replaceAll("-", "")}`)) {
+      throw new Error(`Unexpected PATCH ${url}`);
+    }
     if (denial) return Promise.reject(denial);
     if (malformedWrite) return { data: { id: childId } };
     const name = (body.properties as { Name: { title: { text: { content: string } }[] } }).Name.title[0]?.text.content;
-    return { data: page(childId, parentId, name) };
+    return { data: page(childId, parentId, returnedTitle ?? name) };
   });
   return { context: { provider: { baseUrl: "https://api.notion.com/v1" },
       http: { get, post, patch } } as never, get, post, patch,
     setShared: (value: boolean) => { shared = value; },
     setDenial: (value: typeof denial) => { denial = value; },
     setMalformedWrite: (value: boolean) => { malformedWrite = value; },
+    setReturnedTitle: (value: string | null) => { returnedTitle = value; },
     writes: () => post.mock.calls.filter(([url]) => url.endsWith("/pages")).length + patch.mock.calls.length };
 }
 
@@ -122,6 +127,9 @@ describe("notion-adapter-contract", () => {
     await expect(orchestrator.startOAuth({ actorUserId: "alice", workspaceId: workspace.id,
       provider: "notion", ownership: "personal", redirectUri: "https://omr.local/app/oauth/callback",
       label: "Mine", scopes: ["write"] })).rejects.toBeDefined();
+    await expect(orchestrator.startOAuth({ actorUserId: "alice", workspaceId: workspace.id,
+      provider: "notion", ownership: "personal", redirectUri: "https://omr.local/app/oauth/callback",
+      label: "Mine", scopes: [] })).rejects.toBeDefined();
     expect(getAuthUrl).not.toHaveBeenCalled();
     await orchestrator.startOAuth({ actorUserId: "alice", workspaceId: workspace.id,
       provider: "notion", ownership: "personal", redirectUri: "https://omr.local/app/oauth/callback",
@@ -135,7 +143,10 @@ describe("notion-adapter-contract", () => {
     const fixture = notionFixture();
     const found = await omrNotionProvider.actions["content.search"]!.execute({}, fixture.context);
     expect(found).toMatchObject({ items: [{ type: "page", id: parentId },
-      { type: "database", id: databaseId }], nextCursor: null });
+      { type: "database", id: databaseId }, { type: "page", id: childId, title: "Untitled" }],
+    nextCursor: null });
+    expect((found as { items: { id: string; title: string }[] }).items.find((item) => item.id === childId)?.title)
+      .toBe("Untitled");
     expect(await omrNotionProvider.actions["pages.get"]!.execute({ pageId: parentId }, fixture.context))
       .toMatchObject({ id: parentId, title: "Destination" });
     fixture.setShared(false);
@@ -168,7 +179,22 @@ describe("notion-adapter-contract", () => {
         code: "NOTION_RATE_LIMITED", phase: "write", retryAfterSeconds: 19,
       });
     expect(fixture.writes()).toBe(1);
+    expect(notionDenial({ status: 529, data: { code: "service_overload" },
+      headers: new Headers({ "Retry-After": "27" }) }, "write"))
+      .toMatchObject({ code: "NOTION_RATE_LIMITED", retryAfterSeconds: 27 });
   });
+
+  it.each(["pages.create", "pages.update"] as const)(
+    "keeps a divergent %s response uncertain after one provider write", async (action) => {
+      const fixture = notionFixture();
+      fixture.setReturnedTitle("A different title");
+      const params = action === "pages.create"
+        ? { parentPageId: parentId, title: "Approved title" }
+        : { pageId: childId, title: "Approved title" };
+      await expect(omrNotionProvider.actions[action]!.execute(params, fixture.context))
+        .rejects.toMatchObject({ name: "NotionProviderResponseAmbiguous" });
+      expect(fixture.writes()).toBe(1);
+    });
 
   it("verifies a live bot and rejects a revoked token", async () => {
     const action = vi.fn(async () => ({ object: "user", id: parentId, type: "bot" }));
@@ -289,6 +315,59 @@ describe("notion-adapter-contract", () => {
     expect(f.notion.writes()).toBe(1);
   });
 
+  it("settles a 529 overload as a definite failed write with retry guidance", async () => {
+    const f = await serviceFixture();
+    const approval = await f.service.requestApproval({ principal: f.principal,
+      toolId: "notion.pages.create", params: { parentPageId: parentId, title: "Overloaded" },
+      connectionId: f.binding.id, idempotencyKey: "overload" });
+    await f.service.approve(approval.id, "alice");
+    f.notion.setDenial({ status: 529, data: { code: "service_overload" },
+      headers: new Headers({ "Retry-After": "27" }) });
+    await expect(f.service.executeApproved(f.principal, approval.id)).rejects.toMatchObject({
+      code: "NOTION_RATE_LIMITED", retryAfterSeconds: 27,
+    });
+    expect(f.notion.writes()).toBe(1);
+    expect((await f.service.approvalStatus(f.principal, approval.id)).status).toBe("failed");
+  });
+
+  it.each(["notion.pages.create", "notion.pages.update"] as const)(
+    "canonicalizes %s approval identity and dispatch across equivalent inputs", async (toolId) => {
+      const f = await serviceFixture();
+      const key = toolId === "notion.pages.create" ? "parentPageId" : "pageId";
+      const pageId = key === "parentPageId" ? parentId : childId;
+      const first = await f.service.requestApproval({ principal: f.principal, toolId,
+        params: { [key]: pageId.toUpperCase(), title: "  Same title  " },
+        connectionId: f.binding.id, idempotencyKey: "variant-a" });
+      const second = await f.service.requestApproval({ principal: f.principal, toolId,
+        params: { [key]: pageId.replaceAll("-", ""), title: "Same title" },
+        connectionId: f.binding.id, idempotencyKey: "variant-b" });
+      expect(second.id).toBe(first.id);
+      expect(first.params).toEqual({ [key]: pageId.replaceAll("-", ""), title: "Same title" });
+      await f.service.approve(first.id, "alice");
+      expect((await f.service.requestApproval({ principal: f.principal, toolId,
+        params: { [key]: pageId, title: " Same title" }, connectionId: f.binding.id,
+        idempotencyKey: "variant-c" })).id).toBe(first.id);
+      await f.service.executeApproved(f.principal, first.id);
+      expect(f.notion.writes()).toBe(1);
+      const dispatched = toolId === "notion.pages.create" ? f.notion.post.mock.calls.find(([url]) => url.endsWith("/pages"))?.[1]
+        : f.notion.patch.mock.calls[0]?.[1];
+      expect(JSON.stringify(dispatched)).toContain("Same title");
+      expect(JSON.stringify(dispatched)).not.toContain("  Same title  ");
+    });
+
+  it.each(["notion.pages.create", "notion.pages.update"] as const)(
+    "rejects whitespace-only %s before approval or provider dispatch", async (toolId) => {
+      const f = await serviceFixture();
+      await expect(f.service.requestApproval({ principal: f.principal, toolId,
+        params: toolId === "notion.pages.create"
+          ? { parentPageId: parentId, title: "   " } : { pageId: childId, title: "   " },
+        connectionId: f.binding.id, idempotencyKey: "blank-title" }))
+        .rejects.toBeInstanceOf(ExecutionInputError);
+      expect(f.dispatch).not.toHaveBeenCalled();
+      expect(f.notion.writes()).toBe(0);
+      expect(f.approvals.approvals.size).toBe(0);
+    });
+
   it("fences an ambiguous creation instead of writing again", async () => {
     const f = await serviceFixture();
     const params = { parentPageId: parentId, title: "Maybe made" };
@@ -313,8 +392,14 @@ describe("notion-adapter-contract", () => {
       const params = toolId === "notion.pages.create"
         ? { parentPageId: parentId, title: "Maybe made" }
         : { pageId: childId, title: "Maybe renamed" };
+      const target = toolId === "notion.pages.create" ? parentId : childId;
+      const targetKey = toolId === "notion.pages.create" ? "parentPageId" : "pageId";
       const request = (idempotencyKey: string) => f.service.requestApproval({
-        principal: f.principal, toolId, params, connectionId: f.binding.id, idempotencyKey,
+        principal: f.principal, toolId,
+        params: idempotencyKey === "first-key"
+          ? { [targetKey]: target.toUpperCase(), title: `  ${params.title}  ` }
+          : { [targetKey]: target.replaceAll("-", ""), title: params.title },
+        connectionId: f.binding.id, idempotencyKey,
       });
       const first = await request("first-key");
       expect((await request("second-key")).id).toBe(first.id);

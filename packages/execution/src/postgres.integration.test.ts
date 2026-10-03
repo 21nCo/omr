@@ -111,7 +111,8 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       return result.rows[0]!.pid;
     }, { timeout: 5_000, interval: 20 });
 
-  const uncertainLinearApproval = async (toolId: "linear.issues.create" | "linear.issues.update") => {
+  const uncertainProviderApproval = async (toolId: "linear.issues.create" | "linear.issues.update" |
+    "notion.pages.create" | "notion.pages.update") => {
     const now = Date.now();
     const approval = approvalFixture(now, { toolId });
     await runtime.approvals.create(approval);
@@ -129,7 +130,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
 
   it.each(["linear.issues.create", "linear.issues.update"] as const)(
     "reconciles an exact running %s receipt only as effect present", async (toolId) => {
-      const { approval, receipt, now } = await uncertainLinearApproval(toolId);
+      const { approval, receipt, now } = await uncertainProviderApproval(toolId);
       const observer = new Client({ connectionString: connectionString! });
       await observer.connect();
       try {
@@ -168,7 +169,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
 
   it.each(["effect_present", "effect_absent"] as const)(
     "keeps old uncertain Linear approvals and exact receipts available for %s", async (decision) => {
-      const { approval, receipt } = await uncertainLinearApproval("linear.issues.update");
+      const { approval, receipt } = await uncertainProviderApproval("linear.issues.update");
       for (let index = 0; index < 75; index++) {
         await runtime.approvals.create(approvalFixture(approval.createdAt + index + 1,
           { status: "uncertain" }));
@@ -176,7 +177,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       const actor = { workspaceId, actorUserId: approval.actorUserId, now: Date.now(), limit: 50 };
       expect((await runtime.approvals.listForActor({ ...actor, limit: 50 }))
         .some((candidate) => candidate.id === approval.id)).toBe(false);
-      const page = await runtime.approvals.listOutstandingLinearForActor(actor);
+      const page = await runtime.approvals.listOutstandingProviderForActor(actor);
       expect(page).toHaveLength(50);
       expect(page.some((candidate) => candidate.id === approval.id)).toBe(false);
       expect(await runtime.approvals.getForActor(approval.id, approval.actorUserId))
@@ -185,9 +186,9 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
         approvalId: approval.id, receiptId: receipt.id })).toMatchObject({ id: receipt.id });
       expect(await runtime.receipts.findForApproval({ ...actor, workspaceId: "foreign_workspace",
         approvalId: approval.id, receiptId: receipt.id })).toBeNull();
-      expect(await runtime.approvals.listOutstandingLinearForActor({ ...actor,
+      expect(await runtime.approvals.listOutstandingProviderForActor({ ...actor,
         workspaceId: "foreign_workspace" })).toEqual([]);
-      expect(await runtime.approvals.listOutstandingLinearForActor({ ...actor,
+      expect(await runtime.approvals.listOutstandingProviderForActor({ ...actor,
         actorUserId: "other_actor" })).toEqual([]);
       await expect(runtime.approvals.getForActor(approval.id, "other_actor"))
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
@@ -196,7 +197,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       try {
         await observer.query(`DELETE FROM omr_control.workspace_memberships
           WHERE workspace_id = $1 AND user_id = $2`, [workspaceId, approval.actorUserId]);
-        expect(await runtime.approvals.listOutstandingLinearForActor(actor)).toEqual([]);
+        expect(await runtime.approvals.listOutstandingProviderForActor(actor)).toEqual([]);
       } finally {
         await observer.query(`INSERT INTO omr_control.workspace_memberships
           (id, workspace_id, user_id, role, created_at, updated_at)
@@ -209,10 +210,29 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
         decision, now: Date.now() })).toMatchObject({
           status: decision === "effect_present" ? "consumed" : "failed", reconciledAs: decision,
         });
-      expect((await runtime.approvals.listOutstandingLinearForActor(actor))
+      expect((await runtime.approvals.listOutstandingProviderForActor(actor))
         .some((candidate) => candidate.id === approval.id)).toBe(false);
     },
   );
+
+  it.each(["notion.pages.create", "notion.pages.update"] as const)(
+    "finds an old uncertain %s approval after newer terminal history", async (toolId) => {
+      const { approval, receipt } = await uncertainProviderApproval(toolId);
+      for (let index = 0; index < 60; index++) {
+        await runtime.approvals.create(approvalFixture(approval.createdAt + index + 1,
+          { status: "consumed" }));
+      }
+      const actor = { workspaceId, actorUserId: approval.actorUserId, now: Date.now(), limit: 50 };
+      expect((await runtime.approvals.listForActor(actor)).some((item) => item.id === approval.id)).toBe(false);
+      expect((await runtime.approvals.listOutstandingProviderForActor(actor)).map((item) => item.id))
+        .toContain(approval.id);
+      expect(await runtime.receipts.findForApproval({ ...actor, approvalId: approval.id,
+        receiptId: receipt.id })).toMatchObject({ id: receipt.id });
+      expect(await runtime.approvals.listOutstandingProviderForActor({ ...actor,
+        workspaceId: "foreign_workspace" })).toEqual([]);
+      expect(await runtime.approvals.listOutstandingProviderForActor({ ...actor,
+        actorUserId: "other_actor" })).toEqual([]);
+    });
 
   it("excludes expired pending and approved rows before applying the Linear overview limit", async () => {
     const now = Date.now();
@@ -221,14 +241,14 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     const expired = await runtime.approvals.create(approvalFixture(now,
       { status: "approved", expiresAt: now - 1 }));
     const actor = { workspaceId, actorUserId: live.actorUserId, now, limit: 1 };
-    expect(await runtime.approvals.listOutstandingLinearForActor(actor))
+    expect(await runtime.approvals.listOutstandingProviderForActor(actor))
       .toMatchObject([{ id: live.id }]);
-    expect((await runtime.approvals.listOutstandingLinearForActor({ ...actor, limit: 50 }))
+    expect((await runtime.approvals.listOutstandingProviderForActor({ ...actor, limit: 50 }))
       .some((approval) => approval.id === expired.id)).toBe(false);
   });
 
   it("reads the exact reconciliation receipt only for its current workspace member", async () => {
-    const { approval, receipt } = await uncertainLinearApproval("linear.issues.update");
+    const { approval, receipt } = await uncertainProviderApproval("linear.issues.update");
     const lookup = { workspaceId, actorUserId: approval.actorUserId,
       approvalId: approval.id, receiptId: receipt.id };
     await expect(runtime.receipts.findForApproval(lookup)).resolves.toMatchObject({
@@ -303,7 +323,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
 
   it.each(["effect_present", "effect_absent"] as const)(
     "does not reconcile %s after membership deletion wins the row lock", async (decision) => {
-      const { approval, now } = await uncertainLinearApproval("linear.issues.create");
+      const { approval, now } = await uncertainProviderApproval("linear.issues.create");
       const revoker = new Client({ connectionString: connectionString! });
       await revoker.connect();
       let pending: Promise<unknown> | undefined;
@@ -339,7 +359,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
 
   it.each(["effect_present", "effect_absent"] as const)(
     "finishes %s before a later membership deletion can commit", async (decision) => {
-      const { approval, now } = await uncertainLinearApproval("linear.issues.update");
+      const { approval, now } = await uncertainProviderApproval("linear.issues.update");
       const blocker = new Client({ connectionString: connectionString! });
       const revoker = new Client({ connectionString: connectionString! });
       await blocker.connect();

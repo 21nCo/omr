@@ -790,7 +790,7 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
         });
         const connectionService = new PlugFnConnectionOrchestrator(connections.connections, plugfn.plugfn);
         const now = Date.now();
-        const [availableConnections, orphanedConnections, recentApprovals, outstandingLinear, recoveredApproval, executions] = await Promise.all([
+        const [availableConnections, orphanedConnections, recentApprovals, outstandingProvider, recoveredApproval, executions] = await Promise.all([
           connectionService.listAvailable({
             actorUserId: session.actorId,
             workspaceId: selected.workspace.id,
@@ -804,7 +804,7 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
             workspaceId: selected.workspace.id,
             limit: 50,
           }),
-          activity.approvals.listOutstandingLinearForActor({
+          activity.approvals.listOutstandingProviderForActor({
             actorUserId: session.actorId,
             workspaceId: selected.workspace.id,
             now,
@@ -818,7 +818,7 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
             limit: 50,
           }),
         ]);
-        const approvals = visibleApprovals(recentApprovals, outstandingLinear, recoveredApproval, now);
+        const approvals = visibleApprovals(recentApprovals, outstandingProvider, recoveredApproval, now);
         const approvalCatalog = await createPlugFnToolCatalog(plugfn.plugfn, configuredProviders(plugfn.plugfn));
         const reconciliationReceipts = await providerReconciliationReceipts(
           approvals, activity.receipts, selected.workspace.id, session.actorId);

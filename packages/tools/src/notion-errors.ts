@@ -24,6 +24,7 @@ export class NotionProviderResponseAmbiguous extends Error {
   }
 }
 
+/** Retain numeric Retry-After guidance from a definite HTTP denial. */
 function retryAfter(headers: unknown): number | undefined {
   let value: unknown;
   if (headers instanceof Headers) value = headers.get("retry-after");
@@ -37,6 +38,20 @@ function retryAfter(headers: unknown): number | undefined {
   return Number.isSafeInteger(number) ? number : undefined;
 }
 
+/** Classify only a provider response; transport failures never prove a write was rejected. */
+function denialCode(status: number, providerCode: string,
+  phase: NotionProviderDenial["phase"]): NotionProviderDenial["code"] | null {
+  if (status === 429 || status === 529 || providerCode === "rate_limited" ||
+      providerCode === "service_overload") return "NOTION_RATE_LIMITED";
+  if (status === 401 || providerCode === "unauthorized") return "NOTION_RECONNECT_REQUIRED";
+  if (status === 403 || providerCode === "restricted_resource") return "NOTION_PERMISSION_DENIED";
+  if (status === 404 || providerCode === "object_not_found") return "NOTION_TARGET_UNAVAILABLE";
+  if (status === 400 || providerCode === "validation_error") {
+    return phase === "write" ? "NOTION_INVALID_CHANGE" : "NOTION_QUERY_REJECTED";
+  }
+  return null;
+}
+
 /** Only an HTTP response proves a write was rejected. Transport failures stay uncertain. */
 export function notionDenial(error: unknown, phase: NotionProviderDenial["phase"]): NotionProviderDenial | null {
   if (error instanceof NotionProviderDenial) return error;
@@ -44,11 +59,6 @@ export function notionDenial(error: unknown, phase: NotionProviderDenial["phase"
   const status = error.status;
   const body = "data" in error && error.data && typeof error.data === "object" ? error.data : null;
   const providerCode = body && "code" in body && typeof body.code === "string" ? body.code : "";
-  const code: NotionProviderDenial["code"] | null = status === 429 || providerCode === "rate_limited"
-    ? "NOTION_RATE_LIMITED" : status === 401 || providerCode === "unauthorized"
-      ? "NOTION_RECONNECT_REQUIRED" : status === 403 || providerCode === "restricted_resource"
-        ? "NOTION_PERMISSION_DENIED" : status === 404 || providerCode === "object_not_found"
-          ? "NOTION_TARGET_UNAVAILABLE" : status === 400 || providerCode === "validation_error"
-            ? phase === "write" ? "NOTION_INVALID_CHANGE" : "NOTION_QUERY_REJECTED" : null;
+  const code = denialCode(status, providerCode, phase);
   return code ? new NotionProviderDenial(phase, code, retryAfter("headers" in error ? error.headers : undefined)) : null;
 }

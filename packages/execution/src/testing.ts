@@ -392,14 +392,15 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
       .map((approval) => structuredClone(approval));
   }
 
-  listOutstandingLinearForActor(input: { workspaceId: string; actorUserId: string;
+  listOutstandingProviderForActor(input: { workspaceId: string; actorUserId: string;
     now: number; limit: number }): Promise<ExecutionApproval[]> {
     return Promise.resolve().then(() => {
       if (!this.isMember(input.workspaceId, input.actorUserId)) return [];
       return [...this.approvals.values()]
         .filter((approval) => approval.workspaceId === input.workspaceId &&
           approval.actorUserId === input.actorUserId &&
-          (approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post") &&
+          (approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post" ||
+            approval.toolId === "notion.pages.create" || approval.toolId === "notion.pages.update") &&
           (approval.status === "uncertain" ||
             ((approval.status === "pending" || approval.status === "approved") &&
               approval.expiresAt > input.now)))

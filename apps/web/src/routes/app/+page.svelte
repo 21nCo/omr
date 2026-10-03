@@ -7,6 +7,7 @@
   import { createLinearActionKeys, linearApprovalNotice } from "$lib/linear-action-keys.js";
   import { createControlPlaneRequest, OMRResponseError } from "$lib/control-plane-request.js";
   import { notionApprovalNotice } from "$lib/notion-approval-notice.js";
+  import { notionSearchParams } from "$lib/notion-search-params.js";
   import { slackApprovalNotice } from "$lib/slack-approval-notice.js";
   import { V1_PROVIDERS } from "@oh-my-router/tools";
   import type { LinearAccess, SlackAccess } from "@oh-my-router/connections";
@@ -120,6 +121,7 @@
   let notionItems: NotionItem[] = [];
   let notionCursor: string | null = null;
   let notionQuery = "";
+  let notionSubmittedQuery = "";
   let notionPageId = "";
   let notionPage: NotionPage | null = null;
   let notionCreateTitle = "";
@@ -416,6 +418,7 @@
     notionBusy = "";
     notionItems = [];
     notionCursor = null;
+    notionSubmittedQuery = "";
     notionPageId = "";
     notionPage = null;
     notionCreateTitle = "";
@@ -1131,15 +1134,17 @@
             <div class="panel-heading"><div><p class="kicker">Notion</p><h2>Shared pages</h2></div></div>
             <p>Selected integration: {notionAccount()?.label ?? "Select a Notion account above"}. Search shows content shared with that integration. Choose and read a page before creating a child or renaming it. Every change waits for separate approval.</p>
             <form class="inset" onsubmit={(event) => { event.preventDefault(); notionGeneration++; notionBusy = "";
+              notionSubmittedQuery = notionQuery;
               notionItems = []; notionCursor = null; notionPageId = ""; notionPage = null;
               void notionRead<{ items: NotionItem[]; nextCursor: string | null }>("notion.content.search",
-                { query: notionQuery }, (value) => { notionItems = value.items; notionCursor = value.nextCursor; }); }}>
+                notionSearchParams(notionQuery, notionSubmittedQuery, null),
+                (value) => { notionItems = value.items; notionCursor = value.nextCursor; }); }}>
               <label>Search shared content<input bind:value={notionQuery} maxlength="100" placeholder="Optional title" /></label>
               <button class="quiet compact" type="submit" disabled={Boolean(notionBusy) || !notionToolAvailable("notion.content.search")}>Find pages and databases</button>
             </form>
             {#if notionCursor}
               <button class="quiet compact" disabled={Boolean(notionBusy)} onclick={() => void notionRead<{ items: NotionItem[]; nextCursor: string | null }>(
-                "notion.content.search", { query: notionQuery, cursor: notionCursor },
+                "notion.content.search", notionSearchParams(notionQuery, notionSubmittedQuery, notionCursor),
                 (value) => { notionItems = [...notionItems, ...value.items]; notionCursor = value.nextCursor; })}>More shared content</button>
             {/if}
             {#each notionItems.filter((entry) => entry.type === "database") as database}
