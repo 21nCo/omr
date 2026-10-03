@@ -1,0 +1,20 @@
+packages/cli/src/bin.ts
+  h_a39f9495f9ec1d 192-193,226-230,240-241,279-280,282-284
+packages/mcp/src/server.test.ts
+  h_a39f9495f9ec1d 111,117-118
+packages/mcp/src/server.ts
+  h_a39f9495f9ec1d 316,342
+tests/acceptance/cli-command-contract.test.ts
+  h_a39f9495f9ec1d 1654-1707
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d96da08e410e6ae0883523efc6f1954f9afa3917",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
