@@ -111,6 +111,7 @@
   let slackText = "";
   let slackBusy = "";
   let slackGeneration = 0;
+  let slackReadOwner: { generation: number; workspaceId: string; accountId: string } | null = null;
   const slackActionKeys = createLinearActionKeys(() => crypto.randomUUID(), () => sessionStorage, "Slack");
   type LinearTeam = { id: string; name: string; key: string };
   type LinearIssue = { id: string; identifier: string; title: string; description: string | null;
@@ -413,6 +414,7 @@
   function clearSlack() {
     slackGeneration++;
     slackBusy = "";
+    slackReadOwner = null;
     slackWorkspace = null;
     slackChannels = [];
     slackChannelsCursor = null;
@@ -442,6 +444,7 @@
     const selection = { generation: slackGeneration, workspaceId: selectedWorkspaceId, accountId: account.id };
     const currentSelection = () => ({ generation: slackGeneration, workspaceId: selectedWorkspaceId,
       accountId: slackAccount()?.id });
+    slackReadOwner = selection;
     slackBusy = toolId;
     error = "";
     try {
@@ -454,7 +457,15 @@
       if (sameSlackReadSelection(selection, currentSelection())) {
         error = caught instanceof Error ? caught.message : "Slack read failed";
       }
-    } finally { if (sameSlackReadSelection(selection, currentSelection())) slackBusy = ""; }
+    } finally {
+      // A global mutation or overview refresh may hide the same bot temporarily.
+      // Release only this read's lock; publication still requires a visible binding.
+      if (slackReadOwner === selection && selection.generation === slackGeneration &&
+          selection.workspaceId === selectedWorkspaceId && slackBusy === toolId) {
+        slackBusy = "";
+        slackReadOwner = null;
+      }
+    }
   }
 
   /** Snapshot the visible bot, channel, and message for one approval intent. */
@@ -1022,7 +1033,7 @@
               {/if}
               {#if slackChannels.length}
                 <label>Channel
-                  <select bind:value={slackChannelId} disabled={slackChannelSelectionLocked(slackBusy)} onchange={() => { slackGeneration++; slackBusy = "";
+                  <select bind:value={slackChannelId} disabled={slackChannelSelectionLocked(slackBusy)} onchange={() => { slackGeneration++; slackBusy = ""; slackReadOwner = null;
                     slackMessages = []; slackMessagesCursor = null; slackFilteredCount = 0; slackText = ""; }}>
                     <option value="">Choose a channel</option>
                     {#each slackChannels as entry}<option value={entry.id}>#{entry.name}</option>{/each}
