@@ -1,0 +1,16 @@
+apps/web/src/lib/slack-read-lifecycle.test.ts
+  h_a39f9495f9ec1d 1-96
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 114,417,447,460-468,1036
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "194fec8eb8bd2e0e24c5b45c28b556bd32cdcb4e",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
