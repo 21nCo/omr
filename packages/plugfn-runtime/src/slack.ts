@@ -10,7 +10,8 @@ const cursor = z.string().min(1).optional();
 const channel = z.object({ id: channelId, name: z.string().min(1), is_member: z.literal(true),
   is_private: z.literal(false), is_archived: z.literal(false), is_shared: z.literal(false),
   is_ext_shared: z.literal(false), is_pending_ext_shared: z.literal(false).optional() });
-const channelInfo = channel.extend({ is_member: z.boolean().optional() });
+const channelInfo = channel.extend({ is_member: z.boolean().optional(),
+  context_team_id: workspaceId });
 const identity = z.object({ ok: z.literal(true), team_id: workspaceId, team: z.string().min(1),
   user_id: senderId, bot_id: z.string().min(1) });
 const displayableMessage = z.object({ ts: z.string(), text: z.string().min(1).regex(/\S/),
@@ -100,11 +101,12 @@ async function selectedWorkspace(context: ActionContext, expected?: string, send
 }
 
 /** Require a current, joined, local public channel before reading or posting. */
-async function selectedChannel(context: ActionContext, target: string, botUserId: string,
+async function selectedChannel(context: ActionContext, target: string, workspace: string, botUserId: string,
   phase: SlackProviderDenial["phase"]) {
   const { body } = await call(context, "conversations.info", { channel: target }, phase);
   const parsed = z.object({ channel: channelInfo }).safeParse(body);
-  if (!parsed.success || parsed.data.channel.id !== target || parsed.data.channel.is_member === false) {
+  if (!parsed.success || parsed.data.channel.id !== target || parsed.data.channel.is_member === false ||
+      parsed.data.channel.context_team_id !== workspace) {
     throw new SlackProviderDenial(phase, "SLACK_CHANNEL_UNAVAILABLE");
   }
   if (parsed.data.channel.is_member === undefined) {
@@ -155,7 +157,8 @@ const channelsList: Action = {
   execute: async (params, context) => {
     await selectedWorkspace(context, params.workspaceId);
     const { body } = await call(context, "conversations.list",
-      { types: "public_channel", exclude_archived: true, limit: params.limit ?? 100,
+      { team_id: params.workspaceId, types: "public_channel", exclude_archived: true,
+        limit: params.limit ?? 100,
         ...(params.cursor ? { cursor: params.cursor } : {}) }, "read");
     const parsed = z.object({ channels: z.array(z.unknown()),
       response_metadata: z.object({ next_cursor: z.string().optional() }).optional() }).safeParse(body);
@@ -179,7 +182,7 @@ const messagesList: Action = {
     { kind: "slack_workspace", parameter: "workspaceId" }, { kind: "channel", parameter: "channelId" }], true),
   execute: async (params, context) => {
     const workspace = await selectedWorkspace(context, params.workspaceId);
-    const selected = await selectedChannel(context, params.channelId, workspace.sender.id, "read");
+    const selected = await selectedChannel(context, params.channelId, workspace.id, workspace.sender.id, "read");
     const { body } = await call(context, "conversations.history",
       { channel: params.channelId, limit: params.limit ?? 100,
         ...(params.cursor ? { cursor: params.cursor } : {}) }, "read");
@@ -208,7 +211,7 @@ const messagesPost: Action = {
     { kind: "channel", parameter: "channelId" }, { kind: "sender", parameter: "senderId" }]),
   execute: async (params, context) => {
     const workspace = await selectedWorkspace(context, params.workspaceId, params.senderId, "preflight");
-    const selected = await selectedChannel(context, params.channelId, workspace.sender.id, "preflight");
+    const selected = await selectedChannel(context, params.channelId, workspace.id, workspace.sender.id, "preflight");
     const { body } = await call(context, "chat.postMessage",
       { channel: params.channelId, text: params.text, mrkdwn: false, parse: "none", link_names: false,
         unfurl_links: false, unfurl_media: false }, "write", true);

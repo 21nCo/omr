@@ -22,6 +22,7 @@ const channelB = "C87654321";
 const botA = "U12345678";
 const localChannel = { id: channelA, name: "release", is_member: true,
   is_private: false, is_archived: false, is_shared: false, is_ext_shared: false };
+const localChannelInfo = { ...localChannel, context_team_id: teamA };
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -33,7 +34,7 @@ function slackFixture(team = teamA) {
   const get = vi.fn(async (url: string, options: { params?: { channel?: string } } = {}) => {
     if (failure && url.endsWith("/conversations.info")) return { data: { ok: false, error: failure } };
     if (url.endsWith("/conversations.info")) return { data: { ok: true, channel: {
-      ...localChannel, id: options.params?.channel === channelA ? channelA : channelB,
+      ...localChannelInfo, id: options.params?.channel === channelA ? channelA : channelB,
       is_shared: shared,
     } } };
     if (url.endsWith("/conversations.list")) return { data: { ok: true,
@@ -178,7 +179,7 @@ describe("slack-adapter-contract", () => {
       if (url.startsWith("https://slack.com/api/conversations.list")) return Response.json({ ok: true,
         channels: [localChannel], response_metadata: { next_cursor: "" } });
       if (url.startsWith("https://slack.com/api/conversations.info")) return Response.json({ ok: true,
-        channel: localChannel });
+        channel: localChannelInfo });
       if (url === "https://slack.com/api/chat.postMessage") {
         const body = JSON.parse(String(init?.body)) as { channel: string; text: string };
         return Response.json({ ok: true, channel: body.channel, ts: "456.789",
@@ -370,6 +371,60 @@ describe("slack-adapter-contract", () => {
     expect(slack.messages()).toHaveLength(0);
   });
 
+  it.each(["org-wide", "workspace"] as const)(
+    "scopes every %s channel discovery page to the verified workspace", async (tokenKind) => {
+      const slack = slackFixture();
+      const originalGet = slack.get.getMockImplementation()!;
+      slack.get.mockImplementation(async (url, options) => {
+        if (!url.endsWith("/conversations.list")) return originalGet(url, options);
+        const params = options.params as { team_id?: string; cursor?: string } | undefined;
+        if (tokenKind === "org-wide" && params?.team_id !== teamA) {
+          return { data: { ok: false, error: "team_access_not_granted" } };
+        }
+        return { data: { ok: true, channels: [localChannel],
+          response_metadata: { next_cursor: params?.cursor ? "" : "second" } } };
+      });
+      const action = omrSlackProvider.actions["channels.list"]!;
+      expect(await action.execute({ workspaceId: teamA }, slack.context))
+        .toMatchObject({ channels: [localChannel], nextCursor: "second" });
+      expect(await action.execute({ workspaceId: teamA, cursor: "second" }, slack.context))
+        .toMatchObject({ channels: [localChannel], nextCursor: null });
+      const requests = slack.get.mock.calls.filter(([url]) => url.endsWith("/conversations.list"));
+      expect(requests).toHaveLength(2);
+      expect(requests.map(([, options]) => options?.params)).toMatchObject([
+        { team_id: teamA }, { team_id: teamA, cursor: "second" },
+      ]);
+      await expect(action.execute({ workspaceId: teamB }, slack.context))
+        .rejects.toMatchObject({ code: "SLACK_WORKSPACE_MISMATCH" });
+      expect(slack.get.mock.calls.filter(([url]) => url.endsWith("/conversations.list")))
+        .toHaveLength(2);
+      expect(slack.messages()).toHaveLength(0);
+    },
+  );
+
+  it("rejects another workspace's channel before history read or post", async () => {
+    const slack = slackFixture();
+    const originalGet = slack.get.getMockImplementation()!;
+    let contextTeam: string | undefined = teamB;
+    slack.get.mockImplementation(async (url, options) => {
+      if (url.endsWith("/conversations.info")) return { data: { ok: true,
+        channel: contextTeam ? { ...localChannelInfo, context_team_id: contextTeam } : localChannel } };
+      return originalGet(url, options);
+    });
+    await expect(omrSlackProvider.actions["messages.list"]!.execute({
+      workspaceId: teamA, channelId: channelA,
+    }, slack.context)).rejects.toMatchObject({ code: "SLACK_CHANNEL_UNAVAILABLE" });
+    await expect(omrSlackProvider.actions["messages.post"]!.execute({
+      workspaceId: teamA, channelId: channelA, senderId: botA, text: "No post",
+    }, slack.context)).rejects.toMatchObject({ code: "SLACK_CHANNEL_UNAVAILABLE" });
+    contextTeam = undefined;
+    await expect(omrSlackProvider.actions["messages.list"]!.execute({
+      workspaceId: teamA, channelId: channelA,
+    }, slack.context)).rejects.toMatchObject({ code: "SLACK_CHANNEL_UNAVAILABLE" });
+    expect(slack.get.mock.calls.some(([url]) => url.endsWith("/conversations.history"))).toBe(false);
+    expect(slack.messages()).toHaveLength(0);
+  });
+
   it("excludes pending external shares from discovery and rejects them before read or post", async () => {
     const slack = slackFixture();
     const pending = { ...localChannel, id: channelB, is_pending_ext_shared: true };
@@ -377,7 +432,8 @@ describe("slack-adapter-contract", () => {
     slack.get.mockImplementation(async (url, options) => {
       if (url.endsWith("/conversations.list")) return { data: { ok: true,
         channels: [localChannel, pending], response_metadata: { next_cursor: "" } } };
-      if (url.endsWith("/conversations.info")) return { data: { ok: true, channel: pending } };
+      if (url.endsWith("/conversations.info")) return { data: { ok: true,
+        channel: { ...pending, context_team_id: teamA } } };
       return originalGet(url, options);
     });
     const actions = omrSlackProvider.actions;
@@ -395,7 +451,7 @@ describe("slack-adapter-contract", () => {
 
   it("proves bot membership when channel info omits is_member, before read or post", async () => {
     const slack = slackFixture();
-    const info = { ...localChannel } as Partial<typeof localChannel>;
+    const info = { ...localChannelInfo } as Partial<typeof localChannelInfo>;
     delete info.is_member;
     const originalGet = slack.get.getMockImplementation()!;
     let joined = true;
@@ -432,11 +488,11 @@ describe("slack-adapter-contract", () => {
     const slack = slackFixture();
     const post = { workspaceId: teamA, channelId: channelA, senderId: botA, text: "Ready" };
     slack.get.mockResolvedValueOnce({ data: { ok: true,
-      channel: { ...localChannel, is_member: false } } });
+      channel: { ...localChannelInfo, is_member: false } } });
     await expect(omrSlackProvider.actions["messages.post"]!.execute(post, slack.context))
       .rejects.toMatchObject({ code: "SLACK_CHANNEL_UNAVAILABLE" });
     expect(slack.get.mock.calls.some(([url]) => url.endsWith("/conversations.members"))).toBe(false);
-    const info = { ...localChannel } as Partial<typeof localChannel>;
+    const info = { ...localChannelInfo } as Partial<typeof localChannelInfo>;
     delete info.is_member;
     slack.get.mockResolvedValueOnce({ data: { ok: true, channel: info } });
     slack.get.mockResolvedValueOnce({ data: { ok: true, members: "not-an-array" } });
@@ -650,7 +706,7 @@ describe("slack-adapter-contract", () => {
 
   it("projects supported messages from a mixed history page and retains its cursor", async () => {
     const slack = slackFixture();
-    slack.get.mockResolvedValueOnce({ data: { ok: true, channel: localChannel } });
+    slack.get.mockResolvedValueOnce({ data: { ok: true, channel: localChannelInfo } });
     slack.get.mockResolvedValueOnce({ data: { ok: true, messages: [
       { ts: "1.0", text: "Visible", user: botA },
       { ts: "2.0", type: "message", subtype: "channel_join", text: "A user joined", user: botA },
@@ -673,7 +729,7 @@ describe("slack-adapter-contract", () => {
 
   it("signals a fully filtered history page without losing its continuation cursor", async () => {
     const slack = slackFixture();
-    slack.get.mockResolvedValueOnce({ data: { ok: true, channel: localChannel } });
+    slack.get.mockResolvedValueOnce({ data: { ok: true, channel: localChannelInfo } });
     slack.get.mockResolvedValueOnce({ data: { ok: true, messages: [
       { ts: "1.0", text: "Someone joined", subtype: "channel_join" },
       { ts: "2.0", files: [{ id: "file-1" }] },
