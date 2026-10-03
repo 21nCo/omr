@@ -55,7 +55,7 @@ export function slackDenial(error: unknown, phase: SlackProviderDenial["phase"])
   const providerCode = "error" in body && typeof body.error === "string" ? body.error : undefined;
   let code: SlackProviderDenial["code"] | undefined;
   if (status === 429 || providerCode === "ratelimited") code = "SLACK_RATE_LIMITED";
-  else if (status === 401 || ["invalid_auth", "token_revoked", "account_inactive", "not_authed"].includes(providerCode ?? ""))
+  else if (status === 401 || ["invalid_auth", "token_expired", "token_revoked", "account_inactive", "not_authed"].includes(providerCode ?? ""))
     code = "SLACK_RECONNECT_REQUIRED";
   else if (status === 403 || ["missing_scope", "not_allowed_token_type", "restricted_action", "no_permission"].includes(providerCode ?? ""))
     code = "SLACK_PERMISSION_DENIED";

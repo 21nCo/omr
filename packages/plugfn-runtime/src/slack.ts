@@ -10,6 +10,7 @@ const cursor = z.string().min(1).max(500).optional();
 const channel = z.object({ id: channelId, name: z.string().min(1), is_member: z.literal(true),
   is_private: z.literal(false), is_archived: z.literal(false), is_shared: z.literal(false),
   is_ext_shared: z.literal(false) });
+const channelInfo = channel.extend({ is_member: z.boolean().optional() });
 const identity = z.object({ ok: z.literal(true), team_id: workspaceId, team: z.string().min(1),
   user_id: senderId, bot_id: z.string().min(1) });
 const displayableMessage = z.object({ ts: z.string(), text: z.string(), user: z.string().optional() });
@@ -73,14 +74,35 @@ async function selectedWorkspace(context: ActionContext, expected?: string, send
 }
 
 /** Require a current, joined, local public channel before reading or posting. */
-async function selectedChannel(context: ActionContext, target: string,
+async function selectedChannel(context: ActionContext, target: string, botUserId: string,
   phase: SlackProviderDenial["phase"]) {
   const { body } = await call(context, "conversations.info", { channel: target }, phase);
-  const parsed = z.object({ channel }).safeParse(body);
-  if (!parsed.success || parsed.data.channel.id !== target) {
+  const parsed = z.object({ channel: channelInfo }).safeParse(body);
+  if (!parsed.success || parsed.data.channel.id !== target || parsed.data.channel.is_member === false) {
     throw new SlackProviderDenial(phase, "SLACK_CHANNEL_UNAVAILABLE");
   }
-  return parsed.data.channel;
+  if (parsed.data.channel.is_member === undefined) {
+    // Slack can omit is_member from conversations.info. Search a bounded number
+    // of current member pages before allowing a read or an approved post.
+    const seen = new Set<string>();
+    let next: string | undefined;
+    let joined = false;
+    for (let page = 0; page < 20; page += 1) {
+      const { body: membersBody } = await call(context, "conversations.members",
+        { channel: target, limit: 200, ...(next ? { cursor: next } : {}) }, phase);
+      const members = z.object({ members: z.array(z.string()),
+        response_metadata: z.object({ next_cursor: z.string().optional() }).optional() })
+        .safeParse(membersBody);
+      if (!members.success) throw new SlackProviderDenial(phase, "SLACK_CHANNEL_UNAVAILABLE");
+      if (members.data.members.includes(botUserId)) { joined = true; break; }
+      next = members.data.response_metadata?.next_cursor || undefined;
+      if (!next) break;
+      if (next.length > 500 || seen.has(next)) break;
+      seen.add(next);
+    }
+    if (!joined) throw new SlackProviderDenial(phase, "SLACK_CHANNEL_UNAVAILABLE");
+  }
+  return { ...parsed.data.channel, is_member: true as const };
 }
 
 const workspaceGet: Action = {
@@ -126,8 +148,8 @@ const messagesList: Action = {
   contract: contract("read", ["channels:read", "channels:history"], [
     { kind: "slack_workspace", parameter: "workspaceId" }, { kind: "channel", parameter: "channelId" }], true),
   execute: async (params, context) => {
-    await selectedWorkspace(context, params.workspaceId);
-    const selected = await selectedChannel(context, params.channelId, "read");
+    const workspace = await selectedWorkspace(context, params.workspaceId);
+    const selected = await selectedChannel(context, params.channelId, workspace.sender.id, "read");
     const { body } = await call(context, "conversations.history",
       { channel: params.channelId, limit: params.limit ?? 100,
         ...(params.cursor ? { cursor: params.cursor } : {}) }, "read");
@@ -154,7 +176,7 @@ const messagesPost: Action = {
     { kind: "channel", parameter: "channelId" }, { kind: "sender", parameter: "senderId" }]),
   execute: async (params, context) => {
     const workspace = await selectedWorkspace(context, params.workspaceId, params.senderId, "preflight");
-    const selected = await selectedChannel(context, params.channelId, "preflight");
+    const selected = await selectedChannel(context, params.channelId, workspace.sender.id, "preflight");
     const { body } = await call(context, "chat.postMessage",
       { channel: params.channelId, text: params.text, mrkdwn: false, parse: "none", link_names: false,
         unfurl_links: false, unfurl_media: false }, "write", true);

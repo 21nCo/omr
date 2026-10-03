@@ -10,6 +10,7 @@ import { ExecutionService, SlackExecutionError } from "@oh-my-router/execution";
 import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "@oh-my-router/execution/testing";
 import { createProviderIntegrationConfig } from "../../apps/web/src/lib/server/cloudflare-runtime.js";
 import { selectedReadySlackConnection } from "../../apps/web/src/lib/workspace-catalog.js";
+import { resolveScopedCatalog } from "../../apps/web/src/lib/server/scoped-catalog.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createOMRMcpServer } from "../../packages/mcp/src/server.js";
@@ -284,6 +285,58 @@ describe("slack-adapter-contract", () => {
     expect(slack.messages()).toHaveLength(0);
   });
 
+  it("proves bot membership when channel info omits is_member, before read or post", async () => {
+    const slack = slackFixture();
+    const info = { ...localChannel } as Partial<typeof localChannel>;
+    delete info.is_member;
+    const originalGet = slack.get.getMockImplementation()!;
+    let joined = true;
+    slack.get.mockImplementation(async (url, options) => {
+      if (url.endsWith("/conversations.info")) return { data: { ok: true, channel: info } };
+      if (url.endsWith("/conversations.members")) {
+        const cursor = (options as { params?: { cursor?: string } }).params?.cursor;
+        return { data: { ok: true, members: cursor === "second" && joined ? [botA] : ["U87654321"],
+          response_metadata: { next_cursor: cursor ? "" : "second" } } };
+      }
+      return originalGet(url, options);
+    });
+    const actions = omrSlackProvider.actions;
+    const read = { workspaceId: teamA, channelId: channelA };
+    const post = { ...read, senderId: botA, text: "Ready" };
+    expect((await actions["messages.list"]!.execute(read, slack.context)).channel)
+      .toMatchObject({ id: channelA, is_member: true });
+    expect(slack.get.mock.calls.filter(([url]) => url.endsWith("/conversations.members")))
+      .toHaveLength(2);
+    joined = false;
+    await expect(actions["messages.list"]!.execute(read, slack.context))
+      .rejects.toMatchObject({ code: "SLACK_CHANNEL_UNAVAILABLE" });
+    await expect(actions["messages.post"]!.execute(post, slack.context))
+      .rejects.toMatchObject({ code: "SLACK_CHANNEL_UNAVAILABLE" });
+    expect(slack.get.mock.calls.some(([url]) => url.endsWith("/conversations.history"))).toBe(true);
+    expect(slack.messages()).toHaveLength(0);
+    joined = true;
+    expect((await actions["messages.post"]!.execute(post, slack.context)).channel)
+      .toMatchObject({ id: channelA, is_member: true });
+    expect(slack.messages()).toHaveLength(1);
+  });
+
+  it("rejects explicit non-membership and malformed membership pages without posting", async () => {
+    const slack = slackFixture();
+    const post = { workspaceId: teamA, channelId: channelA, senderId: botA, text: "Ready" };
+    slack.get.mockResolvedValueOnce({ data: { ok: true,
+      channel: { ...localChannel, is_member: false } } });
+    await expect(omrSlackProvider.actions["messages.post"]!.execute(post, slack.context))
+      .rejects.toMatchObject({ code: "SLACK_CHANNEL_UNAVAILABLE" });
+    expect(slack.get.mock.calls.some(([url]) => url.endsWith("/conversations.members"))).toBe(false);
+    const info = { ...localChannel } as Partial<typeof localChannel>;
+    delete info.is_member;
+    slack.get.mockResolvedValueOnce({ data: { ok: true, channel: info } });
+    slack.get.mockResolvedValueOnce({ data: { ok: true, members: "not-an-array" } });
+    await expect(omrSlackProvider.actions["messages.post"]!.execute(post, slack.context))
+      .rejects.toMatchObject({ code: "SLACK_CHANNEL_UNAVAILABLE" });
+    expect(slack.messages()).toHaveLength(0);
+  });
+
   it("posts only after approval; selection, scope loss and revocation fence later posts", async () => {
     const { workspace, other, connections, binding, slack, service, principal, setScopes } = await executionFixture();
     const params = { workspaceId: teamA, channelId: channelA, senderId: botA, text: "Ready" };
@@ -464,6 +517,39 @@ describe("slack-adapter-contract", () => {
       connections: { get: async () => ({ scopes: ["channels:read", "app_mentions:read", "chat:write"] }) } };
     expect(await verifiedSlackScopes(runtime, { userId: "alice", workspaceId: "omr-workspace",
       connectionId: "remote_slack_A" })).toEqual(["channels:read", "app_mentions:read", "chat:write"]);
+  });
+
+  it("treats an expired Slack token as reconnect-required in catalog and approved preflight", async () => {
+    const { catalog, service, principal, slack, receipts, connections, binding } = await executionFixture();
+    const params = { workspaceId: teamA, channelId: channelA, senderId: botA, text: "Ready" };
+    const approval = await service.requestApproval({ principal, toolId: "slack.messages.post",
+      params, idempotencyKey: "expired-token" });
+    await service.approve(approval.id, "alice");
+    slack.post.mockResolvedValueOnce({ data: { ok: false, error: "token_expired" } });
+    await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({
+      code: "SLACK_RECONNECT_REQUIRED",
+    });
+    expect(slack.messages()).toHaveLength(0);
+    expect([...receipts.receipts.values()]).toContainEqual(expect.objectContaining({
+      status: "failed", errorCode: "slack_preflight_denied",
+    }));
+    const reconnect = vi.fn(async (bindingId: string, provider?: string) => {
+      await connections.recordHealth({ connectionId: bindingId, status: "needs_reauth",
+        readiness: "unavailable", reason: `${provider}_reconnect_required` });
+    });
+    slack.post.mockResolvedValueOnce({ data: { ok: false, error: "token_expired" } });
+    const visible = await resolveScopedCatalog(catalog, [{ provider: "slack", displayName: "Slack",
+      providerVersion: "1.0.0", description: "", authMode: "oauth", actionCount: 4,
+      state: "ready", available: true }],
+    async () => ({ id: binding.id, providerConnectionId: binding.providerConnectionId }),
+    async () => (await omrSlackProvider.actions["workspace.get"]!.execute({}, slack.context)).verifiedScopes,
+    async () => {}, reconnect);
+    expect([...visible]).toEqual([]);
+    expect(reconnect).toHaveBeenCalledExactlyOnceWith(binding.id, "slack");
+    expect(await connections.getAccessible("alice", binding.id)).toMatchObject({
+      status: "needs_reauth", readiness: "unavailable", healthReason: "slack_reconnect_required",
+    });
+    expect(slack.messages()).toHaveLength(0);
   });
 
   it("hides Slack browser controls during a workspace or account transition", () => {

@@ -37,6 +37,9 @@ unjoined channels. Choose a `channelId` from that result. `messages.list`
 checks the selected workspace and channel again before reading one page of at
 most 100 messages. It displays messages with text and omits events or blocks-only
 messages that the v1 text view cannot represent, while retaining the page cursor.
+When Slack omits `is_member` from channel info, OMR checks current bot membership
+through bounded `conversations.members` pages. An explicit non-member result or
+an incomplete membership proof stops the read or post.
 `messages.post` checks that the token still belongs to the chosen Slack
 workspace and bot sender and that the channel remains joined and
 local, then sends at most 4,000 plain-text characters. It does not accept a
