@@ -2,7 +2,7 @@ import {
   ConnectionSelectionRequiredError, ConnectionUnavailableError,
   isMissingRemoteConnection,
 } from "@oh-my-router/connections";
-import { githubHttpFailure, LinearProviderDenial, NotionProviderDenial, SlackProviderDenial, usableToolIds, type ProviderStatus, type ToolCatalog } from "@oh-my-router/tools";
+import { githubHttpFailure, LinearProviderDenial, notionDenial, NotionProviderDenial, SlackProviderDenial, usableToolIds, type ProviderStatus, type ToolCatalog } from "@oh-my-router/tools";
 
 type PermanentProofDenialCode = "SLACK_PERMISSION_DENIED" | "SLACK_WORKSPACE_MISMATCH" |
   "NOTION_ACCESS_RESTRICTED";
@@ -77,11 +77,16 @@ async function slackProofUnavailable(bindingId: string, error: unknown,
 async function notionProofUnavailable(bindingId: string, error: unknown,
   observers: CatalogProofObservers,
 ): Promise<boolean> {
-  if (!(error instanceof NotionProviderDenial)) return githubProofUnavailable(error);
-  observers.onNotionProofIssue?.(bindingId, error.code, error.retryAfterSeconds);
-  if (error.code === "NOTION_RECONNECT_REQUIRED") await observers.onReconnectRequired?.(bindingId, "notion");
-  if (error.code === "NOTION_ACCESS_RESTRICTED") {
-    await observers.onPermanentDenial?.(bindingId, error.code);
+  const denial = error instanceof NotionProviderDenial ? error : notionDenial(error, "read");
+  if (!denial) {
+    if (!githubProofUnavailable(error)) return false;
+    observers.onNotionProofIssue?.(bindingId, "NOTION_QUERY_REJECTED");
+    return true;
+  }
+  observers.onNotionProofIssue?.(bindingId, denial.code, denial.retryAfterSeconds);
+  if (denial.code === "NOTION_RECONNECT_REQUIRED") await observers.onReconnectRequired?.(bindingId, "notion");
+  if (denial.code === "NOTION_ACCESS_RESTRICTED") {
+    await observers.onPermanentDenial?.(bindingId, denial.code);
   }
   return true;
 }

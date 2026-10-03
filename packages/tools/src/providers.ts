@@ -27,7 +27,8 @@ export interface ProviderStatus {
   /** Whether a new connection can be initiated; execution also requires state=ready. */
   available: boolean;
   /** A selected connection's proof failure, scoped to this catalog request. */
-  proofIssue?: "notion_access_restricted" | "notion_rate_limited" | "notion_permission_denied";
+  proofIssue?: "notion_access_restricted" | "notion_rate_limited" | "notion_permission_denied" |
+    "notion_query_rejected";
   proofBindingId?: string;
   proofRetryAfterSeconds?: number;
 }

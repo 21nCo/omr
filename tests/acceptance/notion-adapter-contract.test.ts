@@ -375,6 +375,21 @@ describe("notion-adapter-contract", () => {
     });
   });
 
+  it("keeps failed or malformed bot verification retryable without claiming token revocation", async () => {
+    const fixture = notionFixture();
+    const verify = omrNotionProvider.actions["connection.verify"]!;
+    for (const get of [vi.fn().mockRejectedValue({ status: 500, data: { code: "internal_server_error" } }),
+      vi.fn().mockResolvedValue({ data: { object: "user", id: parentId, type: "person" } })]) {
+      await expect(verify.execute({}, { ...fixture.context, http: { ...fixture.context.http, get } }))
+        .rejects.toMatchObject({ code: "NOTION_QUERY_REJECTED" });
+    }
+    expect(fixture.writes()).toBe(0);
+    await expect(verifiedNotionScopes({ action: vi.fn(async () => ({ object: "user",
+      id: parentId, type: "person" })) },
+    { userId: "alice", workspaceId: "workspace-a", connectionId: "remote-a" }))
+      .rejects.toMatchObject({ code: "NOTION_QUERY_REJECTED" });
+  });
+
   it("contains a failed Notion proof to its provider and marks revoked grants for reconnect", async () => {
     const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrNotionProvider] } });
     const provider = { provider: "notion", displayName: "Notion", providerVersion: "1.0.0",

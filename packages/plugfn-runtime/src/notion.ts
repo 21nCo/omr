@@ -130,7 +130,7 @@ const verify: Action = {
   contract: contract("read"),
   execute: async (_params, context) => {
     const result = bot.safeParse(await call(context, "get", "/users/me", undefined, "read"));
-    if (!result.success) throw new NotionProviderDenial("read", "NOTION_RECONNECT_REQUIRED");
+    if (!result.success) throw new NotionProviderDenial("read", "NOTION_QUERY_REJECTED");
     return { object: result.data.object, id: result.data.id, type: result.data.type };
   },
 };
@@ -221,5 +221,8 @@ export async function verifiedNotionScopes(runtime: {
     actor: { userId: input.userId, tenantId: input.workspaceId, organizationId: input.workspaceId },
     retry: { maxAttempts: 1, backoff: "exponential" }, cache: false,
   });
-  return z.object({ object: z.literal("user"), id, type: z.literal("bot") }).safeParse(result).success ? [] : undefined;
+  if (!bot.safeParse(result).success) {
+    throw new NotionProviderDenial("read", "NOTION_QUERY_REJECTED");
+  }
+  return [];
 }

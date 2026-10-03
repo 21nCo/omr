@@ -74,7 +74,8 @@
     available: boolean;
     authMode: string;
     actionCount: number;
-    proofIssue?: "notion_access_restricted" | "notion_rate_limited" | "notion_permission_denied";
+    proofIssue?: "notion_access_restricted" | "notion_rate_limited" | "notion_permission_denied" |
+      "notion_query_rejected";
     proofBindingId?: string;
     proofRetryAfterSeconds?: number;
   };

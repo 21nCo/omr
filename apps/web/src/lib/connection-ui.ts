@@ -43,6 +43,9 @@ export function notionAccessGuidance(proofIssue?: string | null, healthReason?: 
   if (issue === "notion_permission_denied") {
     return "Notion denied access. Check the integration's content capabilities and page sharing, then retry the health check.";
   }
+  if (issue === "notion_query_rejected") {
+    return "Notion could not verify this integration. Retry the health check later.";
+  }
   return null;
 }
 
@@ -67,6 +70,7 @@ export function notionJourneyGuidance(
       connection.readiness === "ready" && connection.healthReason !== "notion_access_restricted" &&
       connection.id !== proofBindingId)) return null;
   if (proofIssue !== "notion_rate_limited" && proofIssue !== "notion_permission_denied" &&
+      proofIssue !== "notion_query_rejected" &&
       proofBindingId && scoped.some((connection) => connection.id !== proofBindingId &&
       connection.status === "active" && connection.readiness === "ready")) return null;
   const deniedProof = proofBindingId && scoped.some((connection) => connection.id === proofBindingId)
@@ -118,6 +122,7 @@ export function connectionActions(
     canReconnect: active && manageable && !cleanupOnly && !ready &&
       connection.healthReason !== "notion_access_restricted" &&
       connection.healthReason !== "notion_rate_limited" &&
+      connection.healthReason !== "notion_query_rejected" &&
       providerState !== "unsupported" && providerState !== "unconfigured" && providerState !== "unknown",
     canDisconnect: active && manageable,
     canRetryRevoke: !active && manageable && connection.status === "revoked" &&

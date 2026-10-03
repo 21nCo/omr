@@ -10,6 +10,7 @@ describe("connection control UI policy", () => {
     expect(notionAccessGuidance(null, "notion_access_restricted")).toContain("Contact Notion support");
     expect(notionAccessGuidance("notion_rate_limited", null, 19)).toContain("after 19 seconds");
     expect(notionAccessGuidance("notion_permission_denied")).toContain("page sharing");
+    expect(notionAccessGuidance("notion_query_rejected")).toContain("Retry the health check later");
   });
 
   it("closes the selected Notion journey on a fresh blocked proof and preserves other workspaces", () => {
@@ -35,13 +36,14 @@ describe("connection control UI policy", () => {
       workspaceId: "workspace_1", healthReason: null };
     const alternate = { ...selected, id: "alternate", selected: false };
     for (const [issue, phrase] of [["notion_rate_limited", "after 19 seconds"],
-      ["notion_permission_denied", "page sharing"]] as const) {
+      ["notion_permission_denied", "page sharing"],
+      ["notion_query_rejected", "Retry the health check later"]] as const) {
       expect(notionJourneyGuidance([selected, alternate], "workspace_1", issue, selected.id, 19))
         .toContain(phrase);
       expect(connectionAfterNotionProof(selected, selected.id, issue)).toMatchObject({
         status: "error", readiness: "unavailable", healthReason: issue, selected: false,
       });
-      if (issue === "notion_rate_limited") expect(connectionActions(
+      if (issue === "notion_rate_limited" || issue === "notion_query_rejected") expect(connectionActions(
         connectionAfterNotionProof(selected, selected.id, issue), "user_admin", "admin", "expired",
       ).canReconnect).toBe(false);
       expect(connectionAfterNotionProof(alternate, selected.id, issue)).toEqual(alternate);

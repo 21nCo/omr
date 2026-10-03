@@ -485,7 +485,8 @@ function notionProofIssue(code: NotionProviderDenial["code"]): ProviderStatus["p
     case "NOTION_ACCESS_RESTRICTED": return "notion_access_restricted";
     case "NOTION_RATE_LIMITED": return "notion_rate_limited";
     case "NOTION_PERMISSION_DENIED": return "notion_permission_denied";
-    default: return undefined;
+    case "NOTION_RECONNECT_REQUIRED": return undefined;
+    default: return "notion_query_rejected";
   }
 }
 
