@@ -17,7 +17,7 @@ function approvalHarness(parent: { type: string; page_id?: string; database_id?:
   const code = ts.transpileModule(functions.map((node) => node.getText(source)).join("\n"),
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   const request = vi.fn(async () => ({ id: "approval-a", status: "pending", expiresAt: 1000 }));
-  const state: Record<string, any> = {
+  const state = {
     notionPage: { id: "page-a", title: "Original", parent }, notionPageId: "page-a",
     notionCreateTitle: "Child", notionUpdateTitle: "Renamed", notionBusy: "",
     notionGeneration: 0, selectedWorkspaceId: "workspace-a", error: "", notice: "",

@@ -16,6 +16,8 @@ function overview(workspaceId: string, selectedId: string | null) {
 }
 
 const catalog = { tools: [{ id: "notion.content.search" }], providers: [] };
+type PublishedState = { overview: ReturnType<typeof overview>; catalog: typeof catalog;
+  selectedWorkspaceId: string; loading: boolean; error: string };
 
 /** Exercise the page's workspace, catalog, mutation, and search handlers at the request boundary. */
 function notionSearchHarness() {
@@ -37,7 +39,7 @@ function notionSearchHarness() {
     function submitSearch(event: { preventDefault(): void }) { event.preventDefault(); notionGeneration++; ${submitBody} }`,
   { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   const calls: { workspaceId: string; connectionId: string; params: { query: string } }[] = [];
-  const state: Record<string, any> = {
+  const state = {
     overview: overview("A", "notion_a"), catalog, selectedWorkspaceId: "A", loading: false, busy: "",
     error: "", notice: "", recoveredApprovalId: "", recoveryInput: "", recoveryError: "",
     automaticApprovalLookup: null, apiKey: "", oauthProvider: "notion", credentialProvider: "",
@@ -47,19 +49,12 @@ function notionSearchHarness() {
     notionPageId: "old", notionPage: { id: "old" }, notionCreateTitle: "old", notionUpdateTitle: "old",
     notionSearchParams, selectedReadyNotionConnection, selectedLinearAccountId, selectedSlackAccountId,
     clearLinear: () => {}, clearSlack: () => {}, cancelAuthorization: () => {}, canInstallShared: () => true,
-    connectOAuth: () => { state.reconnects++; }, reconnects: 0,
+    connectOAuth: () => {}, reconnects: 0,
     revocationGuidance: () => null,
     createWorkspaceCatalogLoader: (_fetchOverview: unknown, _fetchCatalog: unknown,
-      publish: (next: typeof state.nextState) => void) => {
-      state.publish = publish;
-      return async () => { publish(state.nextState ?? {
-        overview: state.overview, catalog: state.catalog, selectedWorkspaceId: state.selectedWorkspaceId,
-        loading: false, error: "",
-      }); };
-    },
-    nextState: null as null | { overview: ReturnType<typeof overview>; catalog: typeof catalog;
-      selectedWorkspaceId: string; loading: boolean; error: string },
-    publish: (_next: unknown) => {},
+      _publish: (next: PublishedState) => void) => async () => {},
+    nextState: null as PublishedState | null,
+    publish: (_next: PublishedState) => {},
     request: (path: string, options: { body: string }) => {
       if (path === "/api/tools/execute") {
         calls.push(JSON.parse(options.body));
@@ -70,6 +65,14 @@ function notionSearchHarness() {
       });
       return Promise.resolve({});
     },
+  };
+  state.connectOAuth = () => { state.reconnects++; };
+  state.createWorkspaceCatalogLoader = (_fetchOverview, _fetchCatalog, publish) => {
+    state.publish = publish;
+    return async () => { publish(state.nextState ?? {
+      overview: state.overview, catalog: state.catalog, selectedWorkspaceId: state.selectedWorkspaceId,
+      loading: false, error: "",
+    }); };
   };
   vm.createContext(state);
   vm.runInContext(code, state);
