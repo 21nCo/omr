@@ -441,6 +441,7 @@
     notionBusy = "";
     notionItems = [];
     notionCursor = null;
+    notionQuery = "";
     notionSubmittedQuery = "";
     notionPageId = "";
     notionPage = null;
