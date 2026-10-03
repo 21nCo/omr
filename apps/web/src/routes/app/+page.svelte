@@ -5,6 +5,7 @@
   import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, linearEffectAbsentAvailable, linearEffectPresentAvailable, providerDisplayState, recoverLinearReconciliation, recoverWorkspaceOverview, selectedLinearAccountId, selectedReadyLinearConnection, selectedReadySlackConnection, selectedSlackAccountId, visibleApprovalCard } from "$lib/workspace-catalog.js";
   import { renderApprovalPreview } from "$lib/approval-preview.js";
   import { createLinearActionKeys, linearApprovalNotice } from "$lib/linear-action-keys.js";
+  import { slackApprovalNotice } from "$lib/slack-approval-notice.js";
   import { V1_PROVIDERS } from "@oh-my-router/tools";
   import type { LinearAccess, SlackAccess } from "@oh-my-router/connections";
 
@@ -477,9 +478,7 @@
       automaticApprovalLookup = ["pending", "approved"].includes(approval.status)
         ? { id: approval.id, expiresAt: approval.expiresAt } : null;
       recoveryInput = recoveredApprovalId;
-      notice = approval.status === "uncertain"
-        ? "Slack post outcome is uncertain. Check the channel before another request."
-        : "Slack post awaits approval below. Review the bot, workspace, channel and message.";
+      notice = slackApprovalNotice(approval.status);
       await load();
     } catch (caught) {
       if (generation === slackGeneration) error = caught instanceof Error ? caught.message : "Could not request Slack approval";
