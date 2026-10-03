@@ -1,0 +1,50 @@
+.env.example
+  h_a39f9495f9ec1d 27-28
+README.md
+  h_a39f9495f9ec1d 97-99
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 17,155,421
+apps/web/src/lib/server/reconciliation-receipts.ts
+  h_a39f9495f9ec1d 30-31,59-60
+apps/web/src/lib/server/router.ts
+  h_a39f9495f9ec1d 37,49,234-247,481-483
+apps/web/src/lib/server/scoped-catalog.ts
+  h_a39f9495f9ec1d 5,54-60
+apps/web/src/lib/workspace-catalog.ts
+  h_a39f9495f9ec1d 23-24,142-153
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 5,116-127,261,269,302,428-536,669,674-675,706,801,1013-1015,1017,1027,1143-1198,1272,1295
+docs/notion-v1.md
+  h_a39f9495f9ec1d 1-57
+docs/provider-catalog-v1.md
+  h_a39f9495f9ec1d 57-58,69
+packages/connections/src/plugfn.ts
+  h_a39f9495f9ec1d 186,189-191
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 7,388-398,624-625,962,1010-1011,1112-1114
+packages/execution/src/index.ts
+  h_a39f9495f9ec1d 12
+packages/plugfn-runtime/src/index.ts
+  h_a39f9495f9ec1d 24,41,123
+packages/plugfn-runtime/src/notion.ts
+  h_a39f9495f9ec1d 1-191
+packages/tools/src/index.ts
+  h_a39f9495f9ec1d 20
+packages/tools/src/notion-errors.ts
+  h_a39f9495f9ec1d 1-54
+scripts/catalog-example.mjs
+  h_a39f9495f9ec1d 3-4,15
+tests/acceptance/notion-adapter-contract.test.ts
+  h_a39f9495f9ec1d 1-320
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9a75bc048c9ba3be1d5a488bc3d24e5aeb12c25b",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
