@@ -267,6 +267,7 @@
     },
     (workspaceId) => request<Catalog>(`/api/tools?workspaceId=${encodeURIComponent(workspaceId)}&limit=100`),
     (state) => {
+      const previousWorkspaceId = selectedWorkspaceId;
       const previousLinearAccountId = selectedLinearAccountId(overview, selectedWorkspaceId);
       const previousSlackAccountId = selectedSlackAccountId(overview, selectedWorkspaceId);
       const previousNotionAccountId = selectedReadyNotionConnection({ overview, selectedWorkspaceId, loading: false, busy: "" })?.id;
@@ -277,7 +278,11 @@
       error = state.error;
       if (previousLinearAccountId !== selectedLinearAccountId(overview, selectedWorkspaceId)) clearLinear();
       if (previousSlackAccountId !== selectedSlackAccountId(overview, selectedWorkspaceId)) clearSlack();
-      if (previousNotionAccountId !== selectedReadyNotionConnection({ overview, selectedWorkspaceId, loading: false, busy: "" })?.id) clearNotion();
+      if (previousWorkspaceId !== selectedWorkspaceId ||
+          previousNotionAccountId !== selectedReadyNotionConnection({ overview, selectedWorkspaceId, loading: false, busy: "" })?.id) {
+        clearNotion();
+        notionQuery = "";
+      }
       if (!catalog) {
         oauthProvider = "";
         credentialProvider = "";
@@ -311,6 +316,7 @@
     clearLinear();
     clearSlack();
     clearNotion();
+    notionQuery = "";
     apiKey = "";
     await load();
   }
@@ -441,7 +447,6 @@
     notionBusy = "";
     notionItems = [];
     notionCursor = null;
-    notionQuery = "";
     notionSubmittedQuery = "";
     notionPageId = "";
     notionPage = null;
@@ -795,6 +800,10 @@
       notice = "Choose Slack bot access below, then reconnect with fresh consent.";
       return;
     }
+    if (connection.provider === "notion") {
+      clearNotion();
+      notionQuery = "";
+    }
     void connectOAuth(connection);
   }
 
@@ -811,7 +820,10 @@
   async function disconnect(connection: Connection) {
     if (connection.provider === "linear") clearLinear();
     if (connection.provider === "slack") clearSlack();
-    if (connection.provider === "notion") clearNotion();
+    if (connection.provider === "notion") {
+      clearNotion();
+      notionQuery = "";
+    }
     busy = `disconnect:${connection.id}`;
     error = "";
     notice = "";
