@@ -12,8 +12,10 @@ as browse-only context without inventing a link. Pages and databases retain
 their provider URLs.
 `pages.get` reads one accessible page's title and parent. Creation makes one
 plain titled child beneath an explicitly selected accessible page; update
-renames one explicitly selected accessible page. The adapter does not expose
-database-row creation, database property edits, page body blocks, comments,
+renames one explicitly selected accessible page. Database-backed pages may be
+discovered and read, but their title is a database property and cannot be
+renamed through v1, including when passed by ID through CLI or MCP. The adapter
+does not expose database-row creation, database property edits, page body blocks, comments,
 uploads, icons, covers, archiving, broad import, sync, or arbitrary Notion API
 calls. Databases found in search are shown for context and cannot be selected
 as creation destinations in v1.

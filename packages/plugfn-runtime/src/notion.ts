@@ -184,6 +184,12 @@ const update: Action = {
       throw new NotionProviderDenial("preflight", "NOTION_INVALID_CHANGE");
     }
     const before = await selectedPage(context, canonical.pageId, "preflight");
+    // A database row is also a page in Notion, but editing its title would
+    // change a data-source property outside the v1 page-rename contract.
+    if (before.parent.type === "data_source_id" || before.parent.type === "database_id" ||
+        "data_source_id" in before.parent || "database_id" in before.parent) {
+      throw new NotionProviderDenial("preflight", "NOTION_INVALID_CHANGE");
+    }
     const property = pageTitle(before.properties);
     if (!property) throw new NotionProviderDenial("preflight", "NOTION_TARGET_UNAVAILABLE");
     const result = await call(context, "patch", `/pages/${canonical.pageId}`, {

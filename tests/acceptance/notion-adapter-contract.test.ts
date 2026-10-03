@@ -29,6 +29,8 @@ afterEach(() => vi.unstubAllGlobals());
 
 function notionFixture() {
   let shared = true;
+  let childParent: { type: string; page_id?: string; database_id?: string;
+    data_source_id?: string } = { type: "page_id", page_id: parentId };
   let denial: { status: number; data: { code: string;
     additional_data?: { rate_limit_reason: string } }; headers?: Headers } | null = null;
   let malformedWrite = false;
@@ -38,7 +40,9 @@ function notionFixture() {
     if (url.endsWith(`/pages/${parentId}`) || url.endsWith(`/pages/${parentId.replaceAll("-", "")}`)) return shared
       ? { data: page(parentId, databaseId, "Destination") }
       : Promise.reject({ status: 404, data: { code: "object_not_found" } });
-    if (url.endsWith(`/pages/${childId}`) || url.endsWith(`/pages/${childId.replaceAll("-", "")}`)) return { data: page(childId) };
+    if (url.endsWith(`/pages/${childId}`) || url.endsWith(`/pages/${childId.replaceAll("-", "")}`)) {
+      return { data: { ...page(childId), parent: childParent } };
+    }
     if (url.endsWith(`/pages/${foreignId}`)) return Promise.reject({ status: 404,
       data: { code: "object_not_found" } });
     throw new Error(`Unexpected GET ${url}`);
@@ -47,7 +51,7 @@ function notionFixture() {
     if (url.endsWith("/search")) return { data: { results: [page(parentId), {
       object: "database", id: databaseId, url: `https://www.notion.so/${databaseId}`,
       title: [{ plain_text: "Projects" }],
-    }, { ...page(childId), properties: { Name: { type: "title", title: [] } } },
+    }, { ...page(childId), parent: childParent, properties: { Name: { type: "title", title: [] } } },
     { ...page(foreignId), archived: true }, { object: "page", id: "broken" }],
     has_more: false, next_cursor: null } };
     if (url.endsWith("/pages")) {
@@ -69,6 +73,7 @@ function notionFixture() {
   return { context: { provider: { baseUrl: "https://api.notion.com/v1" },
       http: { get, post, patch } } as never, get, post, patch,
     setShared: (value: boolean) => { shared = value; },
+    setChildParent: (value: typeof childParent) => { childParent = value; },
     setDenial: (value: typeof denial) => { denial = value; },
     setMalformedWrite: (value: boolean) => { malformedWrite = value; },
     setReturnedTitle: (value: string | null) => { returnedTitle = value; },
@@ -189,6 +194,41 @@ describe("notion-adapter-contract", () => {
     fixture.setMalformedWrite(true);
     await expect(omrNotionProvider.actions["pages.create"]!.execute({ parentPageId: parentId,
       title: "Maybe" }, fixture.context)).rejects.toMatchObject({ name: "NotionProviderResponseAmbiguous" });
+  });
+
+  it.each(["data_source_id", "database_id"] as const)(
+    "refuses a selected %s database row before any rename write", async (parentType) => {
+      const fixture = notionFixture();
+      fixture.setChildParent({ type: parentType, [parentType]: databaseId });
+      const search = await omrNotionProvider.actions["content.search"]!.execute({}, fixture.context);
+      expect((search as { items: { id: string; type: string }[] }).items)
+        .toContainEqual(expect.objectContaining({ id: childId, type: "page" }));
+      expect(await omrNotionProvider.actions["pages.get"]!.execute({ pageId: childId }, fixture.context))
+        .toMatchObject({ id: childId, parent: { type: parentType, [parentType]: databaseId } });
+      await expect(omrNotionProvider.actions["pages.update"]!.execute({
+        pageId: childId.replaceAll("-", ""), title: "Unsupported rename",
+      }, fixture.context)).rejects.toMatchObject({
+        code: "NOTION_INVALID_CHANGE", phase: "preflight",
+      });
+      expect(fixture.patch).not.toHaveBeenCalled();
+      expect(fixture.writes()).toBe(0);
+    });
+
+  it("rejects an approved direct-ID rename of a database row without provider write", async () => {
+    const f = await serviceFixture();
+    f.notion.setChildParent({ type: "data_source_id", data_source_id: databaseId });
+    const approval = await f.service.requestApproval({ principal: f.principal,
+      toolId: "notion.pages.update", params: { pageId: childId, title: "Unsupported rename" },
+      connectionId: f.binding.id, idempotencyKey: "row-rename" });
+    expect(f.notion.writes()).toBe(0);
+    await f.service.approve(approval.id, "alice");
+    await expect(f.service.executeApproved(f.principal, approval.id)).rejects.toMatchObject({
+      code: "NOTION_INVALID_CHANGE", receiptId: expect.any(String),
+    });
+    expect(f.notion.get).toHaveBeenCalledWith(expect.stringContaining(`/pages/${childId.replaceAll("-", "")}`));
+    expect(f.notion.patch).not.toHaveBeenCalled();
+    expect(f.notion.writes()).toBe(0);
+    expect((await f.service.approvalStatus(f.principal, approval.id)).status).toBe("failed");
   });
 
   it("classifies definite rate limits and retains transport uncertainty", async () => {

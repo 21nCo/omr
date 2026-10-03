@@ -122,7 +122,8 @@
   const slackActionKeys = createLinearActionKeys(() => crypto.randomUUID(), () => sessionStorage, "Slack");
   type NotionItem = { type: "page" | "database"; id: string; title: string; url: string } |
     { type: "data_source"; id: string; title: string };
-  type NotionPage = { id: string; title: string; url: string; parent: { type: string; page_id?: string; database_id?: string } };
+  type NotionPage = { id: string; title: string; url: string; parent: { type: string;
+    page_id?: string; database_id?: string; data_source_id?: string } };
   let notionItems: NotionItem[] = [];
   let notionCursor: string | null = null;
   let notionQuery = "";
@@ -492,8 +493,16 @@
       : { pageId: notionPageId, title: notionUpdateTitle };
   }
 
+  function notionDatabaseRow(page: NotionPage): boolean {
+    return page.parent.type === "data_source_id" || page.parent.type === "database_id" ||
+      "data_source_id" in page.parent || "database_id" in page.parent;
+  }
+
   async function notionApproval(toolId: "notion.pages.create" | "notion.pages.update") {
     const account = notionAccount();
+    if (toolId === "notion.pages.update" && notionPage && notionDatabaseRow(notionPage)) {
+      error = "Database rows are read-only in Notion v1."; return;
+    }
     if (!account || notionBusy || !notionPage || notionPage.id !== notionPageId ||
         !notionToolAvailable(toolId)) {
       error = "Choose and read a shared Notion page before requesting a change."; return;
@@ -1221,7 +1230,9 @@
                   <button class="quiet compact" type="button" disabled={Boolean(notionBusy)} onclick={() => void resetNotionAction("notion.pages.create")}>Start a new identical creation</button>
                 </form>
               {/if}
-              {#if notionToolAvailable("notion.pages.update")}
+              {#if notionDatabaseRow(notionPage)}
+                <p>Database rows are read-only in Notion v1.</p>
+              {:else if notionToolAvailable("notion.pages.update")}
                 <form class="inset" onsubmit={(event) => { event.preventDefault(); void notionApproval("notion.pages.update"); }}>
                   <strong>Rename {notionPage.title}</strong>
                   <label>Page title<input bind:value={notionUpdateTitle} maxlength="200" required disabled={Boolean(notionBusy)} /></label>
