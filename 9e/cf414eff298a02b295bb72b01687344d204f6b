@@ -1,0 +1,30 @@
+apps/web/src/lib/connection-ui.test.ts
+  h_a39f9495f9ec1d 13,39-40,46
+apps/web/src/lib/connection-ui.ts
+  h_a39f9495f9ec1d 46-48,73,125
+apps/web/src/lib/server/cloudflare-runtime.test.ts
+  h_a39f9495f9ec1d 190-191,222-274
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 488-489
+apps/web/src/lib/server/scoped-catalog.ts
+  h_a39f9495f9ec1d 5,80-89
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 77-78
+packages/plugfn-runtime/src/notion.ts
+  h_a39f9495f9ec1d 133,224-227
+packages/tools/src/providers.ts
+  h_a39f9495f9ec1d 30-31
+tests/acceptance/notion-adapter-contract.test.ts
+  h_a39f9495f9ec1d 378-392
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9ecf414eff298a02b295bb72b01687344d204f6b",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
