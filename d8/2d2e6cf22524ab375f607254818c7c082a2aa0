@@ -1,0 +1,22 @@
+docs/slack-v1.md
+  h_a39f9495f9ec1d 62-66
+packages/mcp/src/server.test.ts
+  h_a39f9495f9ec1d 110-114
+packages/mcp/src/server.ts
+  h_a39f9495f9ec1d 315-316,320,322,342
+packages/plugfn-runtime/src/slack.ts
+  h_a39f9495f9ec1d 53-57
+tests/acceptance/slack-adapter-contract.test.ts
+  h_a39f9495f9ec1d 449-479
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d82d2e6cf22524ab375f607254818c7c082a2aa0",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
