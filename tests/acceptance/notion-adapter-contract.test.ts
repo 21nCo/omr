@@ -13,6 +13,7 @@ import { resolveScopedCatalog } from "../../apps/web/src/lib/server/scoped-catal
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createOMRMcpServer } from "../../packages/mcp/src/server.js";
+import { MemoryAdapter, plugFn } from "plugfn";
 
 const parentId = "11111111-1111-4111-8111-111111111111";
 const childId = "22222222-2222-4222-8222-222222222222";
@@ -102,6 +103,7 @@ describe("notion-adapter-contract", () => {
     expect(createProviderIntegrationConfig({ ...config, OMR_NOTION_V1_ENABLED: "true" },
       "https://omr.local").notion).toBeDefined();
     const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrNotionProvider] } });
+    expect(omrNotionProvider.headers?.["Notion-Version"]).toBe("2025-09-03");
     expect(catalog.list().map((entry) => entry.id).sort()).toEqual([
       "notion.connection.verify", "notion.content.search", "notion.pages.create",
       "notion.pages.get", "notion.pages.update",
@@ -154,6 +156,24 @@ describe("notion-adapter-contract", () => {
     await expect(omrNotionProvider.actions["pages.create"]!.execute({ parentPageId: parentId,
       title: "No access" }, fixture.context)).rejects.toMatchObject({ code: "NOTION_TARGET_UNAVAILABLE" });
     expect(fixture.writes()).toBe(0);
+  });
+
+  it("projects modern shared data sources as browse-only context", async () => {
+    const fixture = notionFixture();
+    fixture.post.mockResolvedValueOnce({ data: { results: [
+      { object: "data_source", id: databaseId, url: `https://www.notion.so/${databaseId}`,
+        title: [{ plain_text: "Projects" }] },
+      { object: "data_source", id: foreignId, url: `https://www.notion.so/${foreignId}`,
+        title: [{ plain_text: "Hidden" }], in_trash: true },
+      page(parentId),
+    ], has_more: false, next_cursor: null } });
+    const found = await omrNotionProvider.actions["content.search"]!.execute({}, fixture.context);
+    expect(found).toMatchObject({ items: [
+      { type: "data_source", id: databaseId, title: "Projects" },
+      { type: "page", id: parentId },
+    ] });
+    expect((found as { items: { type: string }[] }).items.filter((entry) => entry.type === "page"))
+      .toHaveLength(1);
   });
 
   it("uses the existing title property for rename and treats incomplete writes as uncertain", async () => {
@@ -291,6 +311,40 @@ describe("notion-adapter-contract", () => {
         code: "CONNECTION_ACCESS_DENIED",
       });
       expect(f.notion.writes()).toBe(1);
+    });
+
+  it.each(["pages.create", "pages.update"] as const)(
+    "settles a pinned PlugFn %s connection lookup before adapter entry", async (action) => {
+      const f = await serviceFixture();
+      const runtime = plugFn({ database: new MemoryAdapter(), auth: { getUserId: async () => null },
+        baseUrl: "https://omr.local",
+        encryptionKey: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        integrations: { notion: { type: "oauth2", clientId: "fixture-client", clientSecret: "fixture-secret",
+          redirectUris: ["https://omr.local/app/oauth/callback"] } },
+        retry: { enabled: true }, cache: { enabled: false }, rateLimit: { enabled: false },
+      }).use(omrNotionProvider);
+      await runtime.ready;
+      const providerFetch = vi.fn(async () => { throw new Error("Provider must not be called"); });
+      vi.stubGlobal("fetch", providerFetch);
+      const service = new ExecutionService(f.catalog, f.connections, runtime, f.receipts,
+        async () => [], Date.now, f.approvals, undefined, new Uint8Array(32).fill(7));
+      const approval = await service.requestApproval({ principal: f.principal,
+        toolId: `notion.${action}`, params: action === "pages.create"
+          ? { parentPageId: parentId, title: "Child" } : { pageId: childId, title: "Renamed" },
+        connectionId: f.binding.id, idempotencyKey: `real-lookup-${action}` });
+      await service.approve(approval.id, "alice");
+      await expect(service.executeApproved(f.principal, approval.id))
+        .rejects.toMatchObject({ code: "CONNECTION_UNAVAILABLE" });
+      expect(providerFetch).not.toHaveBeenCalled();
+      expect(f.notion.writes()).toBe(0);
+      expect((await service.approvalStatus(f.principal, approval.id)).status).toBe("failed");
+      expect([...f.receipts.receipts.values()].find((receipt) => receipt.approvalId === approval.id))
+        .toMatchObject({ status: "failed", errorCode: "connection_unavailable" });
+      await expect(service.requestApproval({ principal: f.principal, toolId: `notion.${action}`,
+        params: action === "pages.create" ? { parentPageId: parentId, title: "Child" }
+          : { pageId: childId, title: "Renamed" }, connectionId: f.binding.id,
+        idempotencyKey: `real-lookup-retry-${action}` }))
+        .rejects.toMatchObject({ code: "CONNECTION_ACCESS_DENIED" });
     });
 
   it.each(["pages.create", "pages.update"] as const)(

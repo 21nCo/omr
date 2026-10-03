@@ -53,7 +53,10 @@ export function notionJourneyGuidance(
 ): string | null {
   const scoped = connections.filter((connection) => connection.provider === "notion" &&
     connection.workspaceId === workspaceId);
-  if (scoped.some((connection) => connection.id !== proofBindingId &&
+  if (scoped.some((connection) => connection.selected && connection.status === "active" &&
+      connection.readiness === "ready" && connection.healthReason !== "notion_access_restricted" &&
+      connection.id !== proofBindingId)) return null;
+  if (proofBindingId && scoped.some((connection) => connection.id !== proofBindingId &&
       connection.status === "active" && connection.readiness === "ready")) return null;
   const deniedProof = proofBindingId && scoped.some((connection) => connection.id === proofBindingId)
     ? proofIssue : null;
@@ -64,7 +67,7 @@ export function notionJourneyGuidance(
 /** A failed proof for one binding must not disable selection of another ready one. */
 export function notionConnectionProviderState(connection: ConnectionDisplay,
   providerState: string, proofBindingId?: string): string {
-  return connection.provider === "notion" && providerState === "expired" &&
+  return connection.provider === "notion" && providerState === "expired" && proofBindingId !== undefined &&
     connection.id !== proofBindingId && connection.status === "active" &&
     connection.readiness === "ready" ? "ready" : providerState;
 }
@@ -73,7 +76,9 @@ export function notionConnectionProviderState(connection: ConnectionDisplay,
 export function notionJourneyAvailable(connections: readonly (ConnectionDisplay & { workspaceId: string })[],
   workspaceId: string, providerState: string, proofBindingId?: string): boolean {
   if (providerState === "ready") return true;
-  return providerState === "expired" && connections.some((connection) =>
+  return providerState === "expired" && proofBindingId !== undefined &&
+    connections.some((connection) => connection.provider === "notion" &&
+      connection.workspaceId === workspaceId && connection.id === proofBindingId) && connections.some((connection) =>
     connection.provider === "notion" && connection.workspaceId === workspaceId &&
     connection.id !== proofBindingId && connection.status === "active" &&
     connection.readiness === "ready");

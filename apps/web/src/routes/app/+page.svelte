@@ -118,7 +118,7 @@
   let slackGeneration = 0;
   let slackReadOwner: { generation: number; workspaceId: string; accountId: string } | null = null;
   const slackActionKeys = createLinearActionKeys(() => crypto.randomUUID(), () => sessionStorage, "Slack");
-  type NotionItem = { type: "page" | "database"; id: string; title: string; url: string };
+  type NotionItem = { type: "page" | "database" | "data_source"; id: string; title: string; url: string };
   type NotionPage = { id: string; title: string; url: string; parent: { type: string; page_id?: string; database_id?: string } };
   let notionItems: NotionItem[] = [];
   let notionCursor: string | null = null;
@@ -189,7 +189,7 @@
   function actions(connection: Connection, now: number) {
     return connectionActions(effectiveConnection(connection), overview?.actor.id ?? "",
       selectedAccess()?.membership.role ?? "member", notionConnectionProviderState(connection,
-        providerState(connection.provider), catalog?.providers.find((entry) => entry.provider === "notion")?.proofBindingId), now);
+        providerState(connection.provider), notionProofBindingId()), now);
   }
 
   function revocationGuidance(connection: Connection): string | null {
@@ -208,15 +208,21 @@
     return providerDisplayState(catalog, provider);
   }
 
+  function notionProofBindingId(): string | undefined {
+    const id = catalog?.providers.find((entry) => entry.provider === "notion")?.proofBindingId;
+    return overview?.connections.some((connection) => connection.provider === "notion" &&
+      connection.workspaceId === selectedWorkspaceId && connection.id === id) ? id : undefined;
+  }
+
   function notionGuidance(): string | null {
     return notionJourneyGuidance(overview?.connections ?? [], selectedWorkspaceId,
       catalog?.providers.find((entry) => entry.provider === "notion")?.proofIssue,
-      catalog?.providers.find((entry) => entry.provider === "notion")?.proofBindingId);
+      notionProofBindingId());
   }
 
   function effectiveConnection(connection: Connection): Connection {
     return connectionAfterNotionProof(connection,
-      catalog?.providers.find((entry) => entry.provider === "notion")?.proofBindingId);
+      notionProofBindingId());
   }
 
   const request = createControlPlaneRequest(fetch, () =>
@@ -945,7 +951,7 @@
                     {/if}
                   </div>
                   <span class:ready={actions(connection, clockNow).canSelect} class="status">{connectionStatusLabel(effectiveConnection(connection), notionConnectionProviderState(connection,
-                    providerState(connection.provider), catalog?.providers.find((entry) => entry.provider === "notion")?.proofBindingId))}</span>
+                    providerState(connection.provider), notionProofBindingId()))}</span>
                   {#if actions(connection, clockNow).canSelect}
                     <button
                       class="quiet compact"
@@ -1150,7 +1156,7 @@
         {/if}
 
         {#if notionJourneyAvailable(overview.connections, selectedWorkspaceId,
-          providerState("notion"), catalog?.providers.find((entry) => entry.provider === "notion")?.proofBindingId) && !notionGuidance()}
+          providerState("notion"), notionProofBindingId()) && !notionGuidance()}
           <section class="panel" aria-label="Notion page journey">
             <div class="panel-heading"><div><p class="kicker">Notion</p><h2>Shared pages</h2></div></div>
             <p>Selected integration: {notionAccount()?.label ?? "Select a Notion account above"}. Search shows content shared with that integration. Choose and read a page before creating a child or renaming it. Every change waits for separate approval.</p>
@@ -1168,8 +1174,8 @@
                 "notion.content.search", notionSearchParams(notionQuery, notionSubmittedQuery, notionCursor),
                 (value) => { notionItems = [...notionItems, ...value.items]; notionCursor = value.nextCursor; })}>More shared content</button>
             {/if}
-            {#each notionItems.filter((entry) => entry.type === "database") as database}
-              <p>Database: <a href={database.url} target="_blank" rel="noopener noreferrer">{database.title}</a> · browse in Notion</p>
+            {#each notionItems.filter((entry) => entry.type === "database" || entry.type === "data_source") as database}
+              <p>{database.type === "data_source" ? "Data source" : "Database"}: <a href={database.url} target="_blank" rel="noopener noreferrer">{database.title}</a> · browse in Notion</p>
             {/each}
             {#if notionItems.some((entry) => entry.type === "page")}
               <label>Destination or page to rename

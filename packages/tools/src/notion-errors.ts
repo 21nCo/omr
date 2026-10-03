@@ -19,7 +19,7 @@ export class NotionProviderDenial extends Error {
 }
 
 export class NotionProviderResponseAmbiguous extends Error {
-  constructor() {
+  constructor(readonly missingRemote = false) {
     super("Notion page response is incomplete");
     this.name = "NotionProviderResponseAmbiguous";
   }

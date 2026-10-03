@@ -1007,7 +1007,8 @@ export class ExecutionService {
     receipt: ExecutionReceipt, cleanupDeadlineAt: number, state: AuthorizedRunState): Promise<never> {
     state.missingRemoteAfterInvoke = isMissingRemoteConnection(error) ||
       isMissingGithubCommentPreflight(error, input.manifest) ||
-      (error instanceof NotionProviderDenial && error.phase === "preflight" && error.missingRemote);
+      (error instanceof NotionProviderDenial && error.phase === "preflight" && error.missingRemote) ||
+      (error instanceof NotionProviderResponseAmbiguous && error.missingRemote);
     const confirmed = confirmedDispatchFailure(error, input.manifest, receipt.id);
     if (confirmed && await this.failDispatchedReceipt(receipt.id, confirmed.code, cleanupDeadlineAt)) {
       throw confirmed.error;
@@ -1132,9 +1133,12 @@ function confirmedDispatchFailure(error: unknown, manifest: ToolManifest,
   if (isMissingGithubCommentPreflight(error, manifest)) {
     return { code: "connection_unavailable", error: new ConnectionUnavailableError() };
   }
-  // A raw lookup error does not prove that an already dispatched write had no effect.
+  // Notion's adapter converts a missing connection after entering POST/PATCH
+  // into an ambiguous response. A raw PlugFn lookup error therefore occurred
+  // before the adapter, when no provider request was possible.
   if (isMissingRemoteConnection(error)) {
-    return manifest.provider === "github" && manifest.contract.effect === "read"
+    return (manifest.provider === "github" && manifest.contract.effect === "read") ||
+      (manifest.provider === "notion" && manifest.contract.effect === "write")
       ? { code: "connection_unavailable", error: new ConnectionUnavailableError() } : null;
   }
   if (manifest.provider === "github" && manifest.contract.effect === "read") {

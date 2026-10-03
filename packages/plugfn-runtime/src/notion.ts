@@ -13,7 +13,8 @@ const rawPage = z.object({ object: z.literal("page"), id, url: z.string().url(),
   properties: z.record(z.object({ type: z.string(), title: z.array(richText).optional() }).passthrough()) }).passthrough();
 const rawDatabase = z.object({ object: z.literal("database"), id, url: z.string().url(),
   title: z.array(richText), archived: z.boolean().optional(), in_trash: z.boolean().optional() }).passthrough();
-const item = z.object({ type: z.enum(["page", "database"]), id, title: z.string(), url: z.string().url() });
+const rawDataSource = rawDatabase.extend({ object: z.literal("data_source") });
+const item = z.object({ type: z.enum(["page", "database", "data_source"]), id, title: z.string(), url: z.string().url() });
 const page = z.object({ id, title: z.string(), url: z.string().url(), parent });
 const bot = z.object({ object: z.literal("user"), id, type: z.literal("bot") });
 
@@ -43,9 +44,9 @@ function searchItem(value: unknown): z.infer<typeof item> | null {
   const foundPage = visiblePage(value);
   if (foundPage) return { type: "page", id: foundPage.id,
     title: pageTitle(foundPage.properties)?.text || "Untitled", url: foundPage.url };
-  const database = rawDatabase.safeParse(value);
+  const database = z.union([rawDatabase, rawDataSource]).safeParse(value);
   if (database.success && !database.data.archived && !database.data.in_trash) {
-    return { type: "database", id: database.data.id,
+    return { type: database.data.object, id: database.data.id,
       title: database.data.title.map((entry) => entry.plain_text).join("") || "Untitled", url: database.data.url };
   }
   return null;
@@ -67,6 +68,9 @@ async function call(context: ActionContext, method: "get" | "post" | "patch", pa
       // A missing remote connection after POST/PATCH remains uncertain.
       if (phase === "preflight") throw new NotionProviderDenial(phase, "NOTION_RECONNECT_REQUIRED",
         undefined, true);
+      // PlugFn resolves the connection before entering this adapter. Once a
+      // mutation was attempted, the same raw error cannot prove no effect.
+      if (phase === "write") throw new NotionProviderResponseAmbiguous(true);
       throw error;
     }
     throw notionDenial(error, phase) ?? (phase === "write" ? error
@@ -187,6 +191,7 @@ const update: Action = {
 /** Hide the broad upstream Notion surface. */
 export const omrNotionProvider: Provider = {
   ...notionProvider,
+  headers: { ...notionProvider.headers, "Notion-Version": "2025-09-03" },
   description: "OMR Notion v1 shared content discovery and approved page changes",
   actions: { "connection.verify": verify, "content.search": search, "pages.get": get,
     "pages.create": create, "pages.update": update },

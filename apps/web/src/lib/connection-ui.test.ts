@@ -47,8 +47,23 @@ describe("connection control UI policy", () => {
     expect(notionJourneyGuidance([blocked], "workspace_2", "notion_access_restricted", blocked.id))
       .toBeNull();
     expect(notionJourneyAvailable([blocked, ready], "workspace_2", "expired", blocked.id)).toBe(false);
+    expect(notionJourneyAvailable([{ ...ready, workspaceId: "workspace_2" }],
+      "workspace_2", "expired", blocked.id)).toBe(false);
     expect(notionJourneyGuidance([blocked], "workspace_1", "notion_access_restricted", blocked.id))
       .toContain("Contact Notion support");
+    // An expired catalog without a binding ID cannot identify an alternate.
+    // The overview may still contain the stale selected binding.
+    const stale = { ...ready, selected: true };
+    expect(notionConnectionProviderState(stale, "expired")).toBe("expired");
+    expect(notionJourneyAvailable([stale], "workspace_1", "expired")).toBe(false);
+    expect(connectionActions(stale, "user_admin", "admin", notionConnectionProviderState(stale,
+      "expired")).canReconnect).toBe(true);
+    expect(notionJourneyAvailable([blocked, ready], "workspace_1", "expired")).toBe(false);
+    expect(notionJourneyGuidance([blocked, ready], "workspace_1", null))
+      .toContain("Contact Notion support");
+    expect(notionJourneyGuidance([blocked, { ...ready, selected: true }], "workspace_1", null))
+      .toBeNull();
+    expect(notionJourneyGuidance([blocked, ready], "workspace_2", null)).toBeNull();
   });
 
   it("allows members to select and probe team accounts but reserves lifecycle mutations for admins", () => {

@@ -3,7 +3,10 @@
 OMR publishes `notion.connection.verify`, `notion.content.search`, `notion.pages.get`,
 `notion.pages.create`, and `notion.pages.update` through the same typed catalog,
 workspace binding, and approval contract used by the browser, CLI, and MCP.
-Search returns one cursor page of at most 100 accessible pages and databases.
+Search returns one cursor page of at most 100 accessible pages and data sources.
+OMR pins its Notion action requests to API version `2025-09-03`, which exposes
+each shared database data source as a separate browse-only result. A data source
+ID is not a page or database ID and cannot be used as a v1 write destination.
 `pages.get` reads one accessible page's title and parent. Creation makes one
 plain titled child beneath an explicitly selected accessible page; update
 renames one explicitly selected accessible page. The adapter does not expose
