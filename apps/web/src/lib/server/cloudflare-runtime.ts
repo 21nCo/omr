@@ -36,7 +36,7 @@ import {
 } from "./router.js";
 import { resolveScopedCatalog } from "./scoped-catalog.js";
 import { publicConnections, publicConnectionsAfterMutation } from "./connection-view.js";
-import { linearReconciliationReceipts, publicBrowserApproval, recoverLinearApproval, visibleApprovals } from "./reconciliation-receipts.js";
+import { providerReconciliationReceipts, publicBrowserApproval, recoverProviderApproval, visibleApprovals } from "./reconciliation-receipts.js";
 
 type OMRBindings = Cloudflare.Env & {
   HYPERDRIVE?: { connectionString: string };
@@ -446,6 +446,11 @@ export async function scopedToolIds(
       await authority.recordHealth({ connectionId: bindingId, status: "needs_reauth",
         readiness: "unavailable", reason: `${provider ?? "linear"}_reconnect_required` }).catch(() => undefined);
     },
+    async (bindingId, code) => {
+      missing.add(bindingId);
+      await authority.recordHealth({ connectionId: bindingId, status: "needs_reauth",
+        readiness: "unavailable", reason: code.toLowerCase() });
+    },
   );
   return {
     allowedToolIds,
@@ -803,7 +808,7 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
             now,
             limit: 50,
           }),
-          recoverLinearApproval(activity.approvals, recoveredApprovalId,
+          recoverProviderApproval(activity.approvals, recoveredApprovalId,
             selected.workspace.id, session.actorId, now),
           activity.receipts.listForActor({
             actorUserId: session.actorId,
@@ -813,7 +818,7 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
         ]);
         const approvals = visibleApprovals(recentApprovals, outstandingLinear, recoveredApproval, now);
         const approvalCatalog = await createPlugFnToolCatalog(plugfn.plugfn, configuredProviders(plugfn.plugfn));
-        const reconciliationReceipts = await linearReconciliationReceipts(
+        const reconciliationReceipts = await providerReconciliationReceipts(
           approvals, activity.receipts, selected.workspace.id, session.actorId);
         return {
           actor: { id: session.actorId, email: session.primaryEmail ?? null },

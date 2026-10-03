@@ -4,7 +4,7 @@ const PREFIX = "omr-linear-action-v1:";
 export function linearApprovalNotice(status: string): string {
   switch (status) {
     case "consumed": return "This Linear action already completed. Start a new action to repeat the same change.";
-    case "uncertain": return "This Linear action has an uncertain outcome. Verify it in Linear before reconciliation.";
+    case "uncertain": return "This Linear action has an uncertain outcome. Verify it in Linear, then reconcile its receipt before starting another action.";
     case "pending": return "Linear issue change awaits your approval below. Review the account and target before approving.";
     case "approved": return "This Linear action is approved. Execute it from the approvals list below.";
     case "executing": return "This Linear action is executing. Check its status before requesting another action.";
@@ -58,7 +58,7 @@ export function createLinearActionKeys(makeKey: () => string,
       const approval = await probe(idempotencyKey);
       if (!["consumed", "rejected", "failed", "expired"].includes(approval.status)) {
         throw new Error(approval.status === "uncertain"
-          ? `Verify this uncertain ${provider} action before starting another.`
+          ? `Verify this uncertain ${provider} action and reconcile its receipt before starting another.`
           : `This ${provider} action is still active. Finish or reject it before starting another.`);
       }
       const identity = await fingerprint(toolId, workspaceId, connectionId, params);

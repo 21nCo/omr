@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import { createLinearActionKeys, linearApprovalNotice } from "./linear-action-keys.js";
 
 describe("Linear browser action identity", () => {
+  it("names receipt reconciliation after an uncertain outcome", () => {
+    expect(linearApprovalNotice("uncertain")).toContain("reconcile its receipt");
+  });
   it("distinguishes pending approval, approved execution, and executing states", () => {
     expect(linearApprovalNotice("pending")).toContain("awaits your approval");
     expect(linearApprovalNotice("approved")).toContain("Execute it");

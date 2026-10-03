@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { beginGithubReconnect, createOAuthReviewController } from "$lib/oauth-review.js";
   import { connectionActions, connectionStatusLabel, providerRevocationGuidance } from "$lib/connection-ui.js";
-  import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, linearEffectAbsentAvailable, linearEffectPresentAvailable, providerDisplayState, recoverLinearReconciliation, recoverWorkspaceOverview, selectedLinearAccountId, selectedReadyLinearConnection, selectedReadySlackConnection, selectedSlackAccountId, visibleApprovalCard } from "$lib/workspace-catalog.js";
+  import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, effectAbsentAvailable, effectPresentAvailable, providerDisplayState, recoverProviderReconciliation, recoverWorkspaceOverview, sameSlackPostParams, selectedLinearAccountId, selectedReadyLinearConnection, selectedReadySlackConnection, selectedSlackAccountId, visibleApprovalCard } from "$lib/workspace-catalog.js";
   import { renderApprovalPreview } from "$lib/approval-preview.js";
   import { createLinearActionKeys, linearApprovalNotice } from "$lib/linear-action-keys.js";
   import { slackApprovalNotice } from "$lib/slack-approval-notice.js";
@@ -449,11 +449,13 @@
     } finally { if (generation === slackGeneration) slackBusy = ""; }
   }
 
+  /** Snapshot the visible bot, channel, and message for one approval intent. */
   function slackPostParams() {
     return { workspaceId: slackWorkspace?.id, channelId: slackChannelId,
       senderId: slackWorkspace?.sender.id, text: slackText };
   }
 
+  /** Publish an approval only while its exact form and selected binding remain current. */
   async function slackApproval() {
     const account = slackAccount();
     if (!account || !slackWorkspace || !slackChannelId || slackBusy ||
@@ -474,6 +476,13 @@
       });
       if (generation !== slackGeneration || workspaceId !== selectedWorkspaceId ||
           account.id !== slackAccount()?.id) return;
+      if (!sameSlackPostParams(params, slackPostParams())) {
+        await load();
+        if (generation === slackGeneration) {
+          notice = "The Slack post changed while approval was requested. Review the created approval before requesting another.";
+        }
+        return;
+      }
       recoveredApprovalId = ["pending", "approved", "uncertain"].includes(approval.status) ? approval.id : "";
       automaticApprovalLookup = ["pending", "approved"].includes(approval.status)
         ? { id: approval.id, expiresAt: approval.expiresAt } : null;
@@ -543,7 +552,8 @@
     }
   }
 
-  async function reconcileLinear(approvalId: string, decision: "effect_present" | "effect_absent") {
+  /** Record a verified outcome against the exact uncertain provider receipt. */
+  async function reconcileProvider(approvalId: string, decision: "effect_present" | "effect_absent") {
     const workspaceId = selectedWorkspaceId;
     busy = `reconcile:${approvalId}`;
     clearLinear();
@@ -553,7 +563,7 @@
     const success = decision === "effect_present"
       ? "Recorded that the action happened." : "Recorded that the action did not happen.";
     try {
-      await recoverLinearReconciliation(approvalId, decision,
+      await recoverProviderReconciliation(approvalId, decision,
         () => request<Approval>("/api/approvals/reconcile", {
           method: "POST", headers: { "content-type": "application/json" },
           body: JSON.stringify({ approvalId, decision, workspaceId }),
@@ -1004,7 +1014,7 @@
               {/if}
               {#if slackChannels.length}
                 <label>Channel
-                  <select bind:value={slackChannelId} onchange={() => { slackGeneration++; slackBusy = "";
+                  <select bind:value={slackChannelId} disabled={Boolean(slackBusy)} onchange={() => { slackGeneration++; slackBusy = "";
                     slackMessages = []; slackMessagesCursor = null; slackText = ""; }}>
                     <option value="">Choose a channel</option>
                     {#each slackChannels as entry}<option value={entry.id}>#{entry.name}</option>{/each}
@@ -1032,7 +1042,7 @@
                   {#if slackToolAvailable("slack.messages.post")}
                     <form class="inset" onsubmit={(event) => { event.preventDefault(); void slackApproval(); }}>
                       <strong>Post as bot {slackWorkspace.sender.id} to #{slackChannels.find((entry) => entry.id === slackChannelId)?.name}</strong>
-                      <label>Message<textarea bind:value={slackText} maxlength="4000" required></textarea></label>
+                      <label>Message<textarea bind:value={slackText} maxlength="4000" required disabled={Boolean(slackBusy)}></textarea></label>
                       <button class="primary compact" type="submit" disabled={Boolean(slackBusy) || !slackText.trim()}>
                         Request post approval</button>
                       <button class="quiet compact" type="button" disabled={Boolean(slackBusy)}
@@ -1075,11 +1085,11 @@
                   {#if !approval.browserActionable}
                     <p class="approval-context">Record the verified outcome from the originating CLI or MCP client. This browser session cannot reconcile its grant.</p>
                   {:else}
-                    <button class="quiet compact" disabled={Boolean(busy) || Boolean(error) || loading || !linearEffectPresentAvailable(approval, overview.reconciliationReceipts)}
-                        onclick={() => void reconcileLinear(approval.id, "effect_present")}>I verified the action happened</button>
-                    {#if linearEffectAbsentAvailable(approval, overview.reconciliationReceipts)}
+                    <button class="quiet compact" disabled={Boolean(busy) || Boolean(error) || loading || !effectPresentAvailable(approval, overview.reconciliationReceipts)}
+                        onclick={() => void reconcileProvider(approval.id, "effect_present")}>I verified the action happened</button>
+                    {#if effectAbsentAvailable(approval, overview.reconciliationReceipts)}
                       <button class="danger compact" disabled={Boolean(busy) || Boolean(error) || loading}
-                        onclick={() => void reconcileLinear(approval.id, "effect_absent")}>I verified the action did not happen</button>
+                        onclick={() => void reconcileProvider(approval.id, "effect_absent")}>I verified the action did not happen</button>
                     {:else}
                       <p class="approval-context">The request may still be running. OMR cannot safely record no change or allow a retry for this receipt.</p>
                     {/if}

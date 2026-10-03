@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { ExecutionApproval, ExecutionReceipt } from "@oh-my-router/execution";
 import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "@oh-my-router/execution/testing";
 
-import { createWorkspaceCatalogLoader, linearEffectAbsentAvailable, linearEffectPresentAvailable,
+import { createWorkspaceCatalogLoader, effectAbsentAvailable, effectPresentAvailable,
   type WorkspaceCatalogState } from "../workspace-catalog.js";
-import { linearReconciliationReceipts, publicBrowserApproval, recoverLinearApproval,
+import { providerReconciliationReceipts, publicBrowserApproval, recoverProviderApproval,
   visibleApprovals } from "./reconciliation-receipts.js";
 
 describe("Linear reconciliation history", () => {
@@ -33,8 +33,8 @@ describe("Linear reconciliation history", () => {
         params: {}, manifestHash: "manifest" } as ExecutionApproval;
       const receipts = [{ id: "receipt-A", status: "uncertain",
         errorCode: "provider_response_ambiguous" }];
-      expect(linearEffectPresentAvailable(approval, receipts)).toBe(true);
-      expect(linearEffectAbsentAvailable(approval, receipts)).toBe(true);
+      expect(effectPresentAvailable(approval, receipts)).toBe(true);
+      expect(effectAbsentAvailable(approval, receipts)).toBe(true);
       expect(publicBrowserApproval(approval, null, "alice", "workspace-A").browserActionable).toBe(false);
     },
   );
@@ -61,21 +61,21 @@ describe("Linear reconciliation history", () => {
       expect(page).toHaveLength(50);
       expect(page.some((approval) => approval.id === old.id)).toBe(false);
       const recent = await store.listForActor({ ...actor, limit: 50 });
-      const recovered = await recoverLinearApproval(store, old.id, "workspace-A", "alice", 50);
+      const recovered = await recoverProviderApproval(store, old.id, "workspace-A", "alice", 50);
       const visible = visibleApprovals(recent, page, recovered, 50);
       expect(visible).toHaveLength(51);
       expect(visible.some((approval) => approval.id === old.id)).toBe(true);
       expect(visible.some((approval) => approval.status === "pending" && approval.expiresAt <= 50)).toBe(false);
-      const exact = await linearReconciliationReceipts(visible, receipts, "workspace-A", "alice");
+      const exact = await providerReconciliationReceipts(visible, receipts, "workspace-A", "alice");
       expect(exact.map((receipt) => receipt.id)).toEqual(["receipt-old"]);
-      expect(linearEffectPresentAvailable(old, exact)).toBe(true);
-      expect(linearEffectAbsentAvailable(old, exact)).toBe(true);
-      await expect(recoverLinearApproval(store, old.id, "workspace-B", "alice", 50))
+      expect(effectPresentAvailable(old, exact)).toBe(true);
+      expect(effectAbsentAvailable(old, exact)).toBe(true);
+      await expect(recoverProviderApproval(store, old.id, "workspace-B", "alice", 50))
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
-      await expect(recoverLinearApproval(store, old.id, "workspace-A", "bob", 50))
+      await expect(recoverProviderApproval(store, old.id, "workspace-A", "bob", 50))
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
       member = false;
-      await expect(recoverLinearApproval(store, old.id, "workspace-A", "alice", 50))
+      await expect(recoverProviderApproval(store, old.id, "workspace-A", "alice", 50))
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
     },
   );
@@ -95,17 +95,17 @@ describe("Linear reconciliation history", () => {
       }
       const recent = await store.listForActor({ workspaceId: "workspace-A", actorUserId: "alice", limit: 50 });
       expect(recent.some((item) => item.id === approval.id)).toBe(false);
-      expect(await recoverLinearApproval(store, approval.id, "workspace-A", "alice", 10))
+      expect(await recoverProviderApproval(store, approval.id, "workspace-A", "alice", 10))
         .toMatchObject({ reconciledAs: "effect_present", executionReceiptId: "receipt-old" });
-      await expect(recoverLinearApproval(store, approval.id, "workspace-B", "alice", 10))
+      await expect(recoverProviderApproval(store, approval.id, "workspace-B", "alice", 10))
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
-      await expect(recoverLinearApproval(store, approval.id, "workspace-A", "bob", 10))
+      await expect(recoverProviderApproval(store, approval.id, "workspace-A", "bob", 10))
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
       store.approvals.set(approval.id, { ...approval, status: "failed", reconciledAs: "effect_absent" });
-      expect(await recoverLinearApproval(store, approval.id, "workspace-A", "alice", 10))
+      expect(await recoverProviderApproval(store, approval.id, "workspace-A", "alice", 10))
         .toMatchObject({ status: "failed", reconciledAs: "effect_absent" });
       member = false;
-      await expect(recoverLinearApproval(store, approval.id, "workspace-A", "alice", 10))
+      await expect(recoverProviderApproval(store, approval.id, "workspace-A", "alice", 10))
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
     });
 
@@ -126,7 +126,7 @@ describe("Linear reconciliation history", () => {
     const states: WorkspaceCatalogState<Overview, Catalog>[] = [];
     const load = createWorkspaceCatalogLoader<Overview, Catalog>(async (workspaceId) => {
       const recent = await store.listForActor({ workspaceId, actorUserId: "alice", limit: 50 });
-      const recovered = await recoverLinearApproval(store, approval.id, workspaceId, "alice", 10);
+      const recovered = await recoverProviderApproval(store, approval.id, workspaceId, "alice", 10);
       return { selectedWorkspaceId: workspaceId,
         approvals: visibleApprovals(recent, [], recovered, 10) };
     }, async () => ({ providers: ["github", "linear"] }), (state) => states.push(state));
@@ -145,25 +145,25 @@ describe("Linear reconciliation history", () => {
     const approval = { id: "approval", workspaceId: "workspace-A", actorUserId: "alice",
       toolId: "linear.issues.update", status: "approved", expiresAt: 10 } as ExecutionApproval;
     store.approvals.set(approval.id, approval);
-    await expect(recoverLinearApproval(store, approval.id, "workspace-A", "alice", 10))
+    await expect(recoverProviderApproval(store, approval.id, "workspace-A", "alice", 10))
       .resolves.toBeNull();
     store.approvals.set(approval.id, { ...approval, toolId: "github.issues.update", expiresAt: 100 });
-    await expect(recoverLinearApproval(store, approval.id, "workspace-A", "alice", 10))
+    await expect(recoverProviderApproval(store, approval.id, "workspace-A", "alice", 10))
       .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
     store.approvals.set(approval.id, { ...approval, status: "consumed", expiresAt: 100 });
-    await expect(recoverLinearApproval(store, approval.id, "workspace-A", "alice", 10))
+    await expect(recoverProviderApproval(store, approval.id, "workspace-A", "alice", 10))
       .resolves.toBeNull();
     store.approvals.set(approval.id, { ...approval, status: "consumed", reconciledAs: "effect_absent",
       executionReceiptId: "receipt-old" });
-    await expect(recoverLinearApproval(store, approval.id, "workspace-A", "alice", 10))
+    await expect(recoverProviderApproval(store, approval.id, "workspace-A", "alice", 10))
       .resolves.toBeNull();
     store.approvals.set(approval.id, { ...approval, status: "rejected", reconciledAs: null });
-    await expect(recoverLinearApproval(store, approval.id, "workspace-A", "alice", 10))
+    await expect(recoverProviderApproval(store, approval.id, "workspace-A", "alice", 10))
       .resolves.toBeNull();
     store.approvals.set(approval.id, { ...approval, status: "executing", expiresAt: 0 });
-    await expect(recoverLinearApproval(store, approval.id, "workspace-A", "alice", 10))
+    await expect(recoverProviderApproval(store, approval.id, "workspace-A", "alice", 10))
       .resolves.toMatchObject({ status: "executing" });
-    await expect(recoverLinearApproval(store, approval.id, "workspace-B", "alice", 10))
+    await expect(recoverProviderApproval(store, approval.id, "workspace-B", "alice", 10))
       .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
   });
 
@@ -183,7 +183,7 @@ describe("Linear reconciliation history", () => {
       active -= 1;
       return null;
     };
-    expect(await linearReconciliationReceipts(approvals, store, "workspace-A", "alice")).toEqual([]);
+    expect(await providerReconciliationReceipts(approvals, store, "workspace-A", "alice")).toEqual([]);
     expect(calls).toBe(101);
     expect(maximum).toBeGreaterThan(1);
     expect(maximum).toBeLessThanOrEqual(8);
@@ -204,7 +204,7 @@ describe("Linear reconciliation history", () => {
         return null;
       } finally { active--; }
     };
-    await expect(linearReconciliationReceipts(approvals, store, "workspace-A", "alice"))
+    await expect(providerReconciliationReceipts(approvals, store, "workspace-A", "alice"))
       .rejects.toThrow("receipt read failed");
     expect(active).toBe(0);
   });
@@ -226,16 +226,16 @@ describe("Linear reconciliation history", () => {
     }
     const recent = await store.listForActor({ workspaceId: "workspace-A", actorUserId: "alice", limit: 50 });
     expect(recent.some((receipt) => receipt.id === old.id)).toBe(false);
-    const exact = await linearReconciliationReceipts([approval], store, "workspace-A", "alice");
+    const exact = await providerReconciliationReceipts([approval], store, "workspace-A", "alice");
     expect(exact.map((receipt) => receipt.id)).toEqual([old.id]);
-    expect(linearEffectAbsentAvailable(approval, exact)).toBe(true);
-    expect(linearEffectPresentAvailable(approval, exact)).toBe(true);
-    expect(await linearReconciliationReceipts([approval], store, "workspace-B", "alice")).toEqual([]);
-    expect(await linearReconciliationReceipts([approval], store, "workspace-A", "bob")).toEqual([]);
-    expect(await linearReconciliationReceipts([{ ...approval, id: "approval-other" }],
+    expect(effectAbsentAvailable(approval, exact)).toBe(true);
+    expect(effectPresentAvailable(approval, exact)).toBe(true);
+    expect(await providerReconciliationReceipts([approval], store, "workspace-B", "alice")).toEqual([]);
+    expect(await providerReconciliationReceipts([approval], store, "workspace-A", "bob")).toEqual([]);
+    expect(await providerReconciliationReceipts([{ ...approval, id: "approval-other" }],
       store, "workspace-A", "alice")).toEqual([]);
     member = false;
-    expect(await linearReconciliationReceipts([approval], store, "workspace-A", "alice")).toEqual([]);
+    expect(await providerReconciliationReceipts([approval], store, "workspace-A", "alice")).toEqual([]);
   });
 
   it("does not offer a no-effect decision for absent or ineligible receipts", async () => {
@@ -243,19 +243,19 @@ describe("Linear reconciliation history", () => {
     const approval: Pick<ExecutionApproval, "id" | "status" | "toolId" | "executionReceiptId"> = {
       id: "approval-one", status: "uncertain", toolId: "linear.issues.create",
       executionReceiptId: "execution-one" };
-    expect(await linearReconciliationReceipts([approval], store, "workspace-A", "alice")).toEqual([]);
+    expect(await providerReconciliationReceipts([approval], store, "workspace-A", "alice")).toEqual([]);
     const receipt = { id: approval.executionReceiptId, workspaceId: "workspace-A", actorUserId: "alice",
       approvalId: approval.id, status: "uncertain", errorCode: "provider_outcome_unknown" } as ExecutionReceipt;
     store.receipts.set(receipt.id, receipt);
-    const exact = await linearReconciliationReceipts([approval], store, "workspace-A", "alice");
-    expect(linearEffectAbsentAvailable(approval, exact)).toBe(false);
+    const exact = await providerReconciliationReceipts([approval], store, "workspace-A", "alice");
+    expect(effectAbsentAvailable(approval, exact)).toBe(false);
     store.receipts.set(receipt.id, { ...receipt, status: "running",
       errorCode: "provider_response_ambiguous" });
-    expect(linearEffectAbsentAvailable(approval,
-      await linearReconciliationReceipts([approval], store, "workspace-A", "alice"))).toBe(false);
-    expect(linearEffectPresentAvailable(approval,
-      await linearReconciliationReceipts([approval], store, "workspace-A", "alice"))).toBe(true);
-    expect(await linearReconciliationReceipts([{ ...approval, status: "consumed" }],
+    expect(effectAbsentAvailable(approval,
+      await providerReconciliationReceipts([approval], store, "workspace-A", "alice"))).toBe(false);
+    expect(effectPresentAvailable(approval,
+      await providerReconciliationReceipts([approval], store, "workspace-A", "alice"))).toBe(true);
+    expect(await providerReconciliationReceipts([{ ...approval, status: "consumed" }],
       store, "workspace-A", "alice")).toEqual([]);
   });
 });

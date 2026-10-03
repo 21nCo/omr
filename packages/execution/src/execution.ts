@@ -606,7 +606,7 @@ export class ExecutionService {
     return approval;
   }
 
-  /** Record an actor's explicit provider-side decision for an uncertain Linear write. */
+  /** Record an actor's verified provider-side decision for an uncertain Linear or Slack write. */
   async reconcileUncertain(principal: ExecutionPrincipal, approvalId: string,
     decision: "effect_present" | "effect_absent"): Promise<ExecutionApproval> {
     const approval = await this.approvalStatus(principal, approvalId);
@@ -1087,6 +1087,18 @@ interface ConfirmedDispatchFailure {
   error: Error;
 }
 
+/** Only explicit provider denials prove a Slack or Linear dispatch failed. */
+function confirmedProviderDenial(error: unknown, manifest: ToolManifest,
+  receiptId: string): ConfirmedDispatchFailure | null {
+  if (manifest.provider === "linear" && error instanceof LinearProviderDenial) {
+    return { code: `linear_${error.phase}_denied`, error: new LinearExecutionError(receiptId, error) };
+  }
+  if (manifest.provider === "slack" && error instanceof SlackProviderDenial) {
+    return { code: `slack_${error.phase}_denied`, error: new SlackExecutionError(receiptId, error) };
+  }
+  return null;
+}
+
 /** A wrapped GitHub preflight proves the comment POST was never entered. */
 function isMissingGithubCommentPreflight(error: unknown, manifest: ToolManifest): boolean {
   return manifest.id === "github.issues.commentPublic" &&
@@ -1116,13 +1128,7 @@ function confirmedDispatchFailure(error: unknown, manifest: ToolManifest,
   if (manifest.id === "github.issues.commentPublic" && error instanceof ConfirmedGitHubWriteRejection) {
     return { code: "github_write_rejected", error: new GitHubWriteRejectedError(receiptId, error.failure) };
   }
-  if (manifest.provider === "linear" && error instanceof LinearProviderDenial) {
-    return { code: `linear_${error.phase}_denied`, error: new LinearExecutionError(receiptId, error) };
-  }
-  if (manifest.provider === "slack" && error instanceof SlackProviderDenial) {
-    return { code: `slack_${error.phase}_denied`, error: new SlackExecutionError(receiptId, error) };
-  }
-  return null;
+  return confirmedProviderDenial(error, manifest, receiptId);
 }
 
 /** Bind idempotency to the exact client grant or signed-in web actor. */

@@ -183,6 +183,14 @@ function normalizeLabel(value: string): string {
   return normalized;
 }
 
+/** Reject custom Linear and Slack scope lists that bypass their selected tier. */
+function assertTierScopes(provider: string, supplied: string[] | undefined,
+  expected: string[] | undefined): void {
+  if (!supplied || (provider !== "linear" && provider !== "slack")) return;
+  if (supplied.length === expected?.length && expected.every((scope) => supplied.includes(scope))) return;
+  throw new ConnectionInputError(`${provider === "linear" ? "Linear" : "Slack"} scopes must match the selected access tier`);
+}
+
 function ownerFor(input: {
   actorUserId: string;
   workspaceId: string;
@@ -341,16 +349,7 @@ export class PlugFnConnectionOrchestrator {
     if (provider === "github") defaultScopes = githubScopes(input.githubAccess ?? "profile");
     if (provider === "linear") defaultScopes = linearScopes(input.linearAccess ?? "read");
     if (provider === "slack") defaultScopes = slackScopes(input.slackAccess ?? "discover");
-    if (provider === "linear" && input.scopes &&
-        (input.scopes.length !== defaultScopes?.length ||
-          defaultScopes.some((scope) => !input.scopes?.includes(scope)))) {
-      throw new ConnectionInputError("Linear scopes must match the selected access tier");
-    }
-    if (provider === "slack" && input.scopes &&
-        (input.scopes.length !== defaultScopes?.length ||
-          defaultScopes.some((scope) => !input.scopes?.includes(scope)))) {
-      throw new ConnectionInputError("Slack scopes must match the selected access tier");
-    }
+    assertTierScopes(provider, input.scopes, defaultScopes);
     const scopes = input.scopes ?? defaultScopes;
     await this.authority.authorizeInstall(input);
     this.assertConnectable(provider, "oauth");

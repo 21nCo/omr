@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, linearEffectAbsentAvailable, linearEffectPresentAvailable,
-  recoverLinearReconciliation, recoverWorkspaceOverview, providerDisplayState, visibleApprovalCard,
+import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, effectAbsentAvailable, effectPresentAvailable,
+  recoverProviderReconciliation, recoverWorkspaceOverview, providerDisplayState, visibleApprovalCard,
   selectedLinearAccountId, selectedReadyLinearConnection,
   type WorkspaceCatalogState } from "./workspace-catalog.js";
 
@@ -153,10 +153,10 @@ describe("workspace catalog loading", () => {
     "recovers a lost %s browser response by authenticated exact-ID status", async (decision) => {
       const status = decision === "effect_present" ? "consumed" : "failed";
       const read = async () => ({ id: "approval-old", status, reconciledAs: decision });
-      await expect(recoverLinearReconciliation("approval-old", decision,
+      await expect(recoverProviderReconciliation("approval-old", decision,
         async () => { throw new TypeError("response lost after commit"); }, read))
         .resolves.toMatchObject({ id: "approval-old", status, reconciledAs: decision });
-      await expect(recoverLinearReconciliation("approval-old", decision,
+      await expect(recoverProviderReconciliation("approval-old", decision,
         async () => ({ id: "approval-other", status, reconciledAs: decision }), read))
         .resolves.toMatchObject({ id: "approval-old" });
       for (const invalid of [
@@ -164,11 +164,11 @@ describe("workspace catalog loading", () => {
         { id: "approval-old", status: "uncertain", reconciledAs: decision },
         { id: "approval-old", status, reconciledAs: decision === "effect_present" ? "effect_absent" : "effect_present" },
       ]) {
-        await expect(recoverLinearReconciliation("approval-old", decision,
+        await expect(recoverProviderReconciliation("approval-old", decision,
           async () => { throw new TypeError("response lost after commit"); }, async () => invalid))
           .rejects.toThrow("Reconciliation is unconfirmed");
       }
-      await expect(recoverLinearReconciliation("approval-old", decision,
+      await expect(recoverProviderReconciliation("approval-old", decision,
         async () => { throw new TypeError("response lost after commit"); },
         async () => { throw new Error("membership revoked"); }))
         .rejects.toThrow("Reconciliation is unconfirmed");
@@ -176,24 +176,24 @@ describe("workspace catalog loading", () => {
   );
   it("offers no-effect reconciliation only for an observed completed ambiguous response", () => {
     const approval = { executionReceiptId: "receipt-A" };
-    expect(linearEffectAbsentAvailable(approval, [{ id: "receipt-A",
+    expect(effectAbsentAvailable(approval, [{ id: "receipt-A",
       status: "uncertain", errorCode: "provider_outcome_unknown" }])).toBe(false);
-    expect(linearEffectAbsentAvailable(approval, [{ id: "receipt-A",
+    expect(effectAbsentAvailable(approval, [{ id: "receipt-A",
       status: "uncertain", errorCode: "provider_response_ambiguous" }])).toBe(true);
-    expect(linearEffectAbsentAvailable(approval, [{ id: "receipt-B",
+    expect(effectAbsentAvailable(approval, [{ id: "receipt-B",
       status: "uncertain", errorCode: "provider_response_ambiguous" }])).toBe(false);
-    expect(linearEffectAbsentAvailable(approval, [{ id: "receipt-A",
+    expect(effectAbsentAvailable(approval, [{ id: "receipt-A",
       status: "running", errorCode: "provider_response_ambiguous" }])).toBe(false);
-    expect(linearEffectAbsentAvailable(approval, [])).toBe(false);
+    expect(effectAbsentAvailable(approval, [])).toBe(false);
   });
 
   it("offers effect-present only with the exact running or uncertain receipt", () => {
     const approval = { executionReceiptId: "receipt-A" };
-    expect(linearEffectPresentAvailable(approval, [])).toBe(false);
-    expect(linearEffectPresentAvailable(approval, [{ id: "receipt-B", status: "running" }])).toBe(false);
-    expect(linearEffectPresentAvailable(approval, [{ id: "receipt-A", status: "failed" }])).toBe(false);
-    expect(linearEffectPresentAvailable(approval, [{ id: "receipt-A", status: "running" }])).toBe(true);
-    expect(linearEffectPresentAvailable(approval, [{ id: "receipt-A", status: "uncertain" }])).toBe(true);
+    expect(effectPresentAvailable(approval, [])).toBe(false);
+    expect(effectPresentAvailable(approval, [{ id: "receipt-B", status: "running" }])).toBe(false);
+    expect(effectPresentAvailable(approval, [{ id: "receipt-A", status: "failed" }])).toBe(false);
+    expect(effectPresentAvailable(approval, [{ id: "receipt-A", status: "running" }])).toBe(true);
+    expect(effectPresentAvailable(approval, [{ id: "receipt-A", status: "uncertain" }])).toBe(true);
   });
 
   it("clears a Linear issue selected under another account during a same-workspace refresh", async () => {

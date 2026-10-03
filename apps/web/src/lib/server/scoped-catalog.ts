@@ -12,6 +12,7 @@ export async function resolveScopedCatalog(
   remoteScopes: (connectionId: string, provider: string) => Promise<readonly string[] | undefined>,
   onRemoteMissing: (bindingId: string) => Promise<void>,
   onReconnectRequired?: (bindingId: string, provider?: string) => Promise<void>,
+  onPermanentDenial?: (bindingId: string, code: "SLACK_PERMISSION_DENIED" | "SLACK_WORKSPACE_MISMATCH") => Promise<void>,
 ): Promise<Set<string>> {
   return usableToolIds(catalog, providers, async (provider) => {
     let binding: { id: string; providerConnectionId: string };
@@ -25,7 +26,7 @@ export async function resolveScopedCatalog(
       return await remoteScopes(binding.providerConnectionId, provider);
     } catch (error) {
       if (await providerProofUnavailable(provider, binding.id, error,
-        onRemoteMissing, onReconnectRequired)) return null;
+        onRemoteMissing, onReconnectRequired, onPermanentDenial)) return null;
       throw error;
     }
   });
@@ -34,18 +35,22 @@ export async function resolveScopedCatalog(
 /** Contain provider-local proof failures and update a revoked binding. */
 async function providerProofUnavailable(provider: string, bindingId: string, error: unknown,
   onRemoteMissing: (bindingId: string) => Promise<void>,
-  onReconnectRequired?: (bindingId: string, provider?: string) => Promise<void>): Promise<boolean> {
+  onReconnectRequired?: (bindingId: string, provider?: string) => Promise<void>,
+  onPermanentDenial?: (bindingId: string, code: "SLACK_PERMISSION_DENIED" | "SLACK_WORKSPACE_MISMATCH") => Promise<void>): Promise<boolean> {
   if (isMissingRemoteConnection(error)) {
     await onRemoteMissing(bindingId);
     return true;
   }
   if (provider === "github") return githubProofUnavailable(error);
   if (provider === "slack") {
-    if (error instanceof SlackProviderDenial && error.code === "SLACK_RECONNECT_REQUIRED") {
-      await onReconnectRequired?.(bindingId, provider);
+    if (error instanceof SlackProviderDenial) {
+      if (error.code === "SLACK_RECONNECT_REQUIRED") await onReconnectRequired?.(bindingId, provider);
+      if (error.code === "SLACK_PERMISSION_DENIED" || error.code === "SLACK_WORKSPACE_MISMATCH") {
+        await onPermanentDenial?.(bindingId, error.code);
+      }
       return true;
     }
-    return error instanceof SlackProviderDenial || githubProofUnavailable(error);
+    return githubProofUnavailable(error);
   }
   if (provider !== "linear") return false;
   if (error instanceof LinearProviderDenial && error.code === "LINEAR_RECONNECT_REQUIRED") {

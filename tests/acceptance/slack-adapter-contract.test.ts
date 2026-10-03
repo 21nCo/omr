@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryAdapter, plugFn } from "plugfn";
-import { createPlugFnToolCatalog, hasRequiredScopes } from "@oh-my-router/tools";
+import { createPlugFnToolCatalog, hasRequiredScopes, slackDenial, SlackProviderDenial } from "@oh-my-router/tools";
 import { omrSlackProvider, verifiedSlackScopes } from "@oh-my-router/plugfn-runtime";
 import { ConnectionAuthority, PlugFnConnectionOrchestrator } from "@oh-my-router/connections";
 import { MemoryConnectionBindingStore } from "@oh-my-router/connections/testing";
@@ -8,8 +8,8 @@ import { WorkspaceAuthority } from "@oh-my-router/identity";
 import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
 import { ExecutionService, SlackExecutionError } from "@oh-my-router/execution";
 import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "@oh-my-router/execution/testing";
-import { createProviderIntegrationConfig } from "../../apps/web/src/lib/server/cloudflare-runtime.js";
-import { selectedReadySlackConnection } from "../../apps/web/src/lib/workspace-catalog.js";
+import { createProviderIntegrationConfig, scopedToolIds } from "../../apps/web/src/lib/server/cloudflare-runtime.js";
+import { sameSlackPostParams, selectedReadySlackConnection, selectedSlackAccountId } from "../../apps/web/src/lib/workspace-catalog.js";
 import { resolveScopedCatalog } from "../../apps/web/src/lib/server/scoped-catalog.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -85,6 +85,51 @@ async function executionFixture() {
 }
 
 describe("slack-adapter-contract", () => {
+  it("classifies definite Slack codes without treating inherited object names as denials", () => {
+    expect(slackDenial({ data: { error: "missing_scope" } }, "preflight")?.code)
+      .toBe("SLACK_PERMISSION_DENIED");
+    expect(slackDenial({ data: { error: "invalid_arguments" } }, "write")?.code)
+      .toBe("SLACK_POST_REJECTED");
+    expect(slackDenial({ data: { error: "invalid_arguments" } }, "read")?.code)
+      .toBe("SLACK_QUERY_REJECTED");
+    expect(slackDenial({ data: { error: "toString" } }, "write")).toBeNull();
+  });
+  it.each(["SLACK_PERMISSION_DENIED", "SLACK_WORKSPACE_MISMATCH"] as const)(
+    "persists %s proof failure and hides Slack in the same catalog response", async (code) => {
+      const { catalog, connections, binding, principal, workspace } = await executionFixture();
+      const runtime = { providers: { get: () => omrSlackProvider }, config: { integrations: { slack: {} } },
+        action: vi.fn(async () => { throw new SlackProviderDenial("read", code); }),
+        connections: { get: async () => ({ scopes: ["channels:read"] }) } };
+      const result = await scopedToolIds(catalog, runtime as never, connections as never,
+        principal, workspace.id, [binding]);
+      expect([...result.allowedToolIds]).toEqual([]);
+      expect(result.providers.find((entry) => entry.provider === "slack")?.state).toBe("expired");
+      expect(await connections.getAccessible("alice", binding.id)).toMatchObject({
+        status: "needs_reauth", readiness: "unavailable", healthReason: code.toLowerCase(),
+      });
+      expect(runtime.action).toHaveBeenCalledTimes(1);
+    });
+
+  it.each(["SLACK_RATE_LIMITED", "SLACK_QUERY_REJECTED"] as const)(
+    "keeps a %s catalog proof failure retryable without changing binding health", async (code) => {
+      const { catalog, connections, binding, principal, workspace } = await executionFixture();
+      const runtime = { providers: { get: () => omrSlackProvider }, config: { integrations: { slack: {} } },
+        action: vi.fn(async () => { throw new SlackProviderDenial("read", code); }),
+        connections: { get: async () => ({ scopes: ["channels:read"] }) } };
+      const result = await scopedToolIds(catalog, runtime as never, connections as never,
+        principal, workspace.id, [binding]);
+      expect([...result.allowedToolIds]).toEqual([]);
+      expect(result.providers.find((entry) => entry.provider === "slack")?.state).toBe("ready");
+      expect(await connections.getAccessible("alice", binding.id)).toMatchObject({
+        status: "active", readiness: "ready", healthReason: null,
+      });
+      runtime.action.mockResolvedValueOnce({ id: teamA, name: "Selected",
+        sender: { type: "bot", id: botA, botId: "B12345678" },
+        verifiedScopes: ["channels:read"] });
+      const retry = await scopedToolIds(catalog, runtime as never, connections as never,
+        principal, workspace.id, [binding]);
+      expect(retry.allowedToolIds.has("slack.channels.list")).toBe(true);
+    });
   it("runs OAuth, live scope proof and approval through PlugFn without an early Slack post", async () => {
     const calls: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -335,7 +380,7 @@ describe("slack-adapter-contract", () => {
       .rejects.toMatchObject({ code: "SLACK_CHANNEL_UNAVAILABLE" });
     await expect(actions["messages.post"]!.execute(post, slack.context))
       .rejects.toMatchObject({ code: "SLACK_CHANNEL_UNAVAILABLE" });
-    expect(slack.get.mock.calls.some(([url]) => url.endsWith("/conversations.history"))).toBe(true);
+    expect(slack.get.mock.calls.filter(([url]) => url.endsWith("/conversations.history"))).toHaveLength(1);
     expect(slack.messages()).toHaveLength(0);
     joined = true;
     expect((await actions["messages.post"]!.execute(post, slack.context)).channel)
@@ -546,18 +591,32 @@ describe("slack-adapter-contract", () => {
     slack.get.mockResolvedValueOnce({ data: { ok: true, channel: localChannel } });
     slack.get.mockResolvedValueOnce({ data: { ok: true, messages: [
       { ts: "1.0", text: "Visible", user: botA },
-      { ts: "2.0", type: "message", subtype: "channel_join", user: botA },
+      { ts: "2.0", type: "message", subtype: "channel_join", text: "A user joined", user: botA },
       { ts: "3.0", blocks: [{ type: "section" }] },
       { ts: "4.0", text: "" },
+      { ts: "5.0", text: "Bot reply", subtype: "bot_message" },
+      { ts: "6.0", text: "Thread notice", subtype: "thread_broadcast" },
     ], response_metadata: { next_cursor: "later" } } });
     expect(await omrSlackProvider.actions["messages.list"]!.execute({
       workspaceId: teamA, channelId: channelA, cursor: "first",
     }, slack.context)).toMatchObject({ channel: { id: channelA },
-      messages: [{ ts: "1.0", text: "Visible", user: botA }, { ts: "4.0", text: "" }],
+      messages: [{ ts: "1.0", text: "Visible", user: botA },
+        { ts: "5.0", text: "Bot reply" }, { ts: "6.0", text: "Thread notice" }],
       nextCursor: "later" });
     expect(slack.get.mock.calls[1]?.[1]).toMatchObject({ params: { channel: channelA,
       cursor: "first" } });
     expect(slack.get).toHaveBeenCalledTimes(2);
+  });
+
+  it("accepts an opaque provider cursor beyond the old input cap", async () => {
+    const slack = slackFixture();
+    const opaque = "x".repeat(750);
+    const result = await omrSlackProvider.actions["channels.list"]!.execute({
+      workspaceId: teamA, cursor: opaque,
+    }, slack.context);
+    expect(result.channels).toHaveLength(1);
+    expect(slack.get.mock.calls.find(([url]) => url.endsWith("/conversations.list"))?.[1])
+      .toMatchObject({ params: { cursor: opaque } });
   });
 
   it("retains valid extra Slack scopes while ignoring malformed header entries", async () => {
@@ -607,7 +666,7 @@ describe("slack-adapter-contract", () => {
   });
 
   it("hides Slack browser controls during a workspace or account transition", () => {
-    const account = { provider: "slack", selected: true, status: "active", readiness: "ready",
+    const account = { id: "binding-a", provider: "slack", selected: true, status: "active", readiness: "ready",
       workspaceId: "omr-a" };
     const state = { overview: { selectedWorkspaceId: "omr-a", connections: [account] },
       selectedWorkspaceId: "omr-a", loading: false, busy: "" };
@@ -616,5 +675,17 @@ describe("slack-adapter-contract", () => {
     expect(selectedReadySlackConnection({ ...state, busy: "select:slack" })).toBeUndefined();
     expect(selectedReadySlackConnection({ ...state, overview: { ...state.overview,
       connections: [{ ...account, status: "revoked" }] } })).toBeUndefined();
+    expect(selectedSlackAccountId(state.overview, "omr-a")).toBe("binding-a");
+    expect(selectedSlackAccountId({ ...state.overview, connections: [{ ...account,
+      status: "needs_reauth", readiness: "unavailable" }] }, "omr-a")).toBeNull();
+  });
+
+  it("fences an in-flight Slack approval against every changed form target", () => {
+    const requested = { workspaceId: teamA, channelId: channelA, senderId: botA, text: "Ready" };
+    expect(sameSlackPostParams(requested, { ...requested })).toBe(true);
+    expect(sameSlackPostParams(requested, { ...requested, text: "Changed" })).toBe(false);
+    expect(sameSlackPostParams(requested, { ...requested, channelId: channelB })).toBe(false);
+    expect(sameSlackPostParams(requested, { ...requested, workspaceId: teamB })).toBe(false);
+    expect(sameSlackPostParams(requested, { ...requested, senderId: "U87654321" })).toBe(false);
   });
 });

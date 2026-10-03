@@ -8,6 +8,7 @@ describe("Slack post approval notice", () => {
     expect(slackApprovalNotice("approved")).toContain("Execute it from the approvals list");
     expect(slackApprovalNotice("executing")).toContain("is executing");
     expect(slackApprovalNotice("uncertain")).toContain("Check the channel");
+    expect(slackApprovalNotice("uncertain")).toContain("reconcile its receipt");
     expect(slackApprovalNotice("consumed")).toContain("already completed");
     expect(slackApprovalNotice("rejected")).toContain("was rejected");
     expect(slackApprovalNotice("failed")).toContain("failed");

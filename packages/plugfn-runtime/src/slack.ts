@@ -6,14 +6,23 @@ import { SlackProviderDenial, SlackProviderResponseAmbiguous, slackDenial } from
 const workspaceId = z.string().regex(/^T[A-Z0-9]{8,}$/).describe("Slack workspace ID from workspace.get");
 const channelId = z.string().regex(/^[CG][A-Z0-9]{8,}$/).describe("Public channel ID from channels.list");
 const senderId = z.string().regex(/^[UW][A-Z0-9]{8,}$/).describe("Bot user ID from workspace.get");
-const cursor = z.string().min(1).max(500).optional();
+const cursor = z.string().min(1).optional();
 const channel = z.object({ id: channelId, name: z.string().min(1), is_member: z.literal(true),
   is_private: z.literal(false), is_archived: z.literal(false), is_shared: z.literal(false),
   is_ext_shared: z.literal(false), is_pending_ext_shared: z.literal(false).optional() });
 const channelInfo = channel.extend({ is_member: z.boolean().optional() });
 const identity = z.object({ ok: z.literal(true), team_id: workspaceId, team: z.string().min(1),
   user_id: senderId, bot_id: z.string().min(1) });
-const displayableMessage = z.object({ ts: z.string(), text: z.string(), user: z.string().optional() });
+const displayableMessage = z.object({ ts: z.string(), text: z.string().min(1).regex(/\S/),
+  user: z.string().optional(), subtype: z.enum(["bot_message", "thread_broadcast"]).optional() });
+
+/** Exclude Slack system events while projecting only fields shown as messages. */
+function displayMessage(value: unknown): { ts: string; text: string; user?: string } | null {
+  const parsed = displayableMessage.safeParse(value);
+  if (!parsed.success) return null;
+  const { ts, text, user } = parsed.data;
+  return { ts, text, ...(user ? { user } : {}) };
+}
 
 function contract(effect: "read" | "write", scopes: string[], resources: ActionContract["resources"] = [],
   paginated = false): ActionContract {
@@ -23,10 +32,13 @@ function contract(effect: "read" | "write", scopes: string[], resources: ActionC
     retry: effect === "read" ? "safe" : "never" };
 }
 
+/** Read only a well formed token scope header from the live Slack response. */
 function scopes(headers: unknown): string[] | null {
-  const value = headers instanceof Headers ? headers.get("x-oauth-scopes") :
-    headers && typeof headers === "object"
-      ? Object.entries(headers).find(([key]) => key.toLowerCase() === "x-oauth-scopes")?.[1] : null;
+  let value: unknown = null;
+  if (headers instanceof Headers) value = headers.get("x-oauth-scopes");
+  else if (headers && typeof headers === "object") {
+    value = Object.entries(headers).find(([key]) => key.toLowerCase() === "x-oauth-scopes")?.[1];
+  }
   if (typeof value !== "string") return null;
   const parsed = value.split(",").map((scope) => scope.trim());
   return parsed.filter((scope) => /^[a-z][a-z0-9_.-]*:[a-z][a-z0-9_.-]*$/.test(scope));
@@ -87,27 +99,30 @@ async function selectedChannel(context: ActionContext, target: string, botUserId
     throw new SlackProviderDenial(phase, "SLACK_CHANNEL_UNAVAILABLE");
   }
   if (parsed.data.channel.is_member === undefined) {
-    // Slack can omit is_member from conversations.info. Search a bounded number
-    // of current member pages before allowing a read or an approved post.
-    const seen = new Set<string>();
-    let next: string | undefined;
-    let joined = false;
-    for (let page = 0; page < 20; page += 1) {
-      const { body: membersBody } = await call(context, "conversations.members",
-        { channel: target, limit: 200, ...(next ? { cursor: next } : {}) }, phase);
-      const members = z.object({ members: z.array(z.string()),
-        response_metadata: z.object({ next_cursor: z.string().optional() }).optional() })
-        .safeParse(membersBody);
-      if (!members.success) throw new SlackProviderDenial(phase, "SLACK_CHANNEL_UNAVAILABLE");
-      if (members.data.members.includes(botUserId)) { joined = true; break; }
-      next = members.data.response_metadata?.next_cursor || undefined;
-      if (!next) break;
-      if (next.length > 500 || seen.has(next)) break;
-      seen.add(next);
+    if (!await memberInBoundedPages(context, target, botUserId, phase)) {
+      throw new SlackProviderDenial(phase, "SLACK_CHANNEL_UNAVAILABLE");
     }
-    if (!joined) throw new SlackProviderDenial(phase, "SLACK_CHANNEL_UNAVAILABLE");
   }
   return { ...parsed.data.channel, is_member: true as const };
+}
+
+/** Fail closed after twenty member pages, a malformed page, or a repeated cursor. */
+async function memberInBoundedPages(context: ActionContext, target: string, botUserId: string,
+  phase: SlackProviderDenial["phase"]): Promise<boolean> {
+  const seen = new Set<string>();
+  let next: string | undefined;
+  for (let page = 0; page < 20; page += 1) {
+    const { body } = await call(context, "conversations.members",
+      { channel: target, limit: 200, ...(next ? { cursor: next } : {}) }, phase);
+    const members = z.object({ members: z.array(z.string()),
+      response_metadata: z.object({ next_cursor: z.string().optional() }).optional() }).safeParse(body);
+    if (!members.success) return false;
+    if (members.data.members.includes(botUserId)) return true;
+    next = members.data.response_metadata?.next_cursor || undefined;
+    if (!next || seen.has(next)) return false;
+    seen.add(next);
+  }
+  return false;
 }
 
 const workspaceGet: Action = {
@@ -163,8 +178,8 @@ const messagesList: Action = {
       .safeParse(body);
     if (!parsed.success) throw new SlackProviderDenial("read", "SLACK_QUERY_REJECTED");
     return { channel: selected, messages: parsed.data.messages.flatMap((entry) => {
-      const message = displayableMessage.safeParse(entry);
-      return message.success ? [message.data] : [];
+      const message = displayMessage(entry);
+      return message ? [message] : [];
     }),
       nextCursor: parsed.data.response_metadata?.next_cursor || null };
   },

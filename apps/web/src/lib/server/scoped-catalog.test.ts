@@ -191,4 +191,30 @@ describe("workspace-scoped discovery and manifest grants", () => {
     expect([...visible]).toEqual(["github.read"]);
     expect(reconnect).toHaveBeenCalledExactlyOnceWith("binding_slack", "slack");
   });
+
+  it("persists permanent Slack proof denials and keeps transient failures retryable", async () => {
+    const tools = await ToolCatalog.create({ providers: { list: () => ["github", "slack"].map((name) => ({
+      name, displayName: name, version: "1.0.0", description: "",
+      actions: { read: { name: "read", displayName: "Read", description: "Read resource",
+        parameters: {}, returns: {}, contract: { version: "1.0.0", effect: "read" as const,
+          requiredScopes: ["read"], resources: [], sensitiveKeys: [],
+          pagination: { kind: "none" as const }, retry: "never" as const } } },
+    })) } }, (schema) => schema as Record<string, never>);
+    const statuses = providers.map((entry) => ({ ...entry,
+      provider: entry.provider === "linear" ? "slack" : entry.provider }));
+    for (const code of ["SLACK_PERMISSION_DENIED", "SLACK_WORKSPACE_MISMATCH",
+      "SLACK_RATE_LIMITED", "SLACK_QUERY_REJECTED"] as const) {
+      const permanent = vi.fn(async () => {});
+      const visible = await resolveScopedCatalog(tools, statuses,
+        async (provider) => ({ id: `binding_${provider}`, providerConnectionId: provider }),
+        async (provider) => {
+          if (provider === "slack") throw new SlackProviderDenial("read", code);
+          return ["read"];
+        }, async () => {}, async () => {}, permanent);
+      expect([...visible]).toEqual(["github.read"]);
+      if (code === "SLACK_PERMISSION_DENIED" || code === "SLACK_WORKSPACE_MISMATCH") {
+        expect(permanent).toHaveBeenCalledExactlyOnceWith("binding_slack", code);
+      } else expect(permanent).not.toHaveBeenCalled();
+    }
+  });
 });

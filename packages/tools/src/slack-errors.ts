@@ -45,6 +45,31 @@ function retryAfter(error: object): number | undefined {
   return Number.isSafeInteger(number) ? number : undefined;
 }
 
+const apiDenials: Record<string, SlackProviderDenial["code"]> = {
+  invalid_auth: "SLACK_RECONNECT_REQUIRED", token_expired: "SLACK_RECONNECT_REQUIRED",
+  token_revoked: "SLACK_RECONNECT_REQUIRED", account_inactive: "SLACK_RECONNECT_REQUIRED",
+  not_authed: "SLACK_RECONNECT_REQUIRED", missing_scope: "SLACK_PERMISSION_DENIED",
+  not_allowed_token_type: "SLACK_PERMISSION_DENIED", restricted_action: "SLACK_PERMISSION_DENIED",
+  no_permission: "SLACK_PERMISSION_DENIED", channel_not_found: "SLACK_CHANNEL_UNAVAILABLE",
+  not_in_channel: "SLACK_CHANNEL_UNAVAILABLE", is_archived: "SLACK_CHANNEL_UNAVAILABLE",
+  msg_too_long: "SLACK_POST_REJECTED", no_text: "SLACK_POST_REJECTED",
+  invalid_text: "SLACK_POST_REJECTED", invalid_arguments: "SLACK_POST_REJECTED",
+};
+
+/** Preserve HTTP priority, then classify Slack's HTTP 200 ok:false API code. */
+function denialCode(status: unknown, providerCode: string | undefined,
+  phase: SlackProviderDenial["phase"]): SlackProviderDenial["code"] | undefined {
+  if (status === 429 || providerCode === "ratelimited") return "SLACK_RATE_LIMITED";
+  if (status === 401) return "SLACK_RECONNECT_REQUIRED";
+  if (status === 403) return "SLACK_PERMISSION_DENIED";
+  const mapped = providerCode && Object.hasOwn(apiDenials, providerCode) ? apiDenials[providerCode] : undefined;
+  if (mapped === "SLACK_POST_REJECTED") {
+    return phase === "write" ? mapped : "SLACK_QUERY_REJECTED";
+  }
+  if (mapped) return mapped;
+  return phase === "write" ? undefined : "SLACK_QUERY_REJECTED";
+}
+
 /** Slack uses HTTP 200 with ok:false for most definite API denials. */
 export function slackDenial(error: unknown, phase: SlackProviderDenial["phase"]): SlackProviderDenial | null {
   if (error instanceof SlackProviderDenial) return error;
@@ -53,16 +78,6 @@ export function slackDenial(error: unknown, phase: SlackProviderDenial["phase"])
   const status = "status" in error ? error.status : undefined;
   const body = "data" in error && error.data && typeof error.data === "object" ? error.data : error;
   const providerCode = "error" in body && typeof body.error === "string" ? body.error : undefined;
-  let code: SlackProviderDenial["code"] | undefined;
-  if (status === 429 || providerCode === "ratelimited") code = "SLACK_RATE_LIMITED";
-  else if (status === 401 || ["invalid_auth", "token_expired", "token_revoked", "account_inactive", "not_authed"].includes(providerCode ?? ""))
-    code = "SLACK_RECONNECT_REQUIRED";
-  else if (status === 403 || ["missing_scope", "not_allowed_token_type", "restricted_action", "no_permission"].includes(providerCode ?? ""))
-    code = "SLACK_PERMISSION_DENIED";
-  else if (["channel_not_found", "not_in_channel", "is_archived"].includes(providerCode ?? ""))
-    code = "SLACK_CHANNEL_UNAVAILABLE";
-  else if (phase === "write" && ["msg_too_long", "no_text", "invalid_text", "invalid_arguments"].includes(providerCode ?? ""))
-    code = "SLACK_POST_REJECTED";
-  else if (phase !== "write") code = "SLACK_QUERY_REJECTED";
+  const code = denialCode(status, providerCode, phase);
   return code ? new SlackProviderDenial(phase, code, retryAfter(error)) : null;
 }
