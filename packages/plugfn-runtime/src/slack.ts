@@ -24,6 +24,7 @@ function displayMessage(value: unknown): { ts: string; text: string; user?: stri
   return { ts, text, ...(user ? { user } : {}) };
 }
 
+/** Give reads safe retry metadata while posts remain single-dispatch actions. */
 function contract(effect: "read" | "write", scopes: string[], resources: ActionContract["resources"] = [],
   paginated = false): ActionContract {
   return { version: "1.0.0", effect, requiredScopes: scopes, resources,
@@ -44,18 +45,9 @@ function scopes(headers: unknown): string[] | null {
   return parsed.filter((scope) => /^[a-z][a-z0-9_.-]*:[a-z][a-z0-9_.-]*$/.test(scope));
 }
 
-async function call(context: ActionContext, method: string, params: object,
-  phase: SlackProviderDenial["phase"], post = false): Promise<{ body: unknown; headers: unknown }> {
-  let response: { data: unknown; headers?: unknown };
-  try {
-    response = post
-      ? await context.http.post(`${context.provider.baseUrl}/${method}`, params)
-      : await context.http.get(`${context.provider.baseUrl}/${method}`, { params });
-  } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "CONNECTION_NOT_FOUND") throw error;
-    throw slackDenial(error, phase) ?? (phase === "write" ? error
-      : new SlackProviderDenial(phase, "SLACK_QUERY_REJECTED"));
-  }
+/** Classify completed Slack responses without mistaking ambiguous posts for denials. */
+function checkedBody(response: { data: unknown; headers?: unknown },
+  phase: SlackProviderDenial["phase"]): unknown {
   const body = response?.data;
   if (!body || typeof body !== "object" || !("ok" in body)) {
     throw phase === "write" ? new SlackProviderResponseAmbiguous()
@@ -74,9 +66,26 @@ async function call(context: ActionContext, method: string, params: object,
     throw phase === "write" ? new SlackProviderResponseAmbiguous()
       : new SlackProviderDenial(phase, "SLACK_QUERY_REJECTED");
   }
-  return { body, headers: response.headers };
+  return body;
 }
 
+/** Dispatch one Slack call and keep transport uncertainty separate from API rejection. */
+async function call(context: ActionContext, method: string, params: object,
+  phase: SlackProviderDenial["phase"], post = false): Promise<{ body: unknown; headers: unknown }> {
+  let response: { data: unknown; headers?: unknown };
+  try {
+    response = post
+      ? await context.http.post(`${context.provider.baseUrl}/${method}`, params)
+      : await context.http.get(`${context.provider.baseUrl}/${method}`, { params });
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "CONNECTION_NOT_FOUND") throw error;
+    throw slackDenial(error, phase) ?? (phase === "write" ? error
+      : new SlackProviderDenial(phase, "SLACK_QUERY_REJECTED"));
+  }
+  return { body: checkedBody(response, phase), headers: response.headers };
+}
+
+/** Verify the selected token's workspace and bot sender before a channel operation. */
 async function selectedWorkspace(context: ActionContext, expected?: string, sender?: string,
   phase: SlackProviderDenial["phase"] = "read") {
   const response = await call(context, "auth.test", {}, phase, true);
@@ -164,7 +173,8 @@ const messagesList: Action = {
   idempotent: true,
   parameters: z.object({ workspaceId, channelId, limit: z.number().int().min(1).max(100).optional(), cursor }).strict(),
   returns: z.object({ channel: channel, messages: z.array(z.object({ ts: z.string(), text: z.string(),
-    user: z.string().optional() })), nextCursor: z.string().nullable() }),
+    user: z.string().optional() })), filteredCount: z.number().int().min(0).max(100),
+    nextCursor: z.string().nullable() }),
   contract: contract("read", ["channels:read", "channels:history"], [
     { kind: "slack_workspace", parameter: "workspaceId" }, { kind: "channel", parameter: "channelId" }], true),
   execute: async (params, context) => {
@@ -177,10 +187,12 @@ const messagesList: Action = {
       response_metadata: z.object({ next_cursor: z.string().optional() }).optional() })
       .safeParse(body);
     if (!parsed.success) throw new SlackProviderDenial("read", "SLACK_QUERY_REJECTED");
-    return { channel: selected, messages: parsed.data.messages.flatMap((entry) => {
+    const messages = parsed.data.messages.flatMap((entry) => {
       const message = displayMessage(entry);
       return message ? [message] : [];
-    }),
+    });
+    return { channel: selected, messages,
+      filteredCount: Math.min(100, parsed.data.messages.length - messages.length),
       nextCursor: parsed.data.response_metadata?.next_cursor || null };
   },
 };

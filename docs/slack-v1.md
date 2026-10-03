@@ -37,6 +37,10 @@ external-shared, and unjoined channels. Choose a `channelId` from that result. `
 checks the selected workspace and channel again before reading one page of at
 most 100 messages. It displays messages with text and omits events or blocks-only
 messages that the v1 text view cannot represent, while retaining the page cursor.
+Its typed `filteredCount` reports how many entries on that page could not be
+shown, capped at 100. The browser warns when entries were filtered; CLI and MCP
+results carry the same count and cursor so an empty displayed page is not
+mistaken for an empty channel.
 When Slack omits `is_member` from channel info, OMR checks current bot membership
 through bounded `conversations.members` pages. An explicit non-member result or
 an incomplete membership proof stops the read or post.
@@ -59,7 +63,8 @@ transport failures may leave the original request running. Reconciliation
 never posts. An intentional identical post after settlement needs a new key
 and a new approval.
 
-Definite Slack `ok:false` denials, including unfamiliar error codes,
+Definite Slack `ok:false` denials, including both `ratelimited` and
+`rate_limited` responses and unfamiliar error codes,
 authentication, permission, target and rate-limit responses produce safe codes;
 available `Retry-After` seconds are preserved. Slack `internal_error` and
 `fatal_error` can follow a partially completed post, so they remain uncertain,

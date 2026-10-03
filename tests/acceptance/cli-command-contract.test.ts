@@ -1651,6 +1651,21 @@ syncBuiltinESMExports();
     expect(f.committedMutations).toEqual([]);
   });
 
+  it("keeps the filtered Slack history signal and cursor in CLI JSON output", async () => {
+    const f = await fixture();
+    f.successReply("/api/tools/execute", { id: "receipt_filtered", workspaceId: "workspace_1",
+      toolId: "slack.messages.list", status: "succeeded", result: {
+        channel: { id: "C12345678", name: "release" }, messages: [],
+        filteredCount: 2, nextCursor: "still-active",
+      } });
+    const reply = await f.run(["tools", "run", "slack.messages.list", "--json"], {
+      OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1",
+    });
+    expect(reply.code).toBe(0);
+    expect(JSON.parse(reply.stdout).result).toMatchObject({ messages: [], filteredCount: 2,
+      nextCursor: "still-active" });
+  });
+
   it("preserves a proven GitHub preflight failure across both execution commands", async () => {
     const f = await fixture();
     const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };

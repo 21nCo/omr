@@ -84,6 +84,26 @@ async function executionFixture() {
     dispatch, service, principal, setScopes: (next: string[]) => { scopes = next; } };
 }
 
+/** Drive the same selected Slack binding through permanent and transient scope proof failures. */
+async function slackScopeProofFixture(code: SlackProviderDenial["code"]) {
+  const fixture = await executionFixture();
+  const runtime = { providers: { get: () => omrSlackProvider }, config: { integrations: { slack: {} } },
+    action: vi.fn(async () => { throw new SlackProviderDenial("read", code); }),
+    connections: { get: async () => ({ scopes: ["channels:read"] }) } };
+  const discover = () => scopedToolIds(fixture.catalog, runtime as never, fixture.connections as never,
+    fixture.principal, fixture.workspace.id, [fixture.binding]);
+  return { ...fixture, runtime, discover };
+}
+
+/** Open an in-memory MCP session for the Slack schema and read-result assertions. */
+async function connectedSlackMcp(server: Awaited<ReturnType<typeof createOMRMcpServer>>) {
+  const client = new Client({ name: "slack-contract-test", version: "1.0.0" }, { capabilities: {} });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  return client;
+}
+
 describe("slack-adapter-contract", () => {
   it("classifies definite Slack codes without treating inherited object names as denials", () => {
     expect(slackDenial({ data: { error: "missing_scope" } }, "preflight")?.code)
@@ -94,14 +114,33 @@ describe("slack-adapter-contract", () => {
       .toBe("SLACK_QUERY_REJECTED");
     expect(slackDenial({ data: { error: "toString" } }, "write")).toBeNull();
   });
+  it.each(["ratelimited", "rate_limited"])(
+    "classifies Slack HTTP 200 %s with Retry-After in read, preflight, and post", async (providerCode) => {
+      const response = { data: { ok: false, error: providerCode },
+        headers: new Headers({ "Retry-After": "29" }) };
+      const read = slackFixture();
+      read.get.mockResolvedValueOnce(response);
+      await expect(omrSlackProvider.actions["channels.list"]!.execute({ workspaceId: teamA }, read.context))
+        .rejects.toMatchObject({ code: "SLACK_RATE_LIMITED", phase: "read", retryAfterSeconds: 29 });
+      const preflight = slackFixture();
+      preflight.get.mockResolvedValueOnce(response);
+      await expect(omrSlackProvider.actions["messages.post"]!.execute({ workspaceId: teamA,
+        channelId: channelA, senderId: botA, text: "No post" }, preflight.context))
+        .rejects.toMatchObject({ code: "SLACK_RATE_LIMITED", phase: "preflight", retryAfterSeconds: 29 });
+      expect(preflight.messages()).toHaveLength(0);
+      const write = slackFixture();
+      write.post.mockResolvedValueOnce({ data: { ok: true, team_id: teamA, team: "Selected",
+        user_id: botA, bot_id: "B12345678" } });
+      write.post.mockResolvedValueOnce(response);
+      await expect(omrSlackProvider.actions["messages.post"]!.execute({ workspaceId: teamA,
+        channelId: channelA, senderId: botA, text: "One attempt" }, write.context))
+        .rejects.toMatchObject({ code: "SLACK_RATE_LIMITED", phase: "write", retryAfterSeconds: 29 });
+      expect(write.messages()).toHaveLength(1);
+    });
   it.each(["SLACK_PERMISSION_DENIED", "SLACK_WORKSPACE_MISMATCH"] as const)(
     "persists %s proof failure and hides Slack in the same catalog response", async (code) => {
-      const { catalog, connections, binding, principal, workspace } = await executionFixture();
-      const runtime = { providers: { get: () => omrSlackProvider }, config: { integrations: { slack: {} } },
-        action: vi.fn(async () => { throw new SlackProviderDenial("read", code); }),
-        connections: { get: async () => ({ scopes: ["channels:read"] }) } };
-      const result = await scopedToolIds(catalog, runtime as never, connections as never,
-        principal, workspace.id, [binding]);
+      const { connections, binding, runtime, discover } = await slackScopeProofFixture(code);
+      const result = await discover();
       expect([...result.allowedToolIds]).toEqual([]);
       expect(result.providers.find((entry) => entry.provider === "slack")?.state).toBe("expired");
       expect(await connections.getAccessible("alice", binding.id)).toMatchObject({
@@ -112,12 +151,8 @@ describe("slack-adapter-contract", () => {
 
   it.each(["SLACK_RATE_LIMITED", "SLACK_QUERY_REJECTED"] as const)(
     "keeps a %s catalog proof failure retryable without changing binding health", async (code) => {
-      const { catalog, connections, binding, principal, workspace } = await executionFixture();
-      const runtime = { providers: { get: () => omrSlackProvider }, config: { integrations: { slack: {} } },
-        action: vi.fn(async () => { throw new SlackProviderDenial("read", code); }),
-        connections: { get: async () => ({ scopes: ["channels:read"] }) } };
-      const result = await scopedToolIds(catalog, runtime as never, connections as never,
-        principal, workspace.id, [binding]);
+      const { connections, binding, runtime, discover } = await slackScopeProofFixture(code);
+      const result = await discover();
       expect([...result.allowedToolIds]).toEqual([]);
       expect(result.providers.find((entry) => entry.provider === "slack")?.state).toBe("ready");
       expect(await connections.getAccessible("alice", binding.id)).toMatchObject({
@@ -126,8 +161,7 @@ describe("slack-adapter-contract", () => {
       runtime.action.mockResolvedValueOnce({ id: teamA, name: "Selected",
         sender: { type: "bot", id: botA, botId: "B12345678" },
         verifiedScopes: ["channels:read"] });
-      const retry = await scopedToolIds(catalog, runtime as never, connections as never,
-        principal, workspace.id, [binding]);
+      const retry = await discover();
       expect(retry.allowedToolIds.has("slack.channels.list")).toBe(true);
     });
   it("runs OAuth, live scope proof and approval through PlugFn without an early Slack post", async () => {
@@ -195,13 +229,17 @@ describe("slack-adapter-contract", () => {
   it("projects the Slack post schema over MCP and requests approval without posting", async () => {
     const catalog = await createPlugFnToolCatalog({ providers: { list: () => [omrSlackProvider] } });
     const manifest = catalog.get("slack.messages.post")!;
+    const history = catalog.get("slack.messages.list")!;
     const approvalRequests: unknown[] = [];
     const server = await createOMRMcpServer({ baseUrl: "https://omr.test", credential: "credential",
       workspaceId: "omr-workspace", fetchImpl: async (request, init) => {
         const path = new URL(typeof request === "string" ? request : request instanceof URL
           ? request.href : request.url).pathname;
         if (path === "/api/tools") return Response.json({ catalogSchemaVersion: "1.0.0",
-          revision: "slack-real-manifest", tools: [manifest] });
+          revision: "slack-real-manifest", tools: [manifest, history] });
+        if (path === "/api/tools/execute") return Response.json({ status: "succeeded",
+          result: { channel: localChannel, messages: [], filteredCount: 2,
+            nextCursor: "still-active" } });
         if (path === "/api/approvals") {
           approvalRequests.push(JSON.parse(String(init?.body)));
           return Response.json({ id: "approval-1", status: "pending", expiresAt: Date.now() + 60_000 },
@@ -209,11 +247,8 @@ describe("slack-adapter-contract", () => {
         }
         return Response.json({ error: "NOT_FOUND" }, { status: 404 });
       } });
-    const client = new Client({ name: "slack-contract-test", version: "1.0.0" }, { capabilities: {} });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = await connectedSlackMcp(server);
     try {
-      await server.connect(serverTransport);
-      await client.connect(clientTransport);
       const schema = (await client.listTools()).tools.find(({ name }) => name === manifest.id)?.inputSchema;
       expect(schema).toMatchObject({ type: "object", required: expect.arrayContaining([
         "workspaceId", "channelId", "senderId", "text", "_omrIdempotencyKey",
@@ -231,6 +266,11 @@ describe("slack-adapter-contract", () => {
       expect(approvalRequests).toEqual([{ workspaceId: "omr-workspace", toolId: manifest.id,
         params: { workspaceId: teamA, channelId: channelA, senderId: botA, text: "Ready" },
         idempotencyKey: "slack-post-one" }]);
+      expect(await client.callTool({ name: history.id, arguments: {
+        workspaceId: teamA, channelId: channelA,
+      } })).toMatchObject({ structuredContent: { status: "succeeded", result: {
+        messages: [], filteredCount: 2, nextCursor: "still-active",
+      } } });
     } finally {
       await client.close();
       await server.close();
@@ -545,6 +585,28 @@ describe("slack-adapter-contract", () => {
     },
   );
 
+  it("settles an HTTP 200 rate_limited post as a definite retryable denial", async () => {
+    const { service, principal, slack, receipts, approvals } = await executionFixture();
+    const params = { workspaceId: teamA, channelId: channelA, senderId: botA, text: "Wait" };
+    const approval = await service.requestApproval({ principal, toolId: "slack.messages.post", params,
+      idempotencyKey: "rate-limited-post" });
+    await service.approve(approval.id, "alice");
+    slack.post.mockResolvedValueOnce({ data: { ok: true, team_id: teamA, team: "Selected",
+      user_id: botA, bot_id: "B12345678" } });
+    slack.post.mockResolvedValueOnce({ data: { ok: false, error: "rate_limited" },
+      headers: { "Retry-After": "23" } });
+    await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({
+      code: "SLACK_RATE_LIMITED", retryAfterSeconds: 23,
+    });
+    expect(slack.messages()).toHaveLength(1);
+    expect(approvals.approvals.get(approval.id)?.status).toBe("failed");
+    expect([...receipts.receipts.values()]).toContainEqual(expect.objectContaining({ status: "failed" }));
+    await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({
+      code: "APPROVAL_UNAVAILABLE",
+    });
+    expect(slack.messages()).toHaveLength(1);
+  });
+
   it("accepts the selected bot ID in a completed post without message.user", async () => {
     const { service, principal, slack, receipts } = await executionFixture();
     const params = { workspaceId: teamA, channelId: channelA, senderId: botA, text: "Bot reply" };
@@ -602,9 +664,28 @@ describe("slack-adapter-contract", () => {
     }, slack.context)).toMatchObject({ channel: { id: channelA },
       messages: [{ ts: "1.0", text: "Visible", user: botA },
         { ts: "5.0", text: "Bot reply" }, { ts: "6.0", text: "Thread notice" }],
+      filteredCount: 3,
       nextCursor: "later" });
     expect(slack.get.mock.calls[1]?.[1]).toMatchObject({ params: { channel: channelA,
       cursor: "first" } });
+    expect(slack.get).toHaveBeenCalledTimes(2);
+  });
+
+  it("signals a fully filtered history page without losing its continuation cursor", async () => {
+    const slack = slackFixture();
+    slack.get.mockResolvedValueOnce({ data: { ok: true, channel: localChannel } });
+    slack.get.mockResolvedValueOnce({ data: { ok: true, messages: [
+      { ts: "1.0", text: "Someone joined", subtype: "channel_join" },
+      { ts: "2.0", files: [{ id: "file-1" }] },
+    ], response_metadata: { next_cursor: "still-active" } } });
+    const result = await omrSlackProvider.actions["messages.list"]!.execute({
+      workspaceId: teamA, channelId: channelA,
+    }, slack.context);
+    expect(result).toMatchObject({ channel: { id: channelA }, messages: [],
+      filteredCount: 2, nextCursor: "still-active" });
+    expect(omrSlackProvider.actions["messages.list"]!.returns.parse(result)).toMatchObject({
+      filteredCount: 2, nextCursor: "still-active",
+    });
     expect(slack.get).toHaveBeenCalledTimes(2);
   });
 

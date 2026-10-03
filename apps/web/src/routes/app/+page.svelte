@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { beginGithubReconnect, createOAuthReviewController } from "$lib/oauth-review.js";
   import { connectionActions, connectionStatusLabel, providerRevocationGuidance } from "$lib/connection-ui.js";
-  import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, effectAbsentAvailable, effectPresentAvailable, providerDisplayState, recoverProviderReconciliation, recoverWorkspaceOverview, sameSlackPostParams, selectedLinearAccountId, selectedReadyLinearConnection, selectedReadySlackConnection, selectedSlackAccountId, visibleApprovalCard } from "$lib/workspace-catalog.js";
+  import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, effectAbsentAvailable, effectPresentAvailable, providerDisplayState, recoverProviderReconciliation, recoverWorkspaceOverview, sameSlackPostParams, sameSlackReadSelection, selectedLinearAccountId, selectedReadyLinearConnection, selectedReadySlackConnection, selectedSlackAccountId, slackChannelSelectionLocked, visibleApprovalCard } from "$lib/workspace-catalog.js";
   import { renderApprovalPreview } from "$lib/approval-preview.js";
   import { createLinearActionKeys, linearApprovalNotice } from "$lib/linear-action-keys.js";
   import { slackApprovalNotice } from "$lib/slack-approval-notice.js";
@@ -107,6 +107,7 @@
   let slackChannelId = "";
   let slackMessages: SlackMessage[] = [];
   let slackMessagesCursor: string | null = null;
+  let slackFilteredCount = 0;
   let slackText = "";
   let slackBusy = "";
   let slackGeneration = 0;
@@ -408,6 +409,7 @@
     };
   }
 
+  /** Invalidate pending reads whenever the visible Slack journey is reset. */
   function clearSlack() {
     slackGeneration++;
     slackBusy = "";
@@ -417,36 +419,42 @@
     slackChannelId = "";
     slackMessages = [];
     slackMessagesCursor = null;
+    slackFilteredCount = 0;
     slackText = "";
   }
 
+  /** Resolve only the ready Slack binding in the current workspace. */
   function slackAccount(): Connection | undefined {
     return selectedReadySlackConnection({ overview, selectedWorkspaceId, loading, busy });
   }
 
+  /** Check the selected binding and the current scoped catalog together. */
   function slackToolAvailable(toolId: string): boolean {
     return Boolean(slackAccount() && catalog?.tools.some((tool) => tool.id === toolId));
   }
 
+  /** Publish a read only if its workspace, account, and channel generation still match. */
   async function slackRead<T>(toolId: string, params: object, publish: (value: T) => void) {
     const account = slackAccount();
     if (!account || slackBusy || !slackToolAvailable(toolId)) {
       error = "Select a ready Slack bot and available action first."; return;
     }
-    const generation = slackGeneration;
-    const workspaceId = selectedWorkspaceId;
+    const selection = { generation: slackGeneration, workspaceId: selectedWorkspaceId, accountId: account.id };
+    const currentSelection = () => ({ generation: slackGeneration, workspaceId: selectedWorkspaceId,
+      accountId: slackAccount()?.id });
     slackBusy = toolId;
     error = "";
     try {
       const receipt = await request<{ result: T }>("/api/tools/execute", {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ workspaceId, connectionId: account.id, toolId, params }),
+        body: JSON.stringify({ workspaceId: selection.workspaceId, connectionId: account.id, toolId, params }),
       });
-      if (generation === slackGeneration && workspaceId === selectedWorkspaceId &&
-          account.id === slackAccount()?.id) publish(receipt.result);
+      if (sameSlackReadSelection(selection, currentSelection())) publish(receipt.result);
     } catch (caught) {
-      if (generation === slackGeneration) error = caught instanceof Error ? caught.message : "Slack read failed";
-    } finally { if (generation === slackGeneration) slackBusy = ""; }
+      if (sameSlackReadSelection(selection, currentSelection())) {
+        error = caught instanceof Error ? caught.message : "Slack read failed";
+      }
+    } finally { if (sameSlackReadSelection(selection, currentSelection())) slackBusy = ""; }
   }
 
   /** Snapshot the visible bot, channel, and message for one approval intent. */
@@ -1004,7 +1012,7 @@
                 onclick={() => void slackRead<{ channels: SlackChannel[]; nextCursor: string | null }>(
                   "slack.channels.list", { workspaceId: slackWorkspace?.id },
                   (value) => { slackChannels = value.channels; slackChannelsCursor = value.nextCursor;
-                    slackChannelId = ""; slackMessages = []; })}>Find joined public channels</button>
+                    slackChannelId = ""; slackMessages = []; slackFilteredCount = 0; })}>Find joined public channels</button>
               {#if slackChannelsCursor}
                 <button class="quiet compact" disabled={Boolean(slackBusy)}
                   onclick={() => void slackRead<{ channels: SlackChannel[]; nextCursor: string | null }>(
@@ -1014,8 +1022,8 @@
               {/if}
               {#if slackChannels.length}
                 <label>Channel
-                  <select bind:value={slackChannelId} disabled={Boolean(slackBusy)} onchange={() => { slackGeneration++; slackBusy = "";
-                    slackMessages = []; slackMessagesCursor = null; slackText = ""; }}>
+                  <select bind:value={slackChannelId} disabled={slackChannelSelectionLocked(slackBusy)} onchange={() => { slackGeneration++; slackBusy = "";
+                    slackMessages = []; slackMessagesCursor = null; slackFilteredCount = 0; slackText = ""; }}>
                     <option value="">Choose a channel</option>
                     {#each slackChannels as entry}<option value={entry.id}>#{entry.name}</option>{/each}
                   </select>
@@ -1023,17 +1031,22 @@
                 {#if slackChannelId}
                   {#if slackToolAvailable("slack.messages.list")}
                     <button class="quiet compact" disabled={Boolean(slackBusy)}
-                      onclick={() => void slackRead<{ messages: SlackMessage[]; nextCursor: string | null }>(
+                      onclick={() => void slackRead<{ messages: SlackMessage[]; filteredCount: number; nextCursor: string | null }>(
                         "slack.messages.list", { workspaceId: slackWorkspace?.id, channelId: slackChannelId },
-                        (value) => { slackMessages = value.messages; slackMessagesCursor = value.nextCursor; })}>
+                        (value) => { slackMessages = value.messages; slackFilteredCount = value.filteredCount;
+                          slackMessagesCursor = value.nextCursor; })}>
                       Read messages</button>
                     {#if slackMessagesCursor}
                       <button class="quiet compact" disabled={Boolean(slackBusy)}
-                        onclick={() => void slackRead<{ messages: SlackMessage[]; nextCursor: string | null }>(
+                        onclick={() => void slackRead<{ messages: SlackMessage[]; filteredCount: number; nextCursor: string | null }>(
                           "slack.messages.list", { workspaceId: slackWorkspace?.id,
                             channelId: slackChannelId, cursor: slackMessagesCursor },
                           (value) => { slackMessages = [...slackMessages, ...value.messages];
+                            slackFilteredCount += value.filteredCount;
                             slackMessagesCursor = value.nextCursor; })}>More messages</button>
+                    {/if}
+                    {#if slackFilteredCount > 0}
+                      <p>Some Slack history entries cannot be displayed as text messages. Continue reading if another page is available.</p>
                     {/if}
                     {#each slackMessages as message}
                       <p><strong>{message.user ?? "Slack"}</strong> · {message.text}</p>

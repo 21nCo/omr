@@ -30,19 +30,19 @@ export class SlackProviderResponseAmbiguous extends Error {
   }
 }
 
-function header(error: object, name: string): unknown {
-  if (!("headers" in error) || !error.headers) return undefined;
-  if (error.headers instanceof Headers) return error.headers.get(name);
-  if (typeof error.headers !== "object") return undefined;
-  return Object.entries(error.headers).find(([key]) => key.toLowerCase() === name)?.[1];
-}
-
+/** Read Slack's retry window from either Fetch Headers or a plain response header map. */
 function retryAfter(error: object): number | undefined {
-  const value = header(error, "retry-after");
-  if (typeof value !== "string" && typeof value !== "number") return undefined;
-  if (!/^\d+$/.test(String(value))) return undefined;
-  const number = Number(value);
-  return Number.isSafeInteger(number) ? number : undefined;
+  const headers = "headers" in error ? error.headers : undefined;
+  let value: unknown;
+  if (headers instanceof Headers) value = headers.get("retry-after");
+  else if (headers && typeof headers === "object") {
+    const name = Object.keys(headers).find((key) => key.toLowerCase() === "retry-after");
+    value = name ? Reflect.get(headers, name) : undefined;
+  }
+  const seconds = typeof value === "string" || typeof value === "number" ? String(value) : "";
+  if (!/^\d+$/.test(seconds)) return undefined;
+  const parsed = Number(seconds);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
 const apiDenials: Record<string, SlackProviderDenial["code"]> = {
@@ -59,7 +59,9 @@ const apiDenials: Record<string, SlackProviderDenial["code"]> = {
 /** Preserve HTTP priority, then classify Slack's HTTP 200 ok:false API code. */
 function denialCode(status: unknown, providerCode: string | undefined,
   phase: SlackProviderDenial["phase"]): SlackProviderDenial["code"] | undefined {
-  if (status === 429 || providerCode === "ratelimited") return "SLACK_RATE_LIMITED";
+  if (status === 429 || providerCode === "ratelimited" || providerCode === "rate_limited") {
+    return "SLACK_RATE_LIMITED";
+  }
   if (status === 401) return "SLACK_RECONNECT_REQUIRED";
   if (status === 403) return "SLACK_PERMISSION_DENIED";
   const mapped = providerCode && Object.hasOwn(apiDenials, providerCode) ? apiDenials[providerCode] : undefined;

@@ -138,6 +138,20 @@ export function selectedSlackAccountId<Connection extends { id: string; provider
     connection.readiness === "ready")?.id ?? null;
 }
 
+/** Let a user abandon a pending read, but keep the channel fixed during approval or reset. */
+export function slackChannelSelectionLocked(operation: string): boolean {
+  return operation === "approval" || operation === "reset";
+}
+
+/** Ignore a read response after a channel, workspace, or selected bot changes. */
+export function sameSlackReadSelection(
+  requested: { generation: number; workspaceId: string; accountId: string },
+  current: { generation: number; workspaceId: string; accountId: string | undefined },
+): boolean {
+  return requested.generation === current.generation && requested.workspaceId === current.workspaceId &&
+    requested.accountId === current.accountId;
+}
+
 /** Do not present an approval beside a Slack post form that changed in flight. */
 export function sameSlackPostParams(
   requested: { workspaceId?: string; channelId: string; senderId?: string; text: string },

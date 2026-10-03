@@ -2,13 +2,24 @@ import { describe, expect, it } from "vitest";
 
 import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, effectAbsentAvailable, effectPresentAvailable,
   recoverProviderReconciliation, recoverWorkspaceOverview, providerDisplayState, visibleApprovalCard,
-  selectedLinearAccountId, selectedReadyLinearConnection,
+  selectedLinearAccountId, selectedReadyLinearConnection, sameSlackReadSelection, slackChannelSelectionLocked,
   type WorkspaceCatalogState } from "./workspace-catalog.js";
 
 type Overview = { selectedWorkspaceId: string; connections: { provider: string; status: string }[] };
 type Catalog = { providers: { provider: string; state: string; available?: boolean; authMode?: string }[] };
 
 describe("workspace catalog loading", () => {
+  it("lets a stalled Slack read be abandoned while keeping approval and reset locked", () => {
+    expect(slackChannelSelectionLocked("slack.messages.list")).toBe(false);
+    expect(slackChannelSelectionLocked("slack.channels.list")).toBe(false);
+    expect(slackChannelSelectionLocked("approval")).toBe(true);
+    expect(slackChannelSelectionLocked("reset")).toBe(true);
+    const read = { generation: 4, workspaceId: "workspace_a", accountId: "bot_a" };
+    expect(sameSlackReadSelection(read, { ...read })).toBe(true);
+    expect(sameSlackReadSelection(read, { ...read, generation: 5 })).toBe(false);
+    expect(sameSlackReadSelection(read, { ...read, workspaceId: "workspace_b" })).toBe(false);
+    expect(sameSlackReadSelection(read, { ...read, accountId: "bot_b" })).toBe(false);
+  });
   it("retires a denied recovery hint and loads the current workspace without stale approval controls", async () => {
     const ids: string[] = [];
     let retired = false;

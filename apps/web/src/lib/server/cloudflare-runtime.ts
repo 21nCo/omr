@@ -449,7 +449,7 @@ export async function scopedToolIds(
     async (bindingId, code) => {
       missing.add(bindingId);
       await authority.recordHealth({ connectionId: bindingId, status: "needs_reauth",
-        readiness: "unavailable", reason: code.toLowerCase() });
+        readiness: "unavailable", reason: code.toLowerCase() }).catch(() => undefined);
     },
   );
   return {
