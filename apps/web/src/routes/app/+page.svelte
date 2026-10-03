@@ -5,6 +5,8 @@
   import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, effectAbsentAvailable, effectPresentAvailable, providerDisplayState, recoverProviderReconciliation, recoverWorkspaceOverview, sameSlackPostParams, sameSlackReadSelection, selectedLinearAccountId, selectedReadyLinearConnection, selectedReadyNotionConnection, selectedReadySlackConnection, selectedSlackAccountId, slackChannelSelectionLocked, visibleApprovalCard } from "$lib/workspace-catalog.js";
   import { renderApprovalPreview } from "$lib/approval-preview.js";
   import { createLinearActionKeys, linearApprovalNotice } from "$lib/linear-action-keys.js";
+  import { createControlPlaneRequest, OMRResponseError } from "$lib/control-plane-request.js";
+  import { notionApprovalNotice } from "$lib/notion-approval-notice.js";
   import { slackApprovalNotice } from "$lib/slack-approval-notice.js";
   import { V1_PROVIDERS } from "@oh-my-router/tools";
   import type { LinearAccess, SlackAccess } from "@oh-my-router/connections";
@@ -200,24 +202,8 @@
     return providerDisplayState(catalog, provider);
   }
 
-  class OMRResponseError extends Error {
-    code: string;
-    constructor(code: string, message: string) { super(message); this.code = code; }
-  }
-
-  async function request<T>(path: string, init?: RequestInit): Promise<T> {
-    const response = await fetch(path, { credentials: "same-origin", ...init });
-    const body = await response.json().catch(() => ({})) as { error?: string; message?: string };
-    if (response.status === 401 && body.error !== "SLACK_RECONNECT_REQUIRED" &&
-      body.error !== "LINEAR_RECONNECT_REQUIRED" &&
-      body.error !== "GITHUB_RECONNECT_REQUIRED") {
-      location.assign(`/login?returnTo=${encodeURIComponent(location.pathname + location.search)}`);
-      throw new Error("Authentication required");
-    }
-    if (!response.ok) throw new OMRResponseError(body.error ?? "HTTP_ERROR",
-      body.message ?? body.error ?? `Request failed (${response.status})`);
-    return body as T;
-  }
+  const request = createControlPlaneRequest(fetch, () =>
+    location.assign(`/login?returnTo=${encodeURIComponent(location.pathname + location.search)}`));
 
   const loadWorkspace = createWorkspaceCatalogLoader<Overview, Catalog>(
     async (workspaceId) => {
@@ -501,7 +487,7 @@
       automaticApprovalLookup = ["pending", "approved"].includes(approval.status)
         ? { id: approval.id, expiresAt: approval.expiresAt } : null;
       recoveryInput = recoveredApprovalId;
-      notice = linearApprovalNotice(approval.status);
+      notice = notionApprovalNotice(approval.status);
       await load();
     } catch (caught) {
       if (generation === notionGeneration) error = caught instanceof Error ? caught.message : "Could not request Notion approval";

@@ -56,6 +56,7 @@ function notionFixture() {
   const patch = vi.fn(async (url: string, body: Record<string, unknown>) => {
     if (!url.endsWith(`/pages/${childId}`)) throw new Error(`Unexpected PATCH ${url}`);
     if (denial) return Promise.reject(denial);
+    if (malformedWrite) return { data: { id: childId } };
     const name = (body.properties as { Name: { title: { text: { content: string } }[] } }).Name.title[0]?.text.content;
     return { data: page(childId, parentId, name) };
   });
@@ -305,6 +306,48 @@ describe("notion-adapter-contract", () => {
     expect(replay.id).toBe(approval.id);
     expect(f.notion.writes()).toBe(1);
   });
+
+  it.each(["notion.pages.create", "notion.pages.update"] as const)(
+    "coalesces independent %s keys through pending, approved, executing and uncertain states", async (toolId) => {
+      const f = await serviceFixture();
+      const params = toolId === "notion.pages.create"
+        ? { parentPageId: parentId, title: "Maybe made" }
+        : { pageId: childId, title: "Maybe renamed" };
+      const request = (idempotencyKey: string) => f.service.requestApproval({
+        principal: f.principal, toolId, params, connectionId: f.binding.id, idempotencyKey,
+      });
+      const first = await request("first-key");
+      expect((await request("second-key")).id).toBe(first.id);
+      expect(f.notion.writes()).toBe(0);
+      await f.service.approve(first.id, "alice");
+      expect((await request("third-key")).id).toBe(first.id);
+      expect(f.notion.writes()).toBe(0);
+
+      let entered!: () => void;
+      let release!: () => void;
+      const dispatched = new Promise<void>((resolve) => { entered = resolve; });
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      f.notion.setMalformedWrite(true);
+      f.dispatch.mockImplementationOnce(async (_provider, action, options) => {
+        entered();
+        await held;
+        return omrNotionProvider.actions[action]!.execute(options.params, f.notion.context);
+      });
+      const execution = f.service.executeApproved(f.principal, first.id);
+      await dispatched;
+      expect((await request("fourth-key")).id).toBe(first.id);
+      expect(f.notion.writes()).toBe(0);
+      release();
+      await expect(execution).rejects.toBeInstanceOf(ExecutionOutcomeUnknownError);
+      expect(f.notion.writes()).toBe(1);
+      expect((await request("fifth-key")).id).toBe(first.id);
+      expect(f.notion.writes()).toBe(1);
+      await f.service.reconcileUncertain(f.principal, first.id, "effect_absent");
+      const deliberate = await request("sixth-key");
+      expect(deliberate.id).not.toBe(first.id);
+      expect(deliberate.status).toBe("pending");
+      expect(f.notion.writes()).toBe(1);
+    });
 
   it("hides a stale Notion account on workspace switch or pending refresh", () => {
     const connection = { id: "a", provider: "notion", selected: true, workspaceId: "A",

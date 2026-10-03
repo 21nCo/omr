@@ -570,7 +570,8 @@ export class ExecutionService {
         params, ttlMs }, this.fingerprintKey),
       // Independent approval keys must not create a second live provider intent.
       intentHash: (manifest.id === "linear.issues.create" || manifest.id === "linear.issues.update" ||
-        manifest.id === "slack.messages.post")
+        manifest.id === "slack.messages.post" || manifest.id === "notion.pages.create" ||
+        manifest.id === "notion.pages.update")
         ? await hashJson({
         principalKey: principalKey(input.principal), workspaceId: input.principal.workspaceId,
         connectionId: connection.id, providerConnectionId: connection.providerConnectionId,
