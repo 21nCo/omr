@@ -45,8 +45,11 @@ the exact page in Notion before recording `effect_present` or, only when OMR
 permits it for a completed ambiguous response, `effect_absent`. Reconciliation
 never dispatches a write. Start a new identical action only after settlement.
 Definite Notion authentication, permission, missing-target, validation, and
-rate-limit responses use safe error codes. `Retry-After` is preserved when
-available. Reads may retry; writes make one provider attempt.
+rate-limit responses use safe error codes. A 429 with Notion's
+`public_api_request_blocked` reason means the integration's API access is
+restricted: retrying will not help, and the user should contact Notion
+support. Other 429 and 529 responses retain `Retry-After` when available.
+Reads may retry transient failures; writes make one provider attempt.
 
 `tests/acceptance/notion-adapter-contract.test.ts` is the fixture-backed
 schema, authorization, visibility, approval, isolation, revocation, and

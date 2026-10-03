@@ -1,6 +1,6 @@
 export class NotionProviderDenial extends Error {
   readonly code: "NOTION_RATE_LIMITED" | "NOTION_RECONNECT_REQUIRED" |
-    "NOTION_PERMISSION_DENIED" | "NOTION_TARGET_UNAVAILABLE" |
+    "NOTION_PERMISSION_DENIED" | "NOTION_ACCESS_RESTRICTED" | "NOTION_TARGET_UNAVAILABLE" |
     "NOTION_INVALID_CHANGE" | "NOTION_QUERY_REJECTED";
   constructor(readonly phase: "read" | "preflight" | "write", code: NotionProviderDenial["code"],
     readonly retryAfterSeconds?: number) {
@@ -8,6 +8,7 @@ export class NotionProviderDenial extends Error {
       NOTION_RATE_LIMITED: "Notion rate limit reached. Retry after its reset window.",
       NOTION_RECONNECT_REQUIRED: "Notion rejected this connection. Reconnect the account.",
       NOTION_PERMISSION_DENIED: "Notion denied access. Check the integration's content capabilities and page sharing.",
+      NOTION_ACCESS_RESTRICTED: "Notion restricted this integration's API access. Contact Notion support to restore access.",
       NOTION_TARGET_UNAVAILABLE: "This page is unavailable to the selected Notion integration.",
       NOTION_INVALID_CHANGE: "Notion rejected this page change. Review the title and destination.",
       NOTION_QUERY_REJECTED: "Notion could not complete this read. Try again later.",
@@ -39,8 +40,11 @@ function retryAfter(headers: unknown): number | undefined {
 }
 
 /** Classify only a provider response; transport failures never prove a write was rejected. */
-function denialCode(status: number, providerCode: string,
+function denialCode(status: number, providerCode: string, rateLimitReason: string,
   phase: NotionProviderDenial["phase"]): NotionProviderDenial["code"] | null {
+  if (status === 429 && rateLimitReason === "public_api_request_blocked") {
+    return "NOTION_ACCESS_RESTRICTED";
+  }
   if (status === 429 || status === 529 || providerCode === "rate_limited" ||
       providerCode === "service_overload") return "NOTION_RATE_LIMITED";
   if (status === 401 || providerCode === "unauthorized") return "NOTION_RECONNECT_REQUIRED";
@@ -60,14 +64,25 @@ function responseCode(error: object): string {
   return typeof code === "string" ? code : "";
 }
 
+/** Read the structured Notion rate reason without trusting provider message text. */
+function responseRateLimitReason(error: object): string {
+  const body: unknown = Reflect.get(error, "data");
+  if (!body || typeof body !== "object") return "";
+  const additional: unknown = Reflect.get(body, "additional_data");
+  if (!additional || typeof additional !== "object") return "";
+  const reason: unknown = Reflect.get(additional, "rate_limit_reason");
+  return typeof reason === "string" ? reason : "";
+}
+
 /** Only an HTTP response proves a write was rejected. Transport failures stay uncertain. */
 export function notionDenial(error: unknown, phase: NotionProviderDenial["phase"]): NotionProviderDenial | null {
   if (error instanceof NotionProviderDenial) return error;
   if (!error || typeof error !== "object") return null;
   const status: unknown = Reflect.get(error, "status");
   if (typeof status !== "number") return null;
-  const code = denialCode(status, responseCode(error), phase);
+  const code = denialCode(status, responseCode(error), responseRateLimitReason(error), phase);
   if (!code) return null;
   const headers: unknown = Reflect.get(error, "headers");
-  return new NotionProviderDenial(phase, code, retryAfter(headers));
+  return new NotionProviderDenial(phase, code,
+    code === "NOTION_RATE_LIMITED" ? retryAfter(headers) : undefined);
 }

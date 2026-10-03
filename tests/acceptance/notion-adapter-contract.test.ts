@@ -28,7 +28,8 @@ afterEach(() => vi.unstubAllGlobals());
 
 function notionFixture() {
   let shared = true;
-  let denial: { status: number; data: { code: string }; headers?: Headers } | null = null;
+  let denial: { status: number; data: { code: string;
+    additional_data?: { rate_limit_reason: string } }; headers?: Headers } | null = null;
   let malformedWrite = false;
   let returnedTitle: string | null = null;
   const get = vi.fn(async (url: string) => {
@@ -183,6 +184,70 @@ describe("notion-adapter-contract", () => {
       headers: new Headers({ "Retry-After": "27" }) }, "write"))
       .toMatchObject({ code: "NOTION_RATE_LIMITED", retryAfterSeconds: 27 });
   });
+
+  it.each(["read", "preflight", "write"] as const)(
+    "treats a blocked Notion connection during %s as permanent access recovery", (phase) => {
+      const blocked = { status: 429, data: { code: "rate_limited",
+        additional_data: { rate_limit_reason: "public_api_request_blocked" } },
+      headers: new Headers({ "Retry-After": "19" }) };
+      expect(notionDenial(blocked, phase)).toMatchObject({
+        code: "NOTION_ACCESS_RESTRICTED", phase,
+        message: expect.stringContaining("Contact Notion support"),
+      });
+      expect(notionDenial(blocked, phase)?.retryAfterSeconds).toBeUndefined();
+      expect(notionDenial({ ...blocked, data: { code: "rate_limited",
+        additional_data: { rate_limit_reason: "public_api_request_rate_limit" } } }, phase))
+        .toMatchObject({ code: "NOTION_RATE_LIMITED", retryAfterSeconds: 19 });
+    });
+
+  it("passes blocked access through search, page read, and destination preflight without a write", async () => {
+    const blocked = { status: 429, data: { code: "rate_limited",
+      additional_data: { rate_limit_reason: "public_api_request_blocked" } },
+    headers: new Headers({ "Retry-After": "19" }) };
+    const get = vi.fn(async () => { throw blocked; });
+    const post = vi.fn(async () => { throw blocked; });
+    const patch = vi.fn(async () => { throw blocked; });
+    const context = { provider: { baseUrl: "https://api.notion.com/v1" },
+      http: { get, post, patch } } as never;
+    await expect(omrNotionProvider.actions["content.search"]!.execute({}, context))
+      .rejects.toMatchObject({ code: "NOTION_ACCESS_RESTRICTED", phase: "read" });
+    await expect(omrNotionProvider.actions["pages.get"]!.execute({ pageId: parentId }, context))
+      .rejects.toMatchObject({ code: "NOTION_ACCESS_RESTRICTED", phase: "read" });
+    await expect(omrNotionProvider.actions["pages.create"]!.execute({ parentPageId: parentId,
+      title: "New child" }, context)).rejects.toMatchObject({
+      code: "NOTION_ACCESS_RESTRICTED", phase: "preflight",
+    });
+    await expect(omrNotionProvider.actions["pages.update"]!.execute({ pageId: childId,
+      title: "New name" }, context)).rejects.toMatchObject({
+      code: "NOTION_ACCESS_RESTRICTED", phase: "preflight",
+    });
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(patch).not.toHaveBeenCalled();
+  });
+
+  it.each(["pages.create", "pages.update"] as const)(
+    "settles a blocked %s response after one write without retry guidance", async (toolId) => {
+      const f = await serviceFixture();
+      const params = toolId === "pages.create"
+        ? { parentPageId: parentId, title: "New child" }
+        : { pageId: childId, title: "New name" };
+      const approval = await f.service.requestApproval({ principal: f.principal,
+        toolId: `notion.${toolId}`, params, connectionId: f.binding.id,
+        idempotencyKey: `blocked-${toolId}` });
+      expect(f.notion.writes()).toBe(0);
+      await f.service.approve(approval.id, "alice");
+      f.notion.setDenial({ status: 429, data: { code: "rate_limited",
+        additional_data: { rate_limit_reason: "public_api_request_blocked" } },
+      headers: new Headers({ "Retry-After": "19" }) });
+      await expect(f.service.executeApproved(f.principal, approval.id)).rejects.toMatchObject({
+        code: "NOTION_ACCESS_RESTRICTED", retryAfterSeconds: undefined,
+        message: expect.stringContaining("Contact Notion support"),
+      });
+      expect(f.notion.writes()).toBe(1);
+      expect((await f.service.approvalStatus(f.principal, approval.id)).status).toBe("failed");
+      await expect(f.service.executeApproved(f.principal, approval.id)).rejects.toBeDefined();
+      expect(f.notion.writes()).toBe(1);
+    });
 
   it.each(["pages.create", "pages.update"] as const)(
     "keeps a divergent %s response uncertain after one provider write", async (action) => {

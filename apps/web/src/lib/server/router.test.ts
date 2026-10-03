@@ -10,8 +10,9 @@ import {
   ExecutionOutcomeUnknownError,
   GitHubReadError,
   GitHubWritePreflightError,
+  NotionExecutionError,
 } from "@oh-my-router/execution";
-import { ProviderPreflightError } from "@oh-my-router/tools";
+import { NotionProviderDenial, ProviderPreflightError } from "@oh-my-router/tools";
 
 import {
   createOMRRouter,
@@ -434,6 +435,23 @@ describe("OMR Worker HTTP boundary", () => {
     expect(response.headers.get("x-ratelimit-reset")).toBe("1800000000");
     await expect(response.json()).resolves.toMatchObject({ error: "GITHUB_RATE_LIMITED",
       receiptId: "receipt_1", message: expect.stringContaining("Retry after") });
+  });
+
+  it("shows permanent Notion access guidance without a retry header", async () => {
+    const denial = new NotionProviderDenial("write", "NOTION_ACCESS_RESTRICTED");
+    const execution = { async execute() { throw new NotionExecutionError("receipt_1", denial); } } as
+      unknown as ExecutionRouteServices;
+    const response = await createOMRRouter(undefined, undefined, undefined, execution).handle(new Request(
+      "https://omr.invalid/api/tools/execute", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId: "workspace_1", toolId: "notion.pages.create",
+          params: { parentPageId: "11111111111141118111111111111111", title: "New page" } }) },
+    ));
+    expect(response.status).toBe(403);
+    expect(response.headers.get("retry-after")).toBeNull();
+    await expect(response.json()).resolves.toMatchObject({
+      error: "NOTION_ACCESS_RESTRICTED", receiptId: "receipt_1",
+      message: expect.stringContaining("Contact Notion support"),
+    });
   });
 
   it.each([

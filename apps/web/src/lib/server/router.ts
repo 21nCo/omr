@@ -234,7 +234,7 @@ function slackErrorResponse(error: SlackExecutionError | SlackProviderDenial): R
 function notionErrorResponse(error: NotionExecutionError | NotionProviderDenial): Response {
   const status = {
     NOTION_RATE_LIMITED: 429, NOTION_RECONNECT_REQUIRED: 401,
-    NOTION_PERMISSION_DENIED: 403, NOTION_TARGET_UNAVAILABLE: 404,
+    NOTION_PERMISSION_DENIED: 403, NOTION_ACCESS_RESTRICTED: 403, NOTION_TARGET_UNAVAILABLE: 404,
     NOTION_INVALID_CHANGE: 422, NOTION_QUERY_REJECTED: 502,
   }[error.code];
   const headers: Record<string, string> = { ...PRIVATE_RESPONSE };
