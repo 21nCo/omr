@@ -1,0 +1,25 @@
+apps/web/src/lib/server/router.test.ts
+  s_300423db8f69f3::t_5e7f86df4b8d2b 13,15,440-456
+apps/web/src/lib/server/router.ts
+  s_300423db8f69f3::t_655a2b58cf4e87 237
+docs/notion-v1.md
+  s_300423db8f69f3::t_96c9a6e9ce6c15 48-52
+packages/tools/src/notion-errors.ts
+  s_300423db8f69f3::t_b8e8391b5236fa 3,11,43,45-47,67-76,83,86-87
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ad03dec16f85b452fe48c6e5078c0611dd8ade07",
+  "prompts": {},
+  "sessions": {
+    "s_300423db8f69f3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101a1-a91c-77f0-a0c3-51b2e5b62f4e",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
