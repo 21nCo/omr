@@ -446,6 +446,37 @@ describe("slack-adapter-contract", () => {
     expect(rateFixture.get).not.toHaveBeenCalled();
   });
 
+  it.each(["internal_error", "fatal_error"] as const)(
+    "keeps a Slack %s post uncertain and fences the identical intent", async (code) => {
+      const { service, principal, slack, receipts, approvals } = await executionFixture();
+      const params = { workspaceId: teamA, channelId: channelA, senderId: botA,
+        text: `Maybe posted after ${code}` };
+      const approval = await service.requestApproval({ principal, toolId: "slack.messages.post",
+        params, idempotencyKey: `server-failure-${code}` });
+      expect(slack.messages()).toHaveLength(0);
+      await service.approve(approval.id, "alice");
+      slack.setPostFailure(code);
+      await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({
+        code: "EXECUTION_OUTCOME_UNKNOWN",
+      });
+      expect(slack.messages()).toHaveLength(1);
+      expect(approvals.approvals.get(approval.id)?.status).toBe("uncertain");
+      expect([...receipts.receipts.values()]).toContainEqual(expect.objectContaining({
+        status: "uncertain", errorCode: "provider_response_ambiguous",
+      }));
+      const replay = await service.requestApproval({ principal, toolId: "slack.messages.post",
+        params, idempotencyKey: `another-key-${code}` });
+      expect(replay.id).toBe(approval.id);
+      await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({
+        code: "EXECUTION_OUTCOME_UNKNOWN",
+      });
+      expect(slack.messages()).toHaveLength(1);
+      const reconciled = await service.reconcileUncertain(principal, approval.id, "effect_absent");
+      expect(reconciled.status).toBe("failed");
+      expect(slack.messages()).toHaveLength(1);
+    },
+  );
+
   it("accepts the selected bot ID in a completed post without message.user", async () => {
     const { service, principal, slack, receipts } = await executionFixture();
     const params = { workspaceId: teamA, channelId: channelA, senderId: botA, text: "Bot reply" };

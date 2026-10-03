@@ -312,14 +312,14 @@ export async function createOMRMcpServer(input: {
     },
     {
       name: RECONCILE_APPROVAL_TOOL,
-      title: "Reconcile an Uncertain Linear Approval",
-      description: "After checking Linear independently, record whether an uncertain issue change happened. An effect_absent decision permits a new approval only when OMR received a completed but ambiguous mutation response; transport uncertainty stays fenced.",
+      title: "Reconcile an Uncertain Approval",
+      description: "After checking the selected provider independently, record whether an uncertain Linear issue change or Slack post happened. Verify a Slack post in its selected channel. An effect_absent decision permits a new approval only when OMR received a completed but ambiguous mutation response; transport uncertainty stays fenced.",
       inputSchema: {
         type: "object",
         properties: {
-          approvalId: { type: "string", description: "The uncertain Linear approval id." },
+          approvalId: { type: "string", description: "The uncertain approval id." },
           decision: { type: "string", enum: ["effect_present", "effect_absent"],
-            description: "The outcome you verified in the selected Linear workspace." },
+            description: "The outcome you verified in the selected provider workspace and target." },
         },
         required: ["approvalId", "decision"],
         additionalProperties: false,
@@ -339,7 +339,7 @@ export async function createOMRMcpServer(input: {
     info: {
       name: "oh-my-router",
       version: "0.0.0",
-      instructions: "Use omr.catalog.providers to inspect the workspace-scoped v1 provider states, including unavailable providers. Tools are projected from the authenticated OMR catalog. For multiple ready connections, list and select one with omr.connections.list and omr.connections.select. Call omr.catalog.refresh after connection or selection changes; changed schemas require restarting this session. Revoked tools are hidden on the next list and call. Write, destructive, and unknown-effect calls create an OMR approval instead of executing immediately. After approval in the OMR control plane, call omr.approvals.execute with the returned approvalId. Verify an uncertain Linear result in Linear before calling omr.approvals.reconcile. If that response is lost, read omr.approvals.status by the same grant and check reconciledAs before retrying the same decision.",
+      instructions: "Use omr.catalog.providers to inspect the workspace-scoped v1 provider states, including unavailable providers. Tools are projected from the authenticated OMR catalog. For multiple ready connections, list and select one with omr.connections.list and omr.connections.select. Call omr.catalog.refresh after connection or selection changes; changed schemas require restarting this session. Revoked tools are hidden on the next list and call. Write, destructive, and unknown-effect calls create an OMR approval instead of executing immediately. After approval in the OMR control plane, call omr.approvals.execute with the returned approvalId. Verify an uncertain Linear result in Linear, or an uncertain Slack post in the selected channel, before calling omr.approvals.reconcile. If that response is lost, read omr.approvals.status by the same grant and check reconciledAs before retrying the same decision.",
     },
     transports: ["stdio", "streamable-http"],
     registry,

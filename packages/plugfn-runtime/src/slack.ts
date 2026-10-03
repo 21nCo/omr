@@ -50,6 +50,11 @@ async function call(context: ActionContext, method: string, params: object,
       : new SlackProviderDenial(phase, "SLACK_QUERY_REJECTED");
   }
   if (body.ok === false) {
+    // Slack reports that these server failures may follow a partial write.
+    if (phase === "write" && "error" in body &&
+        (body.error === "internal_error" || body.error === "fatal_error")) {
+      throw new SlackProviderResponseAmbiguous();
+    }
     throw slackDenial({ data: body, headers: response.headers }, phase) ??
       new SlackProviderDenial(phase, phase === "write" ? "SLACK_POST_REJECTED" : "SLACK_QUERY_REJECTED");
   }

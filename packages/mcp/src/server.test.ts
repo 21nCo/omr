@@ -107,6 +107,11 @@ describe("OMR MCP server", () => {
     await client.connect(clientTransport);
     closeables.push(client, server);
 
+    expect(client.getInstructions()).toContain("uncertain Slack post in the selected channel");
+    expect(client.getInstructions()).toContain("omr.approvals.reconcile");
+    expect(client.getInstructions()).toContain("read omr.approvals.status");
+    expect(client.getInstructions()).toContain("check reconciledAs");
+
     const listed = await client.listTools();
     expect(listed.tools.map(({ name }) => name)).toEqual([
       "demo.read",

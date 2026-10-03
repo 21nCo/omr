@@ -59,10 +59,11 @@ transport failures may leave the original request running. Reconciliation
 never posts. An intentional identical post after settlement needs a new key
 and a new approval.
 
-Slack `ok:false`, including unfamiliar error codes, authentication, permission,
-target and rate-limit responses produce safe codes; available `Retry-After`
-seconds are preserved. An
-incomplete or lost response after posting remains uncertain. Reads can retry
+Definite Slack `ok:false` denials, including unfamiliar error codes,
+authentication, permission, target and rate-limit responses produce safe codes;
+available `Retry-After` seconds are preserved. Slack `internal_error` and
+`fatal_error` can follow a partially completed post, so they remain uncertain,
+as does an incomplete or lost post response. Reads can retry
 safely; posts make one provider attempt. Channel membership and workspace
 identity can change at the provider after preflight, so the final provider
 response still governs the recorded outcome. OMR never claims an uncertain
