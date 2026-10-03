@@ -189,7 +189,8 @@ function ambiguousMutationResponse(error: unknown,
   // These codes are emitted only by failed reads or target preflight;
   // the provider mutation has not been dispatched.
   if (error.status === 502 &&
-      (body.error === "LINEAR_QUERY_REJECTED" || body.error === "SLACK_QUERY_REJECTED")) throw error;
+      (body.error === "LINEAR_QUERY_REJECTED" || body.error === "SLACK_QUERY_REJECTED" ||
+       body.error === "NOTION_QUERY_REJECTED")) throw error;
   // Intent reservation failed before an approval or provider call could begin.
   if (error.status === 503 && body.error === "LINEAR_INTENT_TRANSACTION_REQUIRED") {
     throw new CLIError("LINEAR_INTENT_TRANSACTION_REQUIRED",
@@ -222,6 +223,11 @@ const publicSlackCodes = new Set([
   "SLACK_WORKSPACE_MISMATCH", "SLACK_CHANNEL_UNAVAILABLE", "SLACK_POST_REJECTED",
   "SLACK_QUERY_REJECTED",
 ]);
+const publicNotionCodes = new Set([
+  "NOTION_RATE_LIMITED", "NOTION_RECONNECT_REQUIRED", "NOTION_PERMISSION_DENIED",
+  "NOTION_ACCESS_RESTRICTED", "NOTION_TARGET_UNAVAILABLE", "NOTION_INVALID_CHANGE",
+  "NOTION_QUERY_REJECTED",
+]);
 /** Preserve only recognized public server codes; transport errors on writes remain uncertain. */
 function failureCode(error: unknown, body: ReturnType<typeof httpBody>): string {
   if (error instanceof CLIError) return error.code;
@@ -231,7 +237,8 @@ function failureCode(error: unknown, body: ReturnType<typeof httpBody>): string 
       ["/api/tools/execute", "/api/approvals/execute"].includes(error.path)) return "EXECUTION_EFFECT_UNCERTAIN";
   if (typeof body?.error === "string" &&
       (/^(?:EXECUTION|APPROVAL|CLIENT|DEVICE|CONNECTION|TOOL|WORKSPACE|REQUEST|AUTHFN|PROVIDER|RUNTIME|GITHUB)_[A-Z0-9_]{1,64}$/.test(body.error) ||
-        publicLinearCodes.has(body.error) || publicSlackCodes.has(body.error))) {
+        publicLinearCodes.has(body.error) || publicSlackCodes.has(body.error) ||
+        publicNotionCodes.has(body.error))) {
     return body.error;
   }
   return error instanceof OMRHttpError ? "HTTP_ERROR" : "CLI_ERROR";
@@ -269,9 +276,12 @@ function failureDetails(error: unknown, body: ReturnType<typeof httpBody>): unkn
   if (typeof body?.receiptId === "string" &&
       /^(?:execution|receipt)_[A-Za-z0-9_-]{1,100}$/.test(body.receiptId)) details.receiptId = body.receiptId;
   if (error instanceof OMRHttpError && typeof body?.error === "string" &&
-      (body.error === "LINEAR_RATE_LIMITED" || body.error === "SLACK_RATE_LIMITED")) {
+      (body.error === "LINEAR_RATE_LIMITED" || body.error === "SLACK_RATE_LIMITED" ||
+       body.error === "NOTION_RATE_LIMITED")) {
     if (error.retryAfterSeconds !== undefined) details.retryAfterSeconds = error.retryAfterSeconds;
-    if (error.rateLimitResetAt !== undefined) details.rateLimitResetAt = error.rateLimitResetAt;
+    if (body.error === "LINEAR_RATE_LIMITED" || body.error === "SLACK_RATE_LIMITED") {
+      if (error.rateLimitResetAt !== undefined) details.rateLimitResetAt = error.rateLimitResetAt;
+    }
   }
   return Object.keys(details).length ? details : undefined;
 }

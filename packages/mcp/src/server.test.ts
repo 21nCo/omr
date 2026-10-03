@@ -108,11 +108,14 @@ describe("OMR MCP server", () => {
     closeables.push(client, server);
 
     expect(client.getInstructions()).toContain("uncertain Slack post in the selected channel");
+    expect(client.getInstructions()).toContain("Notion page create or rename by checking the exact page and title in the selected integration workspace");
     expect(client.getInstructions()).toContain("omr.approvals.reconcile");
     expect(client.getInstructions()).toContain("read omr.approvals.status");
     expect(client.getInstructions()).toContain("check reconciledAs");
 
     const listed = await client.listTools();
+    expect(listed.tools.find(({ name }) => name === "omr.approvals.reconcile")?.description)
+      .toContain("exact Notion page and title in the selected integration workspace");
     expect(listed.tools.map(({ name }) => name)).toEqual([
       "demo.read",
       "demo.write",
