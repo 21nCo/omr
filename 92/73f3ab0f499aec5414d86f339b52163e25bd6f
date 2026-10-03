@@ -1,0 +1,16 @@
+apps/web/src/lib/notion-search-context.test.ts
+  h_a39f9495f9ec1d 7,9-20,27-28,31-36,40-71,77-80,83-88,92-97,100-101,105-157,159-161
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 270,281-285,319,803-806,823-826
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9273f3ab0f499aec5414d86f339b52163e25bd6f",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
