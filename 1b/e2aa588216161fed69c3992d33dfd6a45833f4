@@ -1,0 +1,26 @@
+apps/web/src/lib/control-plane-request.test.ts
+  h_a39f9495f9ec1d 1-29
+apps/web/src/lib/control-plane-request.ts
+  h_a39f9495f9ec1d 1-26
+apps/web/src/lib/notion-approval-notice.test.ts
+  h_a39f9495f9ec1d 1-14
+apps/web/src/lib/notion-approval-notice.ts
+  h_a39f9495f9ec1d 1-14
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 8-9,205-206,490
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 573-574
+tests/acceptance/notion-adapter-contract.test.ts
+  h_a39f9495f9ec1d 59,310-351
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1be2aa588216161fed69c3992d33dfd6a45833f4",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
