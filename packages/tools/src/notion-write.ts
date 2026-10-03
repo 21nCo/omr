@@ -1,8 +1,8 @@
-const NOTION_ID = /^(?:[a-f0-9]{32}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i;
+export const notionIdPattern = /^(?:[a-f0-9]{32}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i;
 
 /** Use one page identity for approval, intent fencing, and provider dispatch. */
 export function canonicalNotionId(value: unknown): string | null {
-  return typeof value === "string" && NOTION_ID.test(value)
+  return typeof value === "string" && notionIdPattern.test(value)
     ? value.replaceAll("-", "").toLowerCase() : null;
 }
 

@@ -52,13 +52,22 @@ function denialCode(status: number, providerCode: string,
   return null;
 }
 
+/** Read a provider code only from a structured HTTP response body. */
+function responseCode(error: object): string {
+  const body: unknown = Reflect.get(error, "data");
+  if (!body || typeof body !== "object") return "";
+  const code: unknown = Reflect.get(body, "code");
+  return typeof code === "string" ? code : "";
+}
+
 /** Only an HTTP response proves a write was rejected. Transport failures stay uncertain. */
 export function notionDenial(error: unknown, phase: NotionProviderDenial["phase"]): NotionProviderDenial | null {
   if (error instanceof NotionProviderDenial) return error;
-  if (!error || typeof error !== "object" || !("status" in error) || typeof error.status !== "number") return null;
-  const status = error.status;
-  const body = "data" in error && error.data && typeof error.data === "object" ? error.data : null;
-  const providerCode = body && "code" in body && typeof body.code === "string" ? body.code : "";
-  const code = denialCode(status, providerCode, phase);
-  return code ? new NotionProviderDenial(phase, code, retryAfter("headers" in error ? error.headers : undefined)) : null;
+  if (!error || typeof error !== "object") return null;
+  const status: unknown = Reflect.get(error, "status");
+  if (typeof status !== "number") return null;
+  const code = denialCode(status, responseCode(error), phase);
+  if (!code) return null;
+  const headers: unknown = Reflect.get(error, "headers");
+  return new NotionProviderDenial(phase, code, retryAfter(headers));
 }

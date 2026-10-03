@@ -1,9 +1,9 @@
 import { notionProvider } from "@plugfn/providers";
 import type { Action, ActionContext, ActionContract, Provider } from "plugfn";
 import { z } from "zod";
-import { canonicalNotionId, canonicalNotionWriteParams, NotionProviderDenial, NotionProviderResponseAmbiguous, notionDenial } from "@oh-my-router/tools";
+import { canonicalNotionId, canonicalNotionWriteParams, notionIdPattern, NotionProviderDenial, NotionProviderResponseAmbiguous, notionDenial } from "@oh-my-router/tools";
 
-const id = z.string().regex(/^(?:[a-f0-9]{32}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i);
+const id = z.string().regex(notionIdPattern);
 const title = z.string().trim().min(1).max(200);
 const cursor = z.string().min(1).max(1000).optional();
 const richText = z.object({ plain_text: z.string() }).passthrough();
@@ -56,7 +56,7 @@ async function call(context: ActionContext, method: "get" | "post" | "patch", pa
   body: object | undefined, phase: NotionProviderDenial["phase"]): Promise<unknown> {
   try {
     const url = `${context.provider.baseUrl}${path}`;
-    let response;
+    let response: { data: unknown };
     if (method === "get") response = await context.http.get(url);
     else if (method === "post") response = await context.http.post(url, body ?? {});
     else response = await context.http.patch(url, body ?? {});

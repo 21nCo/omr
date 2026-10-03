@@ -18,7 +18,7 @@ export { ConfirmedGitHubWriteRejection, githubHttpFailure, type GitHubHttpFailur
 export { LinearProviderDenial, LinearProviderResponseAmbiguous, linearDenial } from "./linear-errors.js";
 export { SlackProviderDenial, SlackProviderResponseAmbiguous, slackDenial } from "./slack-errors.js";
 export { NotionProviderDenial, NotionProviderResponseAmbiguous, notionDenial } from "./notion-errors.js";
-export { canonicalNotionId, canonicalNotionTitle, canonicalNotionWriteParams } from "./notion-write.js";
+export { canonicalNotionId, canonicalNotionTitle, canonicalNotionWriteParams, notionIdPattern } from "./notion-write.js";
 export {
   V1_PROVIDERS,
   isV1Provider,
