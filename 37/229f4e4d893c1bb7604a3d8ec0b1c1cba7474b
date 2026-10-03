@@ -1,0 +1,21 @@
+apps/web/src/lib/server/cloudflare-runtime.ts
+  s_ad500513bc9987::t_7aa3e5ad1969e7 435,454,462-468
+packages/tools/src/providers.ts
+  s_ad500513bc9987::t_17ff6d17d021c8 29-31
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "37229f4e4d893c1bb7604a3d8ec0b1c1cba7474b",
+  "prompts": {},
+  "sessions": {
+    "s_ad500513bc9987": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0f222-fb22-76a5-a77e-b7c92826db44",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
