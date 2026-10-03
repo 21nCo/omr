@@ -187,7 +187,7 @@ describe("Worker scoped provider catalog", () => {
     }));
   });
 
-  it.each(["NOTION_RATE_LIMITED", "NOTION_RECONNECT_REQUIRED"] as const)(
+  it.each(["NOTION_RATE_LIMITED", "NOTION_PERMISSION_DENIED", "NOTION_RECONNECT_REQUIRED"] as const)(
     "keeps %s distinct from permanent Notion access restriction", async (code) => {
       const { definitions, catalog } = await readActionCatalog(["github", "notion"]);
       const bindings = ["github", "notion"].map((provider) => ({ id: `binding_${provider}`, provider,
@@ -196,7 +196,8 @@ describe("Worker scoped provider catalog", () => {
       const plugfn = { providers: { get: (provider: string) => definitions.get(provider) },
         config: { integrations: { github: {}, notion: {} } },
         action: vi.fn(async (provider: string) => {
-          if (provider === "notion") throw new NotionProviderDenial("read", code, 19);
+          if (provider === "notion") throw new NotionProviderDenial("read", code,
+            code === "NOTION_RATE_LIMITED" ? 19 : undefined);
           return { verifiedScopes: ["read"] };
         }), connections: { get: vi.fn(async () => ({ scopes: ["read"] })) } };
       const result = await scopedToolIds(catalog, plugfn as never,
@@ -204,7 +205,13 @@ describe("Worker scoped provider catalog", () => {
           bindings.find((binding) => binding.provider === provider)!, recordHealth } as never,
         { kind: "web", userId: "user_1", workspaceId: "workspace_1" }, "workspace_1", bindings as never);
       expect([...result.allowedToolIds]).toEqual(["github.read"]);
-      expect(result.providers.find(({ provider }) => provider === "notion")?.proofIssue).toBeUndefined();
+      expect(result.providers.find(({ provider }) => provider === "notion")).toMatchObject({
+        state: "expired",
+        ...(code === "NOTION_RECONNECT_REQUIRED" ? {} : {
+          proofIssue: code.toLowerCase(), proofBindingId: "binding_notion",
+          ...(code === "NOTION_RATE_LIMITED" ? { proofRetryAfterSeconds: 19 } : {}),
+        }),
+      });
       expect(recordHealth).toHaveBeenCalledTimes(code === "NOTION_RECONNECT_REQUIRED" ? 1 : 0);
     });
 

@@ -432,7 +432,8 @@ export async function scopedToolIds(
   bindings: readonly ConnectionBindingRecord[],
 ): Promise<{ allowedToolIds: Set<string>; providers: ProviderStatus[] }> {
   const missing = new Set<string>();
-  const restricted = new Set<string>();
+  const notionProof = new Map<string, { issue: NonNullable<ProviderStatus["proofIssue"]>;
+    retryAfterSeconds?: number }>();
   const allowedToolIds = await resolveScopedCatalog(
     catalog,
     statuses(plugfn, bindings),
@@ -451,9 +452,17 @@ export async function scopedToolIds(
     },
     async (bindingId, code) => {
       missing.add(bindingId);
-      if (code === "NOTION_ACCESS_RESTRICTED") restricted.add(bindingId);
       await authority.recordHealth({ connectionId: bindingId, status: "needs_reauth",
         readiness: "unavailable", reason: code.toLowerCase() }).catch(() => undefined);
+    },
+    (bindingId, code, retryAfterSeconds) => {
+      if (code !== "NOTION_ACCESS_RESTRICTED" && code !== "NOTION_RATE_LIMITED" &&
+          code !== "NOTION_PERMISSION_DENIED") return;
+      missing.add(bindingId);
+      const issue = code === "NOTION_ACCESS_RESTRICTED" ? "notion_access_restricted" :
+        code === "NOTION_RATE_LIMITED" ? "notion_rate_limited" : "notion_permission_denied";
+      notionProof.set(bindingId, { issue,
+        retryAfterSeconds });
     },
   );
   return {
@@ -462,9 +471,10 @@ export async function scopedToolIds(
       ? { ...binding, status: "needs_reauth", readiness: "unavailable" } : binding))
       .map((provider) => {
         if (provider.provider !== "notion") return provider;
-        const bindingId = [...restricted][0];
-        return bindingId ? { ...provider, proofIssue: "notion_access_restricted" as const,
-          proofBindingId: bindingId } : provider;
+        const proof = [...notionProof].find(([bindingId]) => bindings.some((binding) =>
+          binding.provider === "notion" && binding.id === bindingId));
+        return proof ? { ...provider, proofIssue: proof[1].issue,
+          proofBindingId: proof[0], proofRetryAfterSeconds: proof[1].retryAfterSeconds } : provider;
       }),
   };
 }

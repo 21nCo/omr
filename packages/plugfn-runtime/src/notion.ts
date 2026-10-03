@@ -13,8 +13,13 @@ const rawPage = z.object({ object: z.literal("page"), id, url: z.string().url(),
   properties: z.record(z.object({ type: z.string(), title: z.array(richText).optional() }).passthrough()) }).passthrough();
 const rawDatabase = z.object({ object: z.literal("database"), id, url: z.string().url(),
   title: z.array(richText), archived: z.boolean().optional(), in_trash: z.boolean().optional() }).passthrough();
-const rawDataSource = rawDatabase.extend({ object: z.literal("data_source") });
-const item = z.object({ type: z.enum(["page", "database", "data_source"]), id, title: z.string(), url: z.string().url() });
+const rawDataSource = z.object({ object: z.literal("data_source"), id,
+  title: z.array(richText), archived: z.boolean().optional(), in_trash: z.boolean().optional() }).passthrough();
+const item = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("page"), id, title: z.string(), url: z.string().url() }),
+  z.object({ type: z.literal("database"), id, title: z.string(), url: z.string().url() }),
+  z.object({ type: z.literal("data_source"), id, title: z.string() }),
+]);
 const page = z.object({ id, title: z.string(), url: z.string().url(), parent });
 const bot = z.object({ object: z.literal("user"), id, type: z.literal("bot") });
 
@@ -44,11 +49,16 @@ function searchItem(value: unknown): z.infer<typeof item> | null {
   const foundPage = visiblePage(value);
   if (foundPage) return { type: "page", id: foundPage.id,
     title: pageTitle(foundPage.properties)?.text || "Untitled", url: foundPage.url };
-  const database = z.union([rawDatabase, rawDataSource]).safeParse(value);
-  if (database.success && !database.data.archived && !database.data.in_trash) {
-    return { type: database.data.object, id: database.data.id,
-      title: database.data.title.map((entry) => entry.plain_text).join("") || "Untitled", url: database.data.url };
-  }
+  const database = rawDatabase.safeParse(value);
+  if (database.success && !database.data.archived && !database.data.in_trash) return {
+    type: "database", id: database.data.id,
+    title: database.data.title.map((entry) => entry.plain_text).join("") || "Untitled", url: database.data.url,
+  };
+  const dataSource = rawDataSource.safeParse(value);
+  if (dataSource.success && !dataSource.data.archived && !dataSource.data.in_trash) return {
+    type: "data_source", id: dataSource.data.id,
+    title: dataSource.data.title.map((entry) => entry.plain_text).join("") || "Untitled",
+  };
   return null;
 }
 

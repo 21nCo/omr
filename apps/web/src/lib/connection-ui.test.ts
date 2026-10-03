@@ -5,28 +5,51 @@ const team = { id: "connection_1", provider: "slack", ownership: "workspace" as 
   ownerUserId: null, status: "active", readiness: "ready", selected: false };
 
 describe("connection control UI policy", () => {
-  it("shows Notion support recovery for a fresh proof or persisted health, not timed throttling", () => {
+  it("shows Notion recovery for permanent, timed, and permission proof failures", () => {
     expect(notionAccessGuidance("notion_access_restricted", null)).toContain("Contact Notion support");
     expect(notionAccessGuidance(null, "notion_access_restricted")).toContain("Contact Notion support");
-    expect(notionAccessGuidance(null, "notion_rate_limited")).toBeNull();
+    expect(notionAccessGuidance("notion_rate_limited", null, 19)).toContain("after 19 seconds");
+    expect(notionAccessGuidance("notion_permission_denied")).toContain("page sharing");
   });
 
   it("closes the selected Notion journey on a fresh blocked proof and preserves other workspaces", () => {
     const current = { ...team, id: "binding_notion", provider: "notion", selected: true,
       workspaceId: "workspace_1", healthReason: null };
     const other = { ...current, id: "other_notion", workspaceId: "workspace_2" };
-    const projected = connectionAfterNotionProof(current, "binding_notion");
+    const projected = connectionAfterNotionProof(current, "binding_notion", "notion_access_restricted");
     expect(projected).toMatchObject({ status: "needs_reauth", readiness: "unavailable",
       selected: false, healthReason: "notion_access_restricted" });
     expect(connectionActions(projected, "user_admin", "admin", "expired").canSelect).toBe(false);
     expect(connectionActions(projected, "user_admin", "admin", "expired").canReconnect).toBe(false);
-    expect(connectionAfterNotionProof(other, "binding_notion")).toEqual(other);
+    expect(connectionAfterNotionProof(other, "binding_notion", "notion_access_restricted")).toEqual(other);
     expect(notionJourneyGuidance([current, other], "workspace_1", "notion_access_restricted", current.id))
       .toContain("Contact Notion support");
     expect(notionJourneyGuidance([other], "workspace_1")).toBeNull();
     expect(notionJourneyGuidance([{ ...current, selected: false, readiness: "unavailable",
       healthReason: "notion_access_restricted" }], "workspace_1")).toContain("Contact Notion support");
     expect(notionJourneyGuidance([current], "workspace_1")).toBeNull();
+  });
+
+  it("shows fresh 429 and 403 proof guidance only for the selected binding and workspace", () => {
+    const selected = { ...team, id: "failed", provider: "notion", selected: true,
+      workspaceId: "workspace_1", healthReason: null };
+    const alternate = { ...selected, id: "alternate", selected: false };
+    for (const [issue, phrase] of [["notion_rate_limited", "after 19 seconds"],
+      ["notion_permission_denied", "page sharing"]] as const) {
+      expect(notionJourneyGuidance([selected, alternate], "workspace_1", issue, selected.id, 19))
+        .toContain(phrase);
+      expect(connectionAfterNotionProof(selected, selected.id, issue)).toMatchObject({
+        status: "error", readiness: "unavailable", healthReason: issue, selected: false,
+      });
+      if (issue === "notion_rate_limited") expect(connectionActions(
+        connectionAfterNotionProof(selected, selected.id, issue), "user_admin", "admin", "expired",
+      ).canReconnect).toBe(false);
+      expect(connectionAfterNotionProof(alternate, selected.id, issue)).toEqual(alternate);
+      expect(notionJourneyGuidance([{ ...selected, workspaceId: "workspace_2" }],
+        "workspace_1", issue, selected.id, 19)).toBeNull();
+      expect(notionJourneyGuidance([selected, { ...alternate, selected: true }],
+        "workspace_1", issue, selected.id, 19)).toBeNull();
+    }
   });
 
   it("keeps a different ready Notion account selectable and its journey visible", () => {

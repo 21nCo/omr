@@ -74,8 +74,9 @@
     available: boolean;
     authMode: string;
     actionCount: number;
-    proofIssue?: "notion_access_restricted";
+    proofIssue?: "notion_access_restricted" | "notion_rate_limited" | "notion_permission_denied";
     proofBindingId?: string;
+    proofRetryAfterSeconds?: number;
   };
   type Catalog = {
     catalogSchemaVersion: string;
@@ -118,7 +119,8 @@
   let slackGeneration = 0;
   let slackReadOwner: { generation: number; workspaceId: string; accountId: string } | null = null;
   const slackActionKeys = createLinearActionKeys(() => crypto.randomUUID(), () => sessionStorage, "Slack");
-  type NotionItem = { type: "page" | "database" | "data_source"; id: string; title: string; url: string };
+  type NotionItem = { type: "page" | "database"; id: string; title: string; url: string } |
+    { type: "data_source"; id: string; title: string };
   type NotionPage = { id: string; title: string; url: string; parent: { type: string; page_id?: string; database_id?: string } };
   let notionItems: NotionItem[] = [];
   let notionCursor: string | null = null;
@@ -215,14 +217,14 @@
   }
 
   function notionGuidance(): string | null {
+    const proof = catalog?.providers.find((entry) => entry.provider === "notion");
     return notionJourneyGuidance(overview?.connections ?? [], selectedWorkspaceId,
-      catalog?.providers.find((entry) => entry.provider === "notion")?.proofIssue,
-      notionProofBindingId());
+      proof?.proofIssue, notionProofBindingId(), proof?.proofRetryAfterSeconds);
   }
 
   function effectiveConnection(connection: Connection): Connection {
     return connectionAfterNotionProof(connection,
-      notionProofBindingId());
+      notionProofBindingId(), catalog?.providers.find((entry) => entry.provider === "notion")?.proofIssue);
   }
 
   const request = createControlPlaneRequest(fetch, () =>
@@ -1175,7 +1177,10 @@
                 (value) => { notionItems = [...notionItems, ...value.items]; notionCursor = value.nextCursor; })}>More shared content</button>
             {/if}
             {#each notionItems.filter((entry) => entry.type === "database" || entry.type === "data_source") as database}
-              <p>{database.type === "data_source" ? "Data source" : "Database"}: <a href={database.url} target="_blank" rel="noopener noreferrer">{database.title}</a> · browse in Notion</p>
+              <p>{database.type === "data_source" ? "Data source" : "Database"}:
+                {#if database.type === "database"}<a href={database.url} target="_blank" rel="noopener noreferrer">{database.title}</a>{:else}{database.title}{/if}
+                · browse-only
+              </p>
             {/each}
             {#if notionItems.some((entry) => entry.type === "page")}
               <label>Destination or page to rename

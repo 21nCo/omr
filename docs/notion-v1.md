@@ -7,6 +7,9 @@ Search returns one cursor page of at most 100 accessible pages and data sources.
 OMR pins its Notion action requests to API version `2025-09-03`, which exposes
 each shared database data source as a separate browse-only result. A data source
 ID is not a page or database ID and cannot be used as a v1 write destination.
+Data source results have a title and ID but no page URL; the browser shows them
+as browse-only context without inventing a link. Pages and databases retain
+their provider URLs.
 `pages.get` reads one accessible page's title and parent. Creation makes one
 plain titled child beneath an explicitly selected accessible page; update
 renames one explicitly selected accessible page. The adapter does not expose
@@ -55,7 +58,10 @@ support. OMR marks that connection unavailable during catalog proof and shows
 the support instruction in the connection list; it does not offer the page
 journey for that connection until access is restored. Another ready integration
 in the same OMR workspace can still be selected. Other 429 and 529 responses retain
-`Retry-After` when available.
+`Retry-After` when available. A temporary 429 during catalog proof removes
+the selected binding's tools for that request and shows the retry delay without
+persistently disabling the connection. A 403 shows permission and sharing
+guidance for that binding. Both cases permit another ready account to be selected.
 Reads may retry transient failures; writes make one provider attempt.
 
 `tests/acceptance/notion-adapter-contract.test.ts` is the fixture-backed

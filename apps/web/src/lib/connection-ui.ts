@@ -30,38 +30,50 @@ export function providerRevocationGuidance(reason: string | null, authMode: stri
   return "OMR access was removed. Check your provider account for remaining access and revoke it there.";
 }
 
-/** Surface a permanent Notion proof denial from either fresh catalog proof or persisted health. */
-export function notionAccessGuidance(proofIssue?: string | null, healthReason?: string | null): string | null {
-  return proofIssue === "notion_access_restricted" || healthReason === "notion_access_restricted"
-    ? "Notion restricted this integration's API access. Contact Notion support to restore access."
-    : null;
+/** Explain a Notion proof denial from fresh catalog proof or persisted health. */
+export function notionAccessGuidance(proofIssue?: string | null, healthReason?: string | null,
+  retryAfterSeconds?: number): string | null {
+  const issue = proofIssue ?? healthReason;
+  if (issue === "notion_access_restricted") {
+    return "Notion restricted this integration's API access. Contact Notion support to restore access.";
+  }
+  if (issue === "notion_rate_limited") return retryAfterSeconds !== undefined
+    ? `Notion rate limit reached. Retry the health check after ${retryAfterSeconds} seconds.`
+    : "Notion rate limit reached. Retry the health check later.";
+  if (issue === "notion_permission_denied") {
+    return "Notion denied access. Check the integration's content capabilities and page sharing, then retry the health check.";
+  }
+  return null;
 }
 
 /** Project a just-failed proof before the separate overview request can see persisted health. */
 export function connectionAfterNotionProof<Connection extends ConnectionDisplay>(connection: Connection,
-  proofBindingId?: string): Connection {
-  if (connection.provider !== "notion" || connection.id !== proofBindingId) return connection;
-  return { ...connection, status: "needs_reauth", readiness: "unavailable",
-    healthReason: "notion_access_restricted", selected: false };
+  proofBindingId?: string, proofIssue?: string): Connection {
+  if (connection.provider !== "notion" || connection.id !== proofBindingId || !proofIssue) return connection;
+  return { ...connection, status: proofIssue === "notion_access_restricted" ? "needs_reauth" : "error",
+    readiness: "unavailable",
+    healthReason: proofIssue, selected: false };
 }
 
 /** Scope a proof denial to its binding; another ready integration can be selected. */
 export function notionJourneyGuidance(
   connections: readonly (Pick<ConnectionDisplay, "id" | "provider" | "status" | "readiness" | "selected" | "healthReason"> &
     { workspaceId: string })[], workspaceId: string, proofIssue?: string | null,
-  proofBindingId?: string,
+  proofBindingId?: string, retryAfterSeconds?: number,
 ): string | null {
   const scoped = connections.filter((connection) => connection.provider === "notion" &&
     connection.workspaceId === workspaceId);
   if (scoped.some((connection) => connection.selected && connection.status === "active" &&
       connection.readiness === "ready" && connection.healthReason !== "notion_access_restricted" &&
       connection.id !== proofBindingId)) return null;
-  if (proofBindingId && scoped.some((connection) => connection.id !== proofBindingId &&
+  if (proofIssue !== "notion_rate_limited" && proofIssue !== "notion_permission_denied" &&
+      proofBindingId && scoped.some((connection) => connection.id !== proofBindingId &&
       connection.status === "active" && connection.readiness === "ready")) return null;
   const deniedProof = proofBindingId && scoped.some((connection) => connection.id === proofBindingId)
     ? proofIssue : null;
   return notionAccessGuidance(deniedProof,
-    scoped.find((connection) => connection.healthReason === "notion_access_restricted")?.healthReason);
+    scoped.find((connection) => connection.healthReason === "notion_access_restricted")?.healthReason,
+    retryAfterSeconds);
 }
 
 /** A failed proof for one binding must not disable selection of another ready one. */
@@ -105,6 +117,7 @@ export function connectionActions(
     canRefresh: active && manageable && !cleanupOnly,
     canReconnect: active && manageable && !cleanupOnly && !ready &&
       connection.healthReason !== "notion_access_restricted" &&
+      connection.healthReason !== "notion_rate_limited" &&
       providerState !== "unsupported" && providerState !== "unconfigured" && providerState !== "unknown",
     canDisconnect: active && manageable,
     canRetryRevoke: !active && manageable && connection.status === "revoked" &&

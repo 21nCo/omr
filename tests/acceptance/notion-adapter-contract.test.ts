@@ -161,17 +161,19 @@ describe("notion-adapter-contract", () => {
   it("projects modern shared data sources as browse-only context", async () => {
     const fixture = notionFixture();
     fixture.post.mockResolvedValueOnce({ data: { results: [
-      { object: "data_source", id: databaseId, url: `https://www.notion.so/${databaseId}`,
+      { object: "data_source", id: databaseId,
         title: [{ plain_text: "Projects" }] },
-      { object: "data_source", id: foreignId, url: `https://www.notion.so/${foreignId}`,
+      { object: "data_source", id: foreignId,
         title: [{ plain_text: "Hidden" }], in_trash: true },
       page(parentId),
-    ], has_more: false, next_cursor: null } });
+    ], has_more: true, next_cursor: "next-shared-page" } });
     const found = await omrNotionProvider.actions["content.search"]!.execute({}, fixture.context);
-    expect(found).toMatchObject({ items: [
+    expect(found).toEqual({ items: [
       { type: "data_source", id: databaseId, title: "Projects" },
-      { type: "page", id: parentId },
-    ] });
+      { type: "page", id: parentId, title: "Shared",
+        url: `https://www.notion.so/${parentId.replaceAll("-", "")}` },
+    ], nextCursor: "next-shared-page" });
+    expect(omrNotionProvider.actions["content.search"]!.returns.safeParse(found).success).toBe(true);
     expect((found as { items: { type: string }[] }).items.filter((entry) => entry.type === "page"))
       .toHaveLength(1);
   });
