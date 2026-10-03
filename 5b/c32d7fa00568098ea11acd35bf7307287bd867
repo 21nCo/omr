@@ -1,0 +1,18 @@
+apps/web/src/lib/slack-approval-notice.test.ts
+  h_a39f9495f9ec1d 1-29
+apps/web/src/lib/slack-approval-notice.ts
+  h_a39f9495f9ec1d 1-14
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 8,481
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5bc32d7fa00568098ea11acd35bf7307287bd867",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
