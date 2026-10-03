@@ -9,7 +9,7 @@ const senderId = z.string().regex(/^[UW][A-Z0-9]{8,}$/).describe("Bot user ID fr
 const cursor = z.string().min(1).max(500).optional();
 const channel = z.object({ id: channelId, name: z.string().min(1), is_member: z.literal(true),
   is_private: z.literal(false), is_archived: z.literal(false), is_shared: z.literal(false),
-  is_ext_shared: z.literal(false) });
+  is_ext_shared: z.literal(false), is_pending_ext_shared: z.literal(false).optional() });
 const channelInfo = channel.extend({ is_member: z.boolean().optional() });
 const identity = z.object({ ok: z.literal(true), team_id: workspaceId, team: z.string().min(1),
   user_id: senderId, bot_id: z.string().min(1) });

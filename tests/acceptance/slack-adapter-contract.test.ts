@@ -285,6 +285,29 @@ describe("slack-adapter-contract", () => {
     expect(slack.messages()).toHaveLength(0);
   });
 
+  it("excludes pending external shares from discovery and rejects them before read or post", async () => {
+    const slack = slackFixture();
+    const pending = { ...localChannel, id: channelB, is_pending_ext_shared: true };
+    const originalGet = slack.get.getMockImplementation()!;
+    slack.get.mockImplementation(async (url, options) => {
+      if (url.endsWith("/conversations.list")) return { data: { ok: true,
+        channels: [localChannel, pending], response_metadata: { next_cursor: "" } } };
+      if (url.endsWith("/conversations.info")) return { data: { ok: true, channel: pending } };
+      return originalGet(url, options);
+    });
+    const actions = omrSlackProvider.actions;
+    expect((await actions["channels.list"]!.execute({ workspaceId: teamA }, slack.context)).channels)
+      .toEqual([localChannel]);
+    const selected = { workspaceId: teamA, channelId: channelB };
+    await expect(actions["messages.list"]!.execute(selected, slack.context))
+      .rejects.toMatchObject({ code: "SLACK_CHANNEL_UNAVAILABLE" });
+    await expect(actions["messages.post"]!.execute({ ...selected, senderId: botA, text: "Ready" }, slack.context))
+      .rejects.toMatchObject({ code: "SLACK_CHANNEL_UNAVAILABLE" });
+    expect(slack.get.mock.calls.filter(([url]) => url.endsWith("/conversations.history")))
+      .toHaveLength(0);
+    expect(slack.messages()).toHaveLength(0);
+  });
+
   it("proves bot membership when channel info omits is_member, before read or post", async () => {
     const slack = slackFixture();
     const info = { ...localChannel } as Partial<typeof localChannel>;

@@ -32,8 +32,8 @@ if remote revocation is unconfirmed, follow the connection list's guidance.
 Read `workspace.get` first. Use its `id` as `workspaceId` and its `sender.id`
 as `senderId` for a post. These are Slack identifiers, distinct from the OMR
 workspace ID. `channels.list` returns one cursor page of at most 100 joined,
-local public channels. It omits private, archived, shared, external-shared, and
-unjoined channels. Choose a `channelId` from that result. `messages.list`
+local public channels. It omits private, archived, shared, pending external-share,
+external-shared, and unjoined channels. Choose a `channelId` from that result. `messages.list`
 checks the selected workspace and channel again before reading one page of at
 most 100 messages. It displays messages with text and omits events or blocks-only
 messages that the v1 text view cannot represent, while retaining the page cursor.
