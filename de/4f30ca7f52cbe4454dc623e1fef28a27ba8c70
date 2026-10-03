@@ -1,0 +1,16 @@
+packages/plugfn-runtime/src/slack.ts
+  h_a39f9495f9ec1d 13-14,104,108-109,160-161,185,214
+tests/acceptance/slack-adapter-contract.test.ts
+  h_a39f9495f9ec1d 25,37,182,374-427,435-436,454,491,495,709,732
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "de4f30ca7f52cbe4454dc623e1fef28a27ba8c70",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
