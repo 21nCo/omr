@@ -14,7 +14,7 @@ import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
 import { ApprovalUnavailableError, decodeExecutionWrappingKey, deriveExecutionFingerprintKey, ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
 import { connectPostgresExecutionReceipts } from "@oh-my-router/execution/postgres";
 import { connectPostgresIdentityRuntime } from "@oh-my-router/identity/postgres";
-import { connectPostgresPlugFn, verifiedGithubScopes, verifiedLinearScopes, verifiedSlackScopes } from "@oh-my-router/plugfn-runtime";
+import { connectPostgresPlugFn, verifiedGithubScopes, verifiedLinearScopes, verifiedNotionScopes, verifiedSlackScopes } from "@oh-my-router/plugfn-runtime";
 import {
   createPlugFnToolCatalog,
   isProviderConfigured,
@@ -152,6 +152,7 @@ export function createProviderIntegrationConfig(
   return Object.fromEntries(Object.entries(OAUTH_BINDINGS).flatMap(([provider, names]) => {
     if (provider === "github" && env.OMR_GITHUB_V1_ENABLED !== "true") return [];
     if (provider === "linear" && env.OMR_LINEAR_V1_ENABLED !== "true") return [];
+    if (provider === "notion" && env.OMR_NOTION_V1_ENABLED !== "true") return [];
     if (provider === "slack" && env.OMR_SLACK_V1_ENABLED !== "true") return [];
     if (provider === "slack-user") return [];
     const clientId = env[names[0]];
@@ -417,6 +418,7 @@ async function verifiedProviderScopes(
   if (provider === "github") return verifiedGithubScopes(plugfn, { userId, workspaceId, connectionId });
   if (provider === "linear") return verifiedLinearScopes(plugfn, { userId, workspaceId, connectionId });
   if (provider === "slack") return verifiedSlackScopes(plugfn, { userId, workspaceId, connectionId });
+  if (provider === "notion") return verifiedNotionScopes(plugfn, { userId, workspaceId, connectionId });
   return (await plugfn.connections.get(connectionId)).scopes;
 }
 

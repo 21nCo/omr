@@ -20,7 +20,8 @@ export function visibleApprovalCard(approval: { id: string; toolId: string; stat
   recoveredApprovalId: string, now: number, freshOverview: boolean): boolean {
   if (!freshOverview) return false;
   if (["pending", "approved"].includes(approval.status) && approval.expiresAt > now) return true;
-  const reconcilable = approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post";
+  const reconcilable = approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post" ||
+    approval.toolId === "notion.pages.create" || approval.toolId === "notion.pages.update";
   if (approval.status === "uncertain" && reconcilable) return true;
   if (approval.id !== recoveredApprovalId || !reconcilable) return false;
   if (approval.status === "executing") return true;
@@ -136,6 +137,18 @@ export function selectedSlackAccountId<Connection extends { id: string; provider
   return overview.connections.find((connection) => connection.provider === "slack" && connection.selected &&
     connection.workspaceId === workspaceId && connection.status === "active" &&
     connection.readiness === "ready")?.id ?? null;
+}
+
+/** Keep Notion discovery on the current workspace's selected live integration. */
+export function selectedReadyNotionConnection<Connection extends { id: string; provider: string; selected: boolean;
+  workspaceId: string; status: string; readiness: string }>(state: {
+  overview: { selectedWorkspaceId: string | null; connections: readonly Connection[] } | null;
+  selectedWorkspaceId: string; loading: boolean; busy: string;
+}): Connection | undefined {
+  if (state.loading || state.busy || state.overview?.selectedWorkspaceId !== state.selectedWorkspaceId) return undefined;
+  return state.overview.connections.find((connection) => connection.provider === "notion" && connection.selected &&
+    connection.workspaceId === state.selectedWorkspaceId && connection.status === "active" &&
+    connection.readiness === "ready");
 }
 
 /** Let a user abandon a pending read, but keep the channel fixed during approval or reset. */

@@ -9,6 +9,7 @@ export {
   GitHubWriteRejectedError,
   LinearExecutionError,
   SlackExecutionError,
+  NotionExecutionError,
   LinearIntentTransactionRequiredError,
   ExecutionIdempotencyConflictError,
   ExecutionInProgressError,

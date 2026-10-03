@@ -4,7 +4,7 @@ import {
   ConnectionUnavailableError, isMissingRemoteConnection, markMissingRemoteConnection,
   type ConnectionAuthority, type ConnectionBindingRecord,
 } from "@oh-my-router/connections";
-import { ConfirmedGitHubWriteRejection, githubHttpFailure, hasRequiredScopes, LinearProviderDenial, LinearProviderResponseAmbiguous, ProviderPreflightError, SlackProviderDenial, SlackProviderResponseAmbiguous, type GitHubHttpFailure, type JsonValue, type ToolCatalog, type ToolManifest } from "@oh-my-router/tools";
+import { ConfirmedGitHubWriteRejection, githubHttpFailure, hasRequiredScopes, LinearProviderDenial, LinearProviderResponseAmbiguous, NotionProviderDenial, NotionProviderResponseAmbiguous, ProviderPreflightError, SlackProviderDenial, SlackProviderResponseAmbiguous, type GitHubHttpFailure, type JsonValue, type ToolCatalog, type ToolManifest } from "@oh-my-router/tools";
 import { approvalPreviewReady } from "./projection.js";
 
 export type ExecutionStatus = "reserved" | "running" | "succeeded" | "failed" | "uncertain";
@@ -385,6 +385,17 @@ export class SlackExecutionError extends Error {
   }
 }
 
+export class NotionExecutionError extends Error {
+  readonly code: NotionProviderDenial["code"];
+  readonly retryAfterSeconds?: number;
+  constructor(readonly receiptId: string, denial: NotionProviderDenial) {
+    super(denial.message);
+    this.name = "NotionExecutionError";
+    this.code = denial.code;
+    this.retryAfterSeconds = denial.retryAfterSeconds;
+  }
+}
+
 const inputValidators = new Map<string, Validator>();
 
 /** Validate the submitted value against the exact manifest schema used for approval. */
@@ -610,7 +621,8 @@ export class ExecutionService {
   async reconcileUncertain(principal: ExecutionPrincipal, approvalId: string,
     decision: "effect_present" | "effect_absent"): Promise<ExecutionApproval> {
     const approval = await this.approvalStatus(principal, approvalId);
-    if (!(approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post") ||
+    if (!(approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post" ||
+        approval.toolId === "notion.pages.create" || approval.toolId === "notion.pages.update") ||
         !["effect_present", "effect_absent"].includes(decision)) throw new ApprovalUnavailableError();
     const recorded = (value: ExecutionApproval) => value.reconciledAs === decision &&
       value.status === (decision === "effect_present" ? "consumed" : "failed") &&
@@ -947,7 +959,7 @@ export class ExecutionService {
       if (state.succeededReceipt) return state.succeededReceipt;
       if (error instanceof ConnectionUnavailableError || error instanceof GitHubReadError || error instanceof GitHubWritePreflightError ||
           error instanceof GitHubWriteRejectedError || error instanceof LinearExecutionError ||
-          error instanceof SlackExecutionError) throw error;
+          error instanceof SlackExecutionError || error instanceof NotionExecutionError) throw error;
       if (state.dispatchedReceiptId &&
           !(error instanceof ExecutionOutcomeUnknownError)) {
         const receiptId = state.dispatchedReceiptId;
@@ -995,7 +1007,8 @@ export class ExecutionService {
     if (confirmed && await this.failDispatchedReceipt(receipt.id, confirmed.code, cleanupDeadlineAt)) {
       throw confirmed.error;
     }
-    const code = error instanceof LinearProviderResponseAmbiguous || error instanceof SlackProviderResponseAmbiguous
+    const code = error instanceof LinearProviderResponseAmbiguous || error instanceof SlackProviderResponseAmbiguous ||
+      error instanceof NotionProviderResponseAmbiguous
       ? "provider_response_ambiguous" : "provider_outcome_unknown";
     await withinInvocationDeadline(cleanupDeadlineAt, () =>
       this.receipts.uncertain(receipt.id, code, this.now(), cleanupDeadlineAt))
@@ -1095,6 +1108,9 @@ function confirmedProviderDenial(error: unknown, manifest: ToolManifest,
   }
   if (manifest.provider === "slack" && error instanceof SlackProviderDenial) {
     return { code: `slack_${error.phase}_denied`, error: new SlackExecutionError(receiptId, error) };
+  }
+  if (manifest.provider === "notion" && error instanceof NotionProviderDenial) {
+    return { code: `notion_${error.phase}_denied`, error: new NotionExecutionError(receiptId, error) };
   }
   return null;
 }

@@ -9,7 +9,6 @@ import {
   icloudProvider,
   imapSmtpProvider,
   jiraProvider,
-  notionProvider,
   onedriveProvider,
   outlookProvider,
   stripeProvider,
@@ -22,6 +21,7 @@ import { createPostgresPlugFnAdapter } from "./postgres.js";
 import { omrGithubProvider } from "./github.js";
 import { omrLinearProvider } from "./linear.js";
 import { omrSlackProvider } from "./slack.js";
+import { omrNotionProvider } from "./notion.js";
 
 const { Client } = pg;
 
@@ -38,7 +38,7 @@ const providers = [
   icloudProvider,
   imapSmtpProvider,
   jiraProvider,
-  notionProvider,
+  omrNotionProvider,
   onedriveProvider,
   outlookProvider,
   omrSlackProvider,
@@ -120,3 +120,4 @@ export { createPostgresPlugFnAdapter } from "./postgres.js";
 export { omrGithubProvider, verifiedGithubScopes } from "./github.js";
 export { omrLinearProvider, verifiedLinearScopes } from "./linear.js";
 export { omrSlackProvider, verifiedSlackScopes } from "./slack.js";
+export { omrNotionProvider, verifiedNotionScopes } from "./notion.js";

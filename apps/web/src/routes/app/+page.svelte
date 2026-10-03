@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { beginGithubReconnect, createOAuthReviewController } from "$lib/oauth-review.js";
   import { connectionActions, connectionStatusLabel, providerRevocationGuidance } from "$lib/connection-ui.js";
-  import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, effectAbsentAvailable, effectPresentAvailable, providerDisplayState, recoverProviderReconciliation, recoverWorkspaceOverview, sameSlackPostParams, sameSlackReadSelection, selectedLinearAccountId, selectedReadyLinearConnection, selectedReadySlackConnection, selectedSlackAccountId, slackChannelSelectionLocked, visibleApprovalCard } from "$lib/workspace-catalog.js";
+  import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, effectAbsentAvailable, effectPresentAvailable, providerDisplayState, recoverProviderReconciliation, recoverWorkspaceOverview, sameSlackPostParams, sameSlackReadSelection, selectedLinearAccountId, selectedReadyLinearConnection, selectedReadyNotionConnection, selectedReadySlackConnection, selectedSlackAccountId, slackChannelSelectionLocked, visibleApprovalCard } from "$lib/workspace-catalog.js";
   import { renderApprovalPreview } from "$lib/approval-preview.js";
   import { createLinearActionKeys, linearApprovalNotice } from "$lib/linear-action-keys.js";
   import { slackApprovalNotice } from "$lib/slack-approval-notice.js";
@@ -113,6 +113,18 @@
   let slackGeneration = 0;
   let slackReadOwner: { generation: number; workspaceId: string; accountId: string } | null = null;
   const slackActionKeys = createLinearActionKeys(() => crypto.randomUUID(), () => sessionStorage, "Slack");
+  type NotionItem = { type: "page" | "database"; id: string; title: string; url: string };
+  type NotionPage = { id: string; title: string; url: string; parent: { type: string; page_id?: string; database_id?: string } };
+  let notionItems: NotionItem[] = [];
+  let notionCursor: string | null = null;
+  let notionQuery = "";
+  let notionPageId = "";
+  let notionPage: NotionPage | null = null;
+  let notionCreateTitle = "";
+  let notionUpdateTitle = "";
+  let notionBusy = "";
+  let notionGeneration = 0;
+  const notionActionKeys = createLinearActionKeys(() => crypto.randomUUID(), () => sessionStorage, "Notion");
   type LinearTeam = { id: string; name: string; key: string };
   type LinearIssue = { id: string; identifier: string; title: string; description: string | null;
     url: string; team: { id: string; name: string }; state: { id: string; name: string } | null };
@@ -246,6 +258,7 @@
     (state) => {
       const previousLinearAccountId = selectedLinearAccountId(overview, selectedWorkspaceId);
       const previousSlackAccountId = selectedSlackAccountId(overview, selectedWorkspaceId);
+      const previousNotionAccountId = selectedReadyNotionConnection({ overview, selectedWorkspaceId, loading: false, busy: "" })?.id;
       overview = state.overview;
       catalog = state.catalog;
       selectedWorkspaceId = state.selectedWorkspaceId;
@@ -253,6 +266,7 @@
       error = state.error;
       if (previousLinearAccountId !== selectedLinearAccountId(overview, selectedWorkspaceId)) clearLinear();
       if (previousSlackAccountId !== selectedSlackAccountId(overview, selectedWorkspaceId)) clearSlack();
+      if (previousNotionAccountId !== selectedReadyNotionConnection({ overview, selectedWorkspaceId, loading: false, busy: "" })?.id) clearNotion();
       if (!catalog) {
         oauthProvider = "";
         credentialProvider = "";
@@ -285,6 +299,7 @@
     automaticApprovalLookup = null;
     clearLinear();
     clearSlack();
+    clearNotion();
     apiKey = "";
     await load();
   }
@@ -408,6 +423,115 @@
       ...(linearUpdateDescription !== (linearIssue.description ?? "")
         ? { description: linearUpdateDescription } : {}),
     };
+  }
+
+  function clearNotion() {
+    notionGeneration++;
+    notionBusy = "";
+    notionItems = [];
+    notionCursor = null;
+    notionPageId = "";
+    notionPage = null;
+    notionCreateTitle = "";
+    notionUpdateTitle = "";
+  }
+
+  function notionAccount(): Connection | undefined {
+    return selectedReadyNotionConnection({ overview, selectedWorkspaceId, loading, busy });
+  }
+
+  function notionToolAvailable(toolId: string): boolean {
+    return Boolean(notionAccount() && catalog?.tools.some((tool) => tool.id === toolId));
+  }
+
+  async function notionRead<T>(toolId: string, params: object, publish: (value: T) => void) {
+    const account = notionAccount();
+    if (!account || notionBusy || !notionToolAvailable(toolId)) {
+      error = "Select a ready Notion integration and available action first."; return;
+    }
+    const generation = notionGeneration;
+    const workspaceId = selectedWorkspaceId;
+    notionBusy = toolId;
+    error = "";
+    try {
+      const receipt = await request<{ result: T }>("/api/tools/execute", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId, connectionId: account.id, toolId, params }),
+      });
+      if (generation === notionGeneration && workspaceId === selectedWorkspaceId &&
+          account.id === notionAccount()?.id) publish(receipt.result);
+    } catch (caught) {
+      if (generation === notionGeneration && workspaceId === selectedWorkspaceId) {
+        error = caught instanceof Error ? caught.message : "Notion read failed";
+      }
+    } finally { if (generation === notionGeneration) notionBusy = ""; }
+  }
+
+  function notionParams(toolId: "notion.pages.create" | "notion.pages.update") {
+    return toolId === "notion.pages.create"
+      ? { parentPageId: notionPageId, title: notionCreateTitle }
+      : { pageId: notionPageId, title: notionUpdateTitle };
+  }
+
+  async function notionApproval(toolId: "notion.pages.create" | "notion.pages.update") {
+    const account = notionAccount();
+    if (!account || notionBusy || !notionPage || notionPage.id !== notionPageId ||
+        !notionToolAvailable(toolId)) {
+      error = "Choose and read a shared Notion page before requesting a change."; return;
+    }
+    const generation = notionGeneration;
+    const workspaceId = selectedWorkspaceId;
+    const params = notionParams(toolId);
+    notionBusy = "approval";
+    error = "";
+    try {
+      const idempotencyKey = await notionActionKeys.key(toolId, workspaceId, account.id, params);
+      const approval = await request<{ id: string; status: string; expiresAt: number }>("/api/approvals", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId, connectionId: account.id, toolId, params, idempotencyKey }),
+      });
+      if (generation !== notionGeneration || workspaceId !== selectedWorkspaceId ||
+          account.id !== notionAccount()?.id) return;
+      if (JSON.stringify(params) !== JSON.stringify(notionParams(toolId))) {
+        await load();
+        notice = "The Notion destination or title changed. Review the created approval before requesting another.";
+        return;
+      }
+      recoveredApprovalId = ["pending", "approved", "uncertain"].includes(approval.status) ? approval.id : "";
+      automaticApprovalLookup = ["pending", "approved"].includes(approval.status)
+        ? { id: approval.id, expiresAt: approval.expiresAt } : null;
+      recoveryInput = recoveredApprovalId;
+      notice = linearApprovalNotice(approval.status);
+      await load();
+    } catch (caught) {
+      if (generation === notionGeneration) error = caught instanceof Error ? caught.message : "Could not request Notion approval";
+    } finally { if (generation === notionGeneration) notionBusy = ""; }
+  }
+
+  async function resetNotionAction(toolId: "notion.pages.create" | "notion.pages.update") {
+    const account = notionAccount();
+    if (!account || notionBusy || !notionPage || notionPage.id !== notionPageId) return;
+    const generation = notionGeneration;
+    const workspaceId = selectedWorkspaceId;
+    const params = notionParams(toolId);
+    notionBusy = "reset";
+    error = "";
+    try {
+      await notionActionKeys.resetAfterSettlement(toolId, workspaceId, account.id, params,
+        (idempotencyKey) => request<{ status: string }>("/api/approvals", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ workspaceId, connectionId: account.id, toolId, params, idempotencyKey }),
+        }), () => generation === notionGeneration && workspaceId === selectedWorkspaceId &&
+          account.id === notionAccount()?.id);
+      if (generation !== notionGeneration || workspaceId !== selectedWorkspaceId ||
+          account.id !== notionAccount()?.id) return;
+      recoveredApprovalId = "";
+      recoveryInput = "";
+      automaticApprovalLookup = null;
+      notice = "New Notion action started. Review its page and title before requesting approval.";
+    } catch (caught) {
+      if (generation === notionGeneration) error = caught instanceof Error ? caught.message : "Could not start another Notion action";
+    } finally { if (generation === notionGeneration) notionBusy = ""; }
   }
 
   /** Invalidate pending reads whenever the visible Slack journey is reset. */
@@ -542,11 +666,13 @@
 
   async function mutate(name: string, path: string, body: unknown, success: string) {
     if (name.startsWith("select:") || name.startsWith("refresh:") || name.startsWith("health:") ||
-        name.startsWith("reconcile:")) { clearLinear(); clearSlack(); }
+        name.startsWith("reconcile:")) { clearLinear(); clearSlack(); clearNotion(); }
     if (name.startsWith("execute:") && overview?.approvals.some((approval) =>
       name === `execute:${approval.id}` && approval.toolId.startsWith("linear."))) clearLinear();
     if (name.startsWith("execute:") && overview?.approvals.some((approval) =>
       name === `execute:${approval.id}` && approval.toolId.startsWith("slack."))) clearSlack();
+    if (name.startsWith("execute:") && overview?.approvals.some((approval) =>
+      name === `execute:${approval.id}` && approval.toolId.startsWith("notion."))) clearNotion();
     busy = name;
     error = "";
     notice = "";
@@ -577,6 +703,7 @@
     busy = `reconcile:${approvalId}`;
     clearLinear();
     clearSlack();
+    clearNotion();
     error = "";
     notice = "";
     const success = decision === "effect_present"
@@ -671,6 +798,7 @@
   async function disconnect(connection: Connection) {
     if (connection.provider === "linear") clearLinear();
     if (connection.provider === "slack") clearSlack();
+    if (connection.provider === "notion") clearNotion();
     busy = `disconnect:${connection.id}`;
     error = "";
     notice = "";
@@ -882,8 +1010,11 @@
                   </select>
                 </label>
               {/if}
+              {#if oauthProvider === "notion"}
+                <p>Notion's consent page chooses which pages and databases are shared with this integration. OMR can read shared pages and request approval to create or rename a page.</p>
+              {/if}
             </div>
-            <p>OMR shows the requested scopes before provider consent. Linear issue changes and Slack posts require OMR approval. Review the provider consent screen before granting access.</p>
+            <p>OMR shows the requested scopes before provider consent. Linear, Slack, and Notion changes require OMR approval. Review the provider consent screen before granting access.</p>
             <button class="primary" type="submit" disabled={Boolean(busy) || !selectedWorkspaceId || !oauthProvider}>
               {busy === "oauth" ? "Opening provider…" : "Continue to provider"}
             </button>
@@ -893,7 +1024,7 @@
               <strong>Review requested access</strong>
               <p>{new URL(authorizationDestination).hostname} will receive a {authorizationOwnership === "personal" ? "personal" : "team"} connection.</p>
               {#if requestedScopes.length}<p>Requested scopes: {requestedScopes.join(", ")}</p>
-              {:else}<p>No named scopes appear in this authorization URL. Confirm the permissions on the provider consent screen.</p>{/if}
+              {:else}<p>No named scopes appear in this authorization URL. Confirm the permissions and shared pages on the provider consent screen.</p>{/if}
               <button class="primary compact" onclick={() => location.assign(authorizationDestination)}>Continue to provider</button>
               <button class="quiet compact" onclick={cancelAuthorization}>Cancel</button>
             </div>
@@ -1009,6 +1140,62 @@
           </section>
         {/if}
 
+        {#if catalog?.providers.find((entry) => entry.provider === "notion")?.state === "ready"}
+          <section class="panel" aria-label="Notion page journey">
+            <div class="panel-heading"><div><p class="kicker">Notion</p><h2>Shared pages</h2></div></div>
+            <p>Selected integration: {notionAccount()?.label ?? "Select a Notion account above"}. Search shows content shared with that integration. Choose and read a page before creating a child or renaming it. Every change waits for separate approval.</p>
+            <form class="inset" onsubmit={(event) => { event.preventDefault(); notionGeneration++; notionBusy = "";
+              notionItems = []; notionCursor = null; notionPageId = ""; notionPage = null;
+              void notionRead<{ items: NotionItem[]; nextCursor: string | null }>("notion.content.search",
+                { query: notionQuery }, (value) => { notionItems = value.items; notionCursor = value.nextCursor; }); }}>
+              <label>Search shared content<input bind:value={notionQuery} maxlength="100" placeholder="Optional title" /></label>
+              <button class="quiet compact" type="submit" disabled={Boolean(notionBusy) || !notionToolAvailable("notion.content.search")}>Find pages and databases</button>
+            </form>
+            {#if notionCursor}
+              <button class="quiet compact" disabled={Boolean(notionBusy)} onclick={() => void notionRead<{ items: NotionItem[]; nextCursor: string | null }>(
+                "notion.content.search", { query: notionQuery, cursor: notionCursor },
+                (value) => { notionItems = [...notionItems, ...value.items]; notionCursor = value.nextCursor; })}>More shared content</button>
+            {/if}
+            {#each notionItems.filter((entry) => entry.type === "database") as database}
+              <p>Database: <a href={database.url} target="_blank" rel="noopener noreferrer">{database.title}</a> · browse in Notion</p>
+            {/each}
+            {#if notionItems.some((entry) => entry.type === "page")}
+              <label>Destination or page to rename
+                <select bind:value={notionPageId} disabled={Boolean(notionBusy)} onchange={() => {
+                  notionGeneration++; notionBusy = ""; notionPage = null; notionCreateTitle = ""; notionUpdateTitle = "";
+                }}>
+                  <option value="">Choose a shared page</option>
+                  {#each notionItems.filter((entry) => entry.type === "page") as entry}
+                    <option value={entry.id}>{entry.title}</option>
+                  {/each}
+                </select>
+              </label>
+              <button class="quiet compact" disabled={Boolean(notionBusy) || !notionPageId || !notionToolAvailable("notion.pages.get")}
+                onclick={() => void notionRead<NotionPage>("notion.pages.get", { pageId: notionPageId },
+                  (value) => { notionPage = value; notionUpdateTitle = value.title; })}>Read selected page</button>
+            {/if}
+            {#if notionPage && notionPage.id === notionPageId}
+              <p><a href={notionPage.url} target="_blank" rel="noopener noreferrer">{notionPage.title}</a> · {notionPage.id}</p>
+              {#if notionToolAvailable("notion.pages.create")}
+                <form class="inset" onsubmit={(event) => { event.preventDefault(); void notionApproval("notion.pages.create"); }}>
+                  <strong>Create a child beneath {notionPage.title}</strong>
+                  <label>New page title<input bind:value={notionCreateTitle} maxlength="200" required disabled={Boolean(notionBusy)} /></label>
+                  <button class="primary compact" type="submit" disabled={Boolean(notionBusy) || !notionCreateTitle.trim()}>Request creation approval</button>
+                  <button class="quiet compact" type="button" disabled={Boolean(notionBusy)} onclick={() => void resetNotionAction("notion.pages.create")}>Start a new identical creation</button>
+                </form>
+              {/if}
+              {#if notionToolAvailable("notion.pages.update")}
+                <form class="inset" onsubmit={(event) => { event.preventDefault(); void notionApproval("notion.pages.update"); }}>
+                  <strong>Rename {notionPage.title}</strong>
+                  <label>Page title<input bind:value={notionUpdateTitle} maxlength="200" required disabled={Boolean(notionBusy)} /></label>
+                  <button class="primary compact" type="submit" disabled={Boolean(notionBusy) || !notionUpdateTitle.trim() || notionUpdateTitle === notionPage.title}>Request rename approval</button>
+                  <button class="quiet compact" type="button" disabled={Boolean(notionBusy)} onclick={() => void resetNotionAction("notion.pages.update")}>Start a new identical rename</button>
+                </form>
+              {/if}
+            {/if}
+          </section>
+        {/if}
+
         {#if catalog?.providers.find((entry) => entry.provider === "slack")?.state === "ready"}
           <section class="panel" aria-label="Slack channel journey">
             <div class="panel-heading"><div><p class="kicker">Slack</p><h2>Channels</h2></div></div>
@@ -1082,7 +1269,7 @@
         <section class="panel approvals">
           <div class="panel-heading"><div><p class="kicker">Human in the loop</p><h2>Approvals</h2></div></div>
           <form class="inline-form" onsubmit={(event) => { event.preventDefault(); recoveredApprovalId = recoveryInput.trim(); recoveryError = ""; automaticApprovalLookup = null; void load(); }}>
-            <label for="recover-approval">Find an older Linear or Slack approval by ID</label>
+            <label for="recover-approval">Find an older Linear, Slack, or Notion approval by ID</label>
             <input id="recover-approval" bind:value={recoveryInput} maxlength="128" placeholder="Approval ID" />
             <button class="quiet compact" type="submit" disabled={Boolean(busy) || !recoveryInput.trim()}>Find approval</button>
             {#if recoveredApprovalId}<button class="quiet compact" type="button" disabled={Boolean(busy)}
@@ -1105,7 +1292,7 @@
                   <button class="danger compact" disabled={Boolean(busy) || Boolean(error) || loading} onclick={() => void mutate(`reject:${approval.id}`, "/api/approvals/reject", { approvalId: approval.id }, `Rejected ${approval.toolId}.`)}>Reject</button>
                   {#if !approval.browserActionable}<p class="approval-context">After approval, execute this action from the originating CLI or MCP client.</p>{/if}
                 {:else if approval.status === "uncertain"}
-                  <p class="approval-context">The outcome is unknown. Check receipt {approval.executionReceiptId ?? "pending"} against the selected {approval.toolId.startsWith("slack.") ? "Slack workspace and channel" : "Linear workspace and issue"} before recording a decision.</p>
+                  <p class="approval-context">The outcome is unknown. Check receipt {approval.executionReceiptId ?? "pending"} against the selected {approval.toolId.startsWith("slack.") ? "Slack workspace and channel" : approval.toolId.startsWith("notion.") ? "Notion page and title" : "Linear workspace and issue"} before recording a decision.</p>
                   {#if !approval.browserActionable}
                     <p class="approval-context">Record the verified outcome from the originating CLI or MCP client. This browser session cannot reconcile its grant.</p>
                   {:else}

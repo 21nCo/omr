@@ -1,7 +1,7 @@
 import { MemoryAdapter, plugFn } from "plugfn";
 import { randomBytes } from "node:crypto";
-import { linearProvider, notionProvider, slackProvider } from "@plugfn/providers";
-import { omrGithubProvider } from "@oh-my-router/plugfn-runtime";
+import { linearProvider, slackProvider } from "@plugfn/providers";
+import { omrGithubProvider, omrNotionProvider } from "@oh-my-router/plugfn-runtime";
 import { createPlugFnToolCatalog, v1ProviderCatalog } from "@oh-my-router/tools";
 
 // Credential-free reference response: registered adapters, no OAuth configuration or bindings.
@@ -12,7 +12,7 @@ const runtime = plugFn({
   encryptionKey: randomBytes(32).toString("hex"),
   integrations: {},
 });
-for (const provider of [omrGithubProvider, linearProvider, slackProvider, notionProvider]) {
+for (const provider of [omrGithubProvider, linearProvider, slackProvider, omrNotionProvider]) {
   runtime.use(provider);
 }
 await runtime.ready;

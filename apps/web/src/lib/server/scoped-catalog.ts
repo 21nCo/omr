@@ -2,7 +2,7 @@ import {
   ConnectionSelectionRequiredError, ConnectionUnavailableError,
   isMissingRemoteConnection,
 } from "@oh-my-router/connections";
-import { githubHttpFailure, LinearProviderDenial, SlackProviderDenial, usableToolIds, type ProviderStatus, type ToolCatalog } from "@oh-my-router/tools";
+import { githubHttpFailure, LinearProviderDenial, NotionProviderDenial, SlackProviderDenial, usableToolIds, type ProviderStatus, type ToolCatalog } from "@oh-my-router/tools";
 
 /** A deleted PlugFn connection is an unavailable grant, not a failed catalog. */
 export async function resolveScopedCatalog(
@@ -48,6 +48,13 @@ async function providerProofUnavailable(provider: string, bindingId: string, err
       if (error.code === "SLACK_PERMISSION_DENIED" || error.code === "SLACK_WORKSPACE_MISMATCH") {
         await onPermanentDenial?.(bindingId, error.code);
       }
+      return true;
+    }
+    return githubProofUnavailable(error);
+  }
+  if (provider === "notion") {
+    if (error instanceof NotionProviderDenial) {
+      if (error.code === "NOTION_RECONNECT_REQUIRED") await onReconnectRequired?.(bindingId, provider);
       return true;
     }
     return githubProofUnavailable(error);
