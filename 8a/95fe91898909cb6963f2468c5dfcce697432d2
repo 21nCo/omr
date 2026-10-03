@@ -1,0 +1,73 @@
+apps/web/src/lib/connection-ui.test.ts
+  s_ee5d9d808851a0::t_c71cb293e5e329 2,24,32-53
+apps/web/src/lib/connection-ui.ts
+  s_05ee3b445a4a64::t_d3325086d69f1e 48,50,52,56-79
+apps/web/src/lib/notion-approval-notice.test.ts
+  s_e121ed4f36a088::t_7f71002a11252a 2,14-24
+apps/web/src/lib/notion-approval-notice.ts
+  s_e121ed4f36a088::t_c1e6a392eec9d2 15-23
+apps/web/src/lib/server/cloudflare-runtime.test.ts
+  s_ee5d9d808851a0::t_30b068377f389d 12,17-18,125-158
+apps/web/src/lib/server/reconciliation-receipts.test.ts
+  s_6a3bb8d01b28de::t_b0e18b79a8da97 11-32
+apps/web/src/lib/workspace-catalog.test.ts
+  s_ee5d9d808851a0::t_ddd8a8e1b38be2 12-19
+apps/web/src/lib/workspace-catalog.ts
+  s_05ee3b445a4a64::t_2ad9cd139e54ee 26-27
+apps/web/src/routes/app/+page.svelte
+  s_ee5d9d808851a0::t_3d2da764c891cc 4,9,191-192,213-214,499-502,947-948,1152-1153
+docs/notion-v1.md
+  s_ee5d9d808851a0::t_73f24ee0bf7ef6 53-54
+packages/execution/src/execution.ts
+  s_ee5d9d808851a0::t_9c9a434cdb928a 1009-1010
+packages/execution/src/postgres-approval-store.ts
+  s_05ee3b445a4a64::t_d82df22e3d3085 650
+packages/execution/src/postgres.integration.test.ts
+  s_ee5d9d808851a0::t_d40e84000c4107 237-256
+packages/execution/src/testing.ts
+  s_05ee3b445a4a64::t_18e90fdbf8601c 405
+packages/plugfn-runtime/src/notion.ts
+  s_ee5d9d808851a0::t_4b1cc2239f040e 65-71
+packages/tools/src/notion-errors.ts
+  s_ee5d9d808851a0::t_07e41aaf8604c9 6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8a95fe91898909cb6963f2468c5dfcce697432d2",
+  "prompts": {},
+  "sessions": {
+    "s_05ee3b445a4a64": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a101ed-0728-79e2-ad19-86fcd77f7413",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    },
+    "s_6a3bb8d01b28de": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10226-7a97-7b11-8c97-6c4952d00522",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    },
+    "s_e121ed4f36a088": {
+      "agent_id": {
+        "tool": "amp",
+        "id": "TU-034ZXyHbcnmLU0u7pIS7bP",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    },
+    "s_ee5d9d808851a0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f1e3-16d3-72f2-af1e-998d62994d47",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
