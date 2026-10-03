@@ -259,6 +259,9 @@ function failureExit(error: unknown, code: string): number {
 function failureMessage(error: unknown, code: string): string {
   if (error instanceof CLIError) return error.message;
   if (error instanceof OMRHttpError) {
+    if (code === "CONNECTION_UNAVAILABLE") {
+      return "Connection is unavailable; reconnect the provider before retrying.";
+    }
     if (code === "GITHUB_PREFLIGHT_UNAVAILABLE") {
       return "GitHub repository preflight could not be verified. Check the connection before requesting a new approval.";
     }

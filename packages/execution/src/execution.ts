@@ -1133,11 +1133,11 @@ function confirmedDispatchFailure(error: unknown, manifest: ToolManifest,
   if (isMissingGithubCommentPreflight(error, manifest)) {
     return { code: "connection_unavailable", error: new ConnectionUnavailableError() };
   }
-  // Notion's adapter converts a missing connection after entering POST/PATCH
-  // into an ambiguous response. A raw PlugFn lookup error therefore occurred
-  // before the adapter, when no provider request was possible.
+  // Reads have no provider effect. Notion's adapter converts a missing
+  // connection after entering POST/PATCH into an ambiguous response, so a raw
+  // PlugFn lookup error on a Notion write occurred before adapter entry.
   if (isMissingRemoteConnection(error)) {
-    return (manifest.provider === "github" && manifest.contract.effect === "read") ||
+    return manifest.contract.effect === "read" ||
       (manifest.provider === "notion" && manifest.contract.effect === "write")
       ? { code: "connection_unavailable", error: new ConnectionUnavailableError() } : null;
   }

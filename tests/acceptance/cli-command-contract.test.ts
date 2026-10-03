@@ -1705,6 +1705,21 @@ syncBuiltinESMExports();
     expect(f.committedMutations).toEqual([]);
   });
 
+  it("guides reconnect for definite missing-connection reads without an uncertain receipt", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    f.failureResponse("/api/tools/execute", 409, { error: "CONNECTION_UNAVAILABLE" });
+    for (const toolId of ["notion.content.search", "notion.pages.get", "linear.get_issue",
+      "slack.messages.list"]) {
+      const reply = await f.run(["tools", "run", toolId, "--json"], env);
+      expect(reply.code).toBe(1);
+      expect(lastError(reply.stderr)).toEqual({ error: "CONNECTION_UNAVAILABLE",
+        message: "Connection is unavailable; reconnect the provider before retrying." });
+      expect(reply.stderr).not.toContain("outcome");
+    }
+    expect(f.committedMutations).toEqual([]);
+  });
+
   it("keeps the filtered Slack history signal and cursor in CLI JSON output", async () => {
     const f = await fixture();
     f.successReply("/api/tools/execute", { id: "receipt_filtered", workspaceId: "workspace_1",

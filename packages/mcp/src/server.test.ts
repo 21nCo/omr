@@ -417,6 +417,30 @@ describe("OMR MCP server", () => {
     });
   });
 
+  it("returns definite reconnect errors for missing-connection reads without an uncertain receipt", async () => {
+    const readTools = ["notion.content.search", "notion.pages.get", "linear.get_issue",
+      "slack.messages.list"];
+    const fetchImpl: typeof fetch = async (request) => requestUrl(request).pathname === "/api/tools"
+      ? Response.json({ catalogSchemaVersion: "1.0.0", revision: "revision-1",
+        tools: readTools.map((id) => manifest(id, "read")) })
+      : Response.json({ error: "CONNECTION_UNAVAILABLE" }, { status: 409 });
+    const server = await createOMRMcpServer({ baseUrl: "https://omr.test", credential: "credential",
+      workspaceId: "workspace-1", fetchImpl });
+    const client = new Client({ name: "missing-read", version: "1.0.0" }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closeables.push(client, server);
+
+    for (const toolId of readTools) {
+      const response = await client.callTool({ name: toolId, arguments: { value: "page" } });
+      expect(response).toMatchObject({ isError: true, structuredContent: { ok: false,
+        error: { code: "OMR_HTTP_ERROR", details: { error: "CONNECTION_UNAVAILABLE" } } } });
+      expect(JSON.stringify(response)).not.toContain("EXECUTION_OUTCOME_UNKNOWN");
+      expect(JSON.stringify(response)).not.toContain("receiptId");
+    }
+  });
+
   it("keeps a valid MCP session available for Notion reconnect recovery after read and approved writes", async () => {
     const requests: string[] = [];
     const backend: typeof fetch = async (request) => {

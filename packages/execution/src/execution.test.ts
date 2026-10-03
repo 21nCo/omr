@@ -43,6 +43,14 @@ async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes: st
     actorUserId: "user_1", workspaceId: workspace.id, provider: "github",
     providerConnectionId: "plug_github", ownership: "personal", label: "GitHub",
   });
+  const notionBinding = await connections.attach({
+    actorUserId: "user_1", workspaceId: workspace.id, provider: "notion",
+    providerConnectionId: "plug_notion", ownership: "personal", label: "Notion",
+  });
+  const slackBinding = await connections.attach({
+    actorUserId: "user_1", workspaceId: workspace.id, provider: "slack",
+    providerConnectionId: "plug_slack", ownership: "personal", label: "Slack",
+  });
   const catalog = await ToolCatalog.create({
     providers: { list: () => [{
       name: "linear",
@@ -77,6 +85,13 @@ async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes: st
     }, {
       name: "github", displayName: "GitHub", version: "1.0.0", description: "GitHub",
       actions: { get_issue: action("get_issue", "read") },
+    }, {
+      name: "notion", displayName: "Notion", version: "1.0.0", description: "Notion",
+      actions: { "content.search": action("content.search", "read"),
+        "pages.get": action("pages.get", "read") },
+    }, {
+      name: "slack", displayName: "Slack", version: "1.0.0", description: "Slack",
+      actions: { "messages.list": action("messages.list", "read") },
     }] },
   }, (value) => value as never, allowedProviders);
   const actionCall = vi.fn(async () => ({ id: "issue_1", title: "Fixed" }));
@@ -93,6 +108,8 @@ async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes: st
     connections,
     firstBinding,
     otherBinding,
+    notionBinding,
+    slackBinding,
     receipts,
     workspace,
     workspaceStore,
@@ -443,28 +460,30 @@ describe("execution service", () => {
       .toContainEqual(expect.objectContaining({ id: firstBinding.id, status: "active", readiness: "ready" }));
   });
 
-  it("degrades a remote binding deleted after scopes were checked and records a sanitized receipt", async () => {
-    const { actionCall, connections, firstBinding, receipts, service, workspace } = await fixture();
-    actionCall.mockRejectedValueOnce(Object.assign(new Error("remote connection missing"), {
-      code: "CONNECTION_NOT_FOUND",
-    }));
-    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
-    const request = { principal, toolId: "linear.get_issue", params: {}, idempotencyKey: "missing-after-dispatch" };
-    const outcome = await service.execute(request)
-      .catch((error: unknown) => error) as { code: string; receiptId: string };
-    expect(outcome).toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN" });
-    expect([...receipts.receipts.values()]).toEqual([
-      expect.objectContaining({ id: outcome.receiptId, status: "uncertain", errorCode: "provider_outcome_unknown" }),
-    ]);
-    expect(await connections.listAvailable({ actorUserId: "user_1", workspaceId: workspace.id }))
-      .toContainEqual(expect.objectContaining({ id: firstBinding.id, status: "needs_reauth" }));
-    await expect(service.execute(request)).rejects.toMatchObject({
-      code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: outcome.receiptId,
+  it.each(["notion.content.search", "notion.pages.get", "linear.get_issue", "slack.messages.list"])(
+    "fails a %s read definitively when its remote binding disappears after scope proof", async (toolId) => {
+      const { actionCall, connections, firstBinding, receipts, service, workspace } = await fixture();
+      actionCall.mockRejectedValueOnce(Object.assign(new Error("remote connection missing"), {
+        code: "CONNECTION_NOT_FOUND",
+      }));
+      const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+      const request = { principal, toolId, params: {}, idempotencyKey: "missing-after-dispatch" };
+      await expect(service.execute(request)).rejects.toMatchObject({ code: "CONNECTION_UNAVAILABLE" });
+      expect([...receipts.receipts.values()]).toEqual([
+        expect.objectContaining({ toolId, status: "failed", errorCode: "connection_unavailable" }),
+      ]);
+      const provider = toolId.split(".")[0]!;
+      expect(await connections.listAvailable({ actorUserId: "user_1", workspaceId: workspace.id }))
+        .toContainEqual(expect.objectContaining({ provider, status: "needs_reauth",
+          readiness: "unavailable", healthReason: "plugfn_connection_missing" }));
+      if (provider !== "linear") expect(await connections.listAvailable({
+        actorUserId: "user_1", workspaceId: workspace.id, provider: "linear" }))
+        .toContainEqual(expect.objectContaining({ id: firstBinding.id, status: "active", readiness: "ready" }));
+      await expect(service.execute(request)).rejects.toMatchObject({ code: "CONNECTION_UNAVAILABLE" });
+      expect(actionCall).toHaveBeenCalledTimes(1);
+      await expect(service.execute({ principal, toolId: "github.get_issue", params: {} }))
+        .resolves.toMatchObject({ status: "succeeded" });
     });
-    expect(actionCall).toHaveBeenCalledTimes(1);
-    await expect(service.execute({ principal, toolId: "github.get_issue", params: {} }))
-      .resolves.toMatchObject({ status: "succeeded" });
-  });
 
   it("keeps an approved effect uncertain after a missing-remote reply, including approval replay", async () => {
     const { actionCall, approvals, receipts, service, workspace, workspaceStore } = await fixture();
@@ -532,10 +551,8 @@ describe("execution service", () => {
       const missing = Object.assign(new Error("remote missing"), { code: "CONNECTION_NOT_FOUND" });
       if (phase === "scope") setRemoteError(missing);
       else actionCall.mockRejectedValueOnce(missing);
-      const outcome = await service.execute({ principal, toolId: "linear.get_issue", params: {} })
-        .catch((error: unknown) => error) as { code: string; receiptId: string };
-      expect(outcome).toMatchObject({ code: phase === "scope"
-        ? "CONNECTION_UNAVAILABLE" : "EXECUTION_OUTCOME_UNKNOWN" });
+      await expect(service.execute({ principal, toolId: "linear.get_issue", params: {} }))
+        .rejects.toMatchObject({ code: "CONNECTION_UNAVAILABLE" });
       expect(recordHealth).toHaveBeenCalledExactlyOnceWith({
         connectionId: firstBinding.id,
         status: "needs_reauth",
@@ -543,7 +560,7 @@ describe("execution service", () => {
         reason: "plugfn_connection_missing",
       });
       expect([...receipts.receipts.values()]).toEqual(phase === "scope" ? [] : [
-        expect.objectContaining({ id: outcome.receiptId, status: "uncertain", errorCode: "provider_outcome_unknown" }),
+        expect.objectContaining({ status: "failed", errorCode: "connection_unavailable" }),
       ]);
     }
   });
