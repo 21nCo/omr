@@ -1,0 +1,28 @@
+apps/web/src/lib/connection-ui.test.ts
+  h_a39f9495f9ec1d 50-51,54-66
+apps/web/src/lib/connection-ui.ts
+  h_a39f9495f9ec1d 56-59,70,79-81
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 121,192,211-216,220,225,954,1159,1177-1178
+docs/notion-v1.md
+  h_a39f9495f9ec1d 6-9
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 1010-1011,1136-1138,1140-1141
+packages/plugfn-runtime/src/notion.ts
+  h_a39f9495f9ec1d 16-17,47,49,71-73,194
+packages/tools/src/notion-errors.ts
+  h_a39f9495f9ec1d 22
+tests/acceptance/notion-adapter-contract.test.ts
+  h_a39f9495f9ec1d 16,106,161-178,316-349
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "eda8aed84d155cd5ae606878fb1bc868b67b7a63",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
