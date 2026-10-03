@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { beginGithubReconnect, createOAuthReviewController } from "$lib/oauth-review.js";
-  import { connectionActions, connectionStatusLabel, providerRevocationGuidance } from "$lib/connection-ui.js";
+  import { connectionActions, connectionAfterNotionProof, connectionStatusLabel, notionAccessGuidance, notionJourneyGuidance, providerRevocationGuidance } from "$lib/connection-ui.js";
   import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, effectAbsentAvailable, effectPresentAvailable, providerDisplayState, recoverProviderReconciliation, recoverWorkspaceOverview, sameSlackPostParams, sameSlackReadSelection, selectedLinearAccountId, selectedReadyLinearConnection, selectedReadyNotionConnection, selectedReadySlackConnection, selectedSlackAccountId, slackChannelSelectionLocked, visibleApprovalCard } from "$lib/workspace-catalog.js";
   import { renderApprovalPreview } from "$lib/approval-preview.js";
   import { createLinearActionKeys, linearApprovalNotice } from "$lib/linear-action-keys.js";
@@ -74,6 +74,8 @@
     available: boolean;
     authMode: string;
     actionCount: number;
+    proofIssue?: "notion_access_restricted";
+    proofBindingId?: string;
   };
   type Catalog = {
     catalogSchemaVersion: string;
@@ -185,7 +187,8 @@
   }
 
   function actions(connection: Connection, now: number) {
-    return connectionActions(connection, overview?.actor.id ?? "", selectedAccess()?.membership.role ?? "member", providerState(connection.provider), now);
+    return connectionActions(effectiveConnection(connection), overview?.actor.id ?? "",
+      selectedAccess()?.membership.role ?? "member", providerState(connection.provider), now);
   }
 
   function revocationGuidance(connection: Connection): string | null {
@@ -202,6 +205,16 @@
 
   function providerState(provider: string): Provider["state"] | "unknown" {
     return providerDisplayState(catalog, provider);
+  }
+
+  function notionGuidance(): string | null {
+    return notionJourneyGuidance(overview?.connections ?? [], selectedWorkspaceId,
+      catalog?.providers.find((entry) => entry.provider === "notion")?.proofIssue);
+  }
+
+  function effectiveConnection(connection: Connection): Connection {
+    return connectionAfterNotionProof(connection,
+      catalog?.providers.find((entry) => entry.provider === "notion")?.proofBindingId);
   }
 
   const request = createControlPlaneRequest(fetch, () =>
@@ -902,7 +915,8 @@
                 <div class="provider-mark">{entry.provider.slice(0, 2).toUpperCase()}</div>
                 <div class="grow"><strong>{entry.displayName}</strong><span>{entry.actionCount} registered actions · {entry.authMode === "oauth" ? "OAuth" : entry.authMode === "api_key" ? "API key" : entry.authMode}</span>
                   {#if entry.state === "unconfigured"}<span>Setup required: configure this provider’s client ID, client secret, and callback URL on the server.</span>{/if}
-                  {#if entry.state === "expired"}<span>One or more accounts need a health check, refresh, or reconnect.</span>{/if}
+                  {#if entry.state === "expired" && !(entry.provider === "notion" && notionGuidance())}<span>One or more accounts need a health check, refresh, or reconnect.</span>{/if}
+                  {#if entry.provider === "notion" && notionGuidance()}<span>{notionGuidance()}</span>{/if}
                 </div>
                 <span class:ready={entry.state === "ready"} class="status">{entry.state}</span>
               </article>
@@ -918,18 +932,21 @@
                   <div class="grow">
                     <strong>{connection.label}</strong>
                     <span>{connection.provider} · {connection.cleanupOnly ? "Former member’s personal account · cleanup only" : connection.ownership === "personal" ? "Personal · only you" : "Team · shared with members"}
-                      {#if connection.selected} · Selected for your actions{/if}
+                      {#if effectiveConnection(connection).selected} · Selected for your actions{/if}
                     </span>
                     <span>Last checked {timestamp(connection.lastCheckedAt)}{connection.healthReason ? ` · ${connection.healthReason.split(":")[0]?.replaceAll("_", " ")}` : ""}</span>
+                    {#if connection.provider === "notion" && notionAccessGuidance(null, effectiveConnection(connection).healthReason)}
+                      <span>{notionAccessGuidance(null, effectiveConnection(connection).healthReason)}</span>
+                    {/if}
                     {#if revocationGuidance(connection)}
                       <span>{revocationGuidance(connection)}</span>
                     {/if}
                   </div>
-                  <span class:ready={actions(connection, clockNow).canSelect} class="status">{connectionStatusLabel(connection, providerState(connection.provider))}</span>
+                  <span class:ready={actions(connection, clockNow).canSelect} class="status">{connectionStatusLabel(effectiveConnection(connection), providerState(connection.provider))}</span>
                   {#if actions(connection, clockNow).canSelect}
                     <button
                       class="quiet compact"
-                      disabled={Boolean(busy) || connection.selected}
+                      disabled={Boolean(busy) || effectiveConnection(connection).selected}
                       onclick={() => void mutate(`select:${connection.id}`, "/api/connections/select", {
                         workspaceId: selectedWorkspaceId, provider: connection.provider, connectionId: connection.id,
                       }, `Selected ${connection.label} for ${connection.provider}.`)}
@@ -1129,7 +1146,7 @@
           </section>
         {/if}
 
-        {#if catalog?.providers.find((entry) => entry.provider === "notion")?.state === "ready"}
+        {#if catalog?.providers.find((entry) => entry.provider === "notion")?.state === "ready" && !notionGuidance()}
           <section class="panel" aria-label="Notion page journey">
             <div class="panel-heading"><div><p class="kicker">Notion</p><h2>Shared pages</h2></div></div>
             <p>Selected integration: {notionAccount()?.label ?? "Select a Notion account above"}. Search shows content shared with that integration. Choose and read a page before creating a child or renaming it. Every change waits for separate approval.</p>

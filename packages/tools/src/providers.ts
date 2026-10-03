@@ -26,6 +26,9 @@ export interface ProviderStatus {
   state: ProviderState;
   /** Whether a new connection can be initiated; execution also requires state=ready. */
   available: boolean;
+  /** A selected connection's permanent proof failure, scoped to this catalog request. */
+  proofIssue?: "notion_access_restricted";
+  proofBindingId?: string;
 }
 
 const NAMES: Record<V1Provider, string> = {

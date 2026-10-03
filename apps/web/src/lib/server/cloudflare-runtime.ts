@@ -432,6 +432,7 @@ export async function scopedToolIds(
   bindings: readonly ConnectionBindingRecord[],
 ): Promise<{ allowedToolIds: Set<string>; providers: ProviderStatus[] }> {
   const missing = new Set<string>();
+  const restricted = new Set<string>();
   const allowedToolIds = await resolveScopedCatalog(
     catalog,
     statuses(plugfn, bindings),
@@ -450,6 +451,7 @@ export async function scopedToolIds(
     },
     async (bindingId, code) => {
       missing.add(bindingId);
+      if (code === "NOTION_ACCESS_RESTRICTED") restricted.add(bindingId);
       await authority.recordHealth({ connectionId: bindingId, status: "needs_reauth",
         readiness: "unavailable", reason: code.toLowerCase() }).catch(() => undefined);
     },
@@ -457,7 +459,13 @@ export async function scopedToolIds(
   return {
     allowedToolIds,
     providers: statuses(plugfn, bindings.map((binding) => missing.has(binding.id)
-      ? { ...binding, status: "needs_reauth", readiness: "unavailable" } : binding)),
+      ? { ...binding, status: "needs_reauth", readiness: "unavailable" } : binding))
+      .map((provider) => {
+        if (provider.provider !== "notion") return provider;
+        const bindingId = [...restricted][0];
+        return bindingId ? { ...provider, proofIssue: "notion_access_restricted" as const,
+          proofBindingId: bindingId } : provider;
+      }),
   };
 }
 

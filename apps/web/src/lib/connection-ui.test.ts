@@ -1,10 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { authorizationScopes, connectionActions, connectionStatusLabel, providerRevocationGuidance } from "./connection-ui.js";
+import { authorizationScopes, connectionActions, connectionAfterNotionProof, connectionStatusLabel, notionAccessGuidance, notionJourneyGuidance, providerRevocationGuidance } from "./connection-ui.js";
 
 const team = { id: "connection_1", provider: "slack", ownership: "workspace" as const,
   ownerUserId: null, status: "active", readiness: "ready", selected: false };
 
 describe("connection control UI policy", () => {
+  it("shows Notion support recovery for a fresh proof or persisted health, not timed throttling", () => {
+    expect(notionAccessGuidance("notion_access_restricted", null)).toContain("Contact Notion support");
+    expect(notionAccessGuidance(null, "notion_access_restricted")).toContain("Contact Notion support");
+    expect(notionAccessGuidance(null, "notion_rate_limited")).toBeNull();
+  });
+
+  it("closes the selected Notion journey on a fresh blocked proof and preserves other workspaces", () => {
+    const current = { ...team, id: "binding_notion", provider: "notion", selected: true,
+      workspaceId: "workspace_1", healthReason: null };
+    const other = { ...current, id: "other_notion", workspaceId: "workspace_2" };
+    const projected = connectionAfterNotionProof(current, "binding_notion");
+    expect(projected).toMatchObject({ status: "needs_reauth", readiness: "unavailable",
+      selected: false, healthReason: "notion_access_restricted" });
+    expect(connectionActions(projected, "user_admin", "admin", "expired").canSelect).toBe(false);
+    expect(connectionActions(projected, "user_admin", "admin", "expired").canReconnect).toBe(false);
+    expect(connectionAfterNotionProof(other, "binding_notion")).toEqual(other);
+    expect(notionJourneyGuidance([current, other], "workspace_1", "notion_access_restricted"))
+      .toContain("Contact Notion support");
+    expect(notionJourneyGuidance([other], "workspace_1")).toBeNull();
+    expect(notionJourneyGuidance([{ ...current, selected: false, readiness: "unavailable",
+      healthReason: "notion_access_restricted" }], "workspace_1")).toContain("Contact Notion support");
+    expect(notionJourneyGuidance([current], "workspace_1")).toBeNull();
+  });
+
   it("allows members to select and probe team accounts but reserves lifecycle mutations for admins", () => {
     expect(connectionActions(team, "user_member", "member", "ready")).toMatchObject({
       canSelect: true, canCheck: true, canRefresh: false, canDisconnect: false,

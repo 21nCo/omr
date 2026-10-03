@@ -30,6 +30,35 @@ export function providerRevocationGuidance(reason: string | null, authMode: stri
   return "OMR access was removed. Check your provider account for remaining access and revoke it there.";
 }
 
+/** Surface a permanent Notion proof denial from either fresh catalog proof or persisted health. */
+export function notionAccessGuidance(proofIssue?: string | null, healthReason?: string | null): string | null {
+  return proofIssue === "notion_access_restricted" || healthReason === "notion_access_restricted"
+    ? "Notion restricted this integration's API access. Contact Notion support to restore access."
+    : null;
+}
+
+/** Project a just-failed proof before the separate overview request can see persisted health. */
+export function connectionAfterNotionProof<Connection extends ConnectionDisplay>(connection: Connection,
+  proofBindingId?: string): Connection {
+  if (connection.provider !== "notion" || connection.id !== proofBindingId) return connection;
+  return { ...connection, status: "needs_reauth", readiness: "unavailable",
+    healthReason: "notion_access_restricted", selected: false };
+}
+
+/** Keep the Notion journey closed while the selected integration needs support. */
+export function notionJourneyGuidance(
+  connections: readonly (Pick<ConnectionDisplay, "provider" | "status" | "readiness" | "selected" | "healthReason"> &
+    { workspaceId: string })[], workspaceId: string, proofIssue?: string | null,
+): string | null {
+  const scoped = connections.filter((connection) => connection.provider === "notion" &&
+    connection.workspaceId === workspaceId);
+  const readySelection = scoped.some((connection) => connection.selected &&
+    connection.status === "active" && connection.readiness === "ready");
+  return notionAccessGuidance(proofIssue,
+    readySelection ? null : scoped.find((connection) =>
+      connection.healthReason === "notion_access_restricted")?.healthReason);
+}
+
 /** Derive visible actions from server state, ownership, role, and provider readiness. */
 export function connectionActions(
   connection: ConnectionDisplay,
@@ -50,6 +79,7 @@ export function connectionActions(
     canCheck: active && !cleanupOnly,
     canRefresh: active && manageable && !cleanupOnly,
     canReconnect: active && manageable && !cleanupOnly && !ready &&
+      connection.healthReason !== "notion_access_restricted" &&
       providerState !== "unsupported" && providerState !== "unconfigured" && providerState !== "unknown",
     canDisconnect: active && manageable,
     canRetryRevoke: !active && manageable && connection.status === "revoked" &&

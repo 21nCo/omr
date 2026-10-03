@@ -48,7 +48,10 @@ Definite Notion authentication, permission, missing-target, validation, and
 rate-limit responses use safe error codes. A 429 with Notion's
 `public_api_request_blocked` reason means the integration's API access is
 restricted: retrying will not help, and the user should contact Notion
-support. Other 429 and 529 responses retain `Retry-After` when available.
+support. OMR marks that connection unavailable during catalog proof and shows
+the support instruction in the connection list; it does not offer the page
+journey until access is restored. Other 429 and 529 responses retain
+`Retry-After` when available.
 Reads may retry transient failures; writes make one provider attempt.
 
 `tests/acceptance/notion-adapter-contract.test.ts` is the fixture-backed

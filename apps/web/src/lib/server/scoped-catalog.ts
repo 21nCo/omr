@@ -4,6 +4,9 @@ import {
 } from "@oh-my-router/connections";
 import { githubHttpFailure, LinearProviderDenial, NotionProviderDenial, SlackProviderDenial, usableToolIds, type ProviderStatus, type ToolCatalog } from "@oh-my-router/tools";
 
+type PermanentProofDenialCode = "SLACK_PERMISSION_DENIED" | "SLACK_WORKSPACE_MISMATCH" |
+  "NOTION_ACCESS_RESTRICTED";
+
 /** A deleted PlugFn connection is an unavailable grant, not a failed catalog. */
 export async function resolveScopedCatalog(
   catalog: ToolCatalog,
@@ -12,7 +15,7 @@ export async function resolveScopedCatalog(
   remoteScopes: (connectionId: string, provider: string) => Promise<readonly string[] | undefined>,
   onRemoteMissing: (bindingId: string) => Promise<void>,
   onReconnectRequired?: (bindingId: string, provider?: string) => Promise<void>,
-  onPermanentDenial?: (bindingId: string, code: "SLACK_PERMISSION_DENIED" | "SLACK_WORKSPACE_MISMATCH") => Promise<void>,
+  onPermanentDenial?: (bindingId: string, code: PermanentProofDenialCode) => Promise<void>,
 ): Promise<Set<string>> {
   return usableToolIds(catalog, providers, async (provider) => {
     let binding: { id: string; providerConnectionId: string };
@@ -36,7 +39,7 @@ export async function resolveScopedCatalog(
 async function providerProofUnavailable(provider: string, bindingId: string, error: unknown,
   onRemoteMissing: (bindingId: string) => Promise<void>,
   onReconnectRequired?: (bindingId: string, provider?: string) => Promise<void>,
-  onPermanentDenial?: (bindingId: string, code: "SLACK_PERMISSION_DENIED" | "SLACK_WORKSPACE_MISMATCH") => Promise<void>): Promise<boolean> {
+  onPermanentDenial?: (bindingId: string, code: PermanentProofDenialCode) => Promise<void>): Promise<boolean> {
   if (isMissingRemoteConnection(error)) {
     await onRemoteMissing(bindingId);
     return true;
@@ -44,7 +47,8 @@ async function providerProofUnavailable(provider: string, bindingId: string, err
   if (provider === "github") return githubProofUnavailable(error);
   if (provider === "slack") return slackProofUnavailable(bindingId, error,
     onReconnectRequired, onPermanentDenial);
-  if (provider === "notion") return notionProofUnavailable(bindingId, error, onReconnectRequired);
+  if (provider === "notion") return notionProofUnavailable(bindingId, error,
+    onReconnectRequired, onPermanentDenial);
   if (provider !== "linear") return false;
   if (error instanceof LinearProviderDenial && error.code === "LINEAR_RECONNECT_REQUIRED") {
     await onReconnectRequired?.(bindingId);
@@ -58,7 +62,7 @@ async function providerProofUnavailable(provider: string, bindingId: string, err
 /** Contain a Slack proof failure without exposing another provider's catalog. */
 async function slackProofUnavailable(bindingId: string, error: unknown,
   onReconnectRequired?: (bindingId: string, provider?: string) => Promise<void>,
-  onPermanentDenial?: (bindingId: string, code: "SLACK_PERMISSION_DENIED" | "SLACK_WORKSPACE_MISMATCH") => Promise<void>,
+  onPermanentDenial?: (bindingId: string, code: PermanentProofDenialCode) => Promise<void>,
 ): Promise<boolean> {
   if (!(error instanceof SlackProviderDenial)) return githubProofUnavailable(error);
   if (error.code === "SLACK_RECONNECT_REQUIRED") await onReconnectRequired?.(bindingId, "slack");
@@ -68,12 +72,16 @@ async function slackProofUnavailable(bindingId: string, error: unknown,
   return true;
 }
 
-/** A revoked Notion token needs a reconnect, while transient denial stays provider-local. */
+/** Persist a permanent Notion restriction; transient denials stay provider-local. */
 async function notionProofUnavailable(bindingId: string, error: unknown,
   onReconnectRequired?: (bindingId: string, provider?: string) => Promise<void>,
+  onPermanentDenial?: (bindingId: string, code: PermanentProofDenialCode) => Promise<void>,
 ): Promise<boolean> {
   if (!(error instanceof NotionProviderDenial)) return githubProofUnavailable(error);
   if (error.code === "NOTION_RECONNECT_REQUIRED") await onReconnectRequired?.(bindingId, "notion");
+  if (error.code === "NOTION_ACCESS_RESTRICTED") {
+    await onPermanentDenial?.(bindingId, error.code);
+  }
   return true;
 }
 

@@ -3,7 +3,7 @@ import { ClientAccessAuthority } from "@oh-my-router/client-access";
 import { MemoryClientAccessStore } from "@oh-my-router/client-access/testing";
 import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
-import { LinearProviderDenial, SlackProviderDenial, ToolCatalog } from "@oh-my-router/tools";
+import { LinearProviderDenial, NotionProviderDenial, SlackProviderDenial, ToolCatalog } from "@oh-my-router/tools";
 
 import { assertConnectionWorkspace, checkAuthorizedConnectionHealth, createProviderIntegrationConfig, requireExecutionOrigin, revokeOwnBearerClient, scopedToolIds, selectAuthorizedConnection } from "./cloudflare-runtime.js";
 import { createOMRRouter, type ConnectionRouteServices } from "./router.js";
@@ -121,6 +121,58 @@ describe("CLI self-revocation", () => {
 });
 
 describe("Worker scoped provider catalog", () => {
+  it("marks a blocked Notion proof unavailable immediately and preserves sibling discovery", async () => {
+    const { definitions, catalog } = await readActionCatalog(["github", "notion"]);
+    const bindings = ["github", "notion"].map((provider) => ({ id: `binding_${provider}`, provider,
+      providerConnectionId: `remote_${provider}`, status: "active", readiness: "ready" }));
+    const recordHealth = vi.fn().mockRejectedValue(new Error("health store unavailable"));
+    const authority = { resolve: vi.fn(async ({ provider, workspaceId, actorUserId }:
+      { provider: string; workspaceId: string; actorUserId: string }) => {
+        expect({ workspaceId, actorUserId }).toEqual({ workspaceId: "workspace_1", actorUserId: "user_1" });
+        return bindings.find((binding) => binding.provider === provider)!;
+      }), recordHealth };
+    const plugfn = { providers: { get: (provider: string) => definitions.get(provider) },
+      config: { integrations: { github: {}, notion: {} } },
+      action: vi.fn(async (provider: string) => {
+        if (provider === "notion") throw new NotionProviderDenial("read", "NOTION_ACCESS_RESTRICTED");
+        return { verifiedScopes: ["read"] };
+      }), connections: { get: vi.fn(async () => ({ scopes: ["read"] })) } };
+    const result = await scopedToolIds(catalog, plugfn as never, authority as never,
+      { kind: "web", userId: "user_1", workspaceId: "workspace_1" }, "workspace_1", bindings as never);
+    expect(catalog.discover({ allowedToolIds: result.allowedToolIds }).tools.map(({ id }) => id))
+      .toEqual(["github.read"]);
+    expect(result.providers.find(({ provider }) => provider === "notion")).toMatchObject({
+      state: "expired", proofIssue: "notion_access_restricted", proofBindingId: "binding_notion",
+    });
+    expect(recordHealth).toHaveBeenCalledExactlyOnceWith({ connectionId: "binding_notion",
+      status: "needs_reauth", readiness: "unavailable", reason: "notion_access_restricted" });
+    expect(plugfn.action).toHaveBeenCalledWith("notion", "connection.verify", expect.objectContaining({
+      userId: "user_1", connectionId: "remote_notion", cache: false,
+      actor: { userId: "user_1", tenantId: "workspace_1", organizationId: "workspace_1" },
+    }));
+  });
+
+  it.each(["NOTION_RATE_LIMITED", "NOTION_RECONNECT_REQUIRED"] as const)(
+    "keeps %s distinct from permanent Notion access restriction", async (code) => {
+      const { definitions, catalog } = await readActionCatalog(["github", "notion"]);
+      const bindings = ["github", "notion"].map((provider) => ({ id: `binding_${provider}`, provider,
+        providerConnectionId: `remote_${provider}`, status: "active", readiness: "ready" }));
+      const recordHealth = vi.fn(async () => undefined);
+      const plugfn = { providers: { get: (provider: string) => definitions.get(provider) },
+        config: { integrations: { github: {}, notion: {} } },
+        action: vi.fn(async (provider: string) => {
+          if (provider === "notion") throw new NotionProviderDenial("read", code, 19);
+          return { verifiedScopes: ["read"] };
+        }), connections: { get: vi.fn(async () => ({ scopes: ["read"] })) } };
+      const result = await scopedToolIds(catalog, plugfn as never,
+        { resolve: async ({ provider }: { provider: string }) =>
+          bindings.find((binding) => binding.provider === provider)!, recordHealth } as never,
+        { kind: "web", userId: "user_1", workspaceId: "workspace_1" }, "workspace_1", bindings as never);
+      expect([...result.allowedToolIds]).toEqual(["github.read"]);
+      expect(result.providers.find(({ provider }) => provider === "notion")?.proofIssue).toBeUndefined();
+      expect(recordHealth).toHaveBeenCalledTimes(code === "NOTION_RECONNECT_REQUIRED" ? 1 : 0);
+    });
+
   it.each(["SLACK_PERMISSION_DENIED", "SLACK_WORKSPACE_MISMATCH"] as const)(
     "keeps other provider discovery and manifest available when %s health persistence fails", async (code) => {
       const { definitions, catalog } = await readActionCatalog(["github", "slack"]);
