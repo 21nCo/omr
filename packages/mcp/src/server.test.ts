@@ -417,6 +417,63 @@ describe("OMR MCP server", () => {
     });
   });
 
+  it("keeps a valid MCP session available for Notion reconnect recovery after read and approved writes", async () => {
+    const requests: string[] = [];
+    const backend: typeof fetch = async (request) => {
+      const path = requestUrl(request).pathname;
+      requests.push(path);
+      if (path === "/api/tools") return Response.json({
+        catalogSchemaVersion: "1.0.0", revision: "notion-1",
+        tools: [manifest("notion.content.search", "read"),
+          manifest("notion.pages.create", "write"), manifest("notion.pages.update", "write")],
+      });
+      if (path === "/api/connections/list") return Response.json([
+        { id: "notion-binding", provider: "notion", state: "expired" },
+      ]);
+      if (path === "/api/tools/execute" || path === "/api/approvals/execute") {
+        return Response.json({ error: "NOTION_RECONNECT_REQUIRED",
+          message: "Reconnect the selected Notion integration", receiptId: "receipt-denied" },
+        { status: 401 });
+      }
+      if (path === "/api/approvals") return Response.json({
+        id: "approval-1", status: "pending", expiresAt: Date.now() + 60_000,
+      }, { status: 201 });
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    };
+    const close = vi.fn(async () => undefined);
+    const server = await createOMRMcpServer({ baseUrl: "https://omr.test", credential: "credential",
+      workspaceId: "workspace-1", fetchImpl: authenticatedSessionFetch(backend, close, vi.fn()) });
+    const client = new Client({ name: "notion-reconnect", version: "1.0.0" }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closeables.push(client, server);
+
+    const read = await client.callTool({ name: "notion.content.search", arguments: { value: "page" } });
+    expect(read).toMatchObject({ isError: true, structuredContent: { ok: false,
+      error: { details: { error: "NOTION_RECONNECT_REQUIRED", receiptId: "receipt-denied" } } } });
+    for (const name of ["notion.pages.create", "notion.pages.update"]) {
+      const approval = await client.callTool({ name, arguments: {
+        value: "page", _omrIdempotencyKey: `${name}-once`,
+      } });
+      expect(approval.structuredContent).toMatchObject({ status: "approval_required", executed: false });
+      const denied = await client.callTool({ name: "omr.approvals.execute",
+        arguments: { approvalId: "approval-1" } });
+      expect(denied).toMatchObject({ isError: true, structuredContent: { ok: false,
+        error: { details: { error: "NOTION_RECONNECT_REQUIRED", receiptId: "receipt-denied" } } } });
+    }
+    expect(requests.filter((path) => path === "/api/approvals/execute")).toHaveLength(2);
+    expect((await client.callTool({ name: "omr.connections.list",
+      arguments: { provider: "notion" } })).structuredContent).toMatchObject({
+      connections: [{ id: "notion-binding", state: "expired" }],
+    });
+    expect((await client.callTool({ name: "omr.catalog.refresh", arguments: {} }))
+      .structuredContent).toMatchObject({ tools: 3 });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(close).not.toHaveBeenCalled();
+    expect(requests.filter((path) => path === "/api/approvals/execute")).toHaveLength(2);
+  });
+
   it("fences every local MCP operation after a backend 401 even if transport close fails", async () => {
     const paths: string[] = [];
     const backend: typeof fetch = async (request) => {
