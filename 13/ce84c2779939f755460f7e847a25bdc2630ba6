@@ -1,0 +1,16 @@
+apps/web/src/lib/notion-row-boundary.test.ts
+  h_a39f9495f9ec1d 20
+apps/web/src/lib/notion-search-context.test.ts
+  h_a39f9495f9ec1d 19-20,42,52,55-57,69-76
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "13ce84c2779939f755460f7e847a25bdc2630ba6",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
