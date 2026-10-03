@@ -1,0 +1,20 @@
+packages/plugfn-runtime/src/notion.ts
+  h_a39f9495f9ec1d 4,6,59
+packages/tools/src/index.ts
+  h_a39f9495f9ec1d 21
+packages/tools/src/notion-errors.ts
+  h_a39f9495f9ec1d 55-62,66-72
+packages/tools/src/notion-write.ts
+  h_a39f9495f9ec1d 1,5
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7616e48e602d0f506f44a8187b4531d0dba59355",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
