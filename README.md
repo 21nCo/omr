@@ -91,6 +91,9 @@ without configured credentials is reported as unavailable before redirect. Live 
 authorization still requires a separately verified sandbox/provider account.
 GitHub connections request only `read:user` by default. Users can choose a
 public-comment or private-repository grant explicitly; see [the GitHub v1 journey](docs/github-v1.md).
+Slack connections are bot-only in this release and request joined public-channel access by tier;
+see [the Slack v1 journey](docs/slack-v1.md). Slack v1 exposure defaults off until OMR-15
+records live provider evidence.
 
 Build and install the portable CLI archive as documented in [the CLI command contract](packages/cli/README.md).
 Its `omr` command supports device login, profiles, workspace and provider-account selection,

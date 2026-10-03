@@ -102,6 +102,18 @@ export interface PlugFnConnectionPort {
 
 export type GithubAccess = "profile" | "public_write" | "private_repositories";
 export type LinearAccess = "read" | "issue_write";
+export type SlackAccess = "discover" | "read" | "post" | "read_post";
+
+/** OMR v1 uses bot tokens and joined public channels only. */
+export function slackScopes(access: SlackAccess): string[] {
+  switch (access) {
+    case "discover": return ["channels:read"];
+    case "read": return ["channels:read", "channels:history"];
+    case "post": return ["channels:read", "chat:write"];
+    case "read_post": return ["channels:read", "channels:history", "chat:write"];
+    default: throw new ConnectionInputError("Unknown Slack access tier");
+  }
+}
 
 /** Linear read access is required for the target checks before every write. */
 export function linearScopes(access: LinearAccess): string[] {
@@ -169,6 +181,14 @@ function normalizeLabel(value: string): string {
     throw new ConnectionInputError("Connection label must contain 1 to 120 characters");
   }
   return normalized;
+}
+
+/** Reject custom Linear and Slack scope lists that bypass their selected tier. */
+function assertTierScopes(provider: string, supplied: string[] | undefined,
+  expected: string[] | undefined): void {
+  if (!supplied || (provider !== "linear" && provider !== "slack")) return;
+  if (supplied.length === expected?.length && expected.every((scope) => supplied.includes(scope))) return;
+  throw new ConnectionInputError(`${provider === "linear" ? "Linear" : "Slack"} scopes must match the selected access tier`);
 }
 
 function ownerFor(input: {
@@ -309,6 +329,7 @@ export class PlugFnConnectionOrchestrator {
     scopes?: string[];
     githubAccess?: GithubAccess;
     linearAccess?: LinearAccess;
+    slackAccess?: SlackAccess;
     returnTo?: string;
     prompt?: string;
     loginHint?: string;
@@ -321,14 +342,14 @@ export class PlugFnConnectionOrchestrator {
     if (input.linearAccess !== undefined && provider !== "linear") {
       throw new ConnectionInputError("Linear access applies only to Linear");
     }
+    if (input.slackAccess !== undefined && provider !== "slack") {
+      throw new ConnectionInputError("Slack access applies only to Slack");
+    }
     let defaultScopes: string[] | undefined;
     if (provider === "github") defaultScopes = githubScopes(input.githubAccess ?? "profile");
     if (provider === "linear") defaultScopes = linearScopes(input.linearAccess ?? "read");
-    if (provider === "linear" && input.scopes &&
-        (input.scopes.length !== defaultScopes?.length ||
-          defaultScopes.some((scope) => !input.scopes?.includes(scope)))) {
-      throw new ConnectionInputError("Linear scopes must match the selected access tier");
-    }
+    if (provider === "slack") defaultScopes = slackScopes(input.slackAccess ?? "discover");
+    assertTierScopes(provider, input.scopes, defaultScopes);
     const scopes = input.scopes ?? defaultScopes;
     await this.authority.authorizeInstall(input);
     this.assertConnectable(provider, "oauth");

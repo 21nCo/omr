@@ -644,7 +644,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     const result = await this.query<ApprovalRow>(
       `SELECT ${COLUMNS} FROM omr_control.execution_approvals
        WHERE workspace_id = $1 AND actor_user_id = $2
-         AND tool_id LIKE 'linear.%'
+         AND (tool_id LIKE 'linear.%' OR tool_id = 'slack.messages.post')
          AND (status = 'uncertain' OR
            (status IN ('pending', 'approved') AND expires_at > $3))
          AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships

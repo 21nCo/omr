@@ -28,8 +28,10 @@ export {
   type ProviderReadiness,
   type GithubAccess,
   type LinearAccess,
+  type SlackAccess,
   githubScopes,
   linearScopes,
+  slackScopes,
 } from "./plugfn.js";
 
 export { isMissingRemoteConnection, markMissingRemoteConnection } from "./remote.js";

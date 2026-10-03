@@ -25,6 +25,7 @@ import {
   type ConnectionOwnership,
   type GithubAccess,
   type LinearAccess,
+  type SlackAccess,
 } from "@oh-my-router/connections";
 import { publicDatafnSchema } from "@oh-my-router/data";
 import { connectPostgresDataRuntime } from "@oh-my-router/data/postgres";
@@ -33,7 +34,7 @@ import {
   WorkspaceAccessDeniedError,
   WorkspaceInputError,
 } from "@oh-my-router/identity";
-import { LinearProviderDenial, ToolCatalogInputError, type ToolEffect } from "@oh-my-router/tools";
+import { LinearProviderDenial, SlackProviderDenial, ToolCatalogInputError, type ToolEffect } from "@oh-my-router/tools";
 import {
   ApprovalUnavailableError,
   ExecutionApprovalRequiredError,
@@ -44,6 +45,7 @@ import {
   GitHubWritePreflightError,
   GitHubWriteRejectedError,
   LinearExecutionError,
+  SlackExecutionError,
   LinearIntentTransactionRequiredError,
   ExecutionIdempotencyConflictError,
   ExecutionInProgressError,
@@ -77,6 +79,7 @@ export interface ConnectionRouteServices {
     label: string;
     githubAccess?: GithubAccess;
     linearAccess?: LinearAccess;
+    slackAccess?: SlackAccess;
     returnTo?: string;
   }): Promise<unknown>;
   completeOAuth(request: Request, input: {
@@ -212,6 +215,21 @@ function linearErrorResponse(error: LinearExecutionError | LinearProviderDenial)
     ...("receiptId" in error ? { receiptId: error.receiptId } : {}) }, { status: linearStatus(error.code), headers });
 }
 
+function slackErrorResponse(error: SlackExecutionError | SlackProviderDenial): Response {
+  const status = {
+    SLACK_RATE_LIMITED: 429, SLACK_RECONNECT_REQUIRED: 401,
+    SLACK_PERMISSION_DENIED: 403, SLACK_WORKSPACE_MISMATCH: 409,
+    SLACK_CHANNEL_UNAVAILABLE: 404, SLACK_POST_REJECTED: 422,
+    SLACK_QUERY_REJECTED: 502,
+  }[error.code];
+  const headers: Record<string, string> = { ...PRIVATE_RESPONSE };
+  if (error.code === "SLACK_RATE_LIMITED" && error.retryAfterSeconds !== undefined) {
+    headers["retry-after"] = String(error.retryAfterSeconds);
+  }
+  return Response.json({ error: error.code, message: error.message,
+    ...("receiptId" in error ? { receiptId: error.receiptId } : {}) }, { status, headers });
+}
+
 /** Require a JSON object before reading route-specific fields. */
 function objectBody(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -274,6 +292,13 @@ function linearAccess(body: Record<string, unknown>): LinearAccess | undefined {
   if (value === undefined) return undefined;
   if (value === "read" || value === "issue_write") return value;
   throw new RequestInputError("linearAccess must be read or issue_write");
+}
+
+function slackAccess(body: Record<string, unknown>): SlackAccess | undefined {
+  const value = body.slackAccess;
+  if (value === undefined) return undefined;
+  if (value === "discover" || value === "read" || value === "post" || value === "read_post") return value;
+  throw new RequestInputError("slackAccess must be discover, read, post, or read_post");
 }
 
 function unavailableDeviceServices(): DeviceRouteServices {
@@ -434,6 +459,9 @@ export function createOMRRouter(
       }
       if (error instanceof LinearExecutionError || error instanceof LinearProviderDenial) {
         return linearErrorResponse(error);
+      }
+      if (error instanceof SlackExecutionError || error instanceof SlackProviderDenial) {
+        return slackErrorResponse(error);
       }
       if (error instanceof ExecutionInvocationDeadlineError) {
         return Response.json({ error: error.code },
@@ -653,6 +681,7 @@ export function createOMRRouter(
           const returnTo = optionalString(body, "returnTo");
           const access = githubAccess(body);
           const linear = linearAccess(body);
+          const slack = slackAccess(body);
           return Response.json(await connectionServices.startOAuth(request, {
             workspaceId: requiredString(body, "workspaceId"),
             provider: requiredString(body, "provider"),
@@ -661,6 +690,7 @@ export function createOMRRouter(
             label: requiredString(body, "label"),
             ...(access ? { githubAccess: access } : {}),
             ...(linear ? { linearAccess: linear } : {}),
+            ...(slack ? { slackAccess: slack } : {}),
             ...(returnTo ? { returnTo } : {}),
           }), { status: 201, headers: PRIVATE_RESPONSE });
         },

@@ -16,6 +16,7 @@ export { hasRequiredScopes, usableToolIds } from "./scopes.js";
 export { ProviderPreflightError } from "./preflight.js";
 export { ConfirmedGitHubWriteRejection, githubHttpFailure, type GitHubHttpFailure } from "./github-errors.js";
 export { LinearProviderDenial, LinearProviderResponseAmbiguous, linearDenial } from "./linear-errors.js";
+export { SlackProviderDenial, SlackProviderResponseAmbiguous, slackDenial } from "./slack-errors.js";
 export {
   V1_PROVIDERS,
   isV1Provider,

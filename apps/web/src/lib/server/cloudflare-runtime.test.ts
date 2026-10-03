@@ -3,10 +3,25 @@ import { ClientAccessAuthority } from "@oh-my-router/client-access";
 import { MemoryClientAccessStore } from "@oh-my-router/client-access/testing";
 import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
-import { LinearProviderDenial, ToolCatalog } from "@oh-my-router/tools";
+import { LinearProviderDenial, SlackProviderDenial, ToolCatalog } from "@oh-my-router/tools";
 
 import { assertConnectionWorkspace, checkAuthorizedConnectionHealth, createProviderIntegrationConfig, requireExecutionOrigin, revokeOwnBearerClient, scopedToolIds, selectAuthorizedConnection } from "./cloudflare-runtime.js";
 import { createOMRRouter, type ConnectionRouteServices } from "./router.js";
+
+/** Give catalog isolation tests identical read contracts for each selected provider. */
+async function readActionCatalog(names: string[]) {
+  const definitions = new Map(names.map((name) => [name, {
+    name, displayName: name, version: "1.0.0", description: name,
+    auth: { type: "oauth2" }, actions: { read: {
+      name: "read", displayName: "Read", description: "Read resource", parameters: {}, returns: {},
+      contract: { version: "1.0.0", effect: "read" as const, requiredScopes: ["read"],
+        resources: [], sensitiveKeys: [], pagination: { kind: "none" as const }, retry: "never" as const },
+    } },
+  }]));
+  const catalog = await ToolCatalog.create({ providers: { list: () => [...definitions.values()] } },
+    (value) => value as Record<string, never>);
+  return { definitions, catalog };
+}
 
 describe("Worker provider OAuth configuration", () => {
   it("allowlists the browser callback for configured providers", () => {
@@ -106,17 +121,41 @@ describe("CLI self-revocation", () => {
 });
 
 describe("Worker scoped provider catalog", () => {
+  it.each(["SLACK_PERMISSION_DENIED", "SLACK_WORKSPACE_MISMATCH"] as const)(
+    "keeps other provider discovery and manifest available when %s health persistence fails", async (code) => {
+      const { definitions, catalog } = await readActionCatalog(["github", "slack"]);
+      const bindings = ["github", "slack"].map((provider) => ({ id: `binding_${provider}`, provider,
+        providerConnectionId: `remote_${provider}`, status: "active", readiness: "ready" }));
+      const recordHealth = vi.fn().mockRejectedValueOnce(new Error("health store unavailable"))
+        .mockResolvedValue(undefined);
+      const authority = { resolve: async ({ provider, workspaceId }: { provider: string; workspaceId: string }) => {
+        expect(workspaceId).toBe("workspace_1");
+        return bindings.find((binding) => binding.provider === provider)!;
+      }, recordHealth };
+      const plugfn = { providers: { get: (provider: string) => definitions.get(provider) },
+        config: { integrations: { github: {}, slack: {} } },
+        action: vi.fn(async (provider: string) => {
+          if (provider === "slack") throw new SlackProviderDenial("read", code);
+          return { verifiedScopes: ["read"] };
+        }),
+        connections: { get: vi.fn(async () => ({ scopes: ["read"] })) },
+      };
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        const result = await scopedToolIds(catalog, plugfn as never, authority as never,
+          { kind: "web", userId: "user_1", workspaceId: "workspace_1" }, "workspace_1", bindings as never);
+        expect(catalog.discover({ allowedToolIds: result.allowedToolIds }).tools.map(({ id }) => id))
+          .toEqual(["github.read"]);
+        expect(result.allowedToolIds.has(catalog.get("github.read")!.id)).toBe(true);
+        expect(result.allowedToolIds.has(catalog.get("slack.read")!.id)).toBe(false);
+        expect(result.providers.find(({ provider }) => provider === "slack")?.state).toBe("expired");
+        expect(recordHealth).toHaveBeenCalledTimes(attempt);
+        expect(recordHealth).toHaveBeenLastCalledWith({ connectionId: "binding_slack",
+          status: "needs_reauth", readiness: "unavailable", reason: code.toLowerCase() });
+      }
+    });
+
   it("projects a rejected Linear token as reconnect-required without hiding GitHub", async () => {
-    const definitions = new Map(["github", "linear"].map((name) => [name, {
-      name, displayName: name, version: "1.0.0", description: name,
-      auth: { type: "oauth2" }, actions: { read: {
-        name: "read", displayName: "Read", description: "Read resource", parameters: {}, returns: {},
-        contract: { version: "1.0.0", effect: "read" as const, requiredScopes: ["read"],
-          resources: [], sensitiveKeys: [], pagination: { kind: "none" as const }, retry: "never" as const },
-      } },
-    }]));
-    const catalog = await ToolCatalog.create({ providers: { list: () => [...definitions.values()] } },
-      (value) => value as Record<string, never>);
+    const { definitions, catalog } = await readActionCatalog(["github", "linear"]);
     const bindings = ["github", "linear"].map((provider) => ({ id: `binding_${provider}`, provider,
       providerConnectionId: `remote_${provider}`, status: "active", readiness: "ready" }));
     const recordHealth = vi.fn(async () => undefined);
@@ -140,17 +179,7 @@ describe("Worker scoped provider catalog", () => {
       readiness: "unavailable", reason: "linear_reconnect_required" });
   });
   it.each([false, true])("omits a missing selected binding with alternate ready=%s", async (alternateReady) => {
-    const definitions = new Map(["github", "linear"].map((name) => [name, {
-      name, displayName: name, version: "1.0.0", description: name,
-      auth: { type: "oauth2" },
-      actions: { read: {
-        name: "read", displayName: "Read", description: "Read resource", parameters: {}, returns: {},
-        contract: { version: "1.0.0", effect: "read" as const, requiredScopes: ["read"],
-          resources: [], sensitiveKeys: [], pagination: { kind: "none" as const }, retry: "never" as const },
-      } },
-    }]));
-    const catalog = await ToolCatalog.create({ providers: { list: () => [...definitions.values()] } },
-      (value) => value as Record<string, never>);
+    const { definitions, catalog } = await readActionCatalog(["github", "linear"]);
     const bindings = ["github", "linear"].map((provider) => ({
       id: `binding_${provider}`, provider, providerConnectionId: `remote_${provider}`,
       status: "active", readiness: "ready",

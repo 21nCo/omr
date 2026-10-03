@@ -12,7 +12,6 @@ import {
   notionProvider,
   onedriveProvider,
   outlookProvider,
-  slackProvider,
   stripeProvider,
   yahooProvider,
 } from "@plugfn/providers";
@@ -22,6 +21,7 @@ import { plugFn, type IntegrationConfig, type PlugFn, type PlugFnAuthorizationOp
 import { createPostgresPlugFnAdapter } from "./postgres.js";
 import { omrGithubProvider } from "./github.js";
 import { omrLinearProvider } from "./linear.js";
+import { omrSlackProvider } from "./slack.js";
 
 const { Client } = pg;
 
@@ -41,7 +41,7 @@ const providers = [
   notionProvider,
   onedriveProvider,
   outlookProvider,
-  slackProvider,
+  omrSlackProvider,
   stripeProvider,
   yahooProvider,
 ];
@@ -119,3 +119,4 @@ export async function connectPostgresPlugFn(input: {
 export { createPostgresPlugFnAdapter } from "./postgres.js";
 export { omrGithubProvider, verifiedGithubScopes } from "./github.js";
 export { omrLinearProvider, verifiedLinearScopes } from "./linear.js";
+export { omrSlackProvider, verifiedSlackScopes } from "./slack.js";

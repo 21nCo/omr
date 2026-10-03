@@ -2,7 +2,7 @@ import { ApprovalUnavailableError, publicApproval, type ExecutionApproval, type 
   type ExecutionReceipt, type ExecutionReceiptStore } from "@oh-my-router/execution";
 import type { ToolManifest } from "@oh-my-router/tools";
 
-/** Merge bounded history with actionable Linear approvals and one exact recovery. */
+/** Merge bounded history with actionable provider approvals and one exact recovery. */
 export function visibleApprovals<T extends Pick<ExecutionApproval, "id" | "status" | "expiresAt">>(
   recent: readonly T[], outstandingLinear: readonly T[], recovered: T | null, now: number,
 ): T[] {
@@ -12,11 +12,11 @@ export function visibleApprovals<T extends Pick<ExecutionApproval, "id" | "statu
     .map((approval) => [approval.id, approval])).values()];
 }
 
-/** Recover one older Linear approval or its recorded decision without scanning history.
+/** Recover one older provider approval or its recorded decision without scanning history.
  * An owned but retired hint must not take down the workspace overview. Unknown or
  * foreign IDs still fail the actor/workspace boundary.
  */
-export async function recoverLinearApproval(
+export async function recoverProviderApproval(
   store: ExecutionApprovalStore, approvalId: string | undefined,
   workspaceId: string, actorUserId: string, now: number,
 ): Promise<ExecutionApproval | null> {
@@ -26,7 +26,8 @@ export async function recoverLinearApproval(
   const validDecision = Boolean(approval.executionReceiptId) &&
     ((approval.status === "consumed" && recorded === "effect_present") ||
       (approval.status === "failed" && recorded === "effect_absent"));
-  if (approval.workspaceId !== workspaceId || !approval.toolId.startsWith("linear.")) {
+  if (approval.workspaceId !== workspaceId ||
+      !(approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post")) {
     throw new ApprovalUnavailableError();
   }
   if ((["pending", "approved"].includes(approval.status) && approval.expiresAt <= now) ||
@@ -47,14 +48,15 @@ export function publicBrowserApproval(
   };
 }
 
-/** Keep exact Linear reconciliation evidence available beyond recent history. */
-export async function linearReconciliationReceipts(
+/** Keep exact provider reconciliation evidence available beyond recent history. */
+export async function providerReconciliationReceipts(
   approvals: readonly Pick<ExecutionApproval, "id" | "status" | "toolId" | "executionReceiptId">[],
   receipts: ExecutionReceiptStore,
   workspaceId: string, actorUserId: string,
 ): Promise<ExecutionReceipt[]> {
   const uncertain = approvals.filter((approval) => approval.status === "uncertain" &&
-    approval.toolId.startsWith("linear.") && approval.executionReceiptId);
+    (approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post") &&
+    approval.executionReceiptId);
   const found: (ExecutionReceipt | null)[] = new Array(uncertain.length);
   let next = 0;
   const readNext = async (): Promise<void> => {

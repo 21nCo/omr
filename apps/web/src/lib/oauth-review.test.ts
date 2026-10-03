@@ -25,6 +25,16 @@ describe("OAuth review state", () => {
     expect(update).toHaveBeenLastCalledWith(expect.objectContaining({ scopes: ["read", "write"] }), false);
   });
 
+  it("shows the selected Slack bot scope tier before consent", async () => {
+    const { controller, update, start } = fixture();
+    start.mockResolvedValueOnce({ authUrl: "https://slack.com/oauth/v2/authorize?state=slack&scope=channels%3Aread%2Cchat%3Awrite" });
+    await controller.start({ ...input, provider: "slack", label: "Slack", slackAccess: "post" });
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ slackAccess: "post" }));
+    expect(update).toHaveBeenLastCalledWith(expect.objectContaining({
+      scopes: ["channels:read", "chat:write"],
+    }), false);
+  });
+
   it("unlocks controls on review and cancel, clears intent, and permits another action", async () => {
     const { controller, items, update, start } = fixture();
     await controller.start(input);

@@ -1,6 +1,6 @@
 import { authorizationScopes } from "./connection-ui.js";
 import { oauthCallbackUri, savePendingOAuthConnection } from "./oauth-connection.js";
-import type { LinearAccess } from "@oh-my-router/connections";
+import type { LinearAccess, SlackAccess } from "@oh-my-router/connections";
 
 export interface OAuthReviewInput {
   workspaceId: string;
@@ -10,6 +10,7 @@ export interface OAuthReviewInput {
   origin: string;
   githubAccess?: "profile" | "public_write" | "private_repositories";
   linearAccess?: LinearAccess;
+  slackAccess?: SlackAccess;
 }
 
 export interface OAuthReviewState {

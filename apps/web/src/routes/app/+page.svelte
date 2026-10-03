@@ -2,11 +2,12 @@
   import { onMount } from "svelte";
   import { beginGithubReconnect, createOAuthReviewController } from "$lib/oauth-review.js";
   import { connectionActions, connectionStatusLabel, providerRevocationGuidance } from "$lib/connection-ui.js";
-  import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, linearEffectAbsentAvailable, linearEffectPresentAvailable, providerDisplayState, recoverLinearReconciliation, recoverWorkspaceOverview, selectedLinearAccountId, selectedReadyLinearConnection, visibleApprovalCard } from "$lib/workspace-catalog.js";
+  import { createWorkspaceCatalogLoader, expiredAutomaticApprovalLookup, effectAbsentAvailable, effectPresentAvailable, providerDisplayState, recoverProviderReconciliation, recoverWorkspaceOverview, sameSlackPostParams, sameSlackReadSelection, selectedLinearAccountId, selectedReadyLinearConnection, selectedReadySlackConnection, selectedSlackAccountId, slackChannelSelectionLocked, visibleApprovalCard } from "$lib/workspace-catalog.js";
   import { renderApprovalPreview } from "$lib/approval-preview.js";
   import { createLinearActionKeys, linearApprovalNotice } from "$lib/linear-action-keys.js";
+  import { slackApprovalNotice } from "$lib/slack-approval-notice.js";
   import { V1_PROVIDERS } from "@oh-my-router/tools";
-  import type { LinearAccess } from "@oh-my-router/connections";
+  import type { LinearAccess, SlackAccess } from "@oh-my-router/connections";
 
   type WorkspaceAccess = {
     workspace: { id: string; name: string; kind: "personal" | "team" };
@@ -14,6 +15,7 @@
   };
   type Connection = {
     id: string;
+    workspaceId: string;
     provider: string;
     label: string;
     ownership: "personal" | "workspace";
@@ -96,6 +98,21 @@
   let oauthOwnership: "personal" | "workspace" = "personal";
   let githubAccess: "profile" | "public_write" | "private_repositories" = "profile";
   let linearAccess: LinearAccess = "read";
+  let slackAccess: SlackAccess = "discover";
+  type SlackChannel = { id: string; name: string };
+  type SlackMessage = { ts: string; text: string; user?: string };
+  let slackWorkspace: { id: string; name: string; sender: { type: "bot"; id: string; botId: string } } | null = null;
+  let slackChannels: SlackChannel[] = [];
+  let slackChannelsCursor: string | null = null;
+  let slackChannelId = "";
+  let slackMessages: SlackMessage[] = [];
+  let slackMessagesCursor: string | null = null;
+  let slackFilteredCount = 0;
+  let slackText = "";
+  let slackBusy = "";
+  let slackGeneration = 0;
+  let slackReadOwner: { generation: number; workspaceId: string; accountId: string } | null = null;
+  const slackActionKeys = createLinearActionKeys(() => crypto.randomUUID(), () => sessionStorage, "Slack");
   type LinearTeam = { id: string; name: string; key: string };
   type LinearIssue = { id: string; identifier: string; title: string; description: string | null;
     url: string; team: { id: string; name: string }; state: { id: string; name: string } | null };
@@ -126,12 +143,13 @@
     readiness: (provider, workspaceId) => request(
       `/api/connections/providers/readiness?provider=${encodeURIComponent(provider)}&workspaceId=${encodeURIComponent(workspaceId)}`,
     ),
-    start: async ({ workspaceId, provider, ownership, label, redirectUri, githubAccess, linearAccess }) => request("/api/connections/oauth/start", {
+    start: async ({ workspaceId, provider, ownership, label, redirectUri, githubAccess, linearAccess, slackAccess }) => request("/api/connections/oauth/start", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ workspaceId, provider, ownership, label, redirectUri,
         ...(provider === "github" ? { githubAccess } : {}),
-        ...(provider === "linear" ? { linearAccess } : {}) }),
+        ...(provider === "linear" ? { linearAccess } : {}),
+        ...(provider === "slack" ? { slackAccess } : {}) }),
     }),
     update: (review, pending) => {
       authorizationDestination = review?.destination ?? "";
@@ -178,7 +196,8 @@
   async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetch(path, { credentials: "same-origin", ...init });
     const body = await response.json().catch(() => ({})) as { error?: string; message?: string };
-    if (response.status === 401 && body.error !== "LINEAR_RECONNECT_REQUIRED" &&
+    if (response.status === 401 && body.error !== "SLACK_RECONNECT_REQUIRED" &&
+      body.error !== "LINEAR_RECONNECT_REQUIRED" &&
       body.error !== "GITHUB_RECONNECT_REQUIRED") {
       location.assign(`/login?returnTo=${encodeURIComponent(location.pathname + location.search)}`);
       throw new Error("Authentication required");
@@ -226,12 +245,14 @@
     (workspaceId) => request<Catalog>(`/api/tools?workspaceId=${encodeURIComponent(workspaceId)}&limit=100`),
     (state) => {
       const previousLinearAccountId = selectedLinearAccountId(overview, selectedWorkspaceId);
+      const previousSlackAccountId = selectedSlackAccountId(overview, selectedWorkspaceId);
       overview = state.overview;
       catalog = state.catalog;
       selectedWorkspaceId = state.selectedWorkspaceId;
       loading = state.loading;
       error = state.error;
       if (previousLinearAccountId !== selectedLinearAccountId(overview, selectedWorkspaceId)) clearLinear();
+      if (previousSlackAccountId !== selectedSlackAccountId(overview, selectedWorkspaceId)) clearSlack();
       if (!catalog) {
         oauthProvider = "";
         credentialProvider = "";
@@ -263,6 +284,7 @@
     recoveryError = "";
     automaticApprovalLookup = null;
     clearLinear();
+    clearSlack();
     apiKey = "";
     await load();
   }
@@ -388,11 +410,143 @@
     };
   }
 
+  /** Invalidate pending reads whenever the visible Slack journey is reset. */
+  function clearSlack() {
+    slackGeneration++;
+    slackBusy = "";
+    slackReadOwner = null;
+    slackWorkspace = null;
+    slackChannels = [];
+    slackChannelsCursor = null;
+    slackChannelId = "";
+    slackMessages = [];
+    slackMessagesCursor = null;
+    slackFilteredCount = 0;
+    slackText = "";
+  }
+
+  /** Resolve only the ready Slack binding in the current workspace. */
+  function slackAccount(): Connection | undefined {
+    return selectedReadySlackConnection({ overview, selectedWorkspaceId, loading, busy });
+  }
+
+  /** Check the selected binding and the current scoped catalog together. */
+  function slackToolAvailable(toolId: string): boolean {
+    return Boolean(slackAccount() && catalog?.tools.some((tool) => tool.id === toolId));
+  }
+
+  /** Publish a read only if its workspace, account, and channel generation still match. */
+  async function slackRead<T>(toolId: string, params: object, publish: (value: T) => void) {
+    const account = slackAccount();
+    if (!account || slackBusy || !slackToolAvailable(toolId)) {
+      error = "Select a ready Slack bot and available action first."; return;
+    }
+    const selection = { generation: slackGeneration, workspaceId: selectedWorkspaceId, accountId: account.id };
+    const currentSelection = () => ({ generation: slackGeneration, workspaceId: selectedWorkspaceId,
+      accountId: slackAccount()?.id });
+    slackReadOwner = selection;
+    slackBusy = toolId;
+    error = "";
+    try {
+      const receipt = await request<{ result: T }>("/api/tools/execute", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId: selection.workspaceId, connectionId: account.id, toolId, params }),
+      });
+      if (sameSlackReadSelection(selection, currentSelection())) publish(receipt.result);
+    } catch (caught) {
+      if (sameSlackReadSelection(selection, currentSelection())) {
+        error = caught instanceof Error ? caught.message : "Slack read failed";
+      }
+    } finally {
+      // A global mutation or overview refresh may hide the same bot temporarily.
+      // Release only this read's lock; publication still requires a visible binding.
+      if (slackReadOwner === selection && selection.generation === slackGeneration &&
+          selection.workspaceId === selectedWorkspaceId && slackBusy === toolId) {
+        slackBusy = "";
+        slackReadOwner = null;
+      }
+    }
+  }
+
+  /** Snapshot the visible bot, channel, and message for one approval intent. */
+  function slackPostParams() {
+    return { workspaceId: slackWorkspace?.id, channelId: slackChannelId,
+      senderId: slackWorkspace?.sender.id, text: slackText };
+  }
+
+  /** Publish an approval only while its exact form and selected binding remain current. */
+  async function slackApproval() {
+    const account = slackAccount();
+    if (!account || !slackWorkspace || !slackChannelId || slackBusy ||
+        !slackToolAvailable("slack.messages.post")) {
+      error = "Slack posting is unavailable for the selected bot and channel."; return;
+    }
+    const generation = slackGeneration;
+    const workspaceId = selectedWorkspaceId;
+    const params = slackPostParams();
+    slackBusy = "approval";
+    error = "";
+    try {
+      const idempotencyKey = await slackActionKeys.key("slack.messages.post", workspaceId, account.id, params);
+      const approval = await request<{ id: string; status: string; expiresAt: number }>("/api/approvals", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId, connectionId: account.id,
+          toolId: "slack.messages.post", params, idempotencyKey }),
+      });
+      if (generation !== slackGeneration || workspaceId !== selectedWorkspaceId ||
+          account.id !== slackAccount()?.id) return;
+      if (!sameSlackPostParams(params, slackPostParams())) {
+        await load();
+        if (generation === slackGeneration) {
+          notice = "The Slack post changed while approval was requested. Review the created approval before requesting another.";
+        }
+        return;
+      }
+      recoveredApprovalId = ["pending", "approved", "uncertain"].includes(approval.status) ? approval.id : "";
+      automaticApprovalLookup = ["pending", "approved"].includes(approval.status)
+        ? { id: approval.id, expiresAt: approval.expiresAt } : null;
+      recoveryInput = recoveredApprovalId;
+      notice = slackApprovalNotice(approval.status);
+      await load();
+    } catch (caught) {
+      if (generation === slackGeneration) error = caught instanceof Error ? caught.message : "Could not request Slack approval";
+    } finally { if (generation === slackGeneration) slackBusy = ""; }
+  }
+
+  async function resetSlackAction() {
+    const account = slackAccount();
+    if (!account || slackBusy) return;
+    const generation = slackGeneration;
+    const workspaceId = selectedWorkspaceId;
+    const params = slackPostParams();
+    slackBusy = "reset";
+    error = "";
+    try {
+      await slackActionKeys.resetAfterSettlement("slack.messages.post", workspaceId, account.id, params,
+        (idempotencyKey) => request<{ status: string }>("/api/approvals", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ workspaceId, connectionId: account.id,
+            toolId: "slack.messages.post", params, idempotencyKey }),
+        }), () => generation === slackGeneration && workspaceId === selectedWorkspaceId &&
+          account.id === slackAccount()?.id);
+      if (generation !== slackGeneration || workspaceId !== selectedWorkspaceId ||
+          account.id !== slackAccount()?.id) return;
+      recoveredApprovalId = "";
+      recoveryInput = "";
+      automaticApprovalLookup = null;
+      notice = "New Slack post started. Review its channel and sender before requesting approval.";
+    } catch (caught) {
+      if (generation === slackGeneration) error = caught instanceof Error ? caught.message : "Could not start another Slack post";
+    } finally { if (generation === slackGeneration) slackBusy = ""; }
+  }
+
   async function mutate(name: string, path: string, body: unknown, success: string) {
     if (name.startsWith("select:") || name.startsWith("refresh:") || name.startsWith("health:") ||
-        name.startsWith("reconcile:")) clearLinear();
+        name.startsWith("reconcile:")) { clearLinear(); clearSlack(); }
     if (name.startsWith("execute:") && overview?.approvals.some((approval) =>
       name === `execute:${approval.id}` && approval.toolId.startsWith("linear."))) clearLinear();
+    if (name.startsWith("execute:") && overview?.approvals.some((approval) =>
+      name === `execute:${approval.id}` && approval.toolId.startsWith("slack."))) clearSlack();
     busy = name;
     error = "";
     notice = "";
@@ -417,16 +571,18 @@
     }
   }
 
-  async function reconcileLinear(approvalId: string, decision: "effect_present" | "effect_absent") {
+  /** Record a verified outcome against the exact uncertain provider receipt. */
+  async function reconcileProvider(approvalId: string, decision: "effect_present" | "effect_absent") {
     const workspaceId = selectedWorkspaceId;
     busy = `reconcile:${approvalId}`;
     clearLinear();
+    clearSlack();
     error = "";
     notice = "";
     const success = decision === "effect_present"
-      ? "Recorded that Linear applied this change." : "Recorded that Linear did not apply this change.";
+      ? "Recorded that the action happened." : "Recorded that the action did not happen.";
     try {
-      await recoverLinearReconciliation(approvalId, decision,
+      await recoverProviderReconciliation(approvalId, decision,
         () => request<Approval>("/api/approvals/reconcile", {
           method: "POST", headers: { "content-type": "application/json" },
           body: JSON.stringify({ approvalId, decision, workspaceId }),
@@ -462,7 +618,8 @@
       const label = connection?.label ?? (oauthLabel.trim() || catalog?.providers.find((item) => item.provider === provider)?.displayName || provider);
       await oauthReview.start({ workspaceId: selectedWorkspaceId, provider, ownership, label,
         origin: location.origin, ...(provider === "github" ? { githubAccess } : {}),
-        ...(provider === "linear" ? { linearAccess } : {}) });
+        ...(provider === "linear" ? { linearAccess } : {}),
+        ...(provider === "slack" ? { slackAccess } : {}) });
     } catch (caught) {
       error = caught instanceof Error ? caught.message : "Could not start provider authorization";
     }
@@ -489,6 +646,15 @@
       notice = "Choose Linear read or issue-write access below, then reconnect with fresh consent.";
       return;
     }
+    if (connection.provider === "slack") {
+      oauthReview.cancel();
+      oauthProvider = "slack";
+      oauthOwnership = connection.ownership;
+      oauthLabel = connection.label;
+      slackAccess = "discover";
+      notice = "Choose Slack bot access below, then reconnect with fresh consent.";
+      return;
+    }
     void connectOAuth(connection);
   }
 
@@ -504,6 +670,7 @@
 
   async function disconnect(connection: Connection) {
     if (connection.provider === "linear") clearLinear();
+    if (connection.provider === "slack") clearSlack();
     busy = `disconnect:${connection.id}`;
     error = "";
     notice = "";
@@ -705,8 +872,18 @@
                   </select>
                 </label>
               {/if}
+              {#if oauthProvider === "slack"}
+                <label>Slack bot access
+                  <select bind:value={slackAccess}>
+                    <option value="discover">Joined public channels · channels:read</option>
+                    <option value="read">Channel messages · channels:read, channels:history</option>
+                    <option value="post">Approved message posts · channels:read, chat:write</option>
+                    <option value="read_post">Read and approved posts · channels:read, channels:history, chat:write</option>
+                  </select>
+                </label>
+              {/if}
             </div>
-            <p>OMR shows the requested scopes before provider consent. Linear issue changes require its <code>write</code> grant and OMR approval. Review the provider consent screen before granting access.</p>
+            <p>OMR shows the requested scopes before provider consent. Linear issue changes and Slack posts require OMR approval. Review the provider consent screen before granting access.</p>
             <button class="primary" type="submit" disabled={Boolean(busy) || !selectedWorkspaceId || !oauthProvider}>
               {busy === "oauth" ? "Opening provider…" : "Continue to provider"}
             </button>
@@ -832,10 +1009,80 @@
           </section>
         {/if}
 
+        {#if catalog?.providers.find((entry) => entry.provider === "slack")?.state === "ready"}
+          <section class="panel" aria-label="Slack channel journey">
+            <div class="panel-heading"><div><p class="kicker">Slack</p><h2>Channels</h2></div></div>
+            <p>Selected bot: {slackAccount()?.label ?? "Select a Slack account above"}. OMR v1 uses joined, local public channels. Posts use the bot identity shown below and wait for separate approval.</p>
+            <button class="quiet compact" disabled={Boolean(slackBusy) || !slackToolAvailable("slack.workspace.get")}
+              onclick={() => void slackRead<{ id: string; name: string; sender: { type: "bot"; id: string; botId: string } }>(
+                "slack.workspace.get", {}, (value) => { clearSlack(); slackWorkspace = value; })}>
+              Find Slack workspace and sender</button>
+            {#if slackWorkspace}
+              <p>{slackWorkspace.name} · {slackWorkspace.id} · bot sender {slackWorkspace.sender.id}</p>
+              <button class="quiet compact" disabled={Boolean(slackBusy) || !slackToolAvailable("slack.channels.list")}
+                onclick={() => void slackRead<{ channels: SlackChannel[]; nextCursor: string | null }>(
+                  "slack.channels.list", { workspaceId: slackWorkspace?.id },
+                  (value) => { slackChannels = value.channels; slackChannelsCursor = value.nextCursor;
+                    slackChannelId = ""; slackMessages = []; slackFilteredCount = 0; })}>Find joined public channels</button>
+              {#if slackChannelsCursor}
+                <button class="quiet compact" disabled={Boolean(slackBusy)}
+                  onclick={() => void slackRead<{ channels: SlackChannel[]; nextCursor: string | null }>(
+                    "slack.channels.list", { workspaceId: slackWorkspace?.id, cursor: slackChannelsCursor },
+                    (value) => { slackChannels = [...slackChannels, ...value.channels];
+                      slackChannelsCursor = value.nextCursor; })}>More channels</button>
+              {/if}
+              {#if slackChannels.length}
+                <label>Channel
+                  <select bind:value={slackChannelId} disabled={slackChannelSelectionLocked(slackBusy)} onchange={() => { slackGeneration++; slackBusy = ""; slackReadOwner = null;
+                    slackMessages = []; slackMessagesCursor = null; slackFilteredCount = 0; slackText = ""; }}>
+                    <option value="">Choose a channel</option>
+                    {#each slackChannels as entry}<option value={entry.id}>#{entry.name}</option>{/each}
+                  </select>
+                </label>
+                {#if slackChannelId}
+                  {#if slackToolAvailable("slack.messages.list")}
+                    <button class="quiet compact" disabled={Boolean(slackBusy)}
+                      onclick={() => void slackRead<{ messages: SlackMessage[]; filteredCount: number; nextCursor: string | null }>(
+                        "slack.messages.list", { workspaceId: slackWorkspace?.id, channelId: slackChannelId },
+                        (value) => { slackMessages = value.messages; slackFilteredCount = value.filteredCount;
+                          slackMessagesCursor = value.nextCursor; })}>
+                      Read messages</button>
+                    {#if slackMessagesCursor}
+                      <button class="quiet compact" disabled={Boolean(slackBusy)}
+                        onclick={() => void slackRead<{ messages: SlackMessage[]; filteredCount: number; nextCursor: string | null }>(
+                          "slack.messages.list", { workspaceId: slackWorkspace?.id,
+                            channelId: slackChannelId, cursor: slackMessagesCursor },
+                          (value) => { slackMessages = [...slackMessages, ...value.messages];
+                            slackFilteredCount += value.filteredCount;
+                            slackMessagesCursor = value.nextCursor; })}>More messages</button>
+                    {/if}
+                    {#if slackFilteredCount > 0}
+                      <p>Some Slack history entries cannot be displayed as text messages. Continue reading if another page is available.</p>
+                    {/if}
+                    {#each slackMessages as message}
+                      <p><strong>{message.user ?? "Slack"}</strong> · {message.text}</p>
+                    {/each}
+                  {/if}
+                  {#if slackToolAvailable("slack.messages.post")}
+                    <form class="inset" onsubmit={(event) => { event.preventDefault(); void slackApproval(); }}>
+                      <strong>Post as bot {slackWorkspace.sender.id} to #{slackChannels.find((entry) => entry.id === slackChannelId)?.name}</strong>
+                      <label>Message<textarea bind:value={slackText} maxlength="4000" required disabled={Boolean(slackBusy)}></textarea></label>
+                      <button class="primary compact" type="submit" disabled={Boolean(slackBusy) || !slackText.trim()}>
+                        Request post approval</button>
+                      <button class="quiet compact" type="button" disabled={Boolean(slackBusy)}
+                        onclick={() => void resetSlackAction()}>Start a new identical post</button>
+                    </form>
+                  {/if}
+                {/if}
+              {/if}
+            {/if}
+          </section>
+        {/if}
+
         <section class="panel approvals">
           <div class="panel-heading"><div><p class="kicker">Human in the loop</p><h2>Approvals</h2></div></div>
           <form class="inline-form" onsubmit={(event) => { event.preventDefault(); recoveredApprovalId = recoveryInput.trim(); recoveryError = ""; automaticApprovalLookup = null; void load(); }}>
-            <label for="recover-approval">Find an older Linear approval by ID</label>
+            <label for="recover-approval">Find an older Linear or Slack approval by ID</label>
             <input id="recover-approval" bind:value={recoveryInput} maxlength="128" placeholder="Approval ID" />
             <button class="quiet compact" type="submit" disabled={Boolean(busy) || !recoveryInput.trim()}>Find approval</button>
             {#if recoveredApprovalId}<button class="quiet compact" type="button" disabled={Boolean(busy)}
@@ -858,21 +1105,21 @@
                   <button class="danger compact" disabled={Boolean(busy) || Boolean(error) || loading} onclick={() => void mutate(`reject:${approval.id}`, "/api/approvals/reject", { approvalId: approval.id }, `Rejected ${approval.toolId}.`)}>Reject</button>
                   {#if !approval.browserActionable}<p class="approval-context">After approval, execute this action from the originating CLI or MCP client.</p>{/if}
                 {:else if approval.status === "uncertain"}
-                  <p class="approval-context">The Linear outcome is unknown. Check receipt {approval.executionReceiptId ?? "pending"} against the selected Linear workspace and issue before recording a decision.</p>
+                  <p class="approval-context">The outcome is unknown. Check receipt {approval.executionReceiptId ?? "pending"} against the selected {approval.toolId.startsWith("slack.") ? "Slack workspace and channel" : "Linear workspace and issue"} before recording a decision.</p>
                   {#if !approval.browserActionable}
                     <p class="approval-context">Record the verified outcome from the originating CLI or MCP client. This browser session cannot reconcile its grant.</p>
                   {:else}
-                    <button class="quiet compact" disabled={Boolean(busy) || Boolean(error) || loading || !linearEffectPresentAvailable(approval, overview.reconciliationReceipts)}
-                      onclick={() => void reconcileLinear(approval.id, "effect_present")}>I verified the change happened</button>
-                    {#if linearEffectAbsentAvailable(approval, overview.reconciliationReceipts)}
+                    <button class="quiet compact" disabled={Boolean(busy) || Boolean(error) || loading || !effectPresentAvailable(approval, overview.reconciliationReceipts)}
+                        onclick={() => void reconcileProvider(approval.id, "effect_present")}>I verified the action happened</button>
+                    {#if effectAbsentAvailable(approval, overview.reconciliationReceipts)}
                       <button class="danger compact" disabled={Boolean(busy) || Boolean(error) || loading}
-                        onclick={() => void reconcileLinear(approval.id, "effect_absent")}>I verified no change happened</button>
+                        onclick={() => void reconcileProvider(approval.id, "effect_absent")}>I verified the action did not happen</button>
                     {:else}
                       <p class="approval-context">The request may still be running. OMR cannot safely record no change or allow a retry for this receipt.</p>
                     {/if}
                   {/if}
                 {:else if approval.reconciledAs}
-                  <p class="approval-context">Recorded decision for receipt {approval.executionReceiptId}: {approval.reconciledAs === "effect_present" ? "Linear applied the change" : "Linear did not apply the change"}. No issue write was repeated.</p>
+                  <p class="approval-context">Recorded decision for receipt {approval.executionReceiptId}: {approval.reconciledAs === "effect_present" ? "action happened" : "action did not happen"}. No provider write was repeated.</p>
                 {:else if approval.status === "approved"}
                   {#if approval.browserActionable}
                     <button class="primary compact" disabled={Boolean(busy) || Boolean(error) || loading || !approval.previewReady} onclick={() => void mutate(`execute:${approval.id}`, "/api/approvals/execute", { approvalId: approval.id }, `Executed ${approval.toolId}.`)}>Execute approved change</button>

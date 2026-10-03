@@ -1592,6 +1592,80 @@ syncBuiltinESMExports();
     expect(f.committedMutations).toEqual([]);
   });
 
+  it("keeps definite Slack failures typed across read, approval, and approved execution", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    const cases = [
+      { path: "/api/tools/execute", args: ["tools", "run", "slack.messages.list", "--idempotency", "slack-read"],
+        status: 502, code: "SLACK_QUERY_REJECTED" },
+      { path: "/api/approvals", args: ["approvals", "request", "slack.messages.post", "--idempotency", "slack-preflight"],
+        status: 502, code: "SLACK_QUERY_REJECTED" },
+      { path: "/api/approvals/execute", args: ["approvals", "execute", "approval_1"],
+        status: 502, code: "SLACK_QUERY_REJECTED" },
+      { path: "/api/approvals/execute", args: ["approvals", "execute", "approval_1"],
+        status: 422, code: "SLACK_POST_REJECTED" },
+      { path: "/api/approvals/execute", args: ["approvals", "execute", "approval_1"],
+        status: 404, code: "SLACK_CHANNEL_UNAVAILABLE" },
+      { path: "/api/approvals", args: ["approvals", "request", "slack.messages.post", "--idempotency", "slack-workspace"],
+        status: 403, code: "SLACK_WORKSPACE_MISMATCH" },
+      { path: "/api/approvals/execute", args: ["approvals", "execute", "approval_1"],
+        status: 403, code: "SLACK_PERMISSION_DENIED" },
+      { path: "/api/approvals", args: ["approvals", "request", "slack.messages.post", "--idempotency", "slack-reconnect"],
+        status: 401, code: "SLACK_RECONNECT_REQUIRED" },
+    ] as const;
+    for (const item of cases) {
+      f.failureResponse(item.path, item.status, { error: item.code, message: "private Slack response" });
+      const reply = await f.run([...item.args, "--json"], env);
+      expect(reply.code).toBe(item.status === 401 ? 3 : 1);
+      expect(lastError(reply.stderr).error).toBe(item.code);
+      expect(reply.stderr).not.toContain("private Slack response");
+      expect(reply.stderr).not.toContain("EXECUTION_EFFECT_UNCERTAIN");
+      f.clearFailureResponse();
+    }
+
+    for (const [path, args] of [
+      ["/api/tools/execute", ["tools", "run", "slack.messages.list", "--idempotency", "slack-rate"]],
+      ["/api/approvals", ["approvals", "request", "slack.messages.post", "--idempotency", "slack-rate"]],
+      ["/api/approvals/execute", ["approvals", "execute", "approval_1"]],
+    ] as const) {
+      f.failureResponse(path, 429, { error: "SLACK_RATE_LIMITED", message: "private Slack response" },
+        { "retry-after": "17", "x-ratelimit-requests-reset": "1800000000000" });
+      const reply = await f.run([...args, "--json"], env);
+      expect(reply.code).toBe(1);
+      expect(lastError(reply.stderr)).toMatchObject({ error: "SLACK_RATE_LIMITED",
+        details: { retryAfterSeconds: 17, rateLimitResetAt: 1800000000000 } });
+      expect(reply.stderr).not.toContain("private Slack response");
+      f.clearFailureResponse();
+    }
+    f.failureResponse("/api/approvals/execute", 502,
+      { error: "EXECUTION_OUTCOME_UNKNOWN", receiptId: "receipt_slack_unknown" });
+    const uncertain = await f.run(["approvals", "execute", "approval_1", "--json"], env);
+    expect(uncertain.code).toBe(23);
+    expect(lastError(uncertain.stderr)).toMatchObject({ error: "EXECUTION_OUTCOME_UNKNOWN",
+      details: { approvalId: "approval_1", receiptId: "receipt_slack_unknown" } });
+    f.clearFailureResponse();
+    f.failureResponse("/api/tools/execute", 403, { error: "SLACK_PRIVATE_PROVIDER_SECRET" });
+    const privateCode = await f.run(["tools", "run", "slack.messages.list", "--json"], env);
+    expect(lastError(privateCode.stderr).error).toBe("HTTP_ERROR");
+    expect(privateCode.stderr).not.toContain("SLACK_PRIVATE_PROVIDER_SECRET");
+    expect(f.committedMutations).toEqual([]);
+  });
+
+  it("keeps the filtered Slack history signal and cursor in CLI JSON output", async () => {
+    const f = await fixture();
+    f.successReply("/api/tools/execute", { id: "receipt_filtered", workspaceId: "workspace_1",
+      toolId: "slack.messages.list", status: "succeeded", result: {
+        channel: { id: "C12345678", name: "release" }, messages: [],
+        filteredCount: 2, nextCursor: "still-active",
+      } });
+    const reply = await f.run(["tools", "run", "slack.messages.list", "--json"], {
+      OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1",
+    });
+    expect(reply.code).toBe(0);
+    expect(JSON.parse(reply.stdout).result).toMatchObject({ messages: [], filteredCount: 2,
+      nextCursor: "still-active" });
+  });
+
   it("preserves a proven GitHub preflight failure across both execution commands", async () => {
     const f = await fixture();
     const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
