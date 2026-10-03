@@ -1,0 +1,32 @@
+apps/web/src/lib/server/cloudflare-runtime.test.ts
+  h_a39f9495f9ec1d 6,11-25,124-156,158,182
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 452
+apps/web/src/lib/workspace-catalog.test.ts
+  h_a39f9495f9ec1d 5,12-22
+apps/web/src/lib/workspace-catalog.ts
+  h_a39f9495f9ec1d 141-154
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 5,110,412,422,426,431,436,442-444,450,452,454-457,1015,1025-1026,1034,1036-1037,1041,1045,1048-1050
+docs/slack-v1.md
+  h_a39f9495f9ec1d 40-43,66-67
+packages/plugfn-runtime/src/slack.ts
+  h_a39f9495f9ec1d 27,48-50,69-85,88,176-177,190,193-195
+packages/tools/src/slack-errors.ts
+  h_a39f9495f9ec1d 33,35-45,62-64
+tests/acceptance/cli-command-contract.test.ts
+  h_a39f9495f9ec1d 1654-1668
+tests/acceptance/slack-adapter-contract.test.ts
+  h_a39f9495f9ec1d 87-106,117-139,142-143,154-155,164,232,239-242,250,269-273,588-609,667,674-691
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "21d463724af51c1a2b368751f492c2a864c92a40",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
