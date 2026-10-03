@@ -212,6 +212,9 @@ describe("Worker scoped provider catalog", () => {
           ...(code === "NOTION_RATE_LIMITED" ? { proofRetryAfterSeconds: 19 } : {}),
         }),
       });
+      if (code === "NOTION_RECONNECT_REQUIRED") {
+        expect(result.providers.find(({ provider }) => provider === "notion")?.proofIssue).toBeUndefined();
+      }
       expect(recordHealth).toHaveBeenCalledTimes(code === "NOTION_RECONNECT_REQUIRED" ? 1 : 0);
     });
 

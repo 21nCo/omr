@@ -18,6 +18,7 @@ import { connectPostgresPlugFn, verifiedGithubScopes, verifiedLinearScopes, veri
 import {
   createPlugFnToolCatalog,
   isProviderConfigured,
+  type NotionProviderDenial,
   v1ProviderCatalog,
   type JsonValue,
   type ProviderBinding,
@@ -445,24 +446,23 @@ export async function scopedToolIds(
       missing.add(bindingId);
       await markMissingRemoteConnection(authority, bindingId);
     },
-    async (bindingId, provider) => {
-      missing.add(bindingId);
-      await authority.recordHealth({ connectionId: bindingId, status: "needs_reauth",
-        readiness: "unavailable", reason: `${provider ?? "linear"}_reconnect_required` }).catch(() => undefined);
-    },
-    async (bindingId, code) => {
-      missing.add(bindingId);
-      await authority.recordHealth({ connectionId: bindingId, status: "needs_reauth",
-        readiness: "unavailable", reason: code.toLowerCase() }).catch(() => undefined);
-    },
-    (bindingId, code, retryAfterSeconds) => {
-      if (code !== "NOTION_ACCESS_RESTRICTED" && code !== "NOTION_RATE_LIMITED" &&
-          code !== "NOTION_PERMISSION_DENIED") return;
-      missing.add(bindingId);
-      const issue = code === "NOTION_ACCESS_RESTRICTED" ? "notion_access_restricted" :
-        code === "NOTION_RATE_LIMITED" ? "notion_rate_limited" : "notion_permission_denied";
-      notionProof.set(bindingId, { issue,
-        retryAfterSeconds });
+    {
+      onReconnectRequired: async (bindingId, provider) => {
+        missing.add(bindingId);
+        await authority.recordHealth({ connectionId: bindingId, status: "needs_reauth",
+          readiness: "unavailable", reason: `${provider ?? "linear"}_reconnect_required` }).catch(() => undefined);
+      },
+      onPermanentDenial: async (bindingId, code) => {
+        missing.add(bindingId);
+        await authority.recordHealth({ connectionId: bindingId, status: "needs_reauth",
+          readiness: "unavailable", reason: code.toLowerCase() }).catch(() => undefined);
+      },
+      onNotionProofIssue: (bindingId, code, retryAfterSeconds) => {
+        const issue = notionProofIssue(code);
+        if (!issue) return;
+        missing.add(bindingId);
+        notionProof.set(bindingId, { issue, retryAfterSeconds });
+      },
     },
   );
   return {
@@ -477,6 +477,16 @@ export async function scopedToolIds(
           proofBindingId: proof[0], proofRetryAfterSeconds: proof[1].retryAfterSeconds } : provider;
       }),
   };
+}
+
+/** Only these Notion denials provide catalog guidance for a selected binding. */
+function notionProofIssue(code: NotionProviderDenial["code"]): ProviderStatus["proofIssue"] {
+  switch (code) {
+    case "NOTION_ACCESS_RESTRICTED": return "notion_access_restricted";
+    case "NOTION_RATE_LIMITED": return "notion_rate_limited";
+    case "NOTION_PERMISSION_DENIED": return "notion_permission_denied";
+    default: return undefined;
+  }
 }
 
 /** Bind authenticated control-plane routes to disposable server-side runtimes. */

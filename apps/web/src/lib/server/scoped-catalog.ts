@@ -6,6 +6,12 @@ import { githubHttpFailure, LinearProviderDenial, NotionProviderDenial, SlackPro
 
 type PermanentProofDenialCode = "SLACK_PERMISSION_DENIED" | "SLACK_WORKSPACE_MISMATCH" |
   "NOTION_ACCESS_RESTRICTED";
+type CatalogProofObservers = {
+  onReconnectRequired?: (bindingId: string, provider?: string) => Promise<void>;
+  onPermanentDenial?: (bindingId: string, code: PermanentProofDenialCode) => Promise<void>;
+  onNotionProofIssue?: (bindingId: string, code: NotionProviderDenial["code"],
+    retryAfterSeconds?: number) => void;
+};
 
 /** A deleted PlugFn connection is an unavailable grant, not a failed catalog. */
 export async function resolveScopedCatalog(
@@ -14,10 +20,7 @@ export async function resolveScopedCatalog(
   resolveBinding: (provider: string) => Promise<{ id: string; providerConnectionId: string }>,
   remoteScopes: (connectionId: string, provider: string) => Promise<readonly string[] | undefined>,
   onRemoteMissing: (bindingId: string) => Promise<void>,
-  onReconnectRequired?: (bindingId: string, provider?: string) => Promise<void>,
-  onPermanentDenial?: (bindingId: string, code: PermanentProofDenialCode) => Promise<void>,
-  onNotionProofIssue?: (bindingId: string, code: NotionProviderDenial["code"],
-    retryAfterSeconds?: number) => void,
+  observers: CatalogProofObservers = {},
 ): Promise<Set<string>> {
   return usableToolIds(catalog, providers, async (provider) => {
     let binding: { id: string; providerConnectionId: string };
@@ -31,7 +34,7 @@ export async function resolveScopedCatalog(
       return await remoteScopes(binding.providerConnectionId, provider);
     } catch (error) {
       if (await providerProofUnavailable(provider, binding.id, error,
-        onRemoteMissing, onReconnectRequired, onPermanentDenial, onNotionProofIssue)) return null;
+        onRemoteMissing, observers)) return null;
       throw error;
     }
   });
@@ -40,22 +43,17 @@ export async function resolveScopedCatalog(
 /** Contain provider-local proof failures and update a revoked binding. */
 async function providerProofUnavailable(provider: string, bindingId: string, error: unknown,
   onRemoteMissing: (bindingId: string) => Promise<void>,
-  onReconnectRequired?: (bindingId: string, provider?: string) => Promise<void>,
-  onPermanentDenial?: (bindingId: string, code: PermanentProofDenialCode) => Promise<void>,
-  onNotionProofIssue?: (bindingId: string, code: NotionProviderDenial["code"],
-    retryAfterSeconds?: number) => void): Promise<boolean> {
+  observers: CatalogProofObservers): Promise<boolean> {
   if (isMissingRemoteConnection(error)) {
     await onRemoteMissing(bindingId);
     return true;
   }
   if (provider === "github") return githubProofUnavailable(error);
-  if (provider === "slack") return slackProofUnavailable(bindingId, error,
-    onReconnectRequired, onPermanentDenial);
-  if (provider === "notion") return notionProofUnavailable(bindingId, error,
-    onReconnectRequired, onPermanentDenial, onNotionProofIssue);
+  if (provider === "slack") return slackProofUnavailable(bindingId, error, observers);
+  if (provider === "notion") return notionProofUnavailable(bindingId, error, observers);
   if (provider !== "linear") return false;
   if (error instanceof LinearProviderDenial && error.code === "LINEAR_RECONNECT_REQUIRED") {
-    await onReconnectRequired?.(bindingId);
+    await observers.onReconnectRequired?.(bindingId);
     return true;
   }
   return error instanceof LinearProviderDenial ||
@@ -65,29 +63,25 @@ async function providerProofUnavailable(provider: string, bindingId: string, err
 
 /** Contain a Slack proof failure without exposing another provider's catalog. */
 async function slackProofUnavailable(bindingId: string, error: unknown,
-  onReconnectRequired?: (bindingId: string, provider?: string) => Promise<void>,
-  onPermanentDenial?: (bindingId: string, code: PermanentProofDenialCode) => Promise<void>,
+  observers: CatalogProofObservers,
 ): Promise<boolean> {
   if (!(error instanceof SlackProviderDenial)) return githubProofUnavailable(error);
-  if (error.code === "SLACK_RECONNECT_REQUIRED") await onReconnectRequired?.(bindingId, "slack");
+  if (error.code === "SLACK_RECONNECT_REQUIRED") await observers.onReconnectRequired?.(bindingId, "slack");
   if (error.code === "SLACK_PERMISSION_DENIED" || error.code === "SLACK_WORKSPACE_MISMATCH") {
-    await onPermanentDenial?.(bindingId, error.code);
+    await observers.onPermanentDenial?.(bindingId, error.code);
   }
   return true;
 }
 
 /** Persist a permanent Notion restriction; transient denials stay provider-local. */
 async function notionProofUnavailable(bindingId: string, error: unknown,
-  onReconnectRequired?: (bindingId: string, provider?: string) => Promise<void>,
-  onPermanentDenial?: (bindingId: string, code: PermanentProofDenialCode) => Promise<void>,
-  onNotionProofIssue?: (bindingId: string, code: NotionProviderDenial["code"],
-    retryAfterSeconds?: number) => void,
+  observers: CatalogProofObservers,
 ): Promise<boolean> {
   if (!(error instanceof NotionProviderDenial)) return githubProofUnavailable(error);
-  onNotionProofIssue?.(bindingId, error.code, error.retryAfterSeconds);
-  if (error.code === "NOTION_RECONNECT_REQUIRED") await onReconnectRequired?.(bindingId, "notion");
+  observers.onNotionProofIssue?.(bindingId, error.code, error.retryAfterSeconds);
+  if (error.code === "NOTION_RECONNECT_REQUIRED") await observers.onReconnectRequired?.(bindingId, "notion");
   if (error.code === "NOTION_ACCESS_RESTRICTED") {
-    await onPermanentDenial?.(bindingId, error.code);
+    await observers.onPermanentDenial?.(bindingId, error.code);
   }
   return true;
 }

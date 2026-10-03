@@ -164,7 +164,7 @@ describe("workspace-scoped discovery and manifest grants", () => {
         async (provider) => {
           if (provider === "linear") throw failure;
           return ["read"];
-        }, async () => {}, reconnect);
+        }, async () => {}, { onReconnectRequired: reconnect });
       expect([...visible]).toEqual(["github.read"]);
       expect(reconnect).toHaveBeenCalledTimes(failure instanceof LinearProviderDenial &&
         failure.code === "LINEAR_RECONNECT_REQUIRED" ? 1 : 0);
@@ -187,7 +187,7 @@ describe("workspace-scoped discovery and manifest grants", () => {
       async (provider) => {
         if (provider === "slack") throw new SlackProviderDenial("read", "SLACK_RECONNECT_REQUIRED");
         return ["read"];
-      }, async () => {}, reconnect);
+      }, async () => {}, { onReconnectRequired: reconnect });
     expect([...visible]).toEqual(["github.read"]);
     expect(reconnect).toHaveBeenCalledExactlyOnceWith("binding_slack", "slack");
   });
@@ -210,7 +210,7 @@ describe("workspace-scoped discovery and manifest grants", () => {
         async (provider) => {
           if (provider === "slack") throw new SlackProviderDenial("read", code);
           return ["read"];
-        }, async () => {}, async () => {}, permanent);
+        }, async () => {}, { onPermanentDenial: permanent });
       expect([...visible]).toEqual(["github.read"]);
       if (code === "SLACK_PERMISSION_DENIED" || code === "SLACK_WORKSPACE_MISMATCH") {
         expect(permanent).toHaveBeenCalledExactlyOnceWith("binding_slack", code);

@@ -100,7 +100,7 @@ async function selectedPage(context: ActionContext, pageId: string,
 
 const search: Action = {
   name: "content.search", displayName: "Find shared Notion content",
-  description: "Search one page of pages and databases shared with the selected integration.",
+  description: "Search one page of shared pages, databases, and browse-only data sources. Only pages are v1 write targets.",
   idempotent: true,
   parameters: z.object({ query: z.string().trim().max(100).optional(),
     limit: z.number().int().min(1).max(100).optional(), cursor }).strict(),

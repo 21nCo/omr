@@ -3,7 +3,7 @@
 OMR publishes `notion.connection.verify`, `notion.content.search`, `notion.pages.get`,
 `notion.pages.create`, and `notion.pages.update` through the same typed catalog,
 workspace binding, and approval contract used by the browser, CLI, and MCP.
-Search returns one cursor page of at most 100 accessible pages and data sources.
+Search returns one cursor page of at most 100 accessible pages, databases, and data sources.
 OMR pins its Notion action requests to API version `2025-09-03`, which exposes
 each shared database data source as a separate browse-only result. A data source
 ID is not a page or database ID and cannot be used as a v1 write destination.
@@ -59,8 +59,8 @@ the support instruction in the connection list; it does not offer the page
 journey for that connection until access is restored. Another ready integration
 in the same OMR workspace can still be selected. Other 429 and 529 responses retain
 `Retry-After` when available. A temporary 429 during catalog proof removes
-the selected binding's tools for that request and shows the retry delay without
-persistently disabling the connection. A 403 shows permission and sharing
+the selected binding's tools for that request and shows the retry delay when
+available, without persistently disabling the connection. A 403 shows permission and sharing
 guidance for that binding. Both cases permit another ready account to be selected.
 Reads may retry transient failures; writes make one provider attempt.
 

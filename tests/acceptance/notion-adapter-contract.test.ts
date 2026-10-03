@@ -110,6 +110,7 @@ describe("notion-adapter-contract", () => {
     ]);
     expect(catalog.get("notion.pages.create")?.contract).toMatchObject({ effect: "write", retry: "never" });
     expect(catalog.get("notion.content.search")?.contract).toMatchObject({ effect: "read", retry: "safe" });
+    expect(catalog.get("notion.content.search")?.description).toContain("browse-only data sources");
     await expect(omrNotionProvider.actions["pages.create"]!.execute({ parentPageId: "../foreign", title: "X" },
       notionFixture().context)).rejects.toBeDefined();
   });
@@ -383,13 +384,13 @@ describe("notion-adapter-contract", () => {
     const allowed = await resolveScopedCatalog(catalog, [provider],
       async () => ({ id: "binding-a", providerConnectionId: "remote-a" }),
       async () => { throw new NotionProviderDenial("read", "NOTION_RECONNECT_REQUIRED"); },
-      async () => {}, reconnect);
+      async () => {}, { onReconnectRequired: reconnect });
     expect([...allowed]).toEqual([]);
     expect(reconnect).toHaveBeenCalledWith("binding-a", "notion");
     const retryable = await resolveScopedCatalog(catalog, [provider],
       async () => ({ id: "binding-a", providerConnectionId: "remote-a" }),
       async () => { throw new NotionProviderDenial("read", "NOTION_RATE_LIMITED", 12); },
-      async () => {}, reconnect);
+      async () => {}, { onReconnectRequired: reconnect });
     expect([...retryable]).toEqual([]);
     expect(reconnect).toHaveBeenCalledTimes(1);
   });
