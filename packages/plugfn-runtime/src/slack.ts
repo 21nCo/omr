@@ -12,6 +12,7 @@ const channel = z.object({ id: channelId, name: z.string().min(1), is_member: z.
   is_ext_shared: z.literal(false) });
 const identity = z.object({ ok: z.literal(true), team_id: workspaceId, team: z.string().min(1),
   user_id: senderId, bot_id: z.string().min(1) });
+const displayableMessage = z.object({ ts: z.string(), text: z.string(), user: z.string().optional() });
 
 function contract(effect: "read" | "write", scopes: string[], resources: ActionContract["resources"] = [],
   paginated = false): ActionContract {
@@ -27,7 +28,7 @@ function scopes(headers: unknown): string[] | null {
       ? Object.entries(headers).find(([key]) => key.toLowerCase() === "x-oauth-scopes")?.[1] : null;
   if (typeof value !== "string") return null;
   const parsed = value.split(",").map((scope) => scope.trim());
-  return parsed.every((scope) => /^[a-z]+:[a-z.]+$/.test(scope)) ? parsed : null;
+  return parsed.filter((scope) => /^[a-z][a-z0-9_.-]*:[a-z][a-z0-9_.-]*$/.test(scope));
 }
 
 async function call(context: ActionContext, method: string, params: object,
@@ -47,9 +48,13 @@ async function call(context: ActionContext, method: string, params: object,
     throw phase === "write" ? new SlackProviderResponseAmbiguous()
       : new SlackProviderDenial(phase, "SLACK_QUERY_REJECTED");
   }
+  if (body.ok === false) {
+    throw slackDenial({ data: body, headers: response.headers }, phase) ??
+      new SlackProviderDenial(phase, phase === "write" ? "SLACK_POST_REJECTED" : "SLACK_QUERY_REJECTED");
+  }
   if (body.ok !== true) {
-    throw slackDenial({ data: body, headers: response.headers }, phase) ?? (phase === "write" ? new SlackProviderResponseAmbiguous()
-      : new SlackProviderDenial(phase, "SLACK_QUERY_REJECTED"));
+    throw phase === "write" ? new SlackProviderResponseAmbiguous()
+      : new SlackProviderDenial(phase, "SLACK_QUERY_REJECTED");
   }
   return { body, headers: response.headers };
 }
@@ -126,11 +131,14 @@ const messagesList: Action = {
     const { body } = await call(context, "conversations.history",
       { channel: params.channelId, limit: params.limit ?? 100,
         ...(params.cursor ? { cursor: params.cursor } : {}) }, "read");
-    const parsed = z.object({ messages: z.array(z.object({ ts: z.string(), text: z.string(),
-      user: z.string().optional() })), response_metadata: z.object({ next_cursor: z.string().optional() }).optional() })
+    const parsed = z.object({ messages: z.array(z.unknown()),
+      response_metadata: z.object({ next_cursor: z.string().optional() }).optional() })
       .safeParse(body);
     if (!parsed.success) throw new SlackProviderDenial("read", "SLACK_QUERY_REJECTED");
-    return { channel: selected, messages: parsed.data.messages,
+    return { channel: selected, messages: parsed.data.messages.flatMap((entry) => {
+      const message = displayableMessage.safeParse(entry);
+      return message.success ? [message.data] : [];
+    }),
       nextCursor: parsed.data.response_metadata?.next_cursor || null };
   },
 };
@@ -145,16 +153,18 @@ const messagesPost: Action = {
     { kind: "slack_workspace", parameter: "workspaceId" },
     { kind: "channel", parameter: "channelId" }, { kind: "sender", parameter: "senderId" }]),
   execute: async (params, context) => {
-    await selectedWorkspace(context, params.workspaceId, params.senderId, "preflight");
+    const workspace = await selectedWorkspace(context, params.workspaceId, params.senderId, "preflight");
     const selected = await selectedChannel(context, params.channelId, "preflight");
     const { body } = await call(context, "chat.postMessage",
-      { channel: params.channelId, text: params.text, link_names: false,
+      { channel: params.channelId, text: params.text, mrkdwn: false, parse: "none", link_names: false,
         unfurl_links: false, unfurl_media: false }, "write", true);
     const parsed = z.object({ channel: channelId, ts: z.string().min(1),
-      message: z.object({ user: senderId }) }).safeParse(body);
-    if (!parsed.success || parsed.data.channel !== params.channelId ||
-        parsed.data.message.user !== params.senderId) throw new SlackProviderResponseAmbiguous();
-    return { channel: selected, ts: parsed.data.ts, senderId: parsed.data.message.user };
+      message: z.object({ user: senderId.optional(), bot_id: z.string().optional() }) }).safeParse(body);
+    if (!parsed.success || parsed.data.channel !== params.channelId) throw new SlackProviderResponseAmbiguous();
+    const { user, bot_id: botId } = parsed.data.message;
+    if ((!user && !botId) || (user && user !== params.senderId) ||
+        (botId && botId !== workspace.sender.botId)) throw new SlackProviderResponseAmbiguous();
+    return { channel: selected, ts: parsed.data.ts, senderId: workspace.sender.id };
   },
 };
 

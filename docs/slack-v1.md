@@ -23,8 +23,9 @@ without a bot identity cannot authorize these actions.
 The selected token's `auth.test` response supplies the current Slack workspace,
 bot user and effective `X-OAuth-Scopes` header. OMR intersects that header with
 the recorded OAuth grant before exposing an action. A missing header grants no
-actions. Refresh does not add scopes; reconnect with fresh consent to change a
-tier. Health, selection, refresh, and disconnect use the shared connection
+actions; malformed header entries are ignored individually. Refresh does not
+add scopes; reconnect with fresh consent to change a tier. Health, selection,
+refresh, and disconnect use the shared connection
 lifecycle. Disconnect removes local use and selection before provider cleanup;
 if remote revocation is unconfirmed, follow the connection list's guidance.
 
@@ -34,10 +35,14 @@ workspace ID. `channels.list` returns one cursor page of at most 100 joined,
 local public channels. It omits private, archived, shared, external-shared, and
 unjoined channels. Choose a `channelId` from that result. `messages.list`
 checks the selected workspace and channel again before reading one page of at
-most 100 messages. `messages.post` checks that the token still belongs to the
-chosen Slack workspace and bot sender and that the channel remains joined and
+most 100 messages. It displays messages with text and omits events or blocks-only
+messages that the v1 text view cannot represent, while retaining the page cursor.
+`messages.post` checks that the token still belongs to the chosen Slack
+workspace and bot sender and that the channel remains joined and
 local, then sends at most 4,000 plain-text characters. It does not accept a
-custom username, avatar, thread, blocks, unfurling, or a channel name.
+custom username, avatar, thread, blocks, unfurling, or a channel name. Slack
+markup parsing is disabled. The response must identify the selected bot by
+either its bot user ID or bot ID before OMR records success.
 
 Every post requires OMR approval with account, workspace, channel, sender and
 redacted message context in its preview. Browser approval has a separate
@@ -51,8 +56,9 @@ transport failures may leave the original request running. Reconciliation
 never posts. An intentional identical post after settlement needs a new key
 and a new approval.
 
-Slack `ok:false`, authentication, permission, target and rate-limit responses
-produce safe codes; available `Retry-After` seconds are preserved. An
+Slack `ok:false`, including unfamiliar error codes, authentication, permission,
+target and rate-limit responses produce safe codes; available `Retry-After`
+seconds are preserved. An
 incomplete or lost response after posting remains uncertain. Reads can retry
 safely; posts make one provider attempt. Channel membership and workspace
 identity can change at the provider after preflight, so the final provider

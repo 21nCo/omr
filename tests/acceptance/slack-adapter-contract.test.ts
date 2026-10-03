@@ -300,6 +300,9 @@ describe("slack-adapter-contract", () => {
     await service.approve(approval.id, "alice");
     await service.executeApproved(principal, approval.id);
     expect(slack.messages()).toHaveLength(1);
+    expect(slack.messages()[0]?.[1]).toMatchObject({ channel: channelA, text: "Ready",
+      mrkdwn: false, parse: "none", link_names: false,
+      unfurl_links: false, unfurl_media: false });
     await service.executeApproved(principal, approval.id);
     expect(slack.messages()).toHaveLength(1);
     await expect(service.requestApproval({ principal: { ...principal, workspaceId: other.workspace.id },
@@ -342,6 +345,18 @@ describe("slack-adapter-contract", () => {
     });
     expect([...receipts.receipts.values()].some((receipt) => receipt.status === "failed" &&
       receipt.errorCode === "slack_write_denied")).toBe(true);
+    slack.setPostFailure("unrecognized_slack_error");
+    const unknownDenial = await service.requestApproval({ principal, toolId: "slack.messages.post",
+      params: { ...params, text: "Unknown denial" }, idempotencyKey: "unknown-denial" });
+    await service.approve(unknownDenial.id, "alice");
+    await expect(service.executeApproved(principal, unknownDenial.id)).rejects.toMatchObject({
+      code: "SLACK_POST_REJECTED", message: expect.not.stringContaining("unrecognized_slack_error"),
+    });
+    expect(slack.messages()).toHaveLength(2);
+    expect([...receipts.receipts.values()].filter((receipt) => receipt.status === "failed" &&
+      receipt.errorCode === "slack_write_denied")).toHaveLength(2);
+    await expect(service.executeApproved(principal, unknownDenial.id)).rejects.toThrow();
+    expect(slack.messages()).toHaveLength(2);
     slack.setPostFailure(null);
     const ambiguous = await service.requestApproval({ principal, toolId: "slack.messages.post",
       params: { ...params, text: "Maybe sent" }, idempotencyKey: "ambiguous-post" });
@@ -352,7 +367,7 @@ describe("slack-adapter-contract", () => {
     await expect(service.executeApproved(principal, ambiguous.id)).rejects.toMatchObject({
       code: "EXECUTION_OUTCOME_UNKNOWN",
     });
-    expect(slack.messages()).toHaveLength(2);
+    expect(slack.messages()).toHaveLength(3);
     expect([...receipts.receipts.values()].some((receipt) => receipt.status === "uncertain" &&
       receipt.errorCode === "provider_response_ambiguous")).toBe(true);
     const coalesced = await service.requestApproval({ principal, toolId: "slack.messages.post",
@@ -361,14 +376,14 @@ describe("slack-adapter-contract", () => {
     await expect(service.executeApproved(principal, ambiguous.id)).rejects.toMatchObject({
       code: "EXECUTION_OUTCOME_UNKNOWN",
     });
-    expect(slack.messages()).toHaveLength(2);
+    expect(slack.messages()).toHaveLength(3);
     const settled = await service.reconcileUncertain(principal, ambiguous.id, "effect_absent");
     expect(settled.status).toBe("failed");
-    expect(slack.messages()).toHaveLength(2);
+    expect(slack.messages()).toHaveLength(3);
     const next = await service.requestApproval({ principal, toolId: "slack.messages.post",
       params: { ...params, text: "Maybe sent" }, idempotencyKey: "after-settlement" });
     expect(next.id).not.toBe(ambiguous.id);
-    expect(slack.messages()).toHaveLength(2);
+    expect(slack.messages()).toHaveLength(3);
     const rateFixture = slackFixture();
     rateFixture.post.mockRejectedValueOnce({ status: 429,
       headers: new Headers({ "Retry-After": "42" }), data: { error: "private detail" } });
@@ -376,6 +391,79 @@ describe("slack-adapter-contract", () => {
       .rejects.toMatchObject({ code: "SLACK_RATE_LIMITED", retryAfterSeconds: 42,
         message: expect.not.stringContaining("private detail") });
     expect(rateFixture.get).not.toHaveBeenCalled();
+  });
+
+  it("accepts the selected bot ID in a completed post without message.user", async () => {
+    const { service, principal, slack, receipts } = await executionFixture();
+    const params = { workspaceId: teamA, channelId: channelA, senderId: botA, text: "Bot reply" };
+    const approval = await service.requestApproval({ principal, toolId: "slack.messages.post",
+      params, idempotencyKey: "bot-response" });
+    expect(slack.messages()).toHaveLength(0);
+    await service.approve(approval.id, "alice");
+    slack.post.mockResolvedValueOnce({ data: { ok: true, team_id: teamA,
+      team: "Selected", user_id: botA, bot_id: "B12345678" } });
+    slack.post.mockResolvedValueOnce({ data: { ok: true, channel: channelA, ts: "456.789",
+      message: { bot_id: "B12345678", text: "Bot reply" } } });
+    expect((await service.executeApproved(principal, approval.id)).result).toMatchObject({
+      ts: "456.789", senderId: botA,
+    });
+    expect(slack.messages()).toHaveLength(1);
+    expect([...receipts.receipts.values()].some((receipt) => receipt.status === "succeeded")).toBe(true);
+    await service.executeApproved(principal, approval.id);
+    expect(slack.messages()).toHaveLength(1);
+  });
+
+  it("keeps mismatched bot authorship uncertain after a single post", async () => {
+    const { service, principal, slack, receipts } = await executionFixture();
+    const params = { workspaceId: teamA, channelId: channelA, senderId: botA, text: "Unknown author" };
+    const approval = await service.requestApproval({ principal, toolId: "slack.messages.post",
+      params, idempotencyKey: "other-bot" });
+    await service.approve(approval.id, "alice");
+    slack.post.mockResolvedValueOnce({ data: { ok: true, team_id: teamA,
+      team: "Selected", user_id: botA, bot_id: "B12345678" } });
+    slack.post.mockResolvedValueOnce({ data: { ok: true, channel: channelA, ts: "456.789",
+      message: { bot_id: "B87654321" } } });
+    await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({
+      code: "EXECUTION_OUTCOME_UNKNOWN",
+    });
+    expect(slack.messages()).toHaveLength(1);
+    expect([...receipts.receipts.values()].some((receipt) => receipt.status === "uncertain")).toBe(true);
+    await expect(service.executeApproved(principal, approval.id)).rejects.toMatchObject({
+      code: "EXECUTION_OUTCOME_UNKNOWN",
+    });
+    expect(slack.messages()).toHaveLength(1);
+  });
+
+  it("projects supported messages from a mixed history page and retains its cursor", async () => {
+    const slack = slackFixture();
+    slack.get.mockResolvedValueOnce({ data: { ok: true, channel: localChannel } });
+    slack.get.mockResolvedValueOnce({ data: { ok: true, messages: [
+      { ts: "1.0", text: "Visible", user: botA },
+      { ts: "2.0", type: "message", subtype: "channel_join", user: botA },
+      { ts: "3.0", blocks: [{ type: "section" }] },
+      { ts: "4.0", text: "" },
+    ], response_metadata: { next_cursor: "later" } } });
+    expect(await omrSlackProvider.actions["messages.list"]!.execute({
+      workspaceId: teamA, channelId: channelA, cursor: "first",
+    }, slack.context)).toMatchObject({ channel: { id: channelA },
+      messages: [{ ts: "1.0", text: "Visible", user: botA }, { ts: "4.0", text: "" }],
+      nextCursor: "later" });
+    expect(slack.get.mock.calls[1]?.[1]).toMatchObject({ params: { channel: channelA,
+      cursor: "first" } });
+    expect(slack.get).toHaveBeenCalledTimes(2);
+  });
+
+  it("retains valid extra Slack scopes while ignoring malformed header entries", async () => {
+    const slack = slackFixture();
+    slack.post.mockResolvedValueOnce({ data: { ok: true, team_id: teamA,
+      team: "Selected", user_id: botA, bot_id: "B12345678" },
+      headers: { "X-OAuth-Scopes": "channels:read,app_mentions:read,chat:write, bad scope,files:write" } });
+    const result = await omrSlackProvider.actions["workspace.get"]!.execute({}, slack.context);
+    expect(result.verifiedScopes).toEqual(["channels:read", "app_mentions:read", "chat:write", "files:write"]);
+    const runtime = { action: async () => result,
+      connections: { get: async () => ({ scopes: ["channels:read", "app_mentions:read", "chat:write"] }) } };
+    expect(await verifiedSlackScopes(runtime, { userId: "alice", workspaceId: "omr-workspace",
+      connectionId: "remote_slack_A" })).toEqual(["channels:read", "app_mentions:read", "chat:write"]);
   });
 
   it("hides Slack browser controls during a workspace or account transition", () => {
