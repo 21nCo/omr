@@ -86,7 +86,8 @@
         await actionKeys.bindApproval(result.approval.id, "assisted", workspaceId, account.id,
           { model, prompt });
       }
-      if (result.status === "answered" || result.status === "model_error") {
+      if (result.status === "answered" || result.status === "model_error" ||
+          (result.status === "tool_error" && result.terminalFailure)) {
         await actionKeys.reset("assisted", workspaceId, account.id, { model, prompt });
       }
       if (result.status === "action_pending") await refreshAssistedApprovals(turn);

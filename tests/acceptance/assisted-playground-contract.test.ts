@@ -204,12 +204,46 @@ describe("assisted-playground-contract", () => {
     const result = safeResult({ pages: [{ title: "Roadmap", content: {
       text: "The milestone is ready", credential: "nested-password",
       privateKey: "-----BEGIN PRIVATE KEY-----" } }],
-    metadata: { sessionCookie: "cookie-value", note: "sk-or-v1-hidden" } },
+    metadata: { sessionCookie: "cookie-value", note: "public metadata" } },
     ["title", "text"]);
     expect(result).toContain("Roadmap");
     expect(result).toContain("The milestone is ready");
-    for (const secret of ["nested-password", "PRIVATE KEY", "cookie-value", "sk-or-v1-hidden"])
+    for (const secret of ["nested-password", "PRIVATE KEY", "cookie-value"])
       expect(result).not.toContain(secret);
+  });
+
+  it.each([
+    { field: "text", value: "Slack update sk-or-v1_secret_123" },
+    { field: "title", value: "Notion title -----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----" },
+    { field: "body", value: "GitHub note ghp_secret_123" },
+    { field: "description", value: "Review xoxb-secret_123" },
+    { field: "text", value: "Authorization: Bearer secret_123" },
+    { field: "body", value: "client_secret=secret_123" },
+  ])("withholds secret-bearing nested $field before synthesis while retaining the receipt", async ({ field, value }) => {
+    const { services, fetcher, execute } = fixture();
+    const resultValue = { pages: [{ title: "Safe title", content: { [field]: value } }] };
+    execute.mockResolvedValueOnce({ id: "receipt_secret", status: "succeeded", result: resultValue });
+    const result = await runAssistedTurn(request(), input, services);
+    expect(result).toMatchObject({ status: "answered", receipt: {
+      id: "receipt_secret", result: resultValue }, usage: { totalTokens: 14 },
+      usageIncomplete: true });
+    expect(result.answer).toContain("not sent to the model");
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(safeResult(resultValue, [])).not.toContain(value);
+  });
+
+  it("synthesizes safe nested Slack, Notion and GitHub content after redacting secret fields", async () => {
+    const { services, fetcher, execute } = fixture();
+    execute.mockResolvedValueOnce({ id: "receipt_safe", status: "succeeded", result: {
+      slack: { text: "Release is ready", credential: "hidden credential" },
+      notion: { title: "Roadmap" }, github: { body: "Review complete" },
+    } });
+    await runAssistedTurn(request(), input, services);
+    const synthesis = JSON.parse(String(fetcher.mock.calls[1]![1]?.body));
+    expect(JSON.stringify(synthesis)).toContain("Release is ready");
+    expect(JSON.stringify(synthesis)).toContain("Roadmap");
+    expect(JSON.stringify(synthesis)).toContain("Review complete");
+    expect(JSON.stringify(synthesis)).not.toContain("hidden credential");
   });
 
   it("denies a second same-user turn before payment and releases the claim on model error", async () => {
@@ -333,6 +367,50 @@ describe("assisted-playground-contract", () => {
     expect(execute).toHaveBeenCalledTimes(2);
     expect(execute.mock.calls[1]![1].idempotencyKey)
       .toBe(`assisted_${input.requestId}`);
+  });
+
+  it("marks only a confirmed failed read receipt as terminal across lost responses", async () => {
+    let committed = false;
+    const { services, fetcher, execute } = fixture({
+      lookupAction: async () => ({ approval: null,
+        receipt: committed ? { id: "receipt_failed", status: "failed" } : null }),
+    });
+    execute.mockResolvedValue({ id: "receipt_failed", status: "failed", errorCode: "READ_FAILED" });
+    const router = createOMRRouter(undefined, undefined, undefined, undefined,
+      undefined, undefined, services);
+    const first = await router.handle(request());
+    expect(await first.json()).toMatchObject({ status: "tool_error", terminalFailure: true,
+      receipt: { id: "receipt_failed", status: "failed" } });
+    committed = true;
+    fetcher.mockClear();
+    const retry = await router.handle(request());
+    expect(await retry.json()).toMatchObject({ status: "tool_error", terminalFailure: true,
+      receiptId: "receipt_failed" });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it("retains a pending read identity and receipt until it settles", async () => {
+    const { services, execute } = fixture();
+    execute.mockResolvedValueOnce({ id: "receipt_pending", status: "running" });
+    const result = await runAssistedTurn(request(), input, services);
+    expect(result).toMatchObject({ status: "action_pending", requestId: input.requestId,
+      receipt: { id: "receipt_pending", status: "running" } });
+    expect(result).not.toHaveProperty("terminalFailure");
+  });
+
+  it("marks a failed idempotent replay terminal even before receipt lookup catches up", async () => {
+    const { services, fetcher, execute } = fixture();
+    execute.mockResolvedValueOnce({ id: "receipt_lagged", status: "running" })
+      .mockResolvedValueOnce({ id: "receipt_lagged", status: "failed", errorCode: "READ_FAILED" });
+    const first = await runAssistedTurn(request(), input, services);
+    expect(first).toMatchObject({ status: "action_pending", requestId: input.requestId });
+    fetcher.mockClear();
+    const retry = await runAssistedTurn(request(), input, services);
+    expect(retry).toMatchObject({ status: "tool_error", terminalFailure: true,
+      receipt: { id: "receipt_lagged", status: "failed" } });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(execute.mock.calls[1]![1]).toEqual(execute.mock.calls[0]![1]);
   });
 
   it("does not disclose a recovered read when current execution policy denies it", async () => {

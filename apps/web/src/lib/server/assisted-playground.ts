@@ -168,10 +168,13 @@ async function recoverTurn(request: Request, input: AssistedTurnInput,
         throw error;
       }
       const succeeded = object(receipt)?.status === "succeeded";
-      return { ...common, status: succeeded ? "answered" as const : "tool_error" as const,
-        receipt, answer: succeeded
+      const failed = object(receipt)?.status === "failed";
+      return { ...common, status: succeeded ? "answered" as const
+        : failed ? "tool_error" as const : "action_pending" as const,
+        ...(failed ? { terminalFailure: true } : {}), receipt, answer: succeeded
           ? "The selected read completed. Review its receipt; final answer generation was interrupted."
-          : "The selected read did not complete. Review its receipt before another action." };
+          : failed ? "The selected read did not complete. Review its receipt before another action."
+            : "The selected read is still pending. Check its receipt before another action." };
     } catch (error) {
       if (signal.aborted) return { ...common, status: "action_pending" as const,
         answer: "The selected action may still be finishing. Check its receipt or approval." };
@@ -185,7 +188,7 @@ async function recoverTurn(request: Request, input: AssistedTurnInput,
   if (action.receipt?.status === "succeeded") return { ...common,
     ...await recoverReadResult(request, input, services, signal, binding, action.receipt.id) };
   if (action.receipt?.status === "failed") return { ...common,
-    status: "tool_error" as const, receiptId: action.receipt.id,
+    status: "tool_error" as const, receiptId: action.receipt.id, terminalFailure: true,
     answer: `The previous read failed. Review receipt ${action.receipt.id} before another action.` };
   if (action.receipt) return { ...common, status: "action_pending" as const,
     receiptId: action.receipt.id,
@@ -297,14 +300,18 @@ async function modelCall(fetcher: typeof fetch, key: string, model: string,
 }
 
 /** Tool input sensitivity is distinct from output fields such as Slack text and Notion title. */
+const withheldResult = "[WITHHELD_UNSAFE_TOOL_RESULT]";
+const secretBearingText = /-----BEGIN\s+(?:(?:RSA|EC|OPENSSH|ENCRYPTED)\s+)?PRIVATE KEY-----|\b(?:sk[-_]or[-_][A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]+|xox[baprs]-[A-Za-z0-9_-]+|Bearer\s+\S+)|\b(?:api[_-]?key|client[_-]?secret|private[_-]?key|password|credential|access[_-]?token|refresh[_-]?token)\s*[:=]\s*\S+/i;
 export function safeResult(value: unknown, inputSensitiveKeys: readonly string[]): string {
   const sensitive = new Set(inputSensitiveKeys.map((key) => key.split(/[.\[\]]/).filter(Boolean).at(-1)?.toLowerCase()));
   const contentKeys = new Set(["title", "text", "body", "description"]);
+  let unsafeContent = false;
   const redact = (item: unknown, depth: number): unknown => {
     if (depth > 8) return "[TRUNCATED]";
-    if (typeof item === "string") return item.replace(
-      /sk-or-[A-Za-z0-9-]+|Bearer\s+\S+|(?:gh[pousr]_[A-Za-z0-9_]+)|(?:xox[baprs]-[A-Za-z0-9-]+)/gi,
-      "[REDACTED]");
+    if (typeof item === "string") {
+      if (secretBearingText.test(item)) { unsafeContent = true; return "[REDACTED]"; }
+      return item;
+    }
     if (Array.isArray(item)) return item.slice(0, 40).map((entry) => redact(entry, depth + 1));
     const record = object(item);
     if (!record) return item;
@@ -314,6 +321,7 @@ export function safeResult(value: unknown, inputSensitiveKeys: readonly string[]
         ? "[REDACTED]" : redact(entry, depth + 1)]));
   };
   const encoded = JSON.stringify(redact(value, 0)) ?? "null";
+  if (unsafeContent) return withheldResult;
   return encoded.length <= ASSISTED_LIMITS.resultChars ? encoded
     : `${encoded.slice(0, ASSISTED_LIMITS.resultChars)}\n[TRUNCATED]`;
 }
@@ -482,8 +490,11 @@ export async function runAssistedTurn(request: Request, input: AssistedTurnInput
         }
         const publicResult = object(receipt);
         if (publicResult?.status !== "succeeded") {
-          return { status: "tool_error" as const,
-            answer: "The tool did not complete. Check its receipt before retrying.",
+          const failed = publicResult?.status === "failed";
+          return { status: failed ? "tool_error" as const : "action_pending" as const,
+            answer: failed ? "The tool did not complete. Check its receipt before retrying."
+              : "The read may still be finishing. Check its receipt before retrying this request.",
+            ...(failed ? { terminalFailure: true } : { requestId: input.requestId }),
             toolId: chosen.manifest.id, receipt, model: input.model,
             servedModels: [choice.model], usage: choice.usage };
         }
@@ -492,6 +503,10 @@ export async function runAssistedTurn(request: Request, input: AssistedTurnInput
           toolId: chosen.manifest.id, receipt, model: input.model,
           servedModels: [choice.model], usage: choice.usage, usageIncomplete: true };
         const result = safeResult(publicResult.result, chosen.manifest.contract.sensitiveKeys);
+        if (result === withheldResult) return { status: "answered" as const,
+          answer: "The tool completed, but its result contained credential-like content and was not sent to the model. Review the receipt.",
+          toolId: chosen.manifest.id, receipt, model: input.model,
+          servedModels: [choice.model], usage: choice.usage, usageIncomplete: true };
         let final: ModelReply;
         try {
           final = await modelCall(fetcher, key, input.model, [

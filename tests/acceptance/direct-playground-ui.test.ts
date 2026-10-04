@@ -832,6 +832,93 @@ describe("direct playground form", () => {
     } finally { await unmount(app); }
   });
 
+  it.each([
+    { status: "tool_error", terminalFailure: true, fresh: true },
+    { status: "tool_error", terminalFailure: false, fresh: false },
+    { status: "action_pending", terminalFailure: false, fresh: false },
+  ])("uses a fresh ID only after a confirmed failed read ($status, terminal: $terminalFailure)",
+    async ({ status, terminalFailure, fresh }) => {
+      const requestIds: string[] = [];
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = String(input);
+        if (path.startsWith("/api/control-plane")) return Response.json(overview());
+        if (path.startsWith("/api/tools?")) return Response.json({ tools,
+          providers: [{ provider: "demo", state: "ready" }] });
+        if (path === "/api/playground/assisted") {
+          requestIds.push(JSON.parse(String(init?.body)).requestId);
+          return Response.json({ status, terminalFailure,
+            answer: "Check read receipt", model: "fixture/model", servedModels: ["fixture/served"],
+            usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2, costUsd: 0.00001 },
+            receipt: { id: "receipt_read", status: terminalFailure ? "failed" : "running",
+              result: null, errorCode: terminalFailure ? "READ_FAILED" : null } });
+        }
+        return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const app = mount(Playground, { target: document.body,
+        props: { data: { assistedEnabled: true } as never } });
+      try {
+        await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value)
+          .toBe("connection_one"));
+        for (const [id, value] of [["assisted-model", "fixture/model"],
+          ["assisted-prompt", "Find fixture"]]) {
+          const field = document.getElementById(id) as HTMLInputElement;
+          field.value = value;
+          field.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+        button("Ask model").click();
+        await vi.waitFor(() => expect(document.body.textContent).toContain("Check read receipt"));
+        await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+        button("Ask model").click();
+        await vi.waitFor(() => expect(requestIds).toHaveLength(2));
+        expect(requestIds[1] === requestIds[0]).toBe(!fresh);
+      } finally { await unmount(app); }
+    });
+
+  it("keeps a lost failed-read identity until retry confirms the terminal receipt", async () => {
+    const requestIds: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.startsWith("/api/control-plane")) return Response.json(overview());
+      if (path.startsWith("/api/tools?")) return Response.json({ tools,
+        providers: [{ provider: "demo", state: "ready" }] });
+      if (path === "/api/playground/assisted") {
+        requestIds.push(JSON.parse(String(init?.body)).requestId);
+        if (requestIds.length === 1) throw new TypeError("lost response");
+        return Response.json({ status: "tool_error", terminalFailure: true,
+          answer: "The previous read failed", receiptId: "receipt_failed",
+          model: "fixture/model", servedModels: ["fixture/served"],
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2, costUsd: 0.00001 } });
+      }
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body,
+      props: { data: { assistedEnabled: true } as never } });
+    try {
+      await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value)
+        .toBe("connection_one"));
+      for (const [id, value] of [["assisted-model", "fixture/model"],
+        ["assisted-prompt", "Find fixture"]]) {
+        const field = document.getElementById(id) as HTMLInputElement;
+        field.value = value;
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+      button("Ask model").click();
+      await vi.waitFor(() => expect(requestIds).toHaveLength(1));
+      await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+      button("Ask model").click();
+      await vi.waitFor(() => expect(requestIds).toHaveLength(2));
+      expect(requestIds[1]).toBe(requestIds[0]);
+      await vi.waitFor(() => expect(document.body.textContent).toContain("The previous read failed"));
+      button("Ask model").click();
+      await vi.waitFor(() => expect(requestIds).toHaveLength(3));
+      expect(requestIds[2]).not.toBe(requestIds[1]);
+    } finally { await unmount(app); }
+  });
+
   it("cancels an in-flight assisted request and does not render its late result", async () => {
     let release: ((response: Response) => void) | undefined;
     const requestIds: string[] = [];
