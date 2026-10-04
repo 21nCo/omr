@@ -219,6 +219,12 @@ describe("assisted-playground-contract", () => {
     { field: "description", value: "Review xoxb-secret_123" },
     { field: "text", value: "Authorization: Bearer secret_123" },
     { field: "body", value: "client_secret=secret_123" },
+    { field: "text", value: 'Provider payload: {"password":"fixture-secret-value"}' },
+    { field: "title", value: 'Escaped payload: {\\"api_key\\":\\"fixture-secret-value\\"}' },
+    { field: "body", value: `Nested payload: ${JSON.stringify(JSON.stringify({
+      clientSecret: "fixture-secret-value",
+    }))}` },
+    { field: "description", value: 'Encoded key: {"pass\\u0077ord":"fixture-secret-value"}' },
   ])("withholds secret-bearing nested $field before synthesis while retaining the receipt", async ({ field, value }) => {
     const { services, fetcher, execute } = fixture();
     const resultValue = { pages: [{ title: "Safe title", content: { [field]: value } }] };
@@ -230,13 +236,15 @@ describe("assisted-playground-contract", () => {
     expect(result.answer).toContain("not sent to the model");
     expect(fetcher).toHaveBeenCalledOnce();
     expect(safeResult(resultValue, [])).not.toContain(value);
+    expect(JSON.stringify(fetcher.mock.calls)).not.toContain("fixture-secret-value");
   });
 
   it("synthesizes safe nested Slack, Notion and GitHub content after redacting secret fields", async () => {
     const { services, fetcher, execute } = fixture();
     execute.mockResolvedValueOnce({ id: "receipt_safe", status: "succeeded", result: {
       slack: { text: "Release is ready", credential: "hidden credential" },
-      notion: { title: "Roadmap" }, github: { body: "Review complete" },
+      notion: { title: 'Roadmap {"status":"ready"}' },
+      github: { body: "Review complete" },
     } });
     await runAssistedTurn(request(), input, services);
     const synthesis = JSON.parse(String(fetcher.mock.calls[1]![1]?.body));

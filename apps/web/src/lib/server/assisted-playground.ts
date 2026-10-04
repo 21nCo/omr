@@ -301,7 +301,23 @@ async function modelCall(fetcher: typeof fetch, key: string, model: string,
 
 /** Tool input sensitivity is distinct from output fields such as Slack text and Notion title. */
 const withheldResult = "[WITHHELD_UNSAFE_TOOL_RESULT]";
-const secretBearingText = /-----BEGIN\s+(?:(?:RSA|EC|OPENSSH|ENCRYPTED)\s+)?PRIVATE KEY-----|\b(?:sk[-_]or[-_][A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]+|xox[baprs]-[A-Za-z0-9_-]+|Bearer\s+\S+)|\b(?:api[_-]?key|client[_-]?secret|private[_-]?key|password|credential|access[_-]?token|refresh[_-]?token)\s*[:=]\s*\S+/i;
+const secretBearingText = /-----BEGIN\s+(?:(?:RSA|EC|OPENSSH|ENCRYPTED)\s+)?PRIVATE KEY-----|\b(?:sk[-_]or[-_][A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]+|xox[baprs]-[A-Za-z0-9_-]+|Bearer\s+\S+)/i;
+const secretAssignment = /\b(?:api[_-]?key|client[_-]?secret|private[_-]?key|password|credential|access[_-]?token|refresh[_-]?token|authorization|session[_-]?token|cookie)\b\s*["']?\s*[:=]\s*["']?\s*\S+/i;
+/** Serialized provider fields may contain JSON, including JSON escaped more than once. */
+function containsCredentialText(value: string): boolean {
+  let decoded = value;
+  for (let depth = 0; depth < 4; depth++) {
+    if (secretBearingText.test(decoded) || secretAssignment.test(decoded)) return true;
+    const next = decoded.replace(/\\u([0-9a-f]{4})/gi, (_match, hex: string) =>
+      String.fromCharCode(Number.parseInt(hex, 16)))
+      .replace(/\\(["'\\])/g, "$1")
+      .replace(/&(?:quot|#34|apos|#39);/gi, (entity) =>
+        /quot|34/i.test(entity) ? '"' : "'");
+    if (next === decoded) break;
+    decoded = next;
+  }
+  return false;
+}
 export function safeResult(value: unknown, inputSensitiveKeys: readonly string[]): string {
   const sensitive = new Set(inputSensitiveKeys.map((key) => key.split(/[.\[\]]/).filter(Boolean).at(-1)?.toLowerCase()));
   const contentKeys = new Set(["title", "text", "body", "description"]);
@@ -309,7 +325,7 @@ export function safeResult(value: unknown, inputSensitiveKeys: readonly string[]
   const redact = (item: unknown, depth: number): unknown => {
     if (depth > 8) return "[TRUNCATED]";
     if (typeof item === "string") {
-      if (secretBearingText.test(item)) { unsafeContent = true; return "[REDACTED]"; }
+      if (containsCredentialText(item)) { unsafeContent = true; return "[REDACTED]"; }
       return item;
     }
     if (Array.isArray(item)) return item.slice(0, 40).map((entry) => redact(entry, depth + 1));
