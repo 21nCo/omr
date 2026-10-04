@@ -47,8 +47,14 @@ describe("direct-playground-contract", () => {
       { name: "title", type: "string", required: true, description: "Fixture title" },
       { name: "optional", type: "number", required: false, description: "" },
     ]);
-    expect(playgroundConnectionReady({ id: "one", workspaceId: "other", provider: "demo",
-      label: "Other", status: "active", readiness: "ready", selected: true }, "mine")).toBe(false);
+    const readyConnection = { id: "one", workspaceId: "mine", provider: "demo",
+      label: "Account", status: "active", readiness: "ready", selected: true,
+      providerState: "ready", selectable: true };
+    expect(playgroundConnectionReady(readyConnection, "mine")).toBe(true);
+    expect(playgroundConnectionReady({ ...readyConnection, workspaceId: "other" }, "mine")).toBe(false);
+    expect(playgroundConnectionReady({ ...readyConnection, providerState: "unconfigured",
+      selectable: false }, "mine")).toBe(false);
+    expect(playgroundConnectionReady({ ...readyConnection, selectable: false }, "mine")).toBe(false);
     const browserApproval = { id: "approval", workspaceId: "mine", connectionId: "one",
       toolId: "demo.write", status: "pending", params: {}, previewReady: true,
       manifestCurrent: true, expiresAt: Date.now() + 60_000, browserActionable: true };

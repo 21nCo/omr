@@ -34,9 +34,185 @@ function submit() {
     cancelable: true }));
 }
 
+function approval(status: string) {
+  return { id: "approval_one", workspaceId: "workspace_one", connectionId: "connection_one",
+    toolId: "demo.write", status, params: { title: "[REDACTED]" }, previewReady: true,
+    manifestCurrent: true, expiresAt: Date.now() + 60_000, browserActionable: true };
+}
+
+function overview(connections = [{ id: "connection_one", workspaceId: "workspace_one", provider: "demo",
+  label: "Demo account", status: "active", readiness: "ready", providerState: "ready",
+  selectable: true, selected: true }], approvals: ReturnType<typeof approval>[] = []) {
+  return { selectedWorkspaceId: "workspace_one",
+    workspaces: [{ workspace: { id: "workspace_one", name: "Mine" } },
+      { workspace: { id: "workspace_two", name: "Other" } }], connections, approvals };
+}
+
 afterEach(() => { vi.unstubAllGlobals(); document.body.replaceChildren(); });
 
 describe("direct playground form", () => {
+  it("does not offer a provider that the shared selection service marks unconfigured", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/control-plane")) return Response.json(overview([{
+        id: "connection_one", workspaceId: "workspace_one", provider: "demo",
+        label: "Demo account", status: "active", readiness: "ready",
+        providerState: "unconfigured", selectable: false, selected: false,
+      }]));
+      if (path.startsWith("/api/tools?")) return Response.json({ tools, providers: [
+        { provider: "demo", state: "unconfigured" }] });
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body });
+    try {
+      await vi.waitFor(() => expect(document.body.textContent).toContain("No ready account"));
+      expect(document.querySelector<HTMLOptionElement>("#playground-connection option[value=connection_one]")
+        ?.disabled).toBe(true);
+      expect(document.querySelector<HTMLSelectElement>("#playground-tool")?.disabled).toBe(true);
+      expect(fetchMock.mock.calls.some(([path]) => String(path) === "/api/connections/select")).toBe(false);
+    } finally { await unmount(app); }
+  });
+
+  it.each(["approve", "reject"] as const)("refreshes a failed %s decision and exposes expiry recovery", async (operation) => {
+    let status = "pending";
+    let statusCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/control-plane")) return Response.json(overview(undefined,
+        [approval("pending")]));
+      if (path.startsWith("/api/tools?")) return Response.json({ tools, providers: [
+        { provider: "demo", state: "ready" }] });
+      if (path.startsWith("/api/tools/manifest")) return Response.json(tools[1]);
+      if (path.startsWith("/api/approvals/status")) {
+        statusCalls += 1;
+        return Response.json(approval(status));
+      }
+      if (path === `/api/approvals/${operation}`) {
+        status = "expired";
+        return Response.json({ error: "APPROVAL_UNAVAILABLE" }, { status: 409 });
+      }
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body });
+    try {
+      await vi.waitFor(() => expect(button("Review approval").disabled).toBe(false));
+      select("playground-tool", "demo.write");
+      await vi.waitFor(() => expect(button("Request approval").disabled).toBe(false));
+      button("Review approval").click();
+      await vi.waitFor(() => expect(button(operation === "approve" ? "Approve" : "Reject")
+        .disabled).toBe(false));
+      button(operation === "approve" ? "Approve" : "Reject").click();
+      await vi.waitFor(() => expect(document.querySelector("[aria-label='Approval']")?.textContent)
+        .toContain("Approval · expired"));
+      expect(statusCalls).toBe(2);
+      expect(button("Start a new action").disabled).toBe(false);
+      expect(document.querySelector("[role=alert]")?.textContent).toContain("expired");
+    } finally { await unmount(app); }
+  });
+
+  it("blocks stale approval decisions when status refresh fails, then recovers on a manual check", async () => {
+    let statusCalls = 0;
+    let decisions = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/control-plane")) return Response.json(overview(undefined,
+        [approval("pending")]));
+      if (path.startsWith("/api/tools?")) return Response.json({ tools, providers: [
+        { provider: "demo", state: "ready" }] });
+      if (path.startsWith("/api/approvals/status")) {
+        statusCalls += 1;
+        return statusCalls === 2 ? Response.json({ error: "HTTP_ERROR" }, { status: 503 })
+          : Response.json(approval("pending"));
+      }
+      if (path === "/api/approvals/approve") {
+        decisions += 1;
+        return Response.json({ error: "HTTP_ERROR" }, { status: 503 });
+      }
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body });
+    try {
+      await vi.waitFor(() => expect(button("Review approval").disabled).toBe(false));
+      button("Review approval").click();
+      await vi.waitFor(() => expect(button("Approve").disabled).toBe(false));
+      button("Approve").click();
+      await vi.waitFor(() => expect(document.body.textContent).toContain("Approval status is unconfirmed"));
+      expect(button("Approve").disabled).toBe(true);
+      button("Approve").click();
+      expect(decisions).toBe(1);
+      button("Check status").click();
+      await vi.waitFor(() => expect(button("Approve").disabled).toBe(false));
+      expect(statusCalls).toBe(3);
+    } finally { await unmount(app); }
+  });
+
+  it("submits the focused form control and ignores an in-flight result after workspace change", async () => {
+    let finishRead!: (response: Response) => void;
+    const pendingRead = new Promise<Response>((resolve) => { finishRead = resolve; });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/control-plane?workspaceId=workspace_two")) return Response.json({
+        ...overview([]), selectedWorkspaceId: "workspace_two" });
+      if (path.startsWith("/api/control-plane")) return Response.json(overview());
+      if (path.startsWith("/api/tools?")) return Response.json({ tools, providers: [
+        { provider: "demo", state: "ready" }] });
+      if (path.startsWith("/api/tools/manifest")) return Response.json(tools[0]);
+      if (path === "/api/tools/execute") return pendingRead;
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body });
+    try {
+      await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>(
+        "#playground-tool")?.disabled).toBe(false));
+      select("playground-tool", "demo.read");
+      await vi.waitFor(() => expect(button("Run read").disabled).toBe(false));
+      const field = document.getElementById("playground-arguments") as HTMLTextAreaElement;
+      field.value = '{"title":"fixture"}';
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      const submitButton = button("Run read");
+      submitButton.focus();
+      expect(document.activeElement).toBe(submitButton);
+      submitButton.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      submitButton.form?.requestSubmit(submitButton);
+      await vi.waitFor(() => expect(fetchMock.mock.calls.some(([path]) =>
+        String(path) === "/api/tools/execute")).toBe(true));
+      select("playground-workspace", "workspace_two");
+      await vi.waitFor(() => expect(document.body.textContent).toContain("No ready account"));
+      finishRead(Response.json({ id: "receipt_old", status: "succeeded", result: {}, errorCode: null }));
+      await vi.waitFor(() => expect(document.querySelector("[aria-label='Execution result']")).toBeNull());
+      expect(document.querySelector<HTMLSelectElement>("#playground-tool")?.disabled).toBe(true);
+    } finally { await unmount(app); }
+  });
+
+  it("ignores a stale manifest when tool selection changes during loading", async () => {
+    let finishManifest!: (response: Response) => void;
+    const pendingManifest = new Promise<Response>((resolve) => { finishManifest = resolve; });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/control-plane")) return Response.json(overview());
+      if (path.startsWith("/api/tools?")) return Response.json({ tools, providers: [
+        { provider: "demo", state: "ready" }] });
+      if (path.startsWith("/api/tools/manifest")) return pendingManifest;
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body });
+    try {
+      await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>(
+        "#playground-tool")?.disabled).toBe(false));
+      select("playground-tool", "demo.read");
+      await vi.waitFor(() => expect(document.body.textContent).toContain("Loading tool"));
+      select("playground-tool", "");
+      finishManifest(Response.json(tools[0]));
+      await vi.waitFor(() => expect(document.querySelector("#playground-arguments")).toBeNull());
+      expect(document.querySelector<HTMLSelectElement>("#playground-tool")?.value).toBe("");
+    } finally { await unmount(app); }
+  });
+
   it("keeps labeled controls keyboard usable and moves read/write through errors, approval and receipt", async () => {
     let writes = 0;
     let reads = 0;
@@ -46,13 +222,7 @@ describe("direct playground form", () => {
       const path = String(input);
       calls.push(path);
       const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
-      if (path.startsWith("/api/control-plane")) return Response.json({
-        selectedWorkspaceId: "workspace_one",
-        workspaces: [{ workspace: { id: "workspace_one", name: "Mine" } }],
-        connections: [{ id: "connection_one", workspaceId: "workspace_one", provider: "demo",
-          label: "Demo account", status: "active", readiness: "ready", selected: true }],
-        approvals: [],
-      });
+      if (path.startsWith("/api/control-plane")) return Response.json(overview());
       if (path.startsWith("/api/tools?")) return Response.json({ tools,
         providers: [{ provider: "demo", state: "ready" }] });
       if (path.startsWith("/api/tools/manifest")) return Response.json(
@@ -62,18 +232,12 @@ describe("direct playground form", () => {
         return Response.json({ id: "receipt_read", status: "succeeded", result: { title: body.params },
           errorCode: null });
       }
-      if (path === "/api/approvals") return Response.json({ id: "approval_one",
-        workspaceId: "workspace_one", connectionId: "connection_one", toolId: "demo.write",
-        status: approvalStatus, params: { title: "[REDACTED]" }, previewReady: true,
-        manifestCurrent: true, expiresAt: Date.now() + 60_000 });
+      if (path === "/api/approvals") return Response.json(approval(approvalStatus));
       if (path === "/api/approvals/approve") {
         approvalStatus = "approved";
         return Response.json({ id: "approval_one", status: approvalStatus });
       }
-      if (path.startsWith("/api/approvals/status")) return Response.json({ id: "approval_one",
-        workspaceId: "workspace_one", connectionId: "connection_one", toolId: "demo.write",
-        status: approvalStatus, params: { title: "[REDACTED]" }, previewReady: true,
-        manifestCurrent: true, expiresAt: Date.now() + 60_000,
+      if (path.startsWith("/api/approvals/status")) return Response.json({ ...approval(approvalStatus),
         executionReceiptId: approvalStatus === "consumed" ? "receipt_write" : null });
       if (path === "/api/approvals/execute") {
         writes += 1;
@@ -118,6 +282,8 @@ describe("direct playground form", () => {
       await vi.waitFor(() => expect(document.querySelector("[aria-label='Approval']")?.textContent)
         .toContain("pending"));
       expect(writes).toBe(0);
+      submit();
+      expect(calls.filter((path) => path === "/api/approvals")).toHaveLength(1);
       button("Approve").click();
       await vi.waitFor(() => expect(document.querySelector("[aria-label='Approval']")?.textContent)
         .toContain("approved"));

@@ -17,6 +17,7 @@
   let manifest: ToolManifest | null = null;
   let argumentsText = "{}";
   let approval: PlaygroundApproval | null = null;
+  let approvalNeedsRefresh = false;
   let receipt: PlaygroundReceipt | null = null;
   let error = "";
   let notice = "";
@@ -34,6 +35,7 @@
     manifest = null;
     argumentsText = "{}";
     approval = null;
+    approvalNeedsRefresh = false;
     receipt = null;
     error = "";
     notice = "";
@@ -41,6 +43,7 @@
 
   function showApproval(value: PlaygroundApproval) {
     approval = value;
+    approvalNeedsRefresh = false;
     if (overview?.approvals) overview = { ...overview,
       approvals: overview.approvals.map((item) => item.id === value.id
         ? { ...value, browserActionable: item.browserActionable } : item) };
@@ -138,7 +141,7 @@
   }
 
   async function submit() {
-    if (busy || loading || !manifest || !currentConnection()) return;
+    if (busy || loading || approval || !manifest || !currentConnection()) return;
     const turn = generation;
     const selected = { workspaceId, connectionId, toolId, manifest };
     error = "";
@@ -175,7 +178,7 @@
   }
 
   async function approvalAction(operation: "approve" | "reject" | "execute" | "status") {
-    if (!approval || busy || loading) return;
+    if (!approval || busy || loading || (approvalNeedsRefresh && operation !== "status")) return;
     const turn = generation;
     const approvalId = approval.id;
     busy = operation === "status" ? "Checking status…" : `${operation}…`;
@@ -196,7 +199,8 @@
     } catch (caught) {
       if (turn === generation) {
         error = playgroundError(caught);
-        if (operation === "execute") await refreshApproval(approvalId, turn);
+        approvalNeedsRefresh = true;
+        if (operation !== "status") await refreshApproval(approvalId, turn);
       }
     } finally {
       if (turn === generation) busy = "";
@@ -213,7 +217,10 @@
         `/api/approvals/status?${new URLSearchParams({ approvalId: id, workspaceId })}`);
       if (turn === generation) { showApproval(value); receipt = null; }
     } catch (caught) {
-      if (turn === generation) error = playgroundError(caught);
+      if (turn === generation) {
+        error = playgroundError(caught);
+        if (approval?.id === id) approvalNeedsRefresh = true;
+      }
     } finally {
       if (turn === generation) busy = "";
     }
@@ -225,7 +232,10 @@
         `/api/approvals/status?${new URLSearchParams({ approvalId, workspaceId })}`);
       if (turn === generation) showApproval(value);
     } catch {
-      if (turn === generation) notice = "Could not confirm approval status. Check again before retrying.";
+      if (turn === generation) {
+        approvalNeedsRefresh = true;
+        notice = "Could not confirm approval status. Check again before retrying.";
+      }
     }
   }
 
@@ -277,7 +287,8 @@
       {#each overview?.connections ?? [] as connection}
         {#if connection.workspaceId === workspaceId && !connection.cleanupOnly}
           <option value={connection.id} disabled={!playgroundConnectionReady(connection, workspaceId)}>
-            {connection.provider} · {connection.label} · {connection.readiness}
+            {connection.provider} · {connection.label} · {connection.providerState === "ready"
+              ? connection.readiness : connection.providerState ?? connection.readiness}
           </option>
         {/if}
       {/each}
@@ -346,12 +357,15 @@
       {:else}
         <p>Server-redacted argument preview:</p><pre>{JSON.stringify(approval.params, null, 2)}</pre>
       {/if}
+      {#if approvalNeedsRefresh}
+        <p role="alert">Approval status is unconfirmed. Check status before another decision. If the account is unavailable, check it in the <a href="/app">control plane</a>.</p>
+      {/if}
       {#if approval.status === "pending"}
-        <button type="button" disabled={!!busy || !approval.previewReady || !approval.manifestCurrent}
+        <button type="button" disabled={!!busy || approvalNeedsRefresh || !approval.previewReady || !approval.manifestCurrent}
           onclick={() => void approvalAction("approve")}>Approve</button>
-        <button type="button" disabled={!!busy} onclick={() => void approvalAction("reject")}>Reject</button>
+        <button type="button" disabled={!!busy || approvalNeedsRefresh} onclick={() => void approvalAction("reject")}>Reject</button>
       {:else if approval.status === "approved"}
-        <button type="button" disabled={!!busy || !approval.previewReady || !approval.manifestCurrent}
+        <button type="button" disabled={!!busy || approvalNeedsRefresh || !approval.previewReady || !approval.manifestCurrent}
           onclick={() => void approvalAction("execute")}>Execute approved change</button>
       {:else if approval.status === "executing" || approval.status === "uncertain"}
         <p>Check the provider and receipt before another action. Do not repeat this write.

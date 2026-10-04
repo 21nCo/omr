@@ -3,6 +3,7 @@ import type { ToolManifest } from "@oh-my-router/tools";
 export type PlaygroundConnection = {
   id: string; workspaceId: string; provider: string; label: string;
   status: string; readiness: string; selected: boolean; cleanupOnly?: boolean;
+  providerState?: string; selectable?: boolean;
 };
 export type PlaygroundApproval = {
   id: string; workspaceId: string; connectionId: string; toolId: string;
@@ -26,7 +27,8 @@ export type PlaygroundCatalog = {
 
 export function playgroundConnectionReady(connection: PlaygroundConnection, workspaceId: string): boolean {
   return connection.workspaceId === workspaceId && connection.status === "active" &&
-    connection.readiness === "ready" && !connection.cleanupOnly;
+    connection.readiness === "ready" && connection.providerState === "ready" &&
+    connection.selectable === true && !connection.cleanupOnly;
 }
 
 export function resumablePlaygroundApproval(approval: PlaygroundApproval, workspaceId: string): boolean {
