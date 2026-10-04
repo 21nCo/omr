@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
 import type { ToolManifest } from "@oh-my-router/tools";
 import Playground from "../../apps/web/src/routes/app/playground/+page.svelte?client";
+import type { PlaygroundApproval } from "../../apps/web/src/lib/direct-playground.js";
 
 function manifest(id: string, effect: "read" | "write"): ToolManifest {
   return { catalogSchemaVersion: "1.0.0", id, provider: "demo", providerVersion: "1.0.0",
@@ -34,15 +35,17 @@ function submit() {
     cancelable: true }));
 }
 
-function approval(status: string) {
+function approval(status: string): PlaygroundApproval {
   return { id: "approval_one", workspaceId: "workspace_one", connectionId: "connection_one",
     toolId: "demo.write", status, params: { title: "[REDACTED]" }, previewReady: true,
-    manifestCurrent: true, expiresAt: Date.now() + 60_000, browserActionable: true };
+    manifestCurrent: true, action: "Write fixture", effect: "write", resources: [
+      { kind: "item", parameter: "title" }], previewMode: "redacted",
+    expiresAt: Date.now() + 60_000, browserActionable: true };
 }
 
 function overview(connections = [{ id: "connection_one", workspaceId: "workspace_one", provider: "demo",
   label: "Demo account", status: "active", readiness: "ready", providerState: "ready",
-  selectable: true, selected: true }], approvals: ReturnType<typeof approval>[] = []) {
+  selectable: true, selected: true }], approvals: PlaygroundApproval[] = []) {
   return { selectedWorkspaceId: "workspace_one",
     workspaces: [{ workspace: { id: "workspace_one", name: "Mine" } },
       { workspace: { id: "workspace_two", name: "Other" } }], connections, approvals };
@@ -198,6 +201,12 @@ describe("direct playground form", () => {
       await vi.waitFor(() => expect(button("Run read").disabled).toBe(false));
       button("Review approval").click();
       await vi.waitFor(() => expect(button("Approve").disabled).toBe(false));
+      const panel = document.querySelector("[aria-label='Approval']")?.textContent ?? "";
+      expect(panel).toContain("Write fixture");
+      expect(panel).toContain("demo.write");
+      expect(panel).toContain("Effect: write");
+      expect(panel).toContain("item · argument title");
+      expect(panel).toContain("Server-redacted argument preview");
       button("Approve").click();
       await vi.waitFor(() => expect(button("Execute approved change").disabled).toBe(false));
       button("Execute approved change").click();
@@ -244,6 +253,72 @@ describe("direct playground form", () => {
       submit();
       await vi.waitFor(() => expect(approvals.size).toBe(3));
       expect(writes).toBe(2);
+    } finally { await unmount(app); }
+  });
+  it.each(["destructive", "unknown"])(
+    "warns about an opaque %s approval before a resumed decision", async (effect) => {
+    const opaque = { ...approval("pending"), action: "Delete remote fixture",
+      effect, resources: [{ kind: "remote item" }],
+      previewMode: "opaque" as const, params: "[REDACTED]" };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/control-plane")) return Response.json(overview(undefined,
+        [opaque]));
+      if (path.startsWith("/api/tools?")) return Response.json({ tools,
+        providers: [{ provider: "demo", state: "ready" }] });
+      if (path.startsWith("/api/tools/manifest")) return Response.json(tools[0]);
+      if (path.startsWith("/api/approvals/status")) return Response.json(opaque);
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body });
+    try {
+      await vi.waitFor(() => expect(button("Review approval").disabled).toBe(false));
+      select("playground-tool", "demo.read");
+      await vi.waitFor(() => expect(button("Run read").disabled).toBe(false));
+      button("Review approval").click();
+      await vi.waitFor(() => expect(button("Approve").disabled).toBe(false));
+      const panel = document.querySelector("[aria-label='Approval']")?.textContent ?? "";
+      expect(panel).toContain("Delete remote fixture");
+      expect(panel).toContain(`Effect: ${effect}`);
+      expect(panel).toContain("remote item · target unspecified");
+      expect(panel).toContain("cannot show this action's arguments or target");
+      expect(panel).toContain("[REDACTED]");
+      expect(panel).not.toContain("Read fixture");
+    } finally { await unmount(app); }
+  });
+
+  it("guides recovery from failed execution responses and returned failed receipts", async () => {
+    let failedAsResponse = true;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/control-plane")) return Response.json(overview());
+      if (path.startsWith("/api/tools?")) return Response.json({ tools,
+        providers: [{ provider: "demo", state: "ready" }] });
+      if (path.startsWith("/api/tools/manifest")) return Response.json(tools[0]);
+      if (path === "/api/tools/execute") return failedAsResponse
+        ? Response.json({ error: "EXECUTION_FAILED", receiptId: "receipt_failed" }, { status: 502 })
+        : Response.json({ id: "receipt_failed", status: "failed", result: null,
+          errorCode: "connection_unavailable" });
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body });
+    try {
+      await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>(
+        "#playground-tool")?.disabled).toBe(false));
+      select("playground-tool", "demo.read");
+      await vi.waitFor(() => expect(button("Run read").disabled).toBe(false));
+      submit();
+      await vi.waitFor(() => expect(document.querySelector("[role=alert]")?.textContent)
+        .toContain("Check the receipt and account health"));
+      expect(document.querySelector("[role=alert]")?.textContent).toContain("receipt_failed");
+      failedAsResponse = false;
+      submit();
+      await vi.waitFor(() => expect(document.querySelector("[aria-label='Execution result']")?.textContent)
+        .toContain("connection_unavailable"));
+      expect(document.querySelector("[aria-label='Execution result']")?.textContent)
+        .toContain("Verify the provider outcome before retrying a write");
     } finally { await unmount(app); }
   });
   it("does not offer a provider that the shared selection service marks unconfigured", async () => {
@@ -298,6 +373,10 @@ describe("direct playground form", () => {
       button("Review approval").click();
       await vi.waitFor(() => expect(button(operation === "approve" ? "Approve" : "Reject")
         .disabled).toBe(false));
+      const panel = document.querySelector("[aria-label='Approval']")?.textContent ?? "";
+      expect(panel).toContain("Write fixture");
+      expect(panel).toContain("demo.write");
+      expect(panel).toContain("item · argument title");
       button(operation === "approve" ? "Approve" : "Reject").click();
       await vi.waitFor(() => expect(document.querySelector("[aria-label='Approval']")?.textContent)
         .toContain("Approval · expired"));
@@ -430,7 +509,7 @@ describe("direct playground form", () => {
       if (path === "/api/approvals") return Response.json(approval(approvalStatus));
       if (path === "/api/approvals/approve") {
         approvalStatus = "approved";
-        return Response.json({ id: "approval_one", status: approvalStatus });
+        return Response.json(approval(approvalStatus));
       }
       if (path.startsWith("/api/approvals/status")) return Response.json({ ...approval(approvalStatus),
         executionReceiptId: approvalStatus === "consumed" ? "receipt_write" : null });

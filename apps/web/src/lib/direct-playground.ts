@@ -8,6 +8,8 @@ export type PlaygroundConnection = {
 export type PlaygroundApproval = {
   id: string; workspaceId: string; connectionId: string; toolId: string;
   status: string; params: unknown; previewReady: boolean; manifestCurrent: boolean;
+  action: string; effect: string; resources: { kind: string; parameter?: string }[];
+  previewMode: "opaque" | "redacted" | "unavailable";
   expiresAt: number; executionReceiptId?: string | null;
   browserActionable?: boolean;
 };
@@ -73,6 +75,7 @@ export function playgroundError(error: unknown): string {
       APPROVAL_UNAVAILABLE: "This approval expired or is no longer available. Check its status before retrying.",
       EXECUTION_OUTCOME_UNKNOWN: "The provider outcome is uncertain. Verify the receipt before another write.",
       EXECUTION_IN_PROGRESS: "This action is still running. Check its approval status before retrying.",
+      EXECUTION_FAILED: "Check the receipt and account health in the control plane. Verify the provider outcome before retrying a write.",
     };
     return [error.message, advice[error.code], error.receiptId && `Receipt: ${error.receiptId}`]
       .filter(Boolean).join(" ");

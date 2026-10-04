@@ -364,11 +364,26 @@
   {#if approval}
     <section aria-label="Approval">
       <h2>Approval · {approval.status}</h2>
+      <p>Approved action: <strong>{approval.action}</strong> · Tool: <code>{approval.toolId}</code>
+        · Effect: <strong>{approval.effect}</strong></p>
       <p>Account: {overview?.connections.find((item) => item.id === approval?.connectionId)?.label ?? "Unavailable"}
         · Expires {new Date(approval.expiresAt).toLocaleString()}</p>
+      <p>Declared resources:</p>
+      {#if approval.resources.length}
+        <ul aria-label="Approval resources">
+          {#each approval.resources as resource}
+            <li>{resource.kind}{resource.parameter ? ` · argument ${resource.parameter}` : " · target unspecified"}</li>
+          {/each}
+        </ul>
+      {:else}
+        <p>No specific resource is declared for this action.</p>
+      {/if}
       {#if !approval.manifestCurrent || !approval.previewReady}
         <p role="alert">This approval cannot be safely reviewed. Request a new approval after the tool is updated.</p>
       {:else}
+        {#if approval.previewMode === "opaque"}
+          <p role="alert">The server cannot show this action's arguments or target. It may change or delete provider data. Verify the tool and account before approving or executing.</p>
+        {/if}
         <p>Server-redacted argument preview:</p><pre>{JSON.stringify(approval.params, null, 2)}</pre>
       {/if}
       {#if approvalNeedsRefresh}
@@ -397,7 +412,10 @@
     <section aria-label="Execution result">
       <h2>Result · {receipt.status}</h2>
       <p>Receipt: <code>{receipt.id}</code></p>
-      {#if receipt.errorCode}<p role="alert">{receipt.errorCode}</p>{/if}
+      {#if receipt.errorCode}<p>Error code: <code>{receipt.errorCode}</code></p>{/if}
+      {#if receipt.status === "failed" || receipt.status === "uncertain" || receipt.errorCode}
+        <p role="alert">Check this receipt and account health in the <a href="/app">control plane</a>. Verify the provider outcome before retrying a write.</p>
+      {/if}
       {#if receipt.result !== null}<pre>{JSON.stringify(receipt.result, null, 2)}</pre>{/if}
     </section>
   {/if}
