@@ -77,6 +77,16 @@ CLI/MCP. A personal OpenRouter key is not required. Reads return a result and re
 writes require a redacted approval review before execution. The page accepts JSON
 arguments and shows the selected tool's input schema.
 
+Optional single-turn assistance on that page uses only the signed-in user's saved
+OpenRouter key. `OMR_ASSISTED_PLAYGROUND_ENABLED=true` also requires the vault
+rollout and its verified cache-disabled binding; leave it off until OMR-15's live
+acceptance. The user chooses a model. Each request offers at most 12 scoped tools,
+limits prompt/schema/result and model output sizes, makes at most two model calls,
+and selects at most one action.
+Reads return a receipt and a bounded answer; writes stop at the existing approval
+review. The page reports provider token counts and cost when available and allows
+request cancellation. No conversation history or autonomous retries are kept.
+
 Run focused package tests with `npm run test --workspace=<package-name>`. Set
 `OMR_TEST_DATABASE_URL` to a disposable PostgreSQL database to enable the real
 database isolation and transaction canaries.

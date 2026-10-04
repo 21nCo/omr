@@ -23,7 +23,11 @@ describe("direct-playground-contract", () => {
     await expect(Promise.resolve().then(() => playgroundLoad({ platform: { env: {} } } as never)))
       .rejects.toMatchObject({ status: 404 });
     expect(playgroundLoad({ platform: { env: { OMR_DIRECT_PLAYGROUND_ENABLED: "true" } } } as never))
-      .toEqual({});
+      .toEqual({ assistedEnabled: false });
+    expect(playgroundLoad({ platform: { env: { OMR_DIRECT_PLAYGROUND_ENABLED: "true",
+      OMR_ASSISTED_PLAYGROUND_ENABLED: "true", OMR_OPENROUTER_VAULT_ENABLED: "true",
+      OMR_OPENROUTER_VAULT_CACHE_DISABLED_CONFIRMED: "true" } } } as never))
+      .toEqual({ assistedEnabled: true });
     const source = readFileSync(new URL("../../apps/web/src/routes/app/playground/+page.svelte",
       import.meta.url), "utf8");
     const compiled = compile(source, { filename: "+page.svelte" });

@@ -1,4 +1,6 @@
 import { createRouter, RouterError } from "@superfunctions/http";
+import { AssistedPlaygroundError, type AssistedPlaygroundServices,
+  runAssistedTurn } from "./assisted-playground.js";
 import {
   CLIENT_CAPABILITIES,
   ClientAccessDeniedError,
@@ -392,11 +394,16 @@ export function createOMRRouter(
   executionServices: ExecutionRouteServices = unavailableExecutionServices(),
   controlPlaneServices: ControlPlaneRouteServices = unavailableControlPlaneServices(),
   openRouterVaultServices?: OpenRouterVaultRouteServices,
+  assistedPlaygroundServices?: AssistedPlaygroundServices,
 ) {
   return createRouter({
     maxBodyBytes: 16 * 1024,
     onError: (error, request) => {
       if (error instanceof RouterError) return error.toResponse();
+      if (error instanceof AssistedPlaygroundError) {
+        return Response.json({ error: error.code }, { status: error.status,
+          headers: PRIVATE_RESPONSE });
+      }
       if (error instanceof DeviceAuthorizationError) {
         return Response.json(
           {
@@ -542,7 +549,7 @@ export function createOMRRouter(
       }
       const path = new URL(request.url).pathname;
       const connectionRequest = path.startsWith("/api/connections/") ||
-        path.startsWith("/api/settings/openrouter");
+        path.startsWith("/api/settings/openrouter") || path.startsWith("/api/playground/assisted");
       const executionRequest = path === "/api/tools/execute" || path.startsWith("/api/approvals");
       let loggedError: string;
       if (connectionRequest || executionRequest) {
@@ -559,6 +566,20 @@ export function createOMRRouter(
       return Response.json({ error: "INTERNAL_ERROR" }, { status: 500 });
     },
     routes: [
+      {
+        method: "POST",
+        path: "/api/playground/assisted",
+        handler: async (request, context) => {
+          if (!assistedPlaygroundServices) throw new RuntimeUnavailableError("Assisted playground is unavailable");
+          const body = objectBody(await context.json());
+          return Response.json(await runAssistedTurn(request, {
+            workspaceId: requiredString(body, "workspaceId"),
+            connectionId: requiredString(body, "connectionId"),
+            model: requiredString(body, "model"),
+            prompt: requiredString(body, "prompt"),
+          }, assistedPlaygroundServices), { headers: PRIVATE_RESPONSE });
+        },
+      },
       {
         method: "GET",
         path: "/api/settings/openrouter",

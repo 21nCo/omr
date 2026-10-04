@@ -106,7 +106,7 @@ describe("direct playground form", () => {
       expect(selected).toBe("connection_two");
       expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value)
         .toBe("connection_two");
-      expect(document.body.textContent).toContain("Account two is ready");
+      await vi.waitFor(() => expect(document.body.textContent).toContain("Account two is ready"));
     } finally { await unmount(app); }
   });
 
@@ -138,7 +138,8 @@ describe("direct playground form", () => {
         await vi.waitFor(() => expect(document.querySelector("[role=alert]")?.textContent)
           .toContain(failure === "rejected" ? "select it again" : "no longer ready"));
         expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value).toBe("");
-        expect(document.querySelector<HTMLSelectElement>("#playground-tool")?.disabled).toBe(true);
+        await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#playground-tool")?.disabled)
+          .toBe(true));
         expect(document.body.textContent).not.toContain("Account two is ready");
         expect(selectionPosts).toBe(failure === "rejected" ? 1 : 0);
       } finally { await unmount(app); }
@@ -782,6 +783,133 @@ describe("direct playground form", () => {
         .toContain("receipt_write"));
       expect(writes).toBe(1);
       expect(calls).not.toContain("/api/settings/openrouter");
+    } finally { await unmount(app); }
+  });
+
+  it("shows a bounded assisted answer, model usage and the direct receipt without a key field", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.startsWith("/api/control-plane")) return Response.json(overview());
+      if (path.startsWith("/api/tools?")) return Response.json({ tools,
+        providers: [{ provider: "demo", state: "ready" }] });
+      if (path === "/api/playground/assisted") {
+        expect(JSON.parse(String(init?.body))).toMatchObject({ workspaceId: "workspace_one",
+          connectionId: "connection_one", model: "fixture/model", prompt: "Find fixture" });
+        return Response.json({ status: "answered", answer: "Fixture found.", model: "fixture/model",
+          servedModels: ["fixture/served"], toolId: "demo.read",
+          usage: { promptTokens: 10, completionTokens: 4, totalTokens: 14, costUsd: 0.00002 },
+          receipt: { id: "receipt_assisted", status: "succeeded", result: { title: "fixture" },
+            errorCode: null } });
+      }
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body,
+      props: { data: { assistedEnabled: true } as never } });
+    try {
+      await vi.waitFor(() => expect(button("Ask model").disabled).toBe(true));
+      for (const [id, value] of [["assisted-model", "fixture/model"],
+        ["assisted-prompt", "Find fixture"]]) {
+        const field = document.getElementById(id) as HTMLInputElement;
+        field.value = value;
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+      button("Ask model").click();
+      await vi.waitFor(() => expect(document.body.textContent).toContain("Fixture found."));
+      expect(document.body.textContent).toContain("Tokens: 14");
+      expect(document.body.textContent).toContain("$0.000020");
+      expect(document.body.textContent).toContain("receipt_assisted");
+      expect(document.querySelector("input[type=password]")).toBeNull();
+    } finally { await unmount(app); }
+  });
+
+  it("cancels an in-flight assisted request and does not render its late result", async () => {
+    let release: ((response: Response) => void) | undefined;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/control-plane")) return Response.json(overview());
+      if (path.startsWith("/api/tools?")) return Response.json({ tools,
+        providers: [{ provider: "demo", state: "ready" }] });
+      if (path === "/api/playground/assisted") return new Promise<Response>((resolve) => { release = resolve; });
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body,
+      props: { data: { assistedEnabled: true } as never } });
+    try {
+      await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value)
+        .toBe("connection_one"));
+      for (const [id, value] of [["assisted-model", "fixture/model"],
+        ["assisted-prompt", "Find fixture"]]) {
+        const field = document.getElementById(id) as HTMLInputElement;
+        field.value = value;
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+      button("Ask model").click();
+      await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+      button("Cancel request").click();
+      release!(Response.json({ status: "answered", answer: "Late answer", model: "fixture/model",
+        servedModels: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2,
+          costUsd: null } }));
+      await vi.waitFor(() => expect(document.body.textContent).toContain("Request cancelled"));
+      expect(document.body.textContent).not.toContain("Late answer");
+    } finally { await unmount(app); }
+  });
+
+  it("routes an assisted write through the visible approval before execution", async () => {
+    let status = "pending";
+    let writes = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/control-plane")) return Response.json(overview());
+      if (path.startsWith("/api/tools?")) return Response.json({ tools,
+        providers: [{ provider: "demo", state: "ready" }] });
+      if (path === "/api/playground/assisted") return Response.json({
+        status: "approval_required", answer: "Review before approving. No change has run.",
+        model: "fixture/model", servedModels: ["fixture/served"], toolId: "demo.write",
+        usage: { promptTokens: 10, completionTokens: 4, totalTokens: 14, costUsd: 0.00002 },
+        approval: approval("pending"),
+      });
+      if (path.startsWith("/api/approvals/status")) return Response.json(approval(status));
+      if (path === "/api/approvals/approve") {
+        status = "approved";
+        return Response.json(approval(status));
+      }
+      if (path === "/api/approvals/execute") {
+        writes += 1;
+        status = "consumed";
+        return Response.json({ id: "receipt_assisted_write", status: "succeeded",
+          result: { title: "fixture" }, errorCode: null });
+      }
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body,
+      props: { data: { assistedEnabled: true } as never } });
+    try {
+      await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value)
+        .toBe("connection_one"));
+      for (const [id, value] of [["assisted-model", "fixture/model"],
+        ["assisted-prompt", "Change fixture"]]) {
+        const field = document.getElementById(id) as HTMLInputElement;
+        field.value = value;
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+      button("Ask model").click();
+      await vi.waitFor(() => expect(document.querySelector("[aria-label='Approval']")?.textContent)
+        .toContain("pending"));
+      expect(writes).toBe(0);
+      button("Approve").click();
+      await vi.waitFor(() => expect(document.querySelector("[aria-label='Approval']")?.textContent)
+        .toContain("approved"));
+      expect(writes).toBe(0);
+      button("Execute approved change").click();
+      await vi.waitFor(() => expect(document.body.textContent).toContain("Approved change completed"));
+      expect(writes).toBe(1);
+      expect(document.body.textContent).toContain("receipt_assisted_write");
     } finally { await unmount(app); }
   });
 });

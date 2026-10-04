@@ -26,6 +26,8 @@ import {
   type ProviderStatus,
 } from "@oh-my-router/tools";
 import type { IntegrationConfig } from "plugfn";
+import type { AssistedPlaygroundServices } from "./assisted-playground.js";
+import { assistedPlaygroundEnabled } from "./direct-playground-rollout.js";
 
 import {
   RuntimeUnavailableError,
@@ -49,6 +51,7 @@ type OMRBindings = Cloudflare.Env & {
   OPENROUTER_VAULT_DATABASE_URL?: string;
   OMR_OPENROUTER_VAULT_ENABLED?: string;
   OMR_OPENROUTER_VAULT_CACHE_DISABLED_CONFIRMED?: string;
+  OMR_ASSISTED_PLAYGROUND_ENABLED?: string;
   DEVICE_CREDENTIAL_WRAPPING_KEY?: string;
   EXECUTION_RESULT_WRAPPING_KEY?: string;
   PLUGFN_ENCRYPTION_KEY?: string;
@@ -62,6 +65,7 @@ export interface CloudflareRouteServices {
   execution: ExecutionRouteServices;
   controlPlane: ControlPlaneRouteServices;
   openRouterVault: OpenRouterVaultRouteServices;
+  assistedPlayground: AssistedPlaygroundServices;
 }
 
 /** Require Worker bindings before constructing any server-side runtime. */
@@ -983,7 +987,35 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
     }),
   });
 
-  return { device, connections, tools, execution, controlPlane, openRouterVault };
+  const assistedPlayground: AssistedPlaygroundServices = {
+    enabled: () => assistedPlaygroundEnabled(environment(event)),
+    authenticate: (request) => requireWebUser(event, request),
+    async withKey(userId, callback) {
+      const runtime = await connectPostgresOpenRouterVault({
+        connectionString: openRouterVaultConnectionString(event),
+        keys: requiredSecret(event, "OPENROUTER_VAULT_KEYS"),
+        activeKeyId: requiredSecret(event, "OPENROUTER_VAULT_ACTIVE_KEY_ID"),
+      });
+      let key: string;
+      try { key = await runtime.vault.withKey(userId, async (value) => value); }
+      finally { await runtime.close(); }
+      return callback(key);
+    },
+    async connections(request, workspaceId) {
+      const overview = await controlPlane.overview(request, workspaceId) as {
+        connections: Awaited<ReturnType<AssistedPlaygroundServices["connections"]>> };
+      return overview.connections;
+    },
+    async discover(request, workspaceId, provider) {
+      const found = await tools.discover(request, { workspaceId, providers: [provider], limit: 100 }) as {
+        tools: Awaited<ReturnType<AssistedPlaygroundServices["discover"]>> };
+      return found.tools;
+    },
+    execute: (request, input) => execution.execute(request, input),
+    requestApproval: (request, input) => execution.requestApproval(request, input),
+  };
+
+  return { device, connections, tools, execution, controlPlane, openRouterVault, assistedPlayground };
 }
 
 /** Public /api routes accept remote MCP grants only for self-revocation. */
