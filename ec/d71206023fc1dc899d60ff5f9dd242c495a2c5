@@ -1,0 +1,37 @@
+apps/web/src/lib/linear-action-keys.ts
+  h_a39f9495f9ec1d 67,83
+  h_a39f9495f9ec1d 17-18,32-55,81-82
+tests/acceptance/direct-playground-ui.test.ts
+  h_a39f9495f9ec1d 398-399
+  h_a39f9495f9ec1d 63-78,314-397
+tests/acceptance/direct-playground-contract.test.ts
+  h_a39f9495f9ec1d 114-115,150-152,154
+  h_a39f9495f9ec1d 12,153
+tests/acceptance/browser-probe.check.mjs
+  h_a39f9495f9ec1d 29-34,39
+tests/acceptance/browser-probe.mjs
+  h_a39f9495f9ec1d 27-30
+packages/execution/src/postgres.integration.test.ts
+  h_a39f9495f9ec1d 1184-1190,1196-1202
+apps/web/src/lib/direct-playground.ts
+  h_a39f9495f9ec1d 14
+apps/web/src/lib/linear-action-keys.test.ts
+  h_a39f9495f9ec1d 60-84
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 42-43,803
+apps/web/src/lib/server/reconciliation-receipts.test.ts
+  h_a39f9495f9ec1d 8-22
+apps/web/src/lib/server/reconciliation-receipts.ts
+  h_a39f9495f9ec1d 52-64
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ecd71206023fc1dc899d60ff5f9dd242c495a2c5",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
