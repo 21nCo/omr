@@ -11,6 +11,9 @@
   import { slackApprovalNotice } from "$lib/slack-approval-notice.js";
   import { V1_PROVIDERS } from "@oh-my-router/tools";
   import type { LinearAccess, SlackAccess } from "@oh-my-router/connections";
+  import type { PageData } from "./$types";
+
+  export let data: PageData;
 
   type WorkspaceAccess = {
     workspace: { id: string; name: string; kind: "personal" | "team" };
@@ -899,6 +902,7 @@
     <div class="account">
       <span>{overview?.actor.email ?? "Signed in"}</span>
       <a class="quiet" href="/app/clients">Client access</a>
+      {#if data.directPlaygroundEnabled}<a class="quiet" href="/app/playground">Test a tool</a>{/if}
       <a class="quiet" href="/app/settings">Personal settings</a>
       <a class="quiet" href="/oauth/manage">MCP access</a>
       <button class="quiet" onclick={() => void signOut()} disabled={busy === "sign-out"}>Sign out</button>

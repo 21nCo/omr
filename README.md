@@ -70,6 +70,13 @@ Personal OpenRouter vault rollout, dedicated database grants, secret rotation an
 rollback are described in [the vault plan](docs/openrouter-vault.md). Its settings
 route stays disabled until OMR-15 completes disposable live acceptance.
 
+The direct connected-tool playground lives at `/app/playground` and is hidden behind
+`OMR_DIRECT_PLAYGROUND_ENABLED=true` until OMR-15 completes staged acceptance. It uses
+the same workspace catalog, account selection, execution, approval and receipt API as
+CLI/MCP. A personal OpenRouter key is not required. Reads return a result and receipt;
+writes require a redacted approval review before execution. The page accepts JSON
+arguments and shows the selected tool's input schema.
+
 Run focused package tests with `npm run test --workspace=<package-name>`. Set
 `OMR_TEST_DATABASE_URL` to a disposable PostgreSQL database to enable the real
 database isolation and transaction canaries.
