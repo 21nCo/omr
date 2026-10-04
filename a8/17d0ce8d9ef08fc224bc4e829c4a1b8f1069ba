@@ -1,0 +1,45 @@
+apps/web/src/routes/app/playground/+page.svelte
+  h_a39f9495f9ec1d 4,199,239-270,453-454,457-458,461-470
+  h_a39f9495f9ec1d 455-456,459-460
+tests/acceptance/direct-playground-ui.test.ts
+  h_a39f9495f9ec1d 199-237
+  h_a39f9495f9ec1d 238-270
+apps/web/src/lib/linear-action-keys.ts
+  h_a39f9495f9ec1d 32-33,47-52
+apps/web/src/lib/server/reconciliation-receipts.ts
+  h_a39f9495f9ec1d 53,61-73
+  h_a39f9495f9ec1d 15,29,76
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 719,746,802,804-810
+packages/execution/src/execution.test.ts
+  h_a39f9495f9ec1d 87,273-295
+  h_a39f9495f9ec1d 296-316
+apps/web/src/lib/direct-playground.ts
+  h_a39f9495f9ec1d 16-17
+packages/execution/src/postgres-approval-migration.test.ts
+  h_a39f9495f9ec1d 184-191,206-246
+apps/web/src/lib/server/reconciliation-receipts.test.ts
+  h_a39f9495f9ec1d 17-18,23-45
+  h_a39f9495f9ec1d 273,333-361
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 646,650
+packages/execution/src/postgres-approval-store.ts
+  h_a39f9495f9ec1d 67-68,308-318
+apps/web/src/lib/workspace-catalog.test.ts
+  h_a39f9495f9ec1d 17-18
+apps/web/src/lib/workspace-catalog.ts
+  h_a39f9495f9ec1d 23-24
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 1325,1348
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a817d0ce8d9ef08fc224bc4e829c4a1b8f1069ba",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
