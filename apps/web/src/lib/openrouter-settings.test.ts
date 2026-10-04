@@ -23,7 +23,7 @@ describe("personal OpenRouter settings states", () => {
       validation: "valid", checkedAt: 1 });
     expect(parseOpenRouterSettingsStatus({})).toBeNull();
     expect(parseOpenRouterSettingsStatus({ configured: true, key: "secret" })).toBeNull();
-    const draft = `sk-or-v1-${"p".repeat(32)}`;
+    const draft = "replacement draft";
     expect(openRouterSettingsDraftAfter("check", draft)).toBe(draft);
     expect(openRouterSettingsDraftAfter("delete", draft)).toBe(draft);
     expect(openRouterSettingsDraftAfter("save", draft)).toBe("");

@@ -2,7 +2,7 @@
 
 The web settings route is `/app/settings`; its API is `GET/PUT/DELETE /api/settings/openrouter` and `POST /api/settings/openrouter/check`. It accepts only an authenticated browser user. Mutations require the request's own Origin. The API has no workspace or owner parameter. It returns only masked status, validation state and check time, with `Cache-Control: no-store`. CLI and MCP grants cannot use it. The future playground must call `OpenRouterVault.withKey` with the freshly authenticated user ID for each request and must not cache the decrypted key across requests or put it in a receipt.
 
-`OMR_OPENROUTER_VAULT_ENABLED` defaults off. Keep it off until OMR-15 verifies a disposable PostgreSQL migration, secrets, browser journey and rollback. Either disabled rollout switch returns 503 with `OPENROUTER_VAULT_DISABLED`; other vault failures return an unavailable response. Do not enable it as part of this migration alone.
+`OMR_OPENROUTER_VAULT_ENABLED` defaults off. Keep it off until OMR-15 verifies a disposable PostgreSQL migration, secrets, browser journey and rollback. Either disabled rollout switch returns 503 with `OPENROUTER_VAULT_DISABLED`. An invalid key returns 422, a missing saved key returns 404, and a revision conflict returns 409. Infrastructure or provider-validation unavailability returns 503; callers should use the response code to distinguish these outcomes. Do not enable it as part of this migration alone.
 
 ## Migration and access
 

@@ -37,10 +37,12 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const KEY_PATTERN = /^sk-or-v1-[A-Za-z0-9_-]{20,502}$/;
 
+/** Bind each ciphertext to its owner and vault purpose through AES-GCM additional data. */
 function context(userId: string): Uint8Array<ArrayBuffer> {
   return new Uint8Array(encoder.encode(`omr:openrouter:personal:v1:${userId}`));
 }
 
+/** Reject malformed key rings before any vault read or write can use them. */
 export function decodeOpenRouterVaultKeys(encoded: string, activeKeyId: string): {
   keys: Map<string, Uint8Array<ArrayBuffer>>; activeKeyId: string;
 } {

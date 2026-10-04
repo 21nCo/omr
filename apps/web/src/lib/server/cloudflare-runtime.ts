@@ -80,6 +80,7 @@ export function databaseConnectionString(event: RequestEvent): string {
   return connectionString;
 }
 
+/** Use the dedicated vault role; never fall back to the primary database binding. */
 function openRouterVaultConnectionString(event: RequestEvent): string {
   const env = environment(event);
   const connectionString = env.OPENROUTER_VAULT_HYPERDRIVE?.connectionString ??
@@ -220,6 +221,7 @@ export function createOpenRouterVaultRouteServices(options: {
   requireUser(request: Request): Promise<string>;
   open(): Promise<Awaited<ReturnType<typeof connectPostgresOpenRouterVault>>>;
 }): OpenRouterVaultRouteServices {
+  /** Authenticate each request and close the vault connection even when an operation fails. */
   async function run<T>(request: Request, mutating: boolean,
     operation: (vault: Awaited<ReturnType<typeof connectPostgresOpenRouterVault>>["vault"], userId: string) => Promise<T>,
   ): Promise<T> {

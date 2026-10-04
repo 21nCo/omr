@@ -23,4 +23,6 @@ npm run sf:smoke
 
 `sf:link` creates repository-local symlinks under OMR's `node_modules`; it does not mutate global npm links. A regular file or directory at a target path is never overwritten.
 
+A clean CI checkout needs the same bootstrap before `npm run test:prepare` or `npm test`: `npm ci` in OMR, then a checkout of `21nCo/super-functions` at the locked `omr/upstream` revision (or a descendant), followed by `sf:install`, `sf:build`, and `sf:link` with `OMR_SUPERFUNCTIONS_WORKTREE` pointing at that checkout. OMR's npm lockfile intentionally does not publish or install those local packages. Running `test:prepare` after only `npm ci` leaves imports such as `@datafn/server` and `@superfunctions/db` unresolved. The hosted review runner must provide this dependency setup before its test command; a provider usage-limit failure is a separate review-service gate.
+
 `sf:smoke` imports every Node-loadable linked package through Node's normal package resolution. This catches missing builds, invalid exports, and links that accidentally resolve to registry packages. Svelte component packages are resolved without importing because their `.svelte` exports require a bundler loader.
