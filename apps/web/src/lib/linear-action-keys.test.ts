@@ -29,6 +29,34 @@ describe("Linear browser action identity", () => {
     expect(await reloaded.key("linear.issues.create", "omr-A", "connection-A", params)).not.toBe(first);
   });
 
+  it("recovers a settled approval by its identity after reload without retaining arguments", async () => {
+    let next = 0;
+    const values = new Map<string, string>();
+    const storage = () => ({ getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+      removeItem: (key: string) => { values.delete(key); } });
+    const make = () => createLinearActionKeys(() => `action-${++next}`, storage, "connected tool");
+    const params = { title: "private write", secret: "sensitive value" };
+    const first = make();
+    const original = await first.key("demo.write", "workspace-A", "connection-A", params);
+    await first.bindApproval("approval-A", "demo.write", "workspace-A", "connection-A", params);
+    expect(JSON.stringify([...values])).not.toContain("sensitive value");
+    const reloaded = make();
+    for (const status of ["pending", "approved", "executing", "uncertain"]) {
+      await expect(reloaded.resetApprovalAfterSettlement("approval-A",
+        async () => ({ id: "approval-A", status }))).rejects.toThrow();
+      expect(await reloaded.key("demo.write", "workspace-A", "connection-A", params)).toBe(original);
+    }
+    await expect(reloaded.resetApprovalAfterSettlement("approval-A",
+      async () => ({ id: "approval-B", status: "consumed" }))).rejects.toThrow("Approval changed");
+    expect(await reloaded.resetApprovalAfterSettlement("approval-A",
+      async () => ({ id: "approval-A", status: "consumed" }), () => false)).toBe(false);
+    expect(await reloaded.key("demo.write", "workspace-A", "connection-A", params)).toBe(original);
+    expect(await reloaded.resetApprovalAfterSettlement("approval-A",
+      async () => ({ id: "approval-A", status: "consumed" }))).toBe(true);
+    expect(await reloaded.key("demo.write", "workspace-A", "connection-A", params)).not.toBe(original);
+  });
+
   it.each(["linear.issues.create", "linear.issues.update"])(
     "keeps a live %s key through replay and resets only after settlement", async (toolId) => {
       let next = 0;

@@ -68,6 +68,7 @@ export function playgroundError(error: unknown): string {
       CONNECTION_SELECTION_REQUIRED: "Select a connected account and try again.",
       CONNECTION_UNAVAILABLE: "Check or reconnect this account in the control plane.",
       CONNECTION_ACCESS_DENIED: "This account is unavailable in the selected workspace.",
+      TOOL_NOT_FOUND: "Refresh the tool catalog and select an available tool again.",
       EXECUTION_INPUT_INVALID: "Check the tool schema and arguments.",
       APPROVAL_UNAVAILABLE: "This approval expired or is no longer available. Check its status before retrying.",
       EXECUTION_OUTCOME_UNKNOWN: "The provider outcome is uncertain. Verify the receipt before another write.",

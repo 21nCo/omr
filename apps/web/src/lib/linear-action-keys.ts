@@ -17,6 +17,8 @@ export function createLinearActionKeys(makeKey: () => string,
   storage?: () => Pick<Storage, "getItem" | "setItem" | "removeItem">,
   provider = "Linear") {
   const current = new Map<string, string>();
+  const approvalIdentities = new Map<string, string>();
+  const approvalStorageKey = (approvalId: string) => `${PREFIX}approval:${approvalId}`;
   const fingerprint = async (toolId: string, workspaceId: string, connectionId: string,
     params: object): Promise<string> => {
     const selected = JSON.stringify([toolId, workspaceId, connectionId, params]);
@@ -25,6 +27,39 @@ export function createLinearActionKeys(makeKey: () => string,
       .map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
   };
   return {
+    /** Associate a server approval with its secret-free fingerprint for reload recovery. */
+    async bindApproval(approvalId: string, toolId: string, workspaceId: string,
+      connectionId: string, params: object): Promise<void> {
+      const identity = await fingerprint(toolId, workspaceId, connectionId, params);
+      approvalIdentities.set(approvalId, identity);
+      try { storage?.().setItem(approvalStorageKey(approvalId), identity); }
+      catch { /* The current page still remembers the approval. */ }
+    },
+    async resetApprovalAfterSettlement(approvalId: string,
+      probe: () => Promise<{ id: string; status: string }>,
+      stillSelected: () => boolean = () => true): Promise<boolean> {
+      const approval = await probe();
+      if (approval.id !== approvalId) throw new Error("Approval changed. Check its status before another action.");
+      if (!["consumed", "rejected", "failed", "expired"].includes(approval.status)) {
+        throw new Error(approval.status === "uncertain"
+          ? `Verify this uncertain ${provider} action and reconcile its receipt before starting another.`
+          : `This ${provider} action is still active. Finish or reject it before starting another.`);
+      }
+      let identity = approvalIdentities.get(approvalId);
+      if (!identity) {
+        try { identity = storage?.().getItem(approvalStorageKey(approvalId)) ?? undefined; }
+        catch { /* Recovery without browser storage is still safe. */ }
+      }
+      if (!stillSelected()) return false;
+      if (!identity || !new RegExp(`^${PREFIX}[0-9a-f]{64}$`).test(identity)) return false;
+      current.delete(identity);
+      approvalIdentities.delete(approvalId);
+      try {
+        storage?.().removeItem(identity);
+        storage?.().removeItem(approvalStorageKey(approvalId));
+      } catch { /* The current page is already cleared. */ }
+      return true;
+    },
     async existingKey(toolId: string, workspaceId: string, connectionId: string,
       params: object): Promise<string | undefined> {
       const identity = await fingerprint(toolId, workspaceId, connectionId, params);

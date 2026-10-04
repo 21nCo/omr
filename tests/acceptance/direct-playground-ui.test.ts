@@ -48,9 +48,204 @@ function overview(connections = [{ id: "connection_one", workspaceId: "workspace
       { workspace: { id: "workspace_two", name: "Other" } }], connections, approvals };
 }
 
-afterEach(() => { vi.unstubAllGlobals(); document.body.replaceChildren(); });
+afterEach(() => { vi.unstubAllGlobals(); sessionStorage.clear(); document.body.replaceChildren(); });
 
 describe("direct playground form", () => {
+  it("refreshes selection and catalog after switching provider accounts", async () => {
+    const connections = ["one", "two"].map((id) => ({ id: `connection_${id}`,
+      workspaceId: "workspace_one", provider: "demo", label: `Account ${id}`,
+      status: "active", readiness: "ready", providerState: "ready", selectable: true,
+      selected: id === "one" }));
+    let selected = "connection_one";
+    let catalogReads = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.startsWith("/api/control-plane")) return Response.json(overview(connections.map(
+        (connection) => ({ ...connection, selected: connection.id === selected }))));
+      if (path.startsWith("/api/tools?")) {
+        catalogReads += 1;
+        return Response.json({ tools, providers: [{ provider: "demo", state: "ready" }] });
+      }
+      if (path === "/api/connections/select") {
+        selected = (JSON.parse(String(init?.body)) as { connectionId: string }).connectionId;
+        return Response.json({ id: selected });
+      }
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body });
+    try {
+      await vi.waitFor(() => expect(catalogReads).toBe(1));
+      select("playground-connection", "connection_two");
+      await vi.waitFor(() => expect(catalogReads).toBe(2));
+      expect(selected).toBe("connection_two");
+      expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value)
+        .toBe("connection_two");
+      expect(document.body.textContent).toContain("Account two is ready");
+    } finally { await unmount(app); }
+  });
+
+  it("guides refresh and reselection when a catalog tool disappears before manifest load", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/control-plane")) return Response.json(overview());
+      if (path.startsWith("/api/tools?")) return Response.json({ tools,
+        providers: [{ provider: "demo", state: "ready" }] });
+      if (path.startsWith("/api/tools/manifest")) return Response.json({ error: "TOOL_NOT_FOUND" },
+        { status: 404 });
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body });
+    try {
+      await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>(
+        "#playground-tool")?.disabled).toBe(false));
+      select("playground-tool", "demo.read");
+      await vi.waitFor(() => expect(document.querySelector("[role=alert]")?.textContent)
+        .toContain("Refresh the tool catalog and select an available tool again"));
+      expect(document.querySelector("#playground-arguments")).toBeNull();
+    } finally { await unmount(app); }
+  });
+
+  it("holds an uncertain resumed write until status confirms settlement", async () => {
+    let status = "uncertain";
+    let newApprovals = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/control-plane")) return Response.json(overview(undefined,
+        [approval("uncertain")]));
+      if (path.startsWith("/api/tools?")) return Response.json({ tools,
+        providers: [{ provider: "demo", state: "ready" }] });
+      if (path.startsWith("/api/approvals/status")) return Response.json(approval(status));
+      if (path === "/api/approvals") newApprovals += 1;
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body });
+    try {
+      await vi.waitFor(() => expect(button("Review approval").disabled).toBe(false));
+      button("Review approval").click();
+      await vi.waitFor(() => expect(document.body.textContent).toContain("outcome is uncertain"));
+      expect([...document.querySelectorAll("button")].some((item) =>
+        item.textContent?.trim() === "Start a new action")).toBe(false);
+      status = "consumed";
+      button("Check status").click();
+      await vi.waitFor(() => expect(button("Start a new action").disabled).toBe(false));
+      button("Start a new action").click();
+      await vi.waitFor(() => expect(document.body.textContent).toContain("Ready to choose another action"));
+      expect(newApprovals).toBe(0);
+    } finally { await unmount(app); }
+  });
+
+  it("repeats a settled resumed write after reload despite a different selected tool", async () => {
+    const approvals = new Map<string, ReturnType<typeof approval>>();
+    const keys = new Map<string, string>();
+    let next = 0;
+    let writes = 0;
+    let approvalPosts = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, string> : {};
+      if (path.startsWith("/api/control-plane")) return Response.json(overview(undefined,
+        [...approvals.values()].filter((item) => ["pending", "approved", "executing", "uncertain"]
+          .includes(item.status))));
+      if (path.startsWith("/api/tools?")) return Response.json({ tools,
+        providers: [{ provider: "demo", state: "ready" }] });
+      if (path.startsWith("/api/tools/manifest")) return Response.json(
+        tools.find((tool) => path.includes(tool.id)));
+      if (path === "/api/approvals") {
+        approvalPosts += 1;
+        let id = keys.get(body.idempotencyKey);
+        if (!id) { id = `approval_${++next}`; keys.set(body.idempotencyKey, id);
+          approvals.set(id, { ...approval("pending"), id }); }
+        return Response.json(approvals.get(id));
+      }
+      if (path.startsWith("/api/approvals/status")) return Response.json(
+        approvals.get(new URL(`https://omr.invalid${path}`).searchParams.get("approvalId") ?? ""));
+      if (path === "/api/approvals/approve") {
+        const current = approvals.get(body.approvalId)!;
+        approvals.set(current.id, { ...current, status: "approved" });
+        return Response.json(approvals.get(current.id));
+      }
+      if (path === "/api/approvals/execute") {
+        writes += 1;
+        const current = approvals.get(body.approvalId)!;
+        approvals.set(current.id, { ...current, status: "consumed", executionReceiptId: `receipt_${writes}` });
+        return Response.json({ id: `receipt_${writes}`, status: "succeeded", result: {},
+          errorCode: null });
+      }
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    let app = mount(Playground, { target: document.body });
+    const writeArgs = '{"title":"repeat me"}';
+    try {
+      await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>(
+        "#playground-tool")?.disabled).toBe(false));
+      select("playground-tool", "demo.write");
+      await vi.waitFor(() => expect(button("Request approval").disabled).toBe(false));
+      const field = document.getElementById("playground-arguments") as HTMLTextAreaElement;
+      field.value = writeArgs;
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      submit();
+      await vi.waitFor(() => expect(button("Approve").disabled).toBe(false));
+      expect(writes).toBe(0);
+      await unmount(app);
+      document.body.replaceChildren();
+      app = mount(Playground, { target: document.body });
+      await vi.waitFor(() => expect(button("Review approval").disabled).toBe(false));
+      select("playground-tool", "demo.read");
+      await vi.waitFor(() => expect(button("Run read").disabled).toBe(false));
+      button("Review approval").click();
+      await vi.waitFor(() => expect(button("Approve").disabled).toBe(false));
+      button("Approve").click();
+      await vi.waitFor(() => expect(button("Execute approved change").disabled).toBe(false));
+      button("Execute approved change").click();
+      await vi.waitFor(() => expect(button("Start a new action").disabled).toBe(false));
+      expect(writes).toBe(1);
+      button("Start a new action").click();
+      await vi.waitFor(() => expect(document.body.textContent).toContain("Ready for a new action"));
+      expect(approvalPosts).toBe(1);
+      select("playground-tool", "demo.write");
+      await vi.waitFor(() => expect(button("Request approval").disabled).toBe(false));
+      const repeated = document.getElementById("playground-arguments") as HTMLTextAreaElement;
+      repeated.value = writeArgs;
+      repeated.dispatchEvent(new Event("input", { bubbles: true }));
+      submit();
+      await vi.waitFor(() => expect(approvals.size).toBe(2));
+      expect(writes).toBe(1);
+      await vi.waitFor(() => expect(button("Approve").disabled).toBe(false));
+      button("Approve").click();
+      await vi.waitFor(() => expect(button("Execute approved change").disabled).toBe(false));
+      button("Execute approved change").click();
+      await vi.waitFor(() => expect(button("Start a new action").disabled).toBe(false));
+      expect(writes).toBe(2);
+      await unmount(app);
+      document.body.replaceChildren();
+      app = mount(Playground, { target: document.body });
+      await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>(
+        "#playground-tool")?.disabled).toBe(false));
+      select("playground-tool", "demo.write");
+      await vi.waitFor(() => expect(button("Request approval").disabled).toBe(false));
+      const afterReload = document.getElementById("playground-arguments") as HTMLTextAreaElement;
+      afterReload.value = writeArgs;
+      afterReload.dispatchEvent(new Event("input", { bubbles: true }));
+      submit();
+      await vi.waitFor(() => expect(document.body.textContent).toContain("already completed"));
+      expect(writes).toBe(2);
+      expect(approvals.size).toBe(2);
+      button("Start a new action").click();
+      await vi.waitFor(() => expect(document.body.textContent).toContain("Ready for a new action"));
+      select("playground-tool", "demo.write");
+      await vi.waitFor(() => expect(button("Request approval").disabled).toBe(false));
+      const third = document.getElementById("playground-arguments") as HTMLTextAreaElement;
+      third.value = writeArgs;
+      third.dispatchEvent(new Event("input", { bubbles: true }));
+      submit();
+      await vi.waitFor(() => expect(approvals.size).toBe(3));
+      expect(writes).toBe(2);
+    } finally { await unmount(app); }
+  });
   it("does not offer a provider that the shared selection service marks unconfigured", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);

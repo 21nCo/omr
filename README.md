@@ -1,6 +1,6 @@
 # OMR
 
-OMR is a portable tool integration layer for people and teams. Connect provider accounts in its web control plane, then use the same authorized tools through its CLI or MCP from external agents. A limited web playground is planned for testing connected tools with each user's OpenRouter key; OMR is not a general-purpose agent host.
+OMR is a portable tool integration layer for people and teams. Connect provider accounts in its web control plane, then use the same authorized tools through its CLI or MCP from external agents. The gated direct web playground tests connected tools without an OpenRouter key; OMR is not a general-purpose agent host.
 
 ## Local development
 

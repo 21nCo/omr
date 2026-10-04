@@ -45,8 +45,10 @@
     approval = value;
     approvalNeedsRefresh = false;
     if (overview?.approvals) overview = { ...overview,
-      approvals: overview.approvals.map((item) => item.id === value.id
-        ? { ...value, browserActionable: item.browserActionable } : item) };
+      approvals: overview.approvals.some((item) => item.id === value.id)
+        ? overview.approvals.map((item) => item.id === value.id
+          ? { ...value, browserActionable: item.browserActionable } : item)
+        : [...overview.approvals, { ...value, browserActionable: true }] };
   }
 
   async function discover(selectedWorkspaceId: string): Promise<PlaygroundCatalog> {
@@ -165,9 +167,17 @@
           workspaceId: selected.workspaceId, connectionId: selected.connectionId,
           toolId: selected.toolId, params, idempotencyKey,
         });
+        await actionKeys.bindApproval(value.id, selected.toolId, selected.workspaceId,
+          selected.connectionId, params);
         if (turn === generation) {
           showApproval(value);
-          notice = "Review the redacted arguments and account, then approve or reject. No provider change has run.";
+          notice = value.status === "pending"
+            ? "Review the redacted arguments and account, then approve or reject. No provider change has run."
+            : value.status === "consumed"
+              ? "This action already completed. Start a new action to repeat the change."
+              : value.status === "uncertain" || value.status === "executing"
+                ? "Check the provider and receipt before another write. Do not repeat this action yet."
+                : "Check this approval's status before another action.";
         }
       }
     } catch (caught) {
@@ -240,17 +250,21 @@
   }
 
   async function newAction() {
-    if (!approval || !manifest || busy) return;
+    if (!approval || busy || loading || !["consumed", "rejected", "failed", "expired"].includes(approval.status)) return;
     const turn = generation;
+    const settled = approval;
     busy = "Checking settlement…";
     error = "";
     try {
-      const params = parsePlaygroundArguments(argumentsText);
-      await actionKeys.resetAfterSettlement(toolId, workspaceId, connectionId, params,
-        (idempotencyKey) => request<PlaygroundApproval>("/api/approvals", {
-          workspaceId, connectionId, toolId, params, idempotencyKey,
-        }), () => turn === generation);
-      if (turn === generation) { approval = null; receipt = null; notice = "Ready for a new action."; }
+      const recovered = await actionKeys.resetApprovalAfterSettlement(settled.id,
+        () => request<PlaygroundApproval>(`/api/approvals/status?${new URLSearchParams({
+          approvalId: settled.id, workspaceId: settled.workspaceId,
+        })}`), () => turn === generation && approval?.id === settled.id);
+      if (turn === generation && approval?.id === settled.id) {
+        resetAction();
+        notice = recovered ? "Ready for a new action. Choose a tool and enter its arguments."
+          : "Ready to choose another action. If the previous action reappears as completed, start a new action again.";
+      }
     } catch (caught) {
       if (turn === generation) error = playgroundError(caught);
     } finally {
@@ -373,7 +387,7 @@
       {/if}
       {#if approval.executionReceiptId}<p>Execution receipt: <code>{approval.executionReceiptId}</code></p>{/if}
       <button type="button" disabled={!!busy} onclick={() => void approvalAction("status")}>Check status</button>
-      {#if manifest && ["consumed", "rejected", "failed", "expired"].includes(approval.status)}
+      {#if ["consumed", "rejected", "failed", "expired"].includes(approval.status)}
         <button type="button" disabled={!!busy} onclick={() => void newAction()}>Start a new action</button>
       {/if}
     </section>
