@@ -899,6 +899,7 @@
     <div class="account">
       <span>{overview?.actor.email ?? "Signed in"}</span>
       <a class="quiet" href="/app/clients">Client access</a>
+      <a class="quiet" href="/app/settings">Personal settings</a>
       <a class="quiet" href="/oauth/manage">MCP access</a>
       <button class="quiet" onclick={() => void signOut()} disabled={busy === "sign-out"}>Sign out</button>
     </div>

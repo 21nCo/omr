@@ -60,3 +60,4 @@ export async function connectPostgresIdentityRuntime(
 }
 
 export { PostgresWorkspaceStore } from "./postgres-store.js";
+export { connectPostgresOpenRouterVault, PostgresOpenRouterVaultStore } from "./openrouter-vault-postgres.js";

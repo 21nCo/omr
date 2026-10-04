@@ -30,6 +30,7 @@ import {
 import { publicDatafnSchema } from "@oh-my-router/data";
 import { connectPostgresDataRuntime } from "@oh-my-router/data/postgres";
 import { connectPostgresIdentityRuntime } from "@oh-my-router/identity/postgres";
+import { OpenRouterVaultError, type OpenRouterKeyStatus } from "@oh-my-router/identity";
 import {
   WorkspaceAccessDeniedError,
   WorkspaceInputError,
@@ -145,6 +146,13 @@ export interface ControlPlaneRouteServices {
   listManualGrants(request: Request, cursor?: string): Promise<unknown>;
   revokeManualClient(request: Request, clientId: string): Promise<unknown>;
   revokeSelf?(request: Request): Promise<unknown>;
+}
+
+export interface OpenRouterVaultRouteServices {
+  status(request: Request): Promise<OpenRouterKeyStatus>;
+  save(request: Request, key: string): Promise<OpenRouterKeyStatus>;
+  check(request: Request): Promise<OpenRouterKeyStatus>;
+  delete(request: Request): Promise<OpenRouterKeyStatus>;
 }
 
 class RequestInputError extends Error {
@@ -383,6 +391,7 @@ export function createOMRRouter(
   toolServices: ToolRouteServices = unavailableToolServices(),
   executionServices: ExecutionRouteServices = unavailableExecutionServices(),
   controlPlaneServices: ControlPlaneRouteServices = unavailableControlPlaneServices(),
+  openRouterVaultServices?: OpenRouterVaultRouteServices,
 ) {
   return createRouter({
     maxBodyBytes: 16 * 1024,
@@ -408,6 +417,12 @@ export function createOMRRouter(
       }
       if (error instanceof RequestOriginDeniedError) {
         return Response.json({ error: error.code }, { status: 403 });
+      }
+      if (error instanceof OpenRouterVaultError) {
+        const status = error.code === "OPENROUTER_KEY_INVALID" ? 422 :
+          error.code === "OPENROUTER_KEY_MISSING" ? 404 :
+          error.code === "OPENROUTER_KEY_CONFLICT" ? 409 : 503;
+        return Response.json({ error: error.code }, { status, headers: PRIVATE_RESPONSE });
       }
       if (error instanceof WorkspaceInputError) {
         return Response.json({ error: error.code, message: error.message }, { status: 400 });
@@ -518,14 +533,15 @@ export function createOMRRouter(
           { status: 409, headers: PRIVATE_RESPONSE });
       }
       if (error instanceof RuntimeUnavailableError) {
-        return Response.json({ error: error.code }, { status: 503 });
+        return Response.json({ error: error.code }, { status: 503, headers: PRIVATE_RESPONSE });
       }
       const authError = error as { code?: unknown };
       if (authError?.code === "AUTHFN_UNAUTHENTICATED") {
         return Response.json({ error: "AUTHFN_UNAUTHENTICATED" }, { status: 401 });
       }
       const path = new URL(request.url).pathname;
-      const connectionRequest = path.startsWith("/api/connections/");
+      const connectionRequest = path.startsWith("/api/connections/") ||
+        path.startsWith("/api/settings/openrouter");
       const executionRequest = path === "/api/tools/execute" || path.startsWith("/api/approvals");
       let loggedError: string;
       if (connectionRequest || executionRequest) {
@@ -542,6 +558,40 @@ export function createOMRRouter(
       return Response.json({ error: "INTERNAL_ERROR" }, { status: 500 });
     },
     routes: [
+      {
+        method: "GET",
+        path: "/api/settings/openrouter",
+        handler: async (request) => {
+          if (!openRouterVaultServices) throw new RuntimeUnavailableError("Vault is unavailable");
+          return Response.json(await openRouterVaultServices.status(request), { headers: PRIVATE_RESPONSE });
+        },
+      },
+      {
+        method: "PUT",
+        path: "/api/settings/openrouter",
+        handler: async (request, context) => {
+          if (!openRouterVaultServices) throw new RuntimeUnavailableError("Vault is unavailable");
+          const body = objectBody(await context.json());
+          return Response.json(await openRouterVaultServices.save(request, requiredString(body, "key")),
+            { headers: PRIVATE_RESPONSE });
+        },
+      },
+      {
+        method: "POST",
+        path: "/api/settings/openrouter/check",
+        handler: async (request) => {
+          if (!openRouterVaultServices) throw new RuntimeUnavailableError("Vault is unavailable");
+          return Response.json(await openRouterVaultServices.check(request), { headers: PRIVATE_RESPONSE });
+        },
+      },
+      {
+        method: "DELETE",
+        path: "/api/settings/openrouter",
+        handler: async (request) => {
+          if (!openRouterVaultServices) throw new RuntimeUnavailableError("Vault is unavailable");
+          return Response.json(await openRouterVaultServices.delete(request), { headers: PRIVATE_RESPONSE });
+        },
+      },
       {
         method: "GET",
         path: "/api/health",
