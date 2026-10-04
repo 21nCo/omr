@@ -1,0 +1,14 @@
+.github/workflows/vault-contract.yml
+  h_a39f9495f9ec1d 24
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5d5d1926b3aad6be22bfbc2cbbbafb2f3e0f7952",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
