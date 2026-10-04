@@ -1,0 +1,42 @@
+README.md
+  h_a39f9495f9ec1d 89-91
+apps/web/src/lib/direct-playground.ts
+  h_a39f9495f9ec1d 33,35,97-102,121-122,136,139-140
+apps/web/src/lib/server/assisted-playground.ts
+  h_a39f9495f9ec1d 10-11,28,36-38,45-55,78-84,93-103,134,140,145-157,160-161,163,171,175,178-181,184-186,191-192,211-212,216-223,225-251,253-323,326-352,354,356-357
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 15-17,30,994-1002,1026-1040
+apps/web/src/lib/server/router.ts
+  h_a39f9495f9ec1d 2,404-405,570-581,593
+apps/web/src/routes/app/playground/+page.svelte
+  h_a39f9495f9ec1d 7,73-76,78,83-91,93-102,116-142
+docs/assisted-playground.md
+  h_a39f9495f9ec1d 1-29
+packages/execution/src/assisted-status-postgres.ts
+  h_a39f9495f9ec1d 1-26
+packages/execution/src/postgres.ts
+  h_a39f9495f9ec1d 2
+packages/identity/migrations/0021_assisted_turn_quota.sql
+  h_a39f9495f9ec1d 1-10
+packages/identity/src/assisted-turn-quota-postgres.integration.test.ts
+  h_a39f9495f9ec1d 1-48
+packages/identity/src/assisted-turn-quota-postgres.ts
+  h_a39f9495f9ec1d 1-49
+packages/identity/src/postgres.ts
+  h_a39f9495f9ec1d 64-65
+tests/acceptance/assisted-playground-contract.test.ts
+  h_a39f9495f9ec1d 19-20,42,48,132-133,150,184-325
+tests/acceptance/direct-playground-ui.test.ts
+  h_a39f9495f9ec1d 790,797-799,801,828-831,837-838,843-849,873-916
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c501374629e9223e512c30af17c7af45f30f4926",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
