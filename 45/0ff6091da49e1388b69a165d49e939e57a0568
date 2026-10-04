@@ -1,0 +1,24 @@
+README.md
+  h_a39f9495f9ec1d 3
+apps/web/src/lib/direct-playground.ts
+  h_a39f9495f9ec1d 71
+apps/web/src/lib/linear-action-keys.test.ts
+  h_a39f9495f9ec1d 32-59
+apps/web/src/lib/linear-action-keys.ts
+  h_a39f9495f9ec1d 20-21,30-62
+apps/web/src/routes/app/playground/+page.svelte
+  h_a39f9495f9ec1d 48-51,170-171,174-180,253,255,259-267,390
+tests/acceptance/direct-playground-ui.test.ts
+  h_a39f9495f9ec1d 51,54-248
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "450ff6091da49e1388b69a165d49e939e57a0568",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
