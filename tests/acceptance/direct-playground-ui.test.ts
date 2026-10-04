@@ -925,6 +925,109 @@ describe("direct playground form", () => {
     } finally { await unmount(app); }
   });
 
+  it.each([
+    { settlement: "consumed", lostResponse: false },
+    { settlement: "rejected", lostResponse: false },
+    { settlement: "consumed", lostResponse: true },
+  ])("starts a fresh identical assisted request after $settlement (lost response: $lostResponse)",
+    async ({ settlement, lostResponse }) => {
+      const requestIds: string[] = [];
+      const approvals = new Map<string, PlaygroundApproval>();
+      let writes = 0;
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = String(input);
+        const body = init?.body ? JSON.parse(String(init.body)) as Record<string, string> : {};
+        if (path.startsWith("/api/control-plane")) return Response.json(overview(undefined,
+          [...approvals.values()].filter((item) => item.status === "pending")));
+        if (path.startsWith("/api/tools?")) return Response.json({ tools,
+          providers: [{ provider: "demo", state: "ready" }] });
+        if (path.startsWith("/api/playground/assisted/status")) return Response.json({
+          approval: approvals.get("approval_1") ?? null, receipt: null });
+        if (path === "/api/playground/assisted") {
+          const id = body.requestId;
+          requestIds.push(id);
+          const approvalId = `approval_${approvals.size + 1}`;
+          approvals.set(approvalId, { ...approval("pending"), id: approvalId });
+          if (lostResponse && requestIds.length === 1) throw new TypeError("response lost after commit");
+          return Response.json({ status: "approval_required", answer: "Review the action.",
+            model: "fixture/model", servedModels: ["fixture/served"], toolId: "demo.write",
+            usage: { promptTokens: 2, completionTokens: 1, totalTokens: 3, costUsd: 0.00001 },
+            approval: approvals.get(approvalId) });
+        }
+        if (path.startsWith("/api/approvals/status")) {
+          const id = new URL(`https://omr.invalid${path}`).searchParams.get("approvalId") ?? "";
+          const key = `assisted_${requestIds[Number(id.slice(-1)) - 1]}`;
+          const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
+          return Response.json({ ...approvals.get(id), actionKeyDigest: [...new Uint8Array(bytes)]
+            .map((byte) => byte.toString(16).padStart(2, "0")).join("") });
+        }
+        if (path === "/api/approvals/approve" || path === "/api/approvals/reject") {
+          const current = approvals.get(body.approvalId)!;
+          const next = { ...current, status: path.endsWith("reject") ? "rejected" : "approved" };
+          approvals.set(current.id, next);
+          return Response.json(next);
+        }
+        if (path === "/api/approvals/execute") {
+          writes += 1;
+          const current = approvals.get(body.approvalId)!;
+          approvals.set(current.id, { ...current, status: "consumed",
+            executionReceiptId: `receipt_${writes}` });
+          return Response.json({ id: `receipt_${writes}`, status: "succeeded", result: {},
+            errorCode: null });
+        }
+        return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      let app = mount(Playground, { target: document.body,
+        props: { data: { assistedEnabled: true } as never } });
+      try {
+        await vi.waitFor(() => expect(button("Ask model").disabled).toBe(true));
+        for (const [id, value] of [["assisted-model", "fixture/model"],
+          ["assisted-prompt", "Repeat this exact change"]]) {
+          const field = document.getElementById(id) as HTMLInputElement;
+          field.value = value;
+          field.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+        button("Ask model").click();
+        await vi.waitFor(() => expect(requestIds).toHaveLength(1));
+        if (lostResponse) {
+          await vi.waitFor(() => expect(button("Review approval").disabled).toBe(false));
+          await unmount(app);
+          document.body.replaceChildren();
+          app = mount(Playground, { target: document.body,
+            props: { data: { assistedEnabled: true } as never } });
+          await vi.waitFor(() => expect(button("Review approval").disabled).toBe(false));
+          button("Review approval").click();
+        }
+        await vi.waitFor(() => expect(button(settlement === "rejected" ? "Reject" : "Approve")
+          .disabled).toBe(false));
+        button(settlement === "rejected" ? "Reject" : "Approve").click();
+        if (settlement === "consumed") {
+          await vi.waitFor(() => expect(button("Execute approved change").disabled).toBe(false));
+          button("Execute approved change").click();
+          await vi.waitFor(() => expect(writes).toBe(1));
+        }
+        await vi.waitFor(() => expect(button("Start a new action").disabled).toBe(false));
+        button("Start a new action").click();
+        await vi.waitFor(() => expect(document.body.textContent).toContain("Ready for a new action"));
+        expect(approvals.get("approval_1")?.status).toBe(settlement);
+        expect(writes).toBe(settlement === "consumed" ? 1 : 0);
+        if (lostResponse) {
+          for (const [id, value] of [["assisted-model", "fixture/model"],
+            ["assisted-prompt", "Repeat this exact change"]]) {
+            const field = document.getElementById(id) as HTMLInputElement;
+            field.value = value;
+            field.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+          await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+        }
+        button("Ask model").click();
+        await vi.waitFor(() => expect(requestIds).toHaveLength(2));
+        expect(requestIds[1]).not.toBe(requestIds[0]);
+      } finally { await unmount(app); }
+    });
+
   it("routes an assisted write through the visible approval before execution", async () => {
     let status = "pending";
     let writes = 0;

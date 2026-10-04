@@ -13,7 +13,8 @@
 
   const request = createPlaygroundRequest(fetch, () =>
     location.assign(`/login?returnTo=${encodeURIComponent(location.pathname)}`));
-  const actionKeys = createLinearActionKeys(() => crypto.randomUUID(), () => sessionStorage, "connected tool");
+  const actionKeys = createLinearActionKeys(() => crypto.randomUUID(), () => sessionStorage,
+    "connected tool", (key) => [key, `assisted_${key}`]);
   let overview: PlaygroundOverview | null = null;
   let catalog: PlaygroundCatalog | null = null;
   let workspaceId = "";
