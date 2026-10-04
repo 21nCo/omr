@@ -222,19 +222,19 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
         result.rows[0]?.approval_id !== targetId) throw new ExecutionIdempotencyConflictError();
   }
 
-  /** Persist expiry on a status read without changing executing or uncertain writes. */
+  /** Persist expiry using the service clock without releasing an executing or uncertain write. */
   async getForActor(approvalId: string, actorUserId: string,
     deadlineAt?: number, now?: number): Promise<ExecutionApproval> {
     if (now !== undefined) {
       await this.query(
         `UPDATE omr_control.execution_approvals AS approval
-         SET status = 'expired', updated_at = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint
+         SET status = 'expired', updated_at = $3
          WHERE id = $1 AND actor_user_id = $2
            AND status IN ('pending', 'approved')
-           AND expires_at <= (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint
+           AND expires_at <= $3
            AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
              WHERE workspace_id = approval.workspace_id AND user_id = $2)`,
-        [approvalId, actorUserId], deadlineAt,
+        [approvalId, actorUserId, now], deadlineAt,
       );
     }
     return this.transition(
@@ -246,42 +246,60 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     );
   }
 
+  /** Apply consent at the service-supplied expiry time while locking membership. */
   async approve(input: {
     approvalId: string;
     actorUserId: string;
     now: number;
+    clock?: () => number;
   }): Promise<ExecutionApproval> {
-    return this.transition(
-      `UPDATE omr_control.execution_approvals
-       SET status = 'approved', approved_by = $2,
-           decided_at = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint,
-           updated_at = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint
-       WHERE id = $1 AND actor_user_id = $2 AND status = 'pending'
-         AND expires_at > (SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint
-           FROM omr_control.workspace_memberships
-           WHERE workspace_id = execution_approvals.workspace_id AND user_id = $2 FOR SHARE)
-       RETURNING ${COLUMNS}`,
-      [input.approvalId, input.actorUserId],
-    );
+    return this.decide(input, "approved");
   }
 
+  /** Reject only a still-live pending intent under the same membership fence. */
   async reject(input: {
     approvalId: string;
     actorUserId: string;
     now: number;
+    clock?: () => number;
   }): Promise<ExecutionApproval> {
-    return this.transition(
-      `UPDATE omr_control.execution_approvals
-       SET status = 'rejected',
-           decided_at = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint,
-           updated_at = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint
-       WHERE id = $1 AND actor_user_id = $2 AND status = 'pending'
-         AND expires_at > (SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint
-           FROM omr_control.workspace_memberships
-           WHERE workspace_id = execution_approvals.workspace_id AND user_id = $2 FOR SHARE)
-       RETURNING ${COLUMNS}`,
-      [input.approvalId, input.actorUserId],
-    );
+    return this.decide(input, "rejected");
+  }
+
+  /** Recheck expiry after lock acquisition before committing a decision. */
+  private async decide(input: { approvalId: string; actorUserId: string; now: number;
+    clock?: () => number }, status: "approved" | "rejected"): Promise<ExecutionApproval> {
+    const deadlineAt = Date.now() + EXECUTION_INVOCATION_DEADLINE_MS;
+    const decideWithClient = async (client: Client): Promise<ExecutionApproval> => {
+      const query = <R extends object>(sql: string, values?: unknown[]) =>
+        withinInvocationDeadline(deadlineAt, () => client.query<R>(sql, values));
+      await query("BEGIN");
+      try {
+        const result = await query<ApprovalRow>(
+          `UPDATE omr_control.execution_approvals
+           SET status = $3, approved_by = CASE WHEN $3 = 'approved' THEN $2 ELSE NULL END,
+               decided_at = $4, updated_at = $4
+           WHERE id = $1 AND actor_user_id = $2 AND status = 'pending'
+             AND expires_at > (SELECT $4::bigint
+               FROM omr_control.workspace_memberships
+               WHERE workspace_id = execution_approvals.workspace_id AND user_id = $2 FOR SHARE)
+           RETURNING ${COLUMNS}`,
+          [input.approvalId, input.actorUserId, status, input.now],
+        );
+        const row = result.rows[0];
+        if (!row || Number(row.expires_at) <= (input.clock?.() ?? Date.now())) {
+          throw new ApprovalUnavailableError();
+        }
+        await query("COMMIT");
+        return this.toApproval(row);
+      } catch (error) {
+        await query("ROLLBACK").catch(() => undefined);
+        throw error;
+      }
+    };
+    if (this.runOwnedClient) return this.runOwnedClient(deadlineAt, decideWithClient);
+    if (!this.client) throw new Error("Approval decisions require a PostgreSQL connection");
+    return decideWithClient(this.client);
   }
 
   async claim(input: {
@@ -289,6 +307,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     actorUserId: string;
     principalKey: string;
     now: number;
+    clock?: () => number;
     deadlineAt: number;
   }): Promise<ExecutionApproval> {
     if (!this.claimConnectionString && (!this.client || this.client instanceof PostgresClient)) {
@@ -309,7 +328,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
   }
 
   private async claimWithClient(input: { approvalId: string; actorUserId: string;
-    principalKey: string; now: number; deadlineAt: number }, client: Client,
+    principalKey: string; now: number; clock?: () => number; deadlineAt: number }, client: Client,
   connected: boolean): Promise<ExecutionApproval> {
     const query = <R extends object>(sql: string, values?: unknown[]) =>
       withinInvocationDeadline(input.deadlineAt, () => client.query<R>(sql, values));
@@ -332,16 +351,14 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
        SET status = 'executing', updated_at = $4
        WHERE id = $1 AND actor_user_id = $2 AND principal_key = $3
          AND status = 'approved'
-         AND expires_at > (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint
+         AND expires_at > $4
          AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
                      WHERE workspace_id = execution_approvals.workspace_id AND user_id = $2 FOR SHARE)
        RETURNING ${COLUMNS}`,
-      [input.approvalId, input.actorUserId, input.principalKey, Date.now()],
+      [input.approvalId, input.actorUserId, input.principalKey, input.now],
     );
       if (claimed.rows[0]) {
-        const clock = await query<{ now_ms: string }>(
-          "SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint AS now_ms");
-        if (Number(claimed.rows[0].expires_at) <= Number(clock.rows[0]?.now_ms)) {
+        if (Number(claimed.rows[0].expires_at) <= (input.clock?.() ?? Date.now())) {
           await query("ROLLBACK");
           claimTransactionOpen = false;
           throw new ApprovalUnavailableError();

@@ -18,7 +18,9 @@ export function createLinearActionKeys(makeKey: () => string,
   provider = "Linear") {
   const current = new Map<string, string>();
   const approvalIdentities = new Map<string, string>();
+  /** Name one approval's storage record without persisting its arguments. */
   const approvalStorageKey = (approvalId: string) => `${PREFIX}approval:${approvalId}`;
+  /** Derive a stable action identity from the selected account and arguments. */
   const fingerprint = async (toolId: string, workspaceId: string, connectionId: string,
     params: object): Promise<string> => {
     const selected = JSON.stringify([toolId, workspaceId, connectionId, params]);

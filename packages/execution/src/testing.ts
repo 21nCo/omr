@@ -192,18 +192,18 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
   }
 
   /** Settle an overdue, undecided approval before reporting its status to its actor. */
-  async getForActor(approvalId: string, actorUserId: string, _deadlineAt?: number,
+  getForActor(approvalId: string, actorUserId: string, _deadlineAt?: number,
     now?: number): Promise<ExecutionApproval> {
     const approval = this.approvals.get(approvalId);
     if (approval?.actorUserId !== actorUserId || !this.isMember(approval.workspaceId, actorUserId)) {
-      throw new ApprovalUnavailableError();
+      return Promise.reject(new ApprovalUnavailableError());
     }
     if (now !== undefined && approval.expiresAt <= now &&
         (approval.status === "pending" || approval.status === "approved")) {
       approval.status = "expired";
       approval.updatedAt = now;
     }
-    return structuredClone(approval);
+    return Promise.resolve(structuredClone(approval));
   }
 
   async approve(input: {

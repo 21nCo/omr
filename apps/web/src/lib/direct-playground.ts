@@ -89,6 +89,7 @@ export function playgroundError(error: unknown): string {
 }
 
 export class PlaygroundRequestError extends Error {
+  /** Preserve the API code and receipt so the page can guide recovery. */
   constructor(readonly code: string, message: string, readonly receiptId?: string) {
     super(message); this.name = "PlaygroundRequestError";
   }
@@ -96,6 +97,7 @@ export class PlaygroundRequestError extends Error {
 
 /** Use the same-origin APIs and retain receipt IDs on failed requests. */
 export function createPlaygroundRequest(fetchImpl: typeof fetch, login: () => void) {
+  /** Send one authenticated same-origin request and surface structured API failures. */
   return async function request<T>(path: string, body?: unknown): Promise<T> {
     const response = await fetchImpl(path, { credentials: "same-origin", cache: "no-store",
       ...(body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json" },

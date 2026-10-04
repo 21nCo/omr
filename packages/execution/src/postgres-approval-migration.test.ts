@@ -203,7 +203,7 @@ describeDatabase("approval migration from origin/dev schema", () => {
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
       for (const decision of ["approve", "reject"] as const) {
         const id = `approval_expiring_${decision}`;
-        const expiresAt = Date.now() + 750;
+        const expiresAt = Date.now() + 60_000;
         await store.create({ ...candidate, id, idempotencyKey: id,
           expiresAt, createdAt: Date.now(), updatedAt: Date.now() });
         const blocker = new Client({ connectionString: databaseUrl! });
@@ -213,16 +213,18 @@ describeDatabase("approval migration from origin/dev schema", () => {
           await blocker.query(`UPDATE ${qualified}.workspace_memberships SET user_id = user_id
             WHERE workspace_id = 'workspace_1' AND user_id = 'user_1'`);
           let settled = false;
-          const pending = store[decision]({ approvalId: id, actorUserId: "user_1", now: Date.now() })
+          let clockNow = expiresAt - 1;
+          const pending = store[decision]({ approvalId: id, actorUserId: "user_1",
+            now: clockNow, clock: () => clockNow })
             .finally(() => { settled = true; });
           await new Promise((resolve) => setTimeout(resolve, 40));
           expect(settled).toBe(false);
-          await new Promise((resolve) => setTimeout(resolve, Math.max(0, expiresAt - Date.now() + 30)));
+          clockNow = expiresAt;
           await blocker.query("COMMIT");
           await expect(pending).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
           const state = await client.query(`SELECT status FROM ${qualified}.execution_approvals WHERE id = $1`, [id]);
           expect(state.rows[0]?.status).toBe("pending");
-          await expect(store.getForActor(id, "user_1", undefined, Date.now()))
+          await expect(store.getForActor(id, "user_1", undefined, expiresAt))
             .resolves.toMatchObject({ status: "expired" });
           const settledState = await client.query(`SELECT status FROM ${qualified}.execution_approvals WHERE id = $1`, [id]);
           expect(settledState.rows[0]?.status).toBe("expired");
@@ -232,17 +234,18 @@ describeDatabase("approval migration from origin/dev schema", () => {
         }
       }
       const approvedId = "approval_expiring_approved";
-      const approvedExpiresAt = Date.now() + 750;
+      const approvedExpiresAt = Date.now() + 60_000;
       await store.create({ ...candidate, id: approvedId, idempotencyKey: approvedId,
         expiresAt: approvedExpiresAt, createdAt: Date.now(), updatedAt: Date.now() });
-      await store.approve({ approvalId: approvedId, actorUserId: "user_1", now: Date.now() });
-      await new Promise((resolve) => setTimeout(resolve, Math.max(0, approvedExpiresAt - Date.now() + 30)));
-      await expect(store.getForActor(approvedId, "user_1", undefined, Date.now()))
+      await store.approve({ approvalId: approvedId, actorUserId: "user_1", now: approvedExpiresAt - 1 });
+      await expect(store.getForActor(approvedId, "user_1", undefined, approvedExpiresAt - 1))
+        .resolves.toMatchObject({ status: "approved" });
+      await expect(store.getForActor(approvedId, "user_1", undefined, approvedExpiresAt))
         .resolves.toMatchObject({ status: "expired" });
       await client.query(`UPDATE ${qualified}.execution_approvals SET expires_at = 1
         WHERE id = 'approval_inflight'`);
       await expect(store.getForActor("approval_inflight", "user_1", undefined, Date.now()))
-        .resolves.toMatchObject({ status: "executing" });
+        .resolves.toMatchObject({ status: "uncertain" });
       const revoker = new Client({ connectionString: databaseUrl! });
       await revoker.connect();
       try {

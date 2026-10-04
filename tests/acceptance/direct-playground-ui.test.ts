@@ -5,6 +5,7 @@ import type { ToolManifest } from "@oh-my-router/tools";
 import Playground from "../../apps/web/src/routes/app/playground/+page.svelte?client";
 import type { PlaygroundApproval } from "../../apps/web/src/lib/direct-playground.js";
 
+/** Build a minimal catalog entry with a real approval effect contract. */
 function manifest(id: string, effect: "read" | "write"): ToolManifest {
   return { catalogSchemaVersion: "1.0.0", id, provider: "demo", providerVersion: "1.0.0",
     action: id.slice(5), displayName: effect === "read" ? "Read fixture" : "Write fixture",
@@ -17,6 +18,7 @@ function manifest(id: string, effect: "read" | "write"): ToolManifest {
 
 const tools = [manifest("demo.read", "read"), manifest("demo.write", "write")];
 
+/** Find one actionable control by its visible label. */
 function button(label: string): HTMLButtonElement {
   const found = [...document.querySelectorAll("button")].find((element) =>
     element.textContent?.trim() === label);
@@ -24,17 +26,20 @@ function button(label: string): HTMLButtonElement {
   return found;
 }
 
+/** Change a native select through its browser event boundary. */
 function select(id: string, value: string) {
   const element = document.getElementById(id) as HTMLSelectElement;
   element.value = value;
   element.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
+/** Trigger the form's submit handler in DOM acceptance tests. */
 function submit() {
   document.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true,
     cancelable: true }));
 }
 
+/** Project the status payload used by approval recovery cases. */
 function approval(status: string): PlaygroundApproval {
   return { id: "approval_one", workspaceId: "workspace_one", connectionId: "connection_one",
     toolId: "demo.write", status, params: { title: "[REDACTED]" }, previewReady: true,
@@ -43,6 +48,7 @@ function approval(status: string): PlaygroundApproval {
     expiresAt: Date.now() + 60_000, browserActionable: true };
 }
 
+/** Return the control-plane shape used by client tests. */
 function overview(connections = [{ id: "connection_one", workspaceId: "workspace_one", provider: "demo",
   label: "Demo account", status: "active", readiness: "ready", providerState: "ready",
   selectable: true, selected: true }], approvals: PlaygroundApproval[] = []) {
@@ -379,7 +385,8 @@ describe("direct playground form", () => {
   });
 
   it.each(["approve", "reject"] as const)("refreshes a failed %s decision and exposes expiry recovery", async (operation) => {
-    const expiresAt = Date.now() + 250;
+    const expiresAt = Date.now() + 60_000;
+    let expired = false;
     let statusCalls = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
@@ -390,7 +397,7 @@ describe("direct playground form", () => {
       if (path.startsWith("/api/tools/manifest")) return Response.json(tools[1]);
       if (path.startsWith("/api/approvals/status")) {
         statusCalls += 1;
-        return Response.json({ ...approval(Date.now() >= expiresAt ? "expired" : "pending"),
+        return Response.json({ ...approval(expired ? "expired" : "pending"),
           expiresAt });
       }
       if (path === `/api/approvals/${operation}`) {
@@ -411,7 +418,7 @@ describe("direct playground form", () => {
       expect(panel).toContain("Write fixture");
       expect(panel).toContain("demo.write");
       expect(panel).toContain("item · argument title");
-      await new Promise((resolve) => setTimeout(resolve, Math.max(0, expiresAt - Date.now() + 10)));
+      expired = true;
       button(operation === "approve" ? "Approve" : "Reject").click();
       await vi.waitFor(() => expect(document.querySelector("[aria-label='Approval']")?.textContent)
         .toContain("Approval · expired"));

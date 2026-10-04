@@ -147,15 +147,22 @@ export interface ExecutionApproval {
 
 export interface ExecutionApprovalStore {
   create(approval: ExecutionApproval): Promise<ExecutionApproval>;
+  /** Use the service's epoch-millisecond clock for expiry in every store. */
   getForActor(approvalId: string, actorUserId: string, deadlineAt?: number,
     now?: number): Promise<ExecutionApproval>;
-  approve(input: { approvalId: string; actorUserId: string; now: number }): Promise<ExecutionApproval>;
-  reject(input: { approvalId: string; actorUserId: string; now: number }): Promise<ExecutionApproval>;
+  /** Re-sample the same clock after a PostgreSQL membership lock before committing. */
+  approve(input: { approvalId: string; actorUserId: string; now: number;
+    clock?: () => number }): Promise<ExecutionApproval>;
+  /** Re-sample expiry after a lock, including a concurrent revocation wait. */
+  reject(input: { approvalId: string; actorUserId: string; now: number;
+    clock?: () => number }): Promise<ExecutionApproval>;
+  /** Claim remains fenced if expiry advances while opening or locking the connection. */
   claim(input: {
     approvalId: string;
     actorUserId: string;
     principalKey: string;
     now: number;
+    clock?: () => number;
     deadlineAt: number;
   }): Promise<ExecutionApproval>;
   consume(input: { approvalId: string; receiptId: string; now: number;
@@ -594,18 +601,19 @@ export class ExecutionService {
   /** Revalidate the manifest and redacted preview before recording consent. */
   async approve(approvalId: string, actorUserId: string): Promise<ExecutionApproval> {
     const approvals = this.requiredApprovals();
-    const approval = await approvals.getForActor(approvalId, actorUserId);
+    const now = this.now();
+    const approval = await approvals.getForActor(approvalId, actorUserId, undefined, now);
     const manifest = this.catalog.get(approval.toolId);
     if (!manifest || !validToolInput(manifest, approval.params) ||
         !approvalPreviewReady(manifest, approval.manifestHash, approval.params)) {
       throw new ApprovalUnavailableError();
     }
-    return approvals.approve({ approvalId, actorUserId, now: this.now() });
+    return approvals.approve({ approvalId, actorUserId, now: this.now(), clock: this.now });
   }
 
   /** Reject only an approval owned by this actor; no provider effect is entered. */
   async reject(approvalId: string, actorUserId: string): Promise<ExecutionApproval> {
-    return this.requiredApprovals().reject({ approvalId, actorUserId, now: this.now() });
+    return this.requiredApprovals().reject({ approvalId, actorUserId, now: this.now(), clock: this.now });
   }
 
   /** Disclose approval state only to its original principal and workspace. */
@@ -663,6 +671,7 @@ export class ExecutionService {
         actorUserId: principal.userId,
         principalKey: principalKey(principal),
         now: this.now(),
+        clock: this.now,
         deadlineAt,
       }));
     } catch (error) {
@@ -786,7 +795,7 @@ export class ExecutionService {
     try {
       await withinInvocationDeadline(deadlineAt, () => approvals.claim({
         approvalId: approval.id, actorUserId: principal.userId,
-        principalKey: principalKey(principal), now: this.now(), deadlineAt,
+        principalKey: principalKey(principal), now: this.now(), clock: this.now, deadlineAt,
       }));
       throw new ApprovalUnavailableError();
     } catch (error) {

@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createServer } from "vite";
+import { createCdpChannel } from "./cdp-channel.mjs";
 
 const chrome = process.env.CHROME_BIN ?? (process.platform === "darwin"
   ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" : "google-chrome");
@@ -12,16 +13,52 @@ const server = await createServer({ configFile: resolve("vitest.client.config.ts
   server: { host: "127.0.0.1", port: 0 } });
 let browser;
 let socket;
+let channel;
+
+/** Wait for Chrome to open CDP, rejecting a closed or stalled handshake. */
+function opened(target) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => finish(new Error("Chrome debugging connection timed out")), 5_000);
+    const finish = (error) => {
+      clearTimeout(timer);
+      target.removeEventListener("open", onOpen);
+      target.removeEventListener("error", onError);
+      target.removeEventListener("close", onClose);
+      error ? reject(error) : resolve();
+    };
+    const onOpen = () => finish();
+    const onError = () => finish(new Error("Chrome debugging connection failed"));
+    const onClose = () => finish(new Error("Chrome debugging connection closed"));
+    target.addEventListener("open", onOpen);
+    target.addEventListener("error", onError);
+    target.addEventListener("close", onClose);
+    if (target.readyState === WebSocket.OPEN) finish();
+  });
+}
+
+/** Wait for the owned Chrome process to exit before removing its profile. */
+async function stopBrowser(child) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  const waitForExit = (ms) => new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) { resolve(true); return; }
+    const onExit = () => { clearTimeout(timer); resolve(true); };
+    const timer = setTimeout(() => { child.off("exit", onExit); resolve(false); }, ms);
+    child.once("exit", onExit);
+  });
+  child.kill();
+  if (!await waitForExit(2_000)) {
+    child.kill("SIGKILL");
+    if (!await waitForExit(2_000)) throw new Error("Chrome did not exit during keyboard fixture cleanup");
+  }
+}
 
 /** Poll a browser-visible condition with a bounded deadline. */
-async function until(check, label) {
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    const value = await check();
-    if (value) return value;
-    await new Promise((done) => setTimeout(done, 50));
-  }
-  throw new Error(`Timed out waiting for ${label}`);
+async function until(check, label, deadline = Date.now() + 15_000) {
+  const value = await check();
+  if (value) return value;
+  if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${label}`);
+  await new Promise((done) => setTimeout(done, 50));
+  return until(check, label, deadline);
 }
 
 try {
@@ -40,25 +77,9 @@ try {
   const target = targets.find((item) => item.type === "page");
   assert(target?.webSocketDebuggerUrl, "Chrome did not create a page target");
   socket = new WebSocket(target.webSocketDebuggerUrl);
-  await new Promise((done, reject) => {
-    socket.addEventListener("open", done, { once: true });
-    socket.addEventListener("error", reject, { once: true });
-  });
-  let sequence = 0;
-  const pending = new Map();
-  socket.addEventListener("message", (event) => {
-    const message = JSON.parse(event.data);
-    if (!message.id) return;
-    const callbacks = pending.get(message.id);
-    if (!callbacks) return;
-    pending.delete(message.id);
-    message.error ? callbacks.reject(new Error(message.error.message)) : callbacks.resolve(message.result);
-  });
-  const send = (method, params = {}) => new Promise((resolve, reject) => {
-    const id = ++sequence;
-    pending.set(id, { resolve, reject });
-    socket.send(JSON.stringify({ id, method, params }));
-  });
+  await opened(socket);
+  channel = createCdpChannel(socket);
+  const send = channel.send;
   const evaluate = async (expression) => {
     const result = await send("Runtime.evaluate", { expression, returnByValue: true,
       awaitPromise: true });
@@ -81,18 +102,23 @@ try {
     windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
   await until(() => evaluate("window.__playgroundExecuteCalls === 1 && document.body.textContent.includes('receipt_keyboard')"),
     "one keyboard-submitted receipt").catch(async (error) => {
-    process.stderr.write(`${JSON.stringify(await evaluate(`({ calls: window.__playgroundExecuteCalls,
-      active: document.activeElement?.outerHTML, body: document.body.textContent })`))}\n`);
+    const diagnostic = await evaluate("({ calls: window.__playgroundExecuteCalls, " +
+      "active: document.activeElement?.outerHTML, body: document.body.textContent })");
+    process.stderr.write(`${JSON.stringify(diagnostic)}\n`);
     throw error;
   });
   assert.equal(await evaluate("window.__playgroundExecuteCalls"), 1);
   process.stdout.write("Chrome Enter-key submit: one read request and receipt_keyboard observed\n");
 } finally {
+  channel?.dispose();
   socket?.close();
-  browser?.kill();
+  let cleanupFailure;
+  try { await stopBrowser(browser); }
+  catch (error) { cleanupFailure = error; }
   await server.close();
   await until(async () => {
     try { await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); return true; }
     catch { return false; }
   }, "Chrome profile cleanup").catch((error) => process.stderr.write(`${error}\n`));
+  if (cleanupFailure) throw cleanupFailure;
 }
