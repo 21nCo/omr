@@ -716,6 +716,7 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
   async function withExecution<T>(callback: (
     service: ExecutionService,
     catalog: Awaited<ReturnType<typeof createPlugFnToolCatalog>>,
+    runtime: Awaited<ReturnType<typeof connectPostgresExecutionReceipts>>,
   ) => Promise<T>): Promise<T> {
     const connectionRuntime = await connectPostgresConnections({
       connectionString: databaseConnectionString(event),
@@ -742,7 +743,7 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
         execution.approvals,
         execution.invocationGuard,
         await deriveExecutionFingerprintKey(executionWrappingKey(event)),
-      ), catalog);
+      ), catalog, execution);
     } finally {
       await Promise.allSettled([
         connectionRuntime.close(),
@@ -798,9 +799,15 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
     async approvalStatus(request, approvalId, workspaceId) {
       const principal = await authenticate(event, request, workspaceId, "approvals:create", allowRemoteMcp);
       if (principal.kind === "web" && !workspaceId) throw new ApprovalUnavailableError();
-      return withExecution(async (service, catalog) => {
+      return withExecution(async (service, catalog, runtime) => {
         const approval = await service.approvalStatus(principal, approvalId);
-        return publicBrowserApprovalStatus(approval, catalog.get(approval.toolId), principal.kind === "web");
+        const receipt = principal.kind === "web" && approval.status === "uncertain" &&
+          approval.executionReceiptId ? await runtime.receipts.findForApproval({
+            workspaceId: approval.workspaceId, actorUserId: principal.userId,
+            approvalId: approval.id, receiptId: approval.executionReceiptId,
+          }) : null;
+        return publicBrowserApprovalStatus(approval, catalog.get(approval.toolId),
+          principal.kind === "web", receipt);
       });
     },
     async reconcileUncertain(request, approvalId, decision, workspaceId) {

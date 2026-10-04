@@ -13,6 +13,8 @@ export type PlaygroundApproval = {
   expiresAt: number; executionReceiptId?: string | null;
   actionKeyDigest?: string;
   browserActionable?: boolean;
+  reconciledAs?: "effect_present" | "effect_absent" | null;
+  canConfirmPresent?: boolean; canConfirmAbsent?: boolean;
 };
 export type PlaygroundReceipt = {
   id: string; status: string; result: unknown; errorCode: string | null;

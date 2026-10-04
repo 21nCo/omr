@@ -196,6 +196,78 @@ describe("direct playground form", () => {
     } finally { await unmount(app); }
   });
 
+  it("recovers an uncertain GitHub write through its verified receipt without another provider call", async () => {
+    let current = { ...approval("uncertain"), toolId: "github.issues.create",
+      executionReceiptId: "receipt-github", canConfirmPresent: true, canConfirmAbsent: true,
+      reconciledAs: null as "effect_present" | "effect_absent" | null };
+    let decisions = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.startsWith("/api/control-plane")) return Response.json(overview(undefined, [current]));
+      if (path.startsWith("/api/tools?")) return Response.json({ tools,
+        providers: [{ provider: "demo", state: "ready" }] });
+      if (path.startsWith("/api/approvals/status")) return Response.json(current);
+      if (path === "/api/approvals/reconcile") {
+        const body = JSON.parse(String(init?.body));
+        expect(body).toEqual({ approvalId: current.id, decision: "effect_absent",
+          workspaceId: current.workspaceId });
+        decisions++;
+        current = { ...current, status: "failed", reconciledAs: "effect_absent",
+          canConfirmPresent: false, canConfirmAbsent: false };
+        return Response.json(current);
+      }
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body });
+    try {
+      await vi.waitFor(() => expect(button("Review approval").disabled).toBe(false));
+      button("Review approval").click();
+      await vi.waitFor(() => expect(button("I verified the action did not happen").disabled).toBe(false));
+      expect(document.querySelector("[aria-label='Approval']")?.textContent)
+        .not.toContain("control plane");
+      button("I verified the action did not happen").click();
+      await vi.waitFor(() => expect(button("Start a new action").disabled).toBe(false));
+      expect(document.body.textContent).toContain("No provider write was repeated");
+      expect(decisions).toBe(1);
+      expect(fetchMock.mock.calls.some(([path]) => String(path) === "/api/approvals/execute"))
+        .toBe(false);
+    } finally { await unmount(app); }
+  });
+
+  it.each(["executing", "uncertain"])(
+    "recovers a resumed %s write through the same receipt without another approval", async (state) => {
+      let current = { ...approval(state), executionReceiptId: "receipt-existing" };
+      let executeCalls = 0;
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.startsWith("/api/control-plane")) return Response.json(overview(undefined, [current]));
+        if (path.startsWith("/api/tools?")) return Response.json({ tools,
+          providers: [{ provider: "demo", state: "ready" }] });
+        if (path.startsWith("/api/approvals/status")) return Response.json(current);
+        if (path === "/api/approvals/execute") {
+          executeCalls++;
+          current = { ...current, status: "consumed" };
+          return Response.json({ id: "receipt-existing", status: "succeeded", result: {},
+            errorCode: null });
+        }
+        return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const app = mount(Playground, { target: document.body });
+      try {
+        await vi.waitFor(() => expect(button("Review approval").disabled).toBe(false));
+        button("Review approval").click();
+        await vi.waitFor(() => expect(button("Recover execution from receipt").disabled).toBe(false));
+        button("Recover execution from receipt").click();
+        await vi.waitFor(() => expect(button("Start a new action").disabled).toBe(false));
+        expect(executeCalls).toBe(1);
+        expect(document.body.textContent).toContain("receipt-existing");
+        expect(fetchMock.mock.calls.some(([path]) => String(path) === "/api/approvals"))
+          .toBe(false);
+      } finally { await unmount(app); }
+    });
+
   it("repeats a settled resumed write after reload despite a different selected tool", async () => {
     const approvals = new Map<string, ReturnType<typeof approval>>();
     const keys = new Map<string, string>();

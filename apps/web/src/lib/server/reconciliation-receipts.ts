@@ -12,7 +12,7 @@ export function visibleApprovals<T extends Pick<ExecutionApproval, "id" | "statu
     .map((approval) => [approval.id, approval])).values()];
 }
 
-/** Recover one older provider approval or its recorded decision without scanning history.
+/** Recover one older approval or its recorded decision without scanning history.
  * An owned but retired hint must not take down the workspace overview. Unknown or
  * foreign IDs still fail the actor/workspace boundary.
  */
@@ -26,9 +26,7 @@ export async function recoverProviderApproval(
   const validDecision = Boolean(approval.executionReceiptId) &&
     ((approval.status === "consumed" && recorded === "effect_present") ||
       (approval.status === "failed" && recorded === "effect_absent"));
-  if (approval.workspaceId !== workspaceId ||
-      !(approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post" ||
-        approval.toolId === "notion.pages.create" || approval.toolId === "notion.pages.update")) {
+  if (approval.workspaceId !== workspaceId) {
     throw new ApprovalUnavailableError();
   }
   if ((["pending", "approved"].includes(approval.status) && approval.expiresAt <= now) ||
@@ -52,6 +50,7 @@ export function publicBrowserApproval(
 /** Give an authenticated browser a non-replayable link to its saved action key. */
 export async function publicBrowserApprovalStatus(
   approval: ExecutionApproval, manifest: ToolManifest | null | undefined, browser: boolean,
+  receipt: ExecutionReceipt | null = null,
 ) {
   const visible = publicApproval(approval, manifest);
   if (!browser) return visible;
@@ -59,18 +58,28 @@ export async function publicBrowserApprovalStatus(
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   const actionKeyDigest = [...new Uint8Array(digest)]
     .map((byte) => byte.toString(16).padStart(2, "0")).join("");
-  return { ...visible, actionKeyDigest };
+  const exactReceipt = Boolean(receipt && approval.executionReceiptId &&
+    receipt.id === approval.executionReceiptId &&
+    receipt.approvalId === approval.id && receipt.workspaceId === approval.workspaceId &&
+    receipt.actorUserId === approval.actorUserId && receipt.principalKey === approval.principalKey &&
+    receipt.toolId === approval.toolId && receipt.manifestHash === approval.manifestHash &&
+    receipt.connectionId === approval.connectionId &&
+    receipt.providerConnectionId === approval.providerConnectionId &&
+    receipt.idempotencyKey === approval.idempotencyKey);
+  return { ...visible, actionKeyDigest,
+    canConfirmPresent: approval.status === "uncertain" && exactReceipt &&
+      (receipt?.status === "running" || receipt?.status === "uncertain"),
+    canConfirmAbsent: approval.status === "uncertain" && exactReceipt &&
+      receipt?.status === "uncertain" && receipt?.errorCode === "provider_response_ambiguous" };
 }
 
-/** Keep exact provider reconciliation evidence available beyond recent history. */
+/** Keep exact reconciliation evidence available beyond recent history. */
 export async function providerReconciliationReceipts(
   approvals: readonly Pick<ExecutionApproval, "id" | "status" | "toolId" | "executionReceiptId">[],
   receipts: ExecutionReceiptStore,
   workspaceId: string, actorUserId: string,
 ): Promise<ExecutionReceipt[]> {
   const uncertain = approvals.filter((approval) => approval.status === "uncertain" &&
-    (approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post" ||
-      approval.toolId === "notion.pages.create" || approval.toolId === "notion.pages.update") &&
     approval.executionReceiptId);
   const found: (ExecutionReceipt | null)[] = new Array(uncertain.length);
   let next = 0;

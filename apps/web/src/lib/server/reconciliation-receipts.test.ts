@@ -14,10 +14,34 @@ describe("browser approval status identity", () => {
       params: {}, manifestHash: "manifest", status: "consumed" } as ExecutionApproval;
     const browser = await publicBrowserApprovalStatus(approval, null, true);
     const client = await publicBrowserApprovalStatus(approval, null, false);
-    expect("actionKeyDigest" in browser && browser.actionKeyDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect("actionKeyDigest" in browser && browser.actionKeyDigest)
+      .toBe("b4cfd80d214b9e62f2505c705fe5e00ad8709d78eecc24bea36045cd9c210d94");
     expect("actionKeyDigest" in client).toBe(false);
     expect(JSON.stringify(browser)).not.toContain(approval.idempotencyKey);
     expect(JSON.stringify(client)).not.toContain(approval.idempotencyKey);
+  });
+
+  it("offers only receipt-backed verified decisions for an uncertain GitHub write", async () => {
+    const approval = { id: "approval-github", workspaceId: "workspace-A", actorUserId: "alice",
+      principalKey: "web:alice", toolId: "github.issues.create", manifestHash: "manifest",
+      connectionId: "connection-A", providerConnectionId: "provider-A",
+      idempotencyKey: "private-key-A", params: {}, status: "uncertain",
+      executionReceiptId: "receipt-A" } as ExecutionApproval;
+    const receipt = { id: "receipt-A", approvalId: approval.id, workspaceId: approval.workspaceId,
+      actorUserId: approval.actorUserId, principalKey: approval.principalKey, toolId: approval.toolId,
+      manifestHash: approval.manifestHash, connectionId: approval.connectionId,
+      providerConnectionId: approval.providerConnectionId, idempotencyKey: approval.idempotencyKey,
+      status: "uncertain", errorCode: "provider_response_ambiguous" } as ExecutionReceipt;
+    await expect(publicBrowserApprovalStatus(approval, null, true, receipt))
+      .resolves.toMatchObject({ canConfirmPresent: true, canConfirmAbsent: true });
+    await expect(publicBrowserApprovalStatus(approval, null, true,
+      { ...receipt, principalKey: "web:bob" }))
+      .resolves.toMatchObject({ canConfirmPresent: false, canConfirmAbsent: false });
+    await expect(publicBrowserApprovalStatus(approval, null, true,
+      { ...receipt, status: "running", errorCode: null }))
+      .resolves.toMatchObject({ canConfirmPresent: true, canConfirmAbsent: false });
+    expect("canConfirmPresent" in await publicBrowserApprovalStatus(approval, null, false, receipt))
+      .toBe(false);
   });
 });
 
@@ -246,7 +270,7 @@ describe("Linear reconciliation history", () => {
       .resolves.toBeNull();
     store.approvals.set(approval.id, { ...approval, toolId: "github.issues.update", expiresAt: 100 });
     await expect(recoverProviderApproval(store, approval.id, "workspace-A", "alice", 10))
-      .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      .resolves.toMatchObject({ toolId: "github.issues.update", status: "approved" });
     store.approvals.set(approval.id, { ...approval, status: "consumed", expiresAt: 100 });
     await expect(recoverProviderApproval(store, approval.id, "workspace-A", "alice", 10))
       .resolves.toBeNull();
@@ -306,34 +330,35 @@ describe("Linear reconciliation history", () => {
     expect(active).toBe(0);
   });
 
-  it("retains an exact old receipt outside 50 recent executions and scopes it to its approval", async () => {
-    let member = true;
-    const store = new MemoryExecutionReceiptStore(() => member);
-    const approval: Pick<ExecutionApproval, "id" | "status" | "toolId" | "executionReceiptId"> = {
-      id: "approval-old", status: "uncertain", toolId: "linear.issues.update",
-      executionReceiptId: "execution-old" };
-    const old = { id: "execution-old", workspaceId: "workspace-A", actorUserId: "alice",
-      approvalId: approval.id, createdAt: 1, status: "uncertain",
-      errorCode: "provider_response_ambiguous" } as ExecutionReceipt;
-    store.receipts.set(old.id, old);
-    for (let index = 0; index < 51; index++) {
-      const id = `execution-new-${index}`;
-      store.receipts.set(id, { ...old, id, approvalId: `approval-new-${index}`,
-        createdAt: index + 2 });
-    }
-    const recent = await store.listForActor({ workspaceId: "workspace-A", actorUserId: "alice", limit: 50 });
-    expect(recent.some((receipt) => receipt.id === old.id)).toBe(false);
-    const exact = await providerReconciliationReceipts([approval], store, "workspace-A", "alice");
-    expect(exact.map((receipt) => receipt.id)).toEqual([old.id]);
-    expect(effectAbsentAvailable(approval, exact)).toBe(true);
-    expect(effectPresentAvailable(approval, exact)).toBe(true);
-    expect(await providerReconciliationReceipts([approval], store, "workspace-B", "alice")).toEqual([]);
-    expect(await providerReconciliationReceipts([approval], store, "workspace-A", "bob")).toEqual([]);
-    expect(await providerReconciliationReceipts([{ ...approval, id: "approval-other" }],
-      store, "workspace-A", "alice")).toEqual([]);
-    member = false;
-    expect(await providerReconciliationReceipts([approval], store, "workspace-A", "alice")).toEqual([]);
-  });
+  it.each(["linear.issues.update", "github.issues.create"])(
+    "retains an exact old %s receipt outside 50 recent executions and scopes it to its approval", async (toolId) => {
+      let member = true;
+      const store = new MemoryExecutionReceiptStore(() => member);
+      const approval: Pick<ExecutionApproval, "id" | "status" | "toolId" | "executionReceiptId"> = {
+        id: "approval-old", status: "uncertain", toolId,
+        executionReceiptId: "execution-old" };
+      const old = { id: "execution-old", workspaceId: "workspace-A", actorUserId: "alice",
+        approvalId: approval.id, createdAt: 1, status: "uncertain",
+        errorCode: "provider_response_ambiguous" } as ExecutionReceipt;
+      store.receipts.set(old.id, old);
+      for (let index = 0; index < 51; index++) {
+        const id = `execution-new-${index}`;
+        store.receipts.set(id, { ...old, id, approvalId: `approval-new-${index}`,
+          createdAt: index + 2 });
+      }
+      const recent = await store.listForActor({ workspaceId: "workspace-A", actorUserId: "alice", limit: 50 });
+      expect(recent.some((receipt) => receipt.id === old.id)).toBe(false);
+      const exact = await providerReconciliationReceipts([approval], store, "workspace-A", "alice");
+      expect(exact.map((receipt) => receipt.id)).toEqual([old.id]);
+      expect(effectAbsentAvailable(approval, exact)).toBe(true);
+      expect(effectPresentAvailable(approval, exact)).toBe(true);
+      expect(await providerReconciliationReceipts([approval], store, "workspace-B", "alice")).toEqual([]);
+      expect(await providerReconciliationReceipts([approval], store, "workspace-A", "bob")).toEqual([]);
+      expect(await providerReconciliationReceipts([{ ...approval, id: "approval-other" }],
+        store, "workspace-A", "alice")).toEqual([]);
+      member = false;
+      expect(await providerReconciliationReceipts([approval], store, "workspace-A", "alice")).toEqual([]);
+    });
 
   it("does not offer a no-effect decision for absent or ineligible receipts", async () => {
     const store = new MemoryExecutionReceiptStore(() => true);

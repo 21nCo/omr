@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { createLinearActionKeys } from "$lib/linear-action-keys.js";
+  import { recoverProviderReconciliation } from "$lib/workspace-catalog.js";
   import { createPlaygroundRequest, parsePlaygroundArguments, playgroundConnectionReady,
     playgroundError, resumablePlaygroundApproval, schemaHints, type PlaygroundApproval, type PlaygroundCatalog,
     type PlaygroundConnection, type PlaygroundOverview, type PlaygroundReceipt } from "$lib/direct-playground.js";
@@ -195,6 +196,7 @@
                 ? "Check the provider and receipt before another write. Do not repeat this action yet."
                 : "Check this approval's status before another action.";
         }
+        if (turn === generation && value.status === "uncertain") await refreshApproval(value.id, turn);
       }
     } catch (caught) {
       if (turn === generation) error = playgroundError(caught);
@@ -228,6 +230,38 @@
         error = playgroundError(caught);
         approvalNeedsRefresh = true;
         if (operation !== "status") await refreshApproval(approvalId, turn);
+      }
+    } finally {
+      if (turn === generation) busy = "";
+    }
+  }
+
+  /** Settle only the exact uncertain receipt after the actor verifies provider state. */
+  async function reconcileAction(decision: "effect_present" | "effect_absent") {
+    if (!approval || approval.status !== "uncertain" || busy || loading || approvalNeedsRefresh ||
+        !(decision === "effect_present" ? approval.canConfirmPresent : approval.canConfirmAbsent)) return;
+    const turn = generation;
+    const approvalId = approval.id;
+    busy = "Recording verified outcome…";
+    error = "";
+    try {
+      const settled = await recoverProviderReconciliation(approvalId, decision,
+        () => request<PlaygroundApproval>("/api/approvals/reconcile",
+          { approvalId, decision, workspaceId }),
+        () => request<PlaygroundApproval>(
+          `/api/approvals/status?${new URLSearchParams({ approvalId, workspaceId })}`));
+      if (turn === generation) {
+        showApproval(settled);
+        receipt = null;
+        notice = decision === "effect_present"
+          ? "Recorded that the action happened. No provider write was repeated."
+          : "Recorded that the action did not happen. No provider write was repeated.";
+      }
+    } catch (caught) {
+      if (turn === generation) {
+        error = playgroundError(caught);
+        approvalNeedsRefresh = true;
+        await refreshApproval(approvalId, turn);
       }
     } finally {
       if (turn === generation) busy = "";
@@ -416,9 +450,24 @@
       {:else if approval.status === "approved"}
         <button type="button" disabled={!!busy || approvalNeedsRefresh || !approval.previewReady || !approval.manifestCurrent}
           onclick={() => void approvalAction("execute")}>Execute approved change</button>
-      {:else if approval.status === "executing" || approval.status === "uncertain"}
-        <p>Check the provider and receipt before another action. Do not repeat this write.
-          If the outcome is uncertain, use the <a href="/app">control plane</a> to record a verified outcome.</p>
+      {:else if approval.status === "executing"}
+        <p>Execution is in progress. Check status and the provider before another action. Do not repeat this write.</p>
+        <button type="button" disabled={!!busy || approvalNeedsRefresh}
+          onclick={() => void approvalAction("execute")}>Recover execution from receipt</button>
+      {:else if approval.status === "uncertain"}
+        <p>The outcome is uncertain. Check the provider and receipt before recording an outcome. Do not repeat this write.</p>
+        <button type="button" disabled={!!busy || approvalNeedsRefresh}
+          onclick={() => void approvalAction("execute")}>Recover execution from receipt</button>
+        {#if approval.canConfirmPresent}
+          <button type="button" disabled={!!busy || approvalNeedsRefresh}
+            onclick={() => void reconcileAction("effect_present")}>I verified the action happened</button>
+        {/if}
+        {#if approval.canConfirmAbsent}
+          <button type="button" disabled={!!busy || approvalNeedsRefresh}
+            onclick={() => void reconcileAction("effect_absent")}>I verified the action did not happen</button>
+        {:else}
+          <p>The request may still be running, or its receipt cannot prove absence. OMR cannot safely record no change or allow a retry for this receipt.</p>
+        {/if}
       {/if}
       {#if approval.executionReceiptId}<p>Execution receipt: <code>{approval.executionReceiptId}</code></p>{/if}
       <button type="button" disabled={!!busy} onclick={() => void approvalAction("status")}>Check status</button>

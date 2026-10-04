@@ -84,7 +84,7 @@ async function fixture(allowedProviders?: ReadonlySet<string>, initialScopes: st
       },
     }, {
       name: "github", displayName: "GitHub", version: "1.0.0", description: "GitHub",
-      actions: { get_issue: action("get_issue", "read") },
+      actions: { get_issue: action("get_issue", "read"), create_issue: action("create_issue", "write") },
     }, {
       name: "notion", displayName: "Notion", version: "1.0.0", description: "Notion",
       actions: { "content.search": action("content.search", "read"),
@@ -269,6 +269,50 @@ describe("execution service", () => {
     await expect(service.reconcileUncertain(otherWorkspace, approval.id, "effect_present"))
       .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
   });
+
+  it.each(["effect_present", "effect_absent"] as const)(
+    "reconciles a verified GitHub write with an exact ambiguous receipt for %s", async (decision) => {
+      const { actionCall, approvals, connections, otherBinding, receipts, service, workspace } = await fixture();
+      const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+      await connections.select({ actorUserId: principal.userId, workspaceId: workspace.id,
+        provider: "github", connectionId: otherBinding.id });
+      const approval = await requestApproval(service, { principal, toolId: "github.create_issue",
+        params: {} });
+      const receipt = { ...receiptForApproval(approval, "uncertain"),
+        errorCode: "provider_response_ambiguous" };
+      receipts.receipts.set(receipt.id, receipt);
+      approvals.approvals.set(approval.id, { ...approval, status: "uncertain",
+        executionReceiptId: receipt.id });
+      await expect(service.reconcileUncertain({ ...principal, workspaceId: "another" },
+        approval.id, decision)).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      const settled = await service.reconcileUncertain(principal, approval.id, decision);
+      expect(settled).toMatchObject({ reconciledAs: decision, executionReceiptId: receipt.id,
+        status: decision === "effect_present" ? "consumed" : "failed" });
+      expect(await service.reconcileUncertain(principal, approval.id, decision))
+        .toMatchObject({ id: approval.id, reconciledAs: decision });
+      expect(actionCall).not.toHaveBeenCalled();
+    });
+
+  it.each(["executing", "uncertain"] as const)(
+    "recovers an interrupted GitHub %s approval from its succeeded receipt without dispatch", async (state) => {
+      const { actionCall, approvals, connections, otherBinding, receipts, service, workspace } = await fixture();
+      const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+      await connections.select({ actorUserId: principal.userId, workspaceId: workspace.id,
+        provider: "github", connectionId: otherBinding.id });
+      const approval = await requestApproval(service, { principal, toolId: "github.create_issue",
+        params: {} });
+      await service.approve(approval.id, principal.userId);
+      const receipt = receiptForApproval(approval, "reserved");
+      await receipts.reserve(receipt);
+      Object.assign(receipts.receipts.get(receipt.id)!, { status: "succeeded", result: { id: "issue_1" } });
+      approvals.approvals.set(approval.id, { ...approval, status: state,
+        executionReceiptId: state === "uncertain" ? receipt.id : null });
+      await expect(service.executeApproved(principal, approval.id))
+        .resolves.toMatchObject({ id: receipt.id, status: "succeeded" });
+      expect(approvals.approvals.get(approval.id)).toMatchObject({
+        status: "consumed", executionReceiptId: receipt.id });
+      expect(actionCall).not.toHaveBeenCalled();
+    });
 
   it("keeps memory approval fingerprints and membership decisions fail closed", async () => {
     const { approvals, service, workspace, workspaceStore } = await fixture();

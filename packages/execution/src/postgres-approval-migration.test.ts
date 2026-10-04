@@ -181,8 +181,14 @@ describeDatabase("approval migration from origin/dev schema", () => {
 
       // Point the store at this isolated schema; its SQL otherwise matches production.
       const originalQuery = client.query.bind(client);
-      const fixtureClient = { query: (sql: string, values?: unknown[]) =>
-        originalQuery(sql.replaceAll("omr_control.", `${qualified}.`), values) } as unknown as Client;
+      let decisionBegins = 0;
+      let afterDecisionQuery: ((sql: string, values?: unknown[]) => Promise<void>) | undefined;
+      const fixtureClient = { query: async (sql: string, values?: unknown[]) => {
+        const result = await originalQuery(sql.replaceAll("omr_control.", `${qualified}.`), values);
+        if (sql === "BEGIN") decisionBegins++;
+        await afterDecisionQuery?.(sql, values);
+        return result;
+      } } as unknown as Client;
       const store = new PostgresExecutionApprovalStore(fixtureClient, key);
       const candidate: ExecutionApproval = {
         id: "approval_new", workspaceId: "workspace_1", actorUserId: "user_1",
@@ -197,6 +203,47 @@ describeDatabase("approval migration from origin/dev schema", () => {
       });
       await expect(store.create({ ...candidate, id: "approval_fresh", idempotencyKey: "fresh-key" }))
         .resolves.toMatchObject({ id: "approval_fresh", status: "pending" });
+      const firstId = "approval_concurrent_approve";
+      const secondId = "approval_concurrent_reject";
+      const concurrentExpiry = Date.now() + 60_000;
+      for (const id of [firstId, secondId]) {
+        await store.create({ ...candidate, id, idempotencyKey: id,
+          expiresAt: concurrentExpiry, createdAt: Date.now(), updatedAt: Date.now() });
+      }
+      let enterFirst!: () => void;
+      let releaseFirst!: () => void;
+      const firstUpdated = new Promise<void>((resolve) => { enterFirst = resolve; });
+      const firstReleased = new Promise<void>((resolve) => { releaseFirst = resolve; });
+      let firstClock = concurrentExpiry - 1;
+      decisionBegins = 0;
+      afterDecisionQuery = async (sql, values) => {
+        if (sql.startsWith("UPDATE omr_control.execution_approvals") && values?.[0] === firstId) {
+          enterFirst();
+          await firstReleased;
+        }
+      };
+      const firstDecision = store.approve({ approvalId: firstId, actorUserId: "user_1",
+        now: firstClock, clock: () => firstClock }).then(
+        () => null, (error: unknown) => error);
+      await firstUpdated;
+      const secondDecision = store.reject({ approvalId: secondId, actorUserId: "user_1",
+        now: concurrentExpiry - 1, clock: () => concurrentExpiry - 1 });
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(decisionBegins).toBe(1);
+      } finally {
+        firstClock = concurrentExpiry;
+        releaseFirst();
+      }
+      await expect(firstDecision).resolves.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      await expect(secondDecision).resolves.toMatchObject({ status: "rejected" });
+      afterDecisionQuery = undefined;
+      const concurrentStates = await client.query<{ id: string; status: string }>(
+        `SELECT id, status FROM ${qualified}.execution_approvals WHERE id IN ($1, $2) ORDER BY id`,
+        [firstId, secondId]);
+      expect(concurrentStates.rows).toEqual([
+        { id: firstId, status: "pending" }, { id: secondId, status: "rejected" },
+      ]);
       await expect(store.getForActor("approval_fresh", "user_1"))
         .resolves.toMatchObject({ id: "approval_fresh", params: {} });
       await expect(store.getForActor("approval_fresh", "another_user"))

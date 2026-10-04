@@ -64,6 +64,8 @@ export type RunOwnedApprovalClient = <T>(deadlineAt: number,
 type ApprovalQuery = <R extends QueryResultRow>(sql: string, values?: unknown[]) => Promise<QueryResult<R>>;
 
 export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
+  private decisionTail: Promise<void> = Promise.resolve();
+
   constructor(
     private readonly client: Client | null,
     private readonly wrappingKey: Uint8Array<ArrayBuffer>,
@@ -303,7 +305,17 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     };
     if (this.runOwnedClient) return this.runOwnedClient(deadlineAt, decideWithClient);
     if (!this.client) throw new ApprovalTransactionRequiredError();
-    return decideWithClient(this.client);
+    // A directly supplied client is one PostgreSQL session. Keep its decision
+    // transactions separate even when callers approve and reject concurrently.
+    const previous = this.decisionTail;
+    let release!: () => void;
+    this.decisionTail = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await decideWithClient(this.client);
+    } finally {
+      release();
+    }
   }
 
   async claim(input: {

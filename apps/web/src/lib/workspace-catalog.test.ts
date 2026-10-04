@@ -14,8 +14,8 @@ describe("workspace catalog loading", () => {
       const approval = { id: "executing-old", toolId, status: "executing", expiresAt: 0 };
       expect(visibleApprovalCard(approval, "", 100, true)).toBe(true);
       expect(visibleApprovalCard(approval, "", 100, false)).toBe(false);
-      expect(visibleApprovalCard({ ...approval, toolId: "linear.issues.update" }, "", 100, true))
-        .toBe(false);
+      expect(visibleApprovalCard({ ...approval, toolId: "github.issues.create" }, "", 100, true))
+        .toBe(true);
     });
   it("lets a stalled Slack read be abandoned while keeping approval and reset locked", () => {
     expect(slackChannelSelectionLocked("slack.messages.list")).toBe(false);

@@ -643,13 +643,11 @@ export class ExecutionService {
     return approval;
   }
 
-  /** Record an actor's verified provider-side decision for an uncertain Linear or Slack write. */
+  /** Record an actor's verified provider-side decision for an exact uncertain write receipt. */
   async reconcileUncertain(principal: ExecutionPrincipal, approvalId: string,
     decision: "effect_present" | "effect_absent"): Promise<ExecutionApproval> {
     const approval = await this.approvalStatus(principal, approvalId);
-    if (!(approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post" ||
-        approval.toolId === "notion.pages.create" || approval.toolId === "notion.pages.update") ||
-        !["effect_present", "effect_absent"].includes(decision)) throw new ApprovalUnavailableError();
+    if (!["effect_present", "effect_absent"].includes(decision)) throw new ApprovalUnavailableError();
     const recorded = (value: ExecutionApproval) => value.reconciledAs === decision &&
       value.status === (decision === "effect_present" ? "consumed" : "failed") &&
       Boolean(value.executionReceiptId);

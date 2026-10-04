@@ -20,13 +20,8 @@ export function visibleApprovalCard(approval: { id: string; toolId: string; stat
   recoveredApprovalId: string, now: number, freshOverview: boolean): boolean {
   if (!freshOverview) return false;
   if (["pending", "approved"].includes(approval.status) && approval.expiresAt > now) return true;
-  const reconcilable = approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post" ||
-    approval.toolId === "notion.pages.create" || approval.toolId === "notion.pages.update";
-  if (approval.status === "uncertain" && reconcilable) return true;
-  if (approval.status === "executing" &&
-      (approval.toolId === "notion.pages.create" || approval.toolId === "notion.pages.update")) return true;
-  if (approval.id !== recoveredApprovalId || !reconcilable) return false;
-  if (approval.status === "executing") return true;
+  if (approval.status === "uncertain" || approval.status === "executing") return true;
+  if (approval.id !== recoveredApprovalId) return false;
   return Boolean(approval.executionReceiptId &&
     ((approval.status === "consumed" && approval.reconciledAs === "effect_present") ||
       (approval.status === "failed" && approval.reconciledAs === "effect_absent")));

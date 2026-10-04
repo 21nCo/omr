@@ -29,9 +29,8 @@ export function createLinearActionKeys(makeKey: () => string,
     return `${PREFIX}${[...new Uint8Array(digest)]
       .map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
   };
-  /** Match a server-confirmed approval to an exact retained key without storing arguments. */
-  const identityForKeyDigest = async (digest: string): Promise<string | undefined> => {
-    if (!/^[0-9a-f]{64}$/.test(digest)) return undefined;
+  /** Collect only action keys; denied browser storage leaves in-page keys available. */
+  const candidateActionKeys = (): Map<string, string> => {
     const candidates = new Map(current);
     try {
       const saved = storage?.();
@@ -45,7 +44,12 @@ export function createLinearActionKeys(makeKey: () => string,
         }
       }
     } catch { /* Memory still covers this page if browser storage is denied. */ }
-    for (const [identity, key] of candidates) {
+    return candidates;
+  };
+  /** Match a server-confirmed approval to an exact retained key without storing arguments. */
+  const identityForKeyDigest = async (digest: string): Promise<string | undefined> => {
+    if (!/^[0-9a-f]{64}$/.test(digest)) return undefined;
+    for (const [identity, key] of candidateActionKeys()) {
       const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
       const actual = [...new Uint8Array(bytes)]
         .map((byte) => byte.toString(16).padStart(2, "0")).join("");
