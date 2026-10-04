@@ -1,0 +1,21 @@
+packages/execution/src/execution.ts
+  s_ad500513bc9987::t_0f16c3e2fcd067 33-41,164,167,174
+packages/execution/src/index.ts
+  s_ad500513bc9987::t_65b5e48ffbd386 14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a069ae3e886b2e237ed6ea8a04d360f9471a4da2",
+  "prompts": {},
+  "sessions": {
+    "s_ad500513bc9987": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0f222-fb22-76a5-a77e-b7c92826db44",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
