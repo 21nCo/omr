@@ -4,7 +4,7 @@ import {
   ConnectionUnavailableError, isMissingRemoteConnection, markMissingRemoteConnection,
   type ConnectionAuthority, type ConnectionBindingRecord,
 } from "@oh-my-router/connections";
-import { ConfirmedGitHubWriteRejection, githubHttpFailure, hasRequiredScopes, LinearProviderDenial, LinearProviderResponseAmbiguous, ProviderPreflightError, SlackProviderDenial, SlackProviderResponseAmbiguous, type GitHubHttpFailure, type JsonValue, type ToolCatalog, type ToolManifest } from "@oh-my-router/tools";
+import { canonicalNotionWriteParams, ConfirmedGitHubWriteRejection, githubHttpFailure, hasRequiredScopes, LinearProviderDenial, LinearProviderResponseAmbiguous, NotionProviderDenial, NotionProviderResponseAmbiguous, ProviderPreflightError, SlackProviderDenial, SlackProviderResponseAmbiguous, type GitHubHttpFailure, type JsonValue, type ToolCatalog, type ToolManifest } from "@oh-my-router/tools";
 import { approvalPreviewReady } from "./projection.js";
 
 export type ExecutionStatus = "reserved" | "running" | "succeeded" | "failed" | "uncertain";
@@ -171,8 +171,8 @@ export interface ExecutionApprovalStore {
     actorUserId: string;
     limit: number;
   }): Promise<ExecutionApproval[]>;
-  /** A bounded page of actionable Linear approvals outside recent history. */
-  listOutstandingLinearForActor(input: { workspaceId: string; actorUserId: string;
+  /** A bounded page of actionable provider approvals outside recent history. */
+  listOutstandingProviderForActor(input: { workspaceId: string; actorUserId: string;
     now: number; limit: number }): Promise<ExecutionApproval[]>;
 }
 
@@ -385,6 +385,17 @@ export class SlackExecutionError extends Error {
   }
 }
 
+export class NotionExecutionError extends Error {
+  readonly code: NotionProviderDenial["code"];
+  readonly retryAfterSeconds?: number;
+  constructor(readonly receiptId: string, denial: NotionProviderDenial) {
+    super(denial.message);
+    this.name = "NotionExecutionError";
+    this.code = denial.code;
+    this.retryAfterSeconds = denial.retryAfterSeconds;
+  }
+}
+
 const inputValidators = new Map<string, Validator>();
 
 /** Validate the submitted value against the exact manifest schema used for approval. */
@@ -523,14 +534,17 @@ export class ExecutionService {
       throw new ExecutionCapabilityDeniedError("approvals:create");
     }
     assertJson(input.params);
-    if (!validToolInput(manifest, input.params)) throw new ExecutionInputError("Invalid tool parameters");
-    if (!approvalPreviewReady(manifest, manifest.hash, input.params)) {
+    const notionParams = manifest.id === "notion.pages.create" || manifest.id === "notion.pages.update"
+      ? canonicalNotionWriteParams(manifest.id, input.params) : undefined;
+    if (notionParams === null) throw new ExecutionInputError("Invalid tool parameters");
+    const params = structuredClone(notionParams ?? input.params) as JsonValue;
+    if (!validToolInput(manifest, params)) throw new ExecutionInputError("Invalid tool parameters");
+    if (!approvalPreviewReady(manifest, manifest.hash, params)) {
       throw new ExecutionInputError("This tool has no complete, safely redacted approval preview");
     }
     if (typeof input.idempotencyKey !== "string" || !IDEMPOTENCY_KEY.test(input.idempotencyKey)) {
       throw new ExecutionInputError("Invalid idempotency key");
     }
-    const params = structuredClone(input.params);
     const ttlMs = input.ttlMs ?? 10 * 60_000;
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 60_000 || ttlMs > 60 * 60_000) {
       throw new ExecutionInputError("Approval lifetime must be between one minute and one hour");
@@ -559,7 +573,8 @@ export class ExecutionService {
         params, ttlMs }, this.fingerprintKey),
       // Independent approval keys must not create a second live provider intent.
       intentHash: (manifest.id === "linear.issues.create" || manifest.id === "linear.issues.update" ||
-        manifest.id === "slack.messages.post")
+        manifest.id === "slack.messages.post" || manifest.id === "notion.pages.create" ||
+        manifest.id === "notion.pages.update")
         ? await hashJson({
         principalKey: principalKey(input.principal), workspaceId: input.principal.workspaceId,
         connectionId: connection.id, providerConnectionId: connection.providerConnectionId,
@@ -610,7 +625,8 @@ export class ExecutionService {
   async reconcileUncertain(principal: ExecutionPrincipal, approvalId: string,
     decision: "effect_present" | "effect_absent"): Promise<ExecutionApproval> {
     const approval = await this.approvalStatus(principal, approvalId);
-    if (!(approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post") ||
+    if (!(approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post" ||
+        approval.toolId === "notion.pages.create" || approval.toolId === "notion.pages.update") ||
         !["effect_present", "effect_absent"].includes(decision)) throw new ApprovalUnavailableError();
     const recorded = (value: ExecutionApproval) => value.reconciledAs === decision &&
       value.status === (decision === "effect_present" ? "consumed" : "failed") &&
@@ -947,7 +963,7 @@ export class ExecutionService {
       if (state.succeededReceipt) return state.succeededReceipt;
       if (error instanceof ConnectionUnavailableError || error instanceof GitHubReadError || error instanceof GitHubWritePreflightError ||
           error instanceof GitHubWriteRejectedError || error instanceof LinearExecutionError ||
-          error instanceof SlackExecutionError) throw error;
+          error instanceof SlackExecutionError || error instanceof NotionExecutionError) throw error;
       if (state.dispatchedReceiptId &&
           !(error instanceof ExecutionOutcomeUnknownError)) {
         const receiptId = state.dispatchedReceiptId;
@@ -990,12 +1006,15 @@ export class ExecutionService {
   private async handleAuthorizedDispatchFailure(error: unknown, input: AuthorizedInput,
     receipt: ExecutionReceipt, cleanupDeadlineAt: number, state: AuthorizedRunState): Promise<never> {
     state.missingRemoteAfterInvoke = isMissingRemoteConnection(error) ||
-      isMissingGithubCommentPreflight(error, input.manifest);
+      isMissingGithubCommentPreflight(error, input.manifest) ||
+      (error instanceof NotionProviderDenial && error.phase === "preflight" && error.missingRemote) ||
+      (error instanceof NotionProviderResponseAmbiguous && error.missingRemote);
     const confirmed = confirmedDispatchFailure(error, input.manifest, receipt.id);
     if (confirmed && await this.failDispatchedReceipt(receipt.id, confirmed.code, cleanupDeadlineAt)) {
       throw confirmed.error;
     }
-    const code = error instanceof LinearProviderResponseAmbiguous || error instanceof SlackProviderResponseAmbiguous
+    const code = error instanceof LinearProviderResponseAmbiguous || error instanceof SlackProviderResponseAmbiguous ||
+      error instanceof NotionProviderResponseAmbiguous
       ? "provider_response_ambiguous" : "provider_outcome_unknown";
     await withinInvocationDeadline(cleanupDeadlineAt, () =>
       this.receipts.uncertain(receipt.id, code, this.now(), cleanupDeadlineAt))
@@ -1096,6 +1115,9 @@ function confirmedProviderDenial(error: unknown, manifest: ToolManifest,
   if (manifest.provider === "slack" && error instanceof SlackProviderDenial) {
     return { code: `slack_${error.phase}_denied`, error: new SlackExecutionError(receiptId, error) };
   }
+  if (manifest.provider === "notion" && error instanceof NotionProviderDenial) {
+    return { code: `notion_${error.phase}_denied`, error: new NotionExecutionError(receiptId, error) };
+  }
   return null;
 }
 
@@ -1111,9 +1133,12 @@ function confirmedDispatchFailure(error: unknown, manifest: ToolManifest,
   if (isMissingGithubCommentPreflight(error, manifest)) {
     return { code: "connection_unavailable", error: new ConnectionUnavailableError() };
   }
-  // A raw lookup error does not prove that an already dispatched write had no effect.
+  // Reads have no provider effect. Notion's adapter converts a missing
+  // connection after entering POST/PATCH into an ambiguous response, so a raw
+  // PlugFn lookup error on a Notion write occurred before adapter entry.
   if (isMissingRemoteConnection(error)) {
-    return manifest.provider === "github" && manifest.contract.effect === "read"
+    return manifest.contract.effect === "read" ||
+      (manifest.provider === "notion" && manifest.contract.effect === "write")
       ? { code: "connection_unavailable", error: new ConnectionUnavailableError() } : null;
   }
   if (manifest.provider === "github" && manifest.contract.effect === "read") {

@@ -54,8 +54,8 @@ list. Each remote `tools/list` and `tools/call` still checks current readiness.
 ## Reproducible local response
 
 Run `node scripts/catalog-example.mjs` after building packages. The script
-registers OMR's five-action GitHub v1 adapter and the pinned Linear, Slack,
-and Notion providers, with no OAuth configuration or stored connections. It returned:
+registers OMR's bounded GitHub and Notion v1 adapters and the pinned Linear and
+Slack providers, with no OAuth configuration or stored connections. It returns:
 
 ```json
 {
@@ -66,7 +66,7 @@ and Notion providers, with no OAuth configuration or stored connections. It retu
     { "provider": "github", "displayName": "GitHub", "providerVersion": "1.0.0", "description": "OMR GitHub v1 account, repository discovery, and approved public issue comments", "authMode": "oauth", "actionCount": 5, "state": "unconfigured", "available": false },
     { "provider": "linear", "displayName": "Linear", "providerVersion": "1.0.0", "description": "Integration with Linear for issue tracking and project management", "authMode": "oauth", "actionCount": 14, "state": "unconfigured", "available": false },
     { "provider": "slack", "displayName": "Slack", "providerVersion": "1.0.0", "description": "Integration with Slack for messaging and collaboration", "authMode": "oauth", "actionCount": 9, "state": "unconfigured", "available": false },
-    { "provider": "notion", "displayName": "Notion", "providerVersion": "1.0.0", "description": "Integration with Notion pages, databases, users, and search", "authMode": "oauth", "actionCount": 12, "state": "unconfigured", "available": false }
+    { "provider": "notion", "displayName": "Notion", "providerVersion": "1.0.0", "description": "OMR Notion v1 shared content discovery and approved page changes", "authMode": "oauth", "actionCount": 5, "state": "unconfigured", "available": false }
   ]
 }
 ```

@@ -1,10 +1,96 @@
 import { describe, expect, it } from "vitest";
-import { authorizationScopes, connectionActions, connectionStatusLabel, providerRevocationGuidance } from "./connection-ui.js";
+import { authorizationScopes, connectionActions, connectionAfterNotionProof, connectionStatusLabel, notionAccessGuidance, notionConnectionProviderState, notionJourneyAvailable, notionJourneyGuidance, providerRevocationGuidance } from "./connection-ui.js";
 
 const team = { id: "connection_1", provider: "slack", ownership: "workspace" as const,
   ownerUserId: null, status: "active", readiness: "ready", selected: false };
 
 describe("connection control UI policy", () => {
+  it("shows Notion recovery for permanent, timed, and permission proof failures", () => {
+    expect(notionAccessGuidance("notion_access_restricted", null)).toContain("Contact Notion support");
+    expect(notionAccessGuidance(null, "notion_access_restricted")).toContain("Contact Notion support");
+    expect(notionAccessGuidance("notion_rate_limited", null, 19)).toContain("after 19 seconds");
+    expect(notionAccessGuidance("notion_permission_denied")).toContain("page sharing");
+    expect(notionAccessGuidance("notion_query_rejected")).toContain("Retry the health check later");
+  });
+
+  it("closes the selected Notion journey on a fresh blocked proof and preserves other workspaces", () => {
+    const current = { ...team, id: "binding_notion", provider: "notion", selected: true,
+      workspaceId: "workspace_1", healthReason: null };
+    const other = { ...current, id: "other_notion", workspaceId: "workspace_2" };
+    const projected = connectionAfterNotionProof(current, "binding_notion", "notion_access_restricted");
+    expect(projected).toMatchObject({ status: "needs_reauth", readiness: "unavailable",
+      selected: false, healthReason: "notion_access_restricted" });
+    expect(connectionActions(projected, "user_admin", "admin", "expired").canSelect).toBe(false);
+    expect(connectionActions(projected, "user_admin", "admin", "expired").canReconnect).toBe(false);
+    expect(connectionAfterNotionProof(other, "binding_notion", "notion_access_restricted")).toEqual(other);
+    expect(notionJourneyGuidance([current, other], "workspace_1", "notion_access_restricted", current.id))
+      .toContain("Contact Notion support");
+    expect(notionJourneyGuidance([other], "workspace_1")).toBeNull();
+    expect(notionJourneyGuidance([{ ...current, selected: false, readiness: "unavailable",
+      healthReason: "notion_access_restricted" }], "workspace_1")).toContain("Contact Notion support");
+    expect(notionJourneyGuidance([current], "workspace_1")).toBeNull();
+  });
+
+  it("shows fresh 429 and 403 proof guidance only for the selected binding and workspace", () => {
+    const selected = { ...team, id: "failed", provider: "notion", selected: true,
+      workspaceId: "workspace_1", healthReason: null };
+    const alternate = { ...selected, id: "alternate", selected: false };
+    for (const [issue, phrase] of [["notion_rate_limited", "after 19 seconds"],
+      ["notion_permission_denied", "page sharing"],
+      ["notion_query_rejected", "Retry the health check later"]] as const) {
+      expect(notionJourneyGuidance([selected, alternate], "workspace_1", issue, selected.id, 19))
+        .toContain(phrase);
+      expect(connectionAfterNotionProof(selected, selected.id, issue)).toMatchObject({
+        status: "error", readiness: "unavailable", healthReason: issue, selected: false,
+      });
+      if (issue === "notion_rate_limited" || issue === "notion_query_rejected") expect(connectionActions(
+        connectionAfterNotionProof(selected, selected.id, issue), "user_admin", "admin", "expired",
+      ).canReconnect).toBe(false);
+      expect(connectionAfterNotionProof(alternate, selected.id, issue)).toEqual(alternate);
+      expect(notionJourneyGuidance([{ ...selected, workspaceId: "workspace_2" }],
+        "workspace_1", issue, selected.id, 19)).toBeNull();
+      expect(notionJourneyGuidance([selected, { ...alternate, selected: true }],
+        "workspace_1", issue, selected.id, 19)).toBeNull();
+    }
+  });
+
+  it("keeps a different ready Notion account selectable and its journey visible", () => {
+    const blocked = { ...team, provider: "notion", id: "blocked", workspaceId: "workspace_1",
+      status: "needs_reauth", readiness: "unavailable", selected: true,
+      healthReason: "notion_access_restricted" };
+    const ready = { ...blocked, id: "ready", status: "active", readiness: "ready",
+      selected: false, healthReason: null };
+    expect(notionJourneyGuidance([blocked, ready], "workspace_1", "notion_access_restricted", blocked.id))
+      .toBeNull();
+    expect(notionJourneyAvailable([blocked, ready], "workspace_1", "expired", blocked.id)).toBe(true);
+    expect(connectionActions(ready, "user_admin", "admin",
+      notionConnectionProviderState(ready, "expired", blocked.id)).canSelect).toBe(true);
+    expect(notionJourneyGuidance([{ ...blocked, selected: false }, { ...ready, selected: true }],
+      "workspace_1", "notion_access_restricted", blocked.id)).toBeNull();
+    expect(notionJourneyGuidance([ready], "workspace_1", "notion_access_restricted", blocked.id))
+      .toBeNull();
+    expect(notionJourneyGuidance([blocked], "workspace_2", "notion_access_restricted", blocked.id))
+      .toBeNull();
+    expect(notionJourneyAvailable([blocked, ready], "workspace_2", "expired", blocked.id)).toBe(false);
+    expect(notionJourneyAvailable([{ ...ready, workspaceId: "workspace_2" }],
+      "workspace_2", "expired", blocked.id)).toBe(false);
+    expect(notionJourneyGuidance([blocked], "workspace_1", "notion_access_restricted", blocked.id))
+      .toContain("Contact Notion support");
+    // An expired catalog without a binding ID cannot identify an alternate.
+    // The overview may still contain the stale selected binding.
+    const stale = { ...ready, selected: true };
+    expect(notionConnectionProviderState(stale, "expired")).toBe("expired");
+    expect(notionJourneyAvailable([stale], "workspace_1", "expired")).toBe(false);
+    expect(connectionActions(stale, "user_admin", "admin", notionConnectionProviderState(stale,
+      "expired")).canReconnect).toBe(true);
+    expect(notionJourneyAvailable([blocked, ready], "workspace_1", "expired")).toBe(false);
+    expect(notionJourneyGuidance([blocked, ready], "workspace_1", null))
+      .toContain("Contact Notion support");
+    expect(notionJourneyGuidance([blocked, { ...ready, selected: true }], "workspace_1", null))
+      .toBeNull();
+    expect(notionJourneyGuidance([blocked, ready], "workspace_2", null)).toBeNull();
+  });
+
   it("allows members to select and probe team accounts but reserves lifecycle mutations for admins", () => {
     expect(connectionActions(team, "user_member", "member", "ready")).toMatchObject({
       canSelect: true, canCheck: true, canRefresh: false, canDisconnect: false,

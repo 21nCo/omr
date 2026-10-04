@@ -183,9 +183,12 @@ function normalizeLabel(value: string): string {
   return normalized;
 }
 
-/** Reject custom Linear and Slack scope lists that bypass their selected tier. */
+/** Reject scope lists that bypass a selected tier or invent Notion OAuth scopes. */
 function assertTierScopes(provider: string, supplied: string[] | undefined,
   expected: string[] | undefined): void {
+  if (provider === "notion" && supplied !== undefined) {
+    throw new ConnectionInputError("Notion access is selected on its shared-content consent screen");
+  }
   if (!supplied || (provider !== "linear" && provider !== "slack")) return;
   if (supplied.length === expected?.length && expected.every((scope) => supplied.includes(scope))) return;
   throw new ConnectionInputError(`${provider === "linear" ? "Linear" : "Slack"} scopes must match the selected access tier`);

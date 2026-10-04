@@ -1651,6 +1651,75 @@ syncBuiltinESMExports();
     expect(f.committedMutations).toEqual([]);
   });
 
+  it("preserves definite Notion failures and safe metadata across CLI commands", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    const cases = [
+      { path: "/api/tools/execute", args: ["tools", "run", "notion.content.search"],
+        status: 502, code: "NOTION_QUERY_REJECTED" },
+      { path: "/api/approvals", args: ["approvals", "request", "notion.pages.create", "--idempotency", "notion-preflight"],
+        status: 502, code: "NOTION_QUERY_REJECTED" },
+      { path: "/api/approvals/execute", args: ["approvals", "execute", "approval_1"],
+        status: 502, code: "NOTION_QUERY_REJECTED" },
+      { path: "/api/approvals", args: ["approvals", "request", "notion.pages.create", "--idempotency", "notion-permission"],
+        status: 403, code: "NOTION_PERMISSION_DENIED" },
+      { path: "/api/approvals/execute", args: ["approvals", "execute", "approval_1"],
+        status: 403, code: "NOTION_ACCESS_RESTRICTED" },
+      { path: "/api/approvals/execute", args: ["approvals", "execute", "approval_1"],
+        status: 404, code: "NOTION_TARGET_UNAVAILABLE" },
+      { path: "/api/approvals/execute", args: ["approvals", "execute", "approval_1"],
+        status: 422, code: "NOTION_INVALID_CHANGE" },
+      { path: "/api/approvals/execute", args: ["approvals", "execute", "approval_1"],
+        status: 401, code: "NOTION_RECONNECT_REQUIRED" },
+    ] as const;
+    for (const item of cases) {
+      f.failureResponse(item.path, item.status,
+        { error: item.code, message: "private Notion response", receiptId: "receipt_notion_denied" });
+      const reply = await f.run([...item.args, "--json"], env);
+      expect(reply.code).toBe(item.status === 401 ? 3 : 1);
+      expect(lastError(reply.stderr)).toMatchObject({ error: item.code,
+        details: { receiptId: "receipt_notion_denied" } });
+      expect(reply.stderr).not.toContain("private Notion response");
+      f.clearFailureResponse();
+    }
+    for (const [path, args] of [
+      ["/api/tools/execute", ["tools", "run", "notion.content.search", "--idempotency", "notion-rate"]],
+      ["/api/approvals", ["approvals", "request", "notion.pages.create", "--idempotency", "notion-rate"]],
+      ["/api/approvals/execute", ["approvals", "execute", "approval_1"]],
+    ] as const) {
+      f.failureResponse(path, 429, { error: "NOTION_RATE_LIMITED", message: "private Notion response" },
+        { "retry-after": "17" });
+      const reply = await f.run([...args, "--json"], env);
+      expect(reply.code).toBe(1);
+      expect(lastError(reply.stderr)).toMatchObject({ error: "NOTION_RATE_LIMITED",
+        details: { retryAfterSeconds: 17 } });
+      expect(reply.stderr).not.toContain("private Notion response");
+      f.clearFailureResponse();
+    }
+    f.failureResponse("/api/approvals/execute", 502,
+      { error: "PROVIDER_UNAVAILABLE", receiptId: "receipt_notion_unknown" });
+    const uncertain = await f.run(["approvals", "execute", "approval_1", "--json"], env);
+    expect(uncertain.code).toBe(23);
+    expect(lastError(uncertain.stderr)).toMatchObject({ error: "EXECUTION_EFFECT_UNCERTAIN",
+      details: { approvalId: "approval_1", receiptId: "receipt_notion_unknown" } });
+    expect(f.committedMutations).toEqual([]);
+  });
+
+  it("guides reconnect for definite missing-connection reads without an uncertain receipt", async () => {
+    const f = await fixture();
+    const env = { OMR_BACKEND: f.url, OMR_API_KEY: "headless_secret", OMR_WORKSPACE_ID: "workspace_1" };
+    f.failureResponse("/api/tools/execute", 409, { error: "CONNECTION_UNAVAILABLE" });
+    for (const toolId of ["notion.content.search", "notion.pages.get", "linear.get_issue",
+      "slack.messages.list"]) {
+      const reply = await f.run(["tools", "run", toolId, "--json"], env);
+      expect(reply.code).toBe(1);
+      expect(lastError(reply.stderr)).toEqual({ error: "CONNECTION_UNAVAILABLE",
+        message: "Connection is unavailable; reconnect the provider before retrying." });
+      expect(reply.stderr).not.toContain("outcome");
+    }
+    expect(f.committedMutations).toEqual([]);
+  });
+
   it("keeps the filtered Slack history signal and cursor in CLI JSON output", async () => {
     const f = await fixture();
     f.successReply("/api/tools/execute", { id: "receipt_filtered", workspaceId: "workspace_1",

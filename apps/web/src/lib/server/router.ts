@@ -34,7 +34,7 @@ import {
   WorkspaceAccessDeniedError,
   WorkspaceInputError,
 } from "@oh-my-router/identity";
-import { LinearProviderDenial, SlackProviderDenial, ToolCatalogInputError, type ToolEffect } from "@oh-my-router/tools";
+import { LinearProviderDenial, NotionProviderDenial, SlackProviderDenial, ToolCatalogInputError, type ToolEffect } from "@oh-my-router/tools";
 import {
   ApprovalUnavailableError,
   ExecutionApprovalRequiredError,
@@ -46,6 +46,7 @@ import {
   GitHubWriteRejectedError,
   LinearExecutionError,
   SlackExecutionError,
+  NotionExecutionError,
   LinearIntentTransactionRequiredError,
   ExecutionIdempotencyConflictError,
   ExecutionInProgressError,
@@ -224,6 +225,20 @@ function slackErrorResponse(error: SlackExecutionError | SlackProviderDenial): R
   }[error.code];
   const headers: Record<string, string> = { ...PRIVATE_RESPONSE };
   if (error.code === "SLACK_RATE_LIMITED" && error.retryAfterSeconds !== undefined) {
+    headers["retry-after"] = String(error.retryAfterSeconds);
+  }
+  return Response.json({ error: error.code, message: error.message,
+    ...("receiptId" in error ? { receiptId: error.receiptId } : {}) }, { status, headers });
+}
+
+function notionErrorResponse(error: NotionExecutionError | NotionProviderDenial): Response {
+  const status = {
+    NOTION_RATE_LIMITED: 429, NOTION_RECONNECT_REQUIRED: 401,
+    NOTION_PERMISSION_DENIED: 403, NOTION_ACCESS_RESTRICTED: 403, NOTION_TARGET_UNAVAILABLE: 404,
+    NOTION_INVALID_CHANGE: 422, NOTION_QUERY_REJECTED: 502,
+  }[error.code];
+  const headers: Record<string, string> = { ...PRIVATE_RESPONSE };
+  if (error.code === "NOTION_RATE_LIMITED" && error.retryAfterSeconds !== undefined) {
     headers["retry-after"] = String(error.retryAfterSeconds);
   }
   return Response.json({ error: error.code, message: error.message,
@@ -462,6 +477,9 @@ export function createOMRRouter(
       }
       if (error instanceof SlackExecutionError || error instanceof SlackProviderDenial) {
         return slackErrorResponse(error);
+      }
+      if (error instanceof NotionExecutionError || error instanceof NotionProviderDenial) {
+        return notionErrorResponse(error);
       }
       if (error instanceof ExecutionInvocationDeadlineError) {
         return Response.json({ error: error.code },

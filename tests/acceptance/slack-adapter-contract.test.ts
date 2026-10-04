@@ -793,7 +793,7 @@ describe("slack-adapter-contract", () => {
       state: "ready", available: true }],
     async () => ({ id: binding.id, providerConnectionId: binding.providerConnectionId }),
     async () => (await omrSlackProvider.actions["workspace.get"]!.execute({}, slack.context)).verifiedScopes,
-    async () => {}, reconnect);
+    async () => {}, { onReconnectRequired: reconnect });
     expect([...visible]).toEqual([]);
     expect(reconnect).toHaveBeenCalledExactlyOnceWith(binding.id, "slack");
     expect(await connections.getAccessible("alice", binding.id)).toMatchObject({

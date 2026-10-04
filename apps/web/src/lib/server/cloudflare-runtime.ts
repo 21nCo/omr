@@ -14,10 +14,11 @@ import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
 import { ApprovalUnavailableError, decodeExecutionWrappingKey, deriveExecutionFingerprintKey, ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
 import { connectPostgresExecutionReceipts } from "@oh-my-router/execution/postgres";
 import { connectPostgresIdentityRuntime } from "@oh-my-router/identity/postgres";
-import { connectPostgresPlugFn, verifiedGithubScopes, verifiedLinearScopes, verifiedSlackScopes } from "@oh-my-router/plugfn-runtime";
+import { connectPostgresPlugFn, verifiedGithubScopes, verifiedLinearScopes, verifiedNotionScopes, verifiedSlackScopes } from "@oh-my-router/plugfn-runtime";
 import {
   createPlugFnToolCatalog,
   isProviderConfigured,
+  type NotionProviderDenial,
   v1ProviderCatalog,
   type JsonValue,
   type ProviderBinding,
@@ -152,6 +153,7 @@ export function createProviderIntegrationConfig(
   return Object.fromEntries(Object.entries(OAUTH_BINDINGS).flatMap(([provider, names]) => {
     if (provider === "github" && env.OMR_GITHUB_V1_ENABLED !== "true") return [];
     if (provider === "linear" && env.OMR_LINEAR_V1_ENABLED !== "true") return [];
+    if (provider === "notion" && env.OMR_NOTION_V1_ENABLED !== "true") return [];
     if (provider === "slack" && env.OMR_SLACK_V1_ENABLED !== "true") return [];
     if (provider === "slack-user") return [];
     const clientId = env[names[0]];
@@ -417,6 +419,7 @@ async function verifiedProviderScopes(
   if (provider === "github") return verifiedGithubScopes(plugfn, { userId, workspaceId, connectionId });
   if (provider === "linear") return verifiedLinearScopes(plugfn, { userId, workspaceId, connectionId });
   if (provider === "slack") return verifiedSlackScopes(plugfn, { userId, workspaceId, connectionId });
+  if (provider === "notion") return verifiedNotionScopes(plugfn, { userId, workspaceId, connectionId });
   return (await plugfn.connections.get(connectionId)).scopes;
 }
 
@@ -430,6 +433,8 @@ export async function scopedToolIds(
   bindings: readonly ConnectionBindingRecord[],
 ): Promise<{ allowedToolIds: Set<string>; providers: ProviderStatus[] }> {
   const missing = new Set<string>();
+  const notionProof = new Map<string, { issue: NonNullable<ProviderStatus["proofIssue"]>;
+    retryAfterSeconds?: number }>();
   const allowedToolIds = await resolveScopedCatalog(
     catalog,
     statuses(plugfn, bindings),
@@ -441,22 +446,48 @@ export async function scopedToolIds(
       missing.add(bindingId);
       await markMissingRemoteConnection(authority, bindingId);
     },
-    async (bindingId, provider) => {
-      missing.add(bindingId);
-      await authority.recordHealth({ connectionId: bindingId, status: "needs_reauth",
-        readiness: "unavailable", reason: `${provider ?? "linear"}_reconnect_required` }).catch(() => undefined);
-    },
-    async (bindingId, code) => {
-      missing.add(bindingId);
-      await authority.recordHealth({ connectionId: bindingId, status: "needs_reauth",
-        readiness: "unavailable", reason: code.toLowerCase() }).catch(() => undefined);
+    {
+      onReconnectRequired: async (bindingId, provider) => {
+        missing.add(bindingId);
+        await authority.recordHealth({ connectionId: bindingId, status: "needs_reauth",
+          readiness: "unavailable", reason: `${provider ?? "linear"}_reconnect_required` }).catch(() => undefined);
+      },
+      onPermanentDenial: async (bindingId, code) => {
+        missing.add(bindingId);
+        await authority.recordHealth({ connectionId: bindingId, status: "needs_reauth",
+          readiness: "unavailable", reason: code.toLowerCase() }).catch(() => undefined);
+      },
+      onNotionProofIssue: (bindingId, code, retryAfterSeconds) => {
+        const issue = notionProofIssue(code);
+        if (!issue) return;
+        missing.add(bindingId);
+        notionProof.set(bindingId, { issue, retryAfterSeconds });
+      },
     },
   );
   return {
     allowedToolIds,
     providers: statuses(plugfn, bindings.map((binding) => missing.has(binding.id)
-      ? { ...binding, status: "needs_reauth", readiness: "unavailable" } : binding)),
+      ? { ...binding, status: "needs_reauth", readiness: "unavailable" } : binding))
+      .map((provider) => {
+        if (provider.provider !== "notion") return provider;
+        const proof = [...notionProof].find(([bindingId]) => bindings.some((binding) =>
+          binding.provider === "notion" && binding.id === bindingId));
+        return proof ? { ...provider, proofIssue: proof[1].issue,
+          proofBindingId: proof[0], proofRetryAfterSeconds: proof[1].retryAfterSeconds } : provider;
+      }),
   };
+}
+
+/** Only these Notion denials provide catalog guidance for a selected binding. */
+function notionProofIssue(code: NotionProviderDenial["code"]): ProviderStatus["proofIssue"] {
+  switch (code) {
+    case "NOTION_ACCESS_RESTRICTED": return "notion_access_restricted";
+    case "NOTION_RATE_LIMITED": return "notion_rate_limited";
+    case "NOTION_PERMISSION_DENIED": return "notion_permission_denied";
+    case "NOTION_RECONNECT_REQUIRED": return undefined;
+    default: return "notion_query_rejected";
+  }
 }
 
 /** Bind authenticated control-plane routes to disposable server-side runtimes. */
@@ -788,7 +819,7 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
         });
         const connectionService = new PlugFnConnectionOrchestrator(connections.connections, plugfn.plugfn);
         const now = Date.now();
-        const [availableConnections, orphanedConnections, recentApprovals, outstandingLinear, recoveredApproval, executions] = await Promise.all([
+        const [availableConnections, orphanedConnections, recentApprovals, outstandingProvider, recoveredApproval, executions] = await Promise.all([
           connectionService.listAvailable({
             actorUserId: session.actorId,
             workspaceId: selected.workspace.id,
@@ -802,7 +833,7 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
             workspaceId: selected.workspace.id,
             limit: 50,
           }),
-          activity.approvals.listOutstandingLinearForActor({
+          activity.approvals.listOutstandingProviderForActor({
             actorUserId: session.actorId,
             workspaceId: selected.workspace.id,
             now,
@@ -816,7 +847,7 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
             limit: 50,
           }),
         ]);
-        const approvals = visibleApprovals(recentApprovals, outstandingLinear, recoveredApproval, now);
+        const approvals = visibleApprovals(recentApprovals, outstandingProvider, recoveredApproval, now);
         const approvalCatalog = await createPlugFnToolCatalog(plugfn.plugfn, configuredProviders(plugfn.plugfn));
         const reconciliationReceipts = await providerReconciliationReceipts(
           approvals, activity.receipts, selected.workspace.id, session.actorId);
