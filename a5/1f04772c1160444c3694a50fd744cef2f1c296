@@ -1,0 +1,40 @@
+.env.example
+  h_a39f9495f9ec1d 16-17
+README.md
+  h_a39f9495f9ec1d 73-79
+apps/web/src/app.d.ts
+  h_a39f9495f9ec1d 12
+apps/web/src/lib/direct-playground.ts
+  h_a39f9495f9ec1d 1-98
+apps/web/src/lib/server/direct-playground-rollout.ts
+  h_a39f9495f9ec1d 1-5
+apps/web/src/routes/app/+page.server.ts
+  h_a39f9495f9ec1d 1-6
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 14-16,905
+apps/web/src/routes/app/playground/+page.server.ts
+  h_a39f9495f9ec1d 1-8
+apps/web/src/routes/app/playground/+page.svelte
+  h_a39f9495f9ec1d 1-393
+package-lock.json
+  h_a39f9495f9ec1d 20,2045-2061,2233-2245,2602-2614,2999-3017,4777-4786
+package.json
+  h_a39f9495f9ec1d 37
+tests/acceptance/direct-playground-contract.test.ts
+  h_a39f9495f9ec1d 1-171
+tests/acceptance/direct-playground-ui.test.ts
+  h_a39f9495f9ec1d 1-132
+vitest.config.ts
+  h_a39f9495f9ec1d 2-3,6-8,11-23,25
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a51f04772c1160444c3694a50fd744cef2f1c296",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
