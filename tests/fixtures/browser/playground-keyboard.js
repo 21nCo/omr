@@ -11,7 +11,11 @@ const tool = { catalogSchemaVersion: "1.0.0", id: "demo.read", provider: "demo",
 window.__playgroundExecuteCalls = 0;
 /** Supply one connected read tool and count browser-initiated executions. */
 window.fetch = async (input) => {
-  const path = input instanceof Request ? input.url : input instanceof URL ? input.href : input;
+  let url = input;
+  if (input instanceof Request) url = input.url;
+  else if (input instanceof URL) url = input.href;
+  const parsed = new URL(url, location.origin);
+  const path = parsed.pathname + parsed.search;
   if (path.startsWith("/api/control-plane")) return Response.json({
     selectedWorkspaceId: "workspace_one", workspaces: [
       { workspace: { id: "workspace_one", name: "Mine" } }],

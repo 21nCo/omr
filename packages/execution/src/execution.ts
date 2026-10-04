@@ -30,6 +30,15 @@ export class LinearIntentTransactionRequiredError extends Error {
   }
 }
 
+/** Approval decisions require a transactional client to fence membership changes. */
+export class ApprovalTransactionRequiredError extends Error {
+  readonly code = "APPROVAL_TRANSACTION_REQUIRED";
+  constructor() {
+    super("Approval decisions require a transactional PostgreSQL connection");
+    this.name = "ApprovalTransactionRequiredError";
+  }
+}
+
 export async function withinInvocationDeadline<T>(deadlineAt: number, operation: () => Promise<T>): Promise<T> {
   const remaining = deadlineAt - Date.now();
   if (remaining <= 0) throw new ExecutionInvocationDeadlineError();
@@ -152,17 +161,17 @@ export interface ExecutionApprovalStore {
     now?: number): Promise<ExecutionApproval>;
   /** Re-sample the same clock after a PostgreSQL membership lock before committing. */
   approve(input: { approvalId: string; actorUserId: string; now: number;
-    clock?: () => number }): Promise<ExecutionApproval>;
+    clock: () => number }): Promise<ExecutionApproval>;
   /** Re-sample expiry after a lock, including a concurrent revocation wait. */
   reject(input: { approvalId: string; actorUserId: string; now: number;
-    clock?: () => number }): Promise<ExecutionApproval>;
+    clock: () => number }): Promise<ExecutionApproval>;
   /** Claim remains fenced if expiry advances while opening or locking the connection. */
   claim(input: {
     approvalId: string;
     actorUserId: string;
     principalKey: string;
     now: number;
-    clock?: () => number;
+    clock: () => number;
     deadlineAt: number;
   }): Promise<ExecutionApproval>;
   consume(input: { approvalId: string; receiptId: string; now: number;

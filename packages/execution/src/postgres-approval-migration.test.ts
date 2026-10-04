@@ -237,7 +237,7 @@ describeDatabase("approval migration from origin/dev schema", () => {
       const approvedExpiresAt = Date.now() + 60_000;
       await store.create({ ...candidate, id: approvedId, idempotencyKey: approvedId,
         expiresAt: approvedExpiresAt, createdAt: Date.now(), updatedAt: Date.now() });
-      await store.approve({ approvalId: approvedId, actorUserId: "user_1", now: approvedExpiresAt - 1 });
+      await store.approve({ approvalId: approvedId, actorUserId: "user_1", now: approvedExpiresAt - 1, clock: () => approvedExpiresAt - 1 });
       await expect(store.getForActor(approvedId, "user_1", undefined, approvedExpiresAt - 1))
         .resolves.toMatchObject({ status: "approved" });
       await expect(store.getForActor(approvedId, "user_1", undefined, approvedExpiresAt))
@@ -252,7 +252,7 @@ describeDatabase("approval migration from origin/dev schema", () => {
         await revoker.query("BEGIN");
         await revoker.query(`DELETE FROM ${qualified}.workspace_memberships WHERE user_id = 'user_1'`);
         let decisionSettled = false;
-        const racingDecision = store.approve({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5 })
+        const racingDecision = store.approve({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5, clock: () => 5 })
           .then(() => { decisionSettled = true; return null; }, (error: unknown) => {
             decisionSettled = true;
             return error;
@@ -267,14 +267,14 @@ describeDatabase("approval migration from origin/dev schema", () => {
       }
       await expect(store.getForActor("approval_fresh", "user_1"))
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
-      await expect(store.approve({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5 }))
+      await expect(store.approve({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5, clock: () => 5 }))
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
-      await expect(store.reject({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5 }))
+      await expect(store.reject({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5, clock: () => 5 }))
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
       await client.query(`INSERT INTO ${qualified}.workspace_memberships VALUES ('workspace_1', 'user_1')`);
-      await store.approve({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5 });
+      await store.approve({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5, clock: () => 5 });
       await store.claim({ approvalId: "approval_fresh", actorUserId: "user_1",
-        principalKey: "web:user_1", now: 6, deadlineAt: Date.now() + 1_000 });
+        principalKey: "web:user_1", now: 6, deadlineAt: Date.now() + 1_000, clock: () => 6 });
       await client.query(`INSERT INTO ${qualified}.execution_receipts
         (id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash, connection_id,
          provider_connection_id, idempotency_key, status, request_hash, started_at, created_at, updated_at)
@@ -292,7 +292,7 @@ describeDatabase("approval migration from origin/dev schema", () => {
       await expect(store.uncertain({ approvalId: "approval_fresh", receiptId: "execution_reconcile", now: 7 }))
         .resolves.toMatchObject({ status: "uncertain", executionReceiptId: "execution_reconcile" });
       await expect(store.claim({ approvalId: "approval_fresh", actorUserId: "user_1",
-        principalKey: "web:user_1", now: 8, deadlineAt: Date.now() + 1_000 })).rejects.toMatchObject({
+        principalKey: "web:user_1", now: 8, deadlineAt: Date.now() + 1_000, clock: () => 8 })).rejects.toMatchObject({
         code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: "execution_reconcile",
       });
       const count = await client.query<{ count: string }>(

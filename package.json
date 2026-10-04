@@ -11,7 +11,7 @@
     "build": "turbo run build",
     "dev": "npm run dev --workspace=@oh-my-router/web",
     "typecheck": "turbo run typecheck",
-    "test": "npm run test:prepare && vitest run --exclude tests/acceptance/direct-playground-ui.test.ts --exclude tests/acceptance/client-component-import.test.ts && vitest run --config vitest.client.config.ts",
+    "test": "npm run test:prepare && node --test tests/acceptance/*.check.mjs && vitest run --exclude tests/acceptance/direct-playground-ui.test.ts --exclude tests/acceptance/client-component-import.test.ts && vitest run --config vitest.client.config.ts",
     "test:prepare": "turbo run build --filter='./packages/*' && npm run sync --workspace=@oh-my-router/web",
     "test:phase-00": "vitest run tests/acceptance/phase-00.test.ts",
     "test:keyboard": "node tests/acceptance/direct-playground-keyboard.mjs",

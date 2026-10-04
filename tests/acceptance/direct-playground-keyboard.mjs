@@ -5,12 +5,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createServer } from "vite";
 import { createCdpChannel } from "./cdp-channel.mjs";
+import { cleanupAll, until } from "./browser-probe.mjs";
 
 const chrome = process.env.CHROME_BIN ?? (process.platform === "darwin"
   ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" : "google-chrome");
 const profile = await mkdtemp(join(tmpdir(), "omr-playground-keyboard-"));
-const server = await createServer({ configFile: resolve("vitest.client.config.ts"),
-  server: { host: "127.0.0.1", port: 0 } });
+let server;
 let browser;
 let socket;
 let channel;
@@ -38,7 +38,7 @@ function opened(target) {
 
 /** Wait for the owned Chrome process to exit before removing its profile. */
 async function stopBrowser(child) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  if (child?.exitCode !== null || child?.signalCode !== null) return;
   const waitForExit = (ms) => new Promise((resolve) => {
     if (child.exitCode !== null || child.signalCode !== null) { resolve(true); return; }
     const onExit = () => { clearTimeout(timer); resolve(true); };
@@ -52,16 +52,9 @@ async function stopBrowser(child) {
   }
 }
 
-/** Poll a browser-visible condition with a bounded deadline. */
-async function until(check, label, deadline = Date.now() + 15_000) {
-  const value = await check();
-  if (value) return value;
-  if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${label}`);
-  await new Promise((done) => setTimeout(done, 50));
-  return until(check, label, deadline);
-}
-
 try {
+  server = await createServer({ configFile: resolve("vitest.client.config.ts"),
+    server: { host: "127.0.0.1", port: 0 } });
   await server.listen();
   const address = server.httpServer.address();
   assert(address && typeof address !== "string");
@@ -91,6 +84,10 @@ try {
   await send("Page.navigate", { url: `http://127.0.0.1:${address.port}/tests/fixtures/browser/playground-keyboard.html` });
   await until(() => evaluate("window.__playgroundMounted && !document.querySelector('#playground-tool')?.disabled"),
     "playground catalog");
+  assert.deepEqual(await evaluate(`Promise.all([
+    fetch(new URL('/api/tools?workspaceId=workspace_one', location.origin)),
+    fetch(new Request(new URL('/api/tools?workspaceId=workspace_one', location.origin)))
+  ]).then((responses) => responses.map((response) => response.status))`), [200, 200]);
   await evaluate(`(() => { const select = document.querySelector('#playground-tool');
     select.value = 'demo.read'; select.dispatchEvent(new Event('change', { bubbles: true })); })()`);
   await until(() => evaluate("!document.querySelector('button[type=submit]')?.disabled"), "read button");
@@ -110,15 +107,15 @@ try {
   assert.equal(await evaluate("window.__playgroundExecuteCalls"), 1);
   process.stdout.write("Chrome Enter-key submit: one read request and receipt_keyboard observed\n");
 } finally {
-  channel?.dispose();
-  socket?.close();
-  let cleanupFailure;
-  try { await stopBrowser(browser); }
-  catch (error) { cleanupFailure = error; }
-  await server.close();
-  await until(async () => {
-    try { await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); return true; }
-    catch { return false; }
-  }, "Chrome profile cleanup").catch((error) => process.stderr.write(`${error}\n`));
-  if (cleanupFailure) throw cleanupFailure;
+  const failed = await cleanupAll([
+    () => channel?.dispose(),
+    () => socket?.close(),
+    () => stopBrowser(browser),
+    () => server?.close(),
+    () => until(async () => {
+      try { await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); return true; }
+      catch { return false; }
+    }, "Chrome profile cleanup"),
+  ], (error) => process.stderr.write(`${error}\n`));
+  if (failed) process.exitCode = 1;
 }

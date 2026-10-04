@@ -3,6 +3,7 @@ import type { JsonValue } from "@oh-my-router/tools";
 
 import {
   ApprovalUnavailableError,
+  ApprovalTransactionRequiredError,
   ExecutionIdempotencyConflictError,
   LinearIntentTransactionRequiredError,
   ExecutionInvocationDeadlineError,
@@ -72,6 +73,9 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
   ) {
     if (wrappingKey.byteLength !== 32) throw new Error("Execution approval wrapping key must be 32 bytes");
     if (!client && !ownedQueries) throw new Error("An execution approval query connection is required");
+    if (!client && !runOwnedClient) {
+      throw new ApprovalTransactionRequiredError();
+    }
   }
 
   private query<R extends QueryResultRow>(sql: string, values?: unknown[],
@@ -251,7 +255,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     approvalId: string;
     actorUserId: string;
     now: number;
-    clock?: () => number;
+    clock: () => number;
   }): Promise<ExecutionApproval> {
     return this.decide(input, "approved");
   }
@@ -261,14 +265,14 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     approvalId: string;
     actorUserId: string;
     now: number;
-    clock?: () => number;
+    clock: () => number;
   }): Promise<ExecutionApproval> {
     return this.decide(input, "rejected");
   }
 
   /** Recheck expiry after lock acquisition before committing a decision. */
   private async decide(input: { approvalId: string; actorUserId: string; now: number;
-    clock?: () => number }, status: "approved" | "rejected"): Promise<ExecutionApproval> {
+    clock: () => number }, status: "approved" | "rejected"): Promise<ExecutionApproval> {
     const deadlineAt = Date.now() + EXECUTION_INVOCATION_DEADLINE_MS;
     const decideWithClient = async (client: Client): Promise<ExecutionApproval> => {
       const query = <R extends object>(sql: string, values?: unknown[]) =>
@@ -287,7 +291,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
           [input.approvalId, input.actorUserId, status, input.now],
         );
         const row = result.rows[0];
-        if (!row || Number(row.expires_at) <= (input.clock?.() ?? Date.now())) {
+        if (!row || Number(row.expires_at) <= input.clock()) {
           throw new ApprovalUnavailableError();
         }
         await query("COMMIT");
@@ -298,7 +302,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
       }
     };
     if (this.runOwnedClient) return this.runOwnedClient(deadlineAt, decideWithClient);
-    if (!this.client) throw new Error("Approval decisions require a PostgreSQL connection");
+    if (!this.client) throw new ApprovalTransactionRequiredError();
     return decideWithClient(this.client);
   }
 
@@ -307,7 +311,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     actorUserId: string;
     principalKey: string;
     now: number;
-    clock?: () => number;
+    clock: () => number;
     deadlineAt: number;
   }): Promise<ExecutionApproval> {
     if (!this.claimConnectionString && (!this.client || this.client instanceof PostgresClient)) {
@@ -328,7 +332,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
   }
 
   private async claimWithClient(input: { approvalId: string; actorUserId: string;
-    principalKey: string; now: number; clock?: () => number; deadlineAt: number }, client: Client,
+    principalKey: string; now: number; clock: () => number; deadlineAt: number }, client: Client,
   connected: boolean): Promise<ExecutionApproval> {
     const query = <R extends object>(sql: string, values?: unknown[]) =>
       withinInvocationDeadline(input.deadlineAt, () => client.query<R>(sql, values));
@@ -358,7 +362,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
       [input.approvalId, input.actorUserId, input.principalKey, input.now],
     );
       if (claimed.rows[0]) {
-        if (Number(claimed.rows[0].expires_at) <= (input.clock?.() ?? Date.now())) {
+        if (Number(claimed.rows[0].expires_at) <= input.clock()) {
           await query("ROLLBACK");
           claimTransactionOpen = false;
           throw new ApprovalUnavailableError();

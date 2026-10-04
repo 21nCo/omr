@@ -45,4 +45,31 @@ describe("Linear approval reservation boundaries", () => {
       .rejects.toMatchObject({ code: "LINEAR_INTENT_TRANSACTION_REQUIRED" });
     expect(query).not.toHaveBeenCalled();
   });
+
+  it("rejects a query-only approval store before it can accept a decision", () => {
+    const query = vi.fn();
+    expect(() => new PostgresExecutionApprovalStore(null, new Uint8Array(32),
+      undefined, { query } as never)).toThrow(expect.objectContaining({
+      code: "APPROVAL_TRANSACTION_REQUIRED",
+    }));
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("uses the supplied clock for direct memory decisions and claims", async () => {
+    const memory = new MemoryExecutionApprovalStore(() => true,
+      new MemoryExecutionReceiptStore(() => true));
+    const candidate = { ...approval("clocked"), intentHash: undefined,
+      expiresAt: 10_000 };
+    await memory.create(candidate);
+    const clock = () => 10_000;
+    await expect(memory.approve({ approvalId: candidate.id, actorUserId: candidate.actorUserId,
+      now: 9_999, clock })).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    expect(memory.approvals.get(candidate.id)?.status).toBe("pending");
+    await memory.approve({ approvalId: candidate.id, actorUserId: candidate.actorUserId,
+      now: 9_999, clock: () => 9_999 });
+    await expect(memory.claim({ approvalId: candidate.id, actorUserId: candidate.actorUserId,
+      principalKey: candidate.principalKey, now: 9_999, clock,
+      deadlineAt: Date.now() + 1_000 })).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+    expect(memory.approvals.get(candidate.id)?.status).toBe("approved");
+  });
 });
