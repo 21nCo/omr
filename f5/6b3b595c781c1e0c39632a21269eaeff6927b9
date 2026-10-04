@@ -1,0 +1,50 @@
+.env.example
+  h_a39f9495f9ec1d 13-23
+README.md
+  h_a39f9495f9ec1d 69-72
+apps/web/src/app.d.ts
+  h_a39f9495f9ec1d 8,10
+apps/web/src/lib/openrouter-settings.test.ts
+  h_a39f9495f9ec1d 1-16
+apps/web/src/lib/openrouter-settings.ts
+  h_a39f9495f9ec1d 1-28
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 16,36,45,47,60,80-87,214-237,946-956
+apps/web/src/lib/server/openrouter-vault-route.test.ts
+  h_a39f9495f9ec1d 1-107
+apps/web/src/lib/server/router.ts
+  h_a39f9495f9ec1d 33,151-157,394,421-426,536,543-544,561-594
+apps/web/src/routes/api/[...path]/+server.ts
+  h_a39f9495f9ec1d 14
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 902
+apps/web/src/routes/app/settings/+page.svelte
+  h_a39f9495f9ec1d 1-88
+docs/openrouter-vault.md
+  h_a39f9495f9ec1d 1-25
+packages/identity/migrations/0020_openrouter_personal_vault.sql
+  h_a39f9495f9ec1d 1-20
+packages/identity/src/index.ts
+  h_a39f9495f9ec1d 6-8
+packages/identity/src/openrouter-vault-postgres.integration.test.ts
+  h_a39f9495f9ec1d 1-70
+packages/identity/src/openrouter-vault-postgres.ts
+  h_a39f9495f9ec1d 1-63
+packages/identity/src/openrouter-vault.test.ts
+  h_a39f9495f9ec1d 1-135
+packages/identity/src/openrouter-vault.ts
+  h_a39f9495f9ec1d 1-176
+packages/identity/src/postgres.ts
+  h_a39f9495f9ec1d 63
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f56b3b595c781c1e0c39632a21269eaeff6927b9",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
