@@ -1,0 +1,40 @@
+.env.example
+  h_a39f9495f9ec1d 18-20
+README.md
+  h_a39f9495f9ec1d 80-89
+apps/web/src/app.d.ts
+  h_a39f9495f9ec1d 11,14
+apps/web/src/lib/direct-playground.ts
+  h_a39f9495f9ec1d 32-40,96-105,123,125
+apps/web/src/lib/server/assisted-playground.ts
+  h_a39f9495f9ec1d 1-270
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 29-30,54,68,990-1018
+apps/web/src/lib/server/direct-playground-rollout.ts
+  h_a39f9495f9ec1d 6-15
+apps/web/src/lib/server/router.ts
+  h_a39f9495f9ec1d 2-3,397,403-406,552,569-582
+apps/web/src/routes/api/[...path]/+server.ts
+  h_a39f9495f9ec1d 15
+apps/web/src/routes/app/playground/+page.server.ts
+  h_a39f9495f9ec1d 2,8
+apps/web/src/routes/app/playground/+page.svelte
+  h_a39f9495f9ec1d 3,7-8,12-13,32-38,42,55-94,268-273,278-283,424-426,433,436,440,466-494,589
+tests/acceptance/assisted-playground-contract.test.ts
+  h_a39f9495f9ec1d 1-218
+tests/acceptance/direct-playground-contract.test.ts
+  h_a39f9495f9ec1d 26-30
+tests/acceptance/direct-playground-ui.test.ts
+  h_a39f9495f9ec1d 109,141-142,788-914
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3a84beb9534f31b9159d5b905d4ca7163e9a3561",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
