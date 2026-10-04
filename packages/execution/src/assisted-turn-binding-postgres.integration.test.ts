@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { bindPostgresAssistedTurn, lookupPostgresAssistedTurn } from
+import { ASSISTED_TURN_RETENTION_MS, bindPostgresAssistedTurn, lookupPostgresAssistedTurn } from
   "./assisted-turn-binding-postgres.js";
 
 const { Client } = pg;
@@ -66,5 +66,37 @@ describeDatabase("assisted turn PostgreSQL binding", () => {
         AND alice.workspace_id = $1 AND alice.actor_user_id = 'alice' AND alice.request_id = $2`,
     [workspaceId, requestId]);
     await expect(lookupPostgresAssistedTurn({ ...common, userId: "bob" })).rejects.toThrow();
+  });
+
+  it("encrypts model-only answers and purges expired request bindings", async () => {
+    const requestId = crypto.randomUUID();
+    const common = { connectionString: connectionString!, workspaceId, requestId, wrappingKey,
+      userId: "alice" };
+    const answer = "private model answer";
+    const outcome = { kind: "model", response: { status: "answered", answer,
+      model: "fixture/model", servedModels: ["fixture/served"],
+      usage: { promptTokens: 1, completionTokens: 2, totalTokens: 3, costUsd: 0.01 } } };
+    const first = await bindPostgresAssistedTurn({ ...common,
+      requestFingerprint: "model-only", outcome });
+    expect(first.binding.outcome).toEqual(outcome);
+    const row = await client.query<{ outcome: string; ciphertext: string;
+      expires_at: string }>(`
+      SELECT outcome::text, encode(outcome_ciphertext, 'hex') AS ciphertext, expires_at
+      FROM omr_control.assisted_turn_bindings
+      WHERE workspace_id = $1 AND actor_user_id = $2 AND request_id = $3`,
+    [workspaceId, "alice", requestId]);
+    expect(JSON.stringify(row.rows)).not.toContain(answer);
+    expect(Number(row.rows[0]!.expires_at)).toBeGreaterThan(Date.now());
+    expect(Number(row.rows[0]!.expires_at)).toBeLessThanOrEqual(
+      Date.now() + ASSISTED_TURN_RETENTION_MS);
+    expect((await lookupPostgresAssistedTurn(common))?.outcome).toEqual(outcome);
+    await client.query(`UPDATE omr_control.assisted_turn_bindings SET expires_at = $1
+      WHERE workspace_id = $2 AND actor_user_id = $3 AND request_id = $4`,
+    [Date.now() - 1, workspaceId, "alice", requestId]);
+    expect(await lookupPostgresAssistedTurn(common)).toBeNull();
+    const gone = await client.query(`SELECT 1 FROM omr_control.assisted_turn_bindings
+      WHERE workspace_id = $1 AND actor_user_id = $2 AND request_id = $3`,
+    [workspaceId, "alice", requestId]);
+    expect(gone.rowCount).toBe(0);
   });
 });

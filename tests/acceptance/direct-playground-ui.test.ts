@@ -843,7 +843,12 @@ describe("direct playground form", () => {
       if (path === "/api/playground/assisted") {
         requestIds.push(JSON.parse(String(init?.body)).requestId);
         return requestIds.length === 1 ? new Promise<Response>((resolve) => { release = resolve; })
-          : Response.json({ status: "answered", answer: "Recovered answer", model: "fixture/model",
+          : Response.json({ status: "answered",
+            answer: "The read completed. Its result is shown in the receipt below.",
+            receiptId: "receipt_recovered",
+            receipt: { id: "receipt_recovered", status: "succeeded",
+              result: { title: "Recovered private item" }, errorCode: null },
+            model: "fixture/model",
             servedModels: ["fixture/served"], usage: { promptTokens: 1,
               completionTokens: 1, totalTokens: 2, costUsd: 0.00001 } });
       }
@@ -871,7 +876,10 @@ describe("direct playground form", () => {
       await vi.waitFor(() => expect(document.body.textContent).toContain("Request cancelled"));
       expect(document.body.textContent).not.toContain("Late answer");
       button("Ask model").click();
-      await vi.waitFor(() => expect(document.body.textContent).toContain("Recovered answer"));
+      await vi.waitFor(() => expect(document.body.textContent)
+        .toContain("Recovered private item"));
+      expect(document.querySelector("[aria-label='Execution result']")?.textContent)
+        .toContain("receipt_recovered");
       expect(requestIds).toHaveLength(2);
       expect(requestIds[1]).toBe(requestIds[0]);
     } finally { await unmount(app); }

@@ -8,9 +8,12 @@ connected-provider acceptance. Direct playground use has a separate flag.
 Apply `packages/identity/migrations/0021_assisted_turn_quota.sql` and
 `packages/execution/migrations/0022_assisted_turn_bindings.sql` in numeric order before
 enabling assisted turns. The primary Worker database role needs `SELECT, INSERT, UPDATE`
-on both tables; the dedicated vault role must not receive access. The binding table
-stores only the first selected outcome, an HMAC request fingerprint, and encrypted action
-arguments under the existing execution wrapping key. A database claim allows one active turn and ten starts per user
+on the quota table and `SELECT, INSERT, DELETE` on the binding table; the dedicated
+vault role must not receive access. The binding table
+stores only the first selected action metadata, an HMAC request fingerprint, encrypted
+model-only responses, and encrypted action arguments under the execution wrapping key.
+Bindings expire after 24 hours and are purged on later binding access; execution receipts
+and approvals continue to fence prior actions. A database claim allows one active turn and ten starts per user
 hour across Worker instances. A 110-second lease covers a started shared execution and
 recovers from interrupted Workers.
 Turn processing has a 35-second response deadline. The claim is retained until a started
@@ -25,6 +28,9 @@ check the visible approval list or retry the same request before starting anothe
 A changed request allocates a different ID.
 A completed read or model-only reply clears its retry identity so a deliberate new
 submission can run again; a pending approval keeps its identity until settlement.
+Before binding expiry, a retry of a committed read replays its receipt through current
+execution policy and displays its result without another provider invocation. If current
+access is denied, the result is withheld.
 
 OMR-14 contract evidence uses fixture model, execution, approval and UI responses, plus
 typecheck and build. OMR-15 owns observed Railway PostgreSQL migration and permissions,

@@ -3,6 +3,8 @@ import type { JsonValue } from "@oh-my-router/tools";
 import { decryptJson, encryptJson } from "./postgres-crypto.js";
 
 const { Client } = pg;
+/** Bind retries for a day; execution receipts and approvals remain the action fence. */
+export const ASSISTED_TURN_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 export interface AssistedTurnBinding {
   requestFingerprint: string;
@@ -11,6 +13,7 @@ export interface AssistedTurnBinding {
 }
 
 type BindingRow = { request_fingerprint: string; outcome: Record<string, unknown>;
+  outcome_ciphertext: Buffer | null; outcome_iv: Buffer | null;
   action_ciphertext: Buffer | null; action_iv: Buffer | null };
 
 async function decodeRow(row: BindingRow, workspaceId: string, userId: string, requestId: string,
@@ -20,7 +23,12 @@ async function decodeRow(row: BindingRow, workspaceId: string, userId: string, r
       { kind: "assisted-action", workspaceId, id: `${userId}:${requestId}` }, 1) : null;
   const action = decoded && typeof decoded === "object" && !Array.isArray(decoded)
     ? decoded as { connectionId: string; params: Record<string, unknown> } : undefined;
-  return { requestFingerprint: row.request_fingerprint, outcome: row.outcome,
+  const protectedOutcome = row.outcome_ciphertext && row.outcome_iv
+    ? await decryptJson(row.outcome_ciphertext, row.outcome_iv, wrappingKey,
+      { kind: "assisted-outcome", workspaceId, id: `${userId}:${requestId}` }, 1)
+    : row.outcome;
+  return { requestFingerprint: row.request_fingerprint,
+    outcome: protectedOutcome as Record<string, unknown>,
     ...(action ? { action } : {}) };
 }
 
@@ -39,11 +47,15 @@ export async function lookupPostgresAssistedTurn(input: {
   wrappingKey: Uint8Array<ArrayBuffer>;
 }): Promise<AssistedTurnBinding | null> {
   return withClient(input.connectionString, async (client) => {
+    await client.query("DELETE FROM omr_control.assisted_turn_bindings WHERE expires_at <= $1",
+      [Date.now()]);
     const result = await client.query<BindingRow>(`
-      SELECT request_fingerprint, outcome, action_ciphertext, action_iv
+      SELECT request_fingerprint, outcome, outcome_ciphertext, outcome_iv,
+        action_ciphertext, action_iv
       FROM omr_control.assisted_turn_bindings
-      WHERE workspace_id = $1 AND actor_user_id = $2 AND request_id = $3`,
-    [input.workspaceId, input.userId, input.requestId]);
+      WHERE workspace_id = $1 AND actor_user_id = $2 AND request_id = $3
+        AND expires_at > $4`,
+    [input.workspaceId, input.userId, input.requestId, Date.now()]);
     const row = result.rows[0];
     return row ? decodeRow(row, input.workspaceId, input.userId, input.requestId,
       input.wrappingKey) : null;
@@ -59,20 +71,31 @@ export async function bindPostgresAssistedTurn(input: {
 }): Promise<{ binding: AssistedTurnBinding; created: boolean }> {
   return withClient(input.connectionString, async (client) => {
     const key = [input.workspaceId, input.userId, input.requestId];
+    await client.query("DELETE FROM omr_control.assisted_turn_bindings WHERE expires_at <= $1",
+      [Date.now()]);
     const encrypted = input.action ? await encryptJson(input.action as JsonValue,
       input.wrappingKey, { kind: "assisted-action", workspaceId: input.workspaceId,
         id: `${input.userId}:${input.requestId}` }) : null;
+    const protectedOutcome = input.outcome.kind === "model"
+      ? await encryptJson(input.outcome as JsonValue, input.wrappingKey,
+        { kind: "assisted-outcome", workspaceId: input.workspaceId,
+          id: `${input.userId}:${input.requestId}` }) : null;
     const inserted = await client.query(`
       INSERT INTO omr_control.assisted_turn_bindings
         (workspace_id, actor_user_id, request_id, request_fingerprint, outcome,
-          action_ciphertext, action_iv, created_at)
-      VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)
+          outcome_ciphertext, outcome_iv, action_ciphertext, action_iv, created_at, expires_at)
+      VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11)
       ON CONFLICT (workspace_id, actor_user_id, request_id) DO NOTHING`,
-    [...key, input.requestFingerprint, JSON.stringify(input.outcome),
+    [...key, input.requestFingerprint,
+      JSON.stringify(protectedOutcome ? { kind: "model" } : input.outcome),
+      protectedOutcome ? Buffer.from(protectedOutcome.ciphertext) : null,
+      protectedOutcome ? Buffer.from(protectedOutcome.iv) : null,
       encrypted ? Buffer.from(encrypted.ciphertext) : null,
-      encrypted ? Buffer.from(encrypted.iv) : null, Date.now()]);
+      encrypted ? Buffer.from(encrypted.iv) : null,
+      Date.now(), Date.now() + ASSISTED_TURN_RETENTION_MS]);
     const result = await client.query<BindingRow>(`
-      SELECT request_fingerprint, outcome, action_ciphertext, action_iv
+      SELECT request_fingerprint, outcome, outcome_ciphertext, outcome_iv,
+        action_ciphertext, action_iv
       FROM omr_control.assisted_turn_bindings
       WHERE workspace_id = $1 AND actor_user_id = $2 AND request_id = $3`, key);
     const row = result.rows[0];

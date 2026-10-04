@@ -295,15 +295,77 @@ describe("assisted-playground-contract", () => {
       lookupAction: async () => ({ approval: null,
         receipt: committed ? { id: "receipt_original", status: "succeeded" } : null }),
     });
+    execute.mockResolvedValue({ id: "receipt_original", status: "succeeded",
+      result: { title: "fixture" } });
     await runAssistedTurn(request(), input, services);
     committed = true;
     fetcher.mockReset().mockResolvedValue(reply({ content: "Do nothing." }));
     const recovered = await runAssistedTurn(request(), input, services);
     expect(recovered).toMatchObject({ status: "answered", receiptId: "receipt_original",
-      toolId: "demo.read", usage: { totalTokens: 14 } });
+      toolId: "demo.read", usage: { totalTokens: 14 },
+      receipt: { result: { title: "fixture" } } });
     expect(fetcher).not.toHaveBeenCalled();
-    expect(execute).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute.mock.calls[1]![1]).toEqual(execute.mock.calls[0]![1]);
     expect(requestApproval).not.toHaveBeenCalled();
+  });
+
+  it("returns a committed read result through HTTP after the first response is lost", async () => {
+    let committed = false;
+    const { services, fetcher, execute } = fixture({
+      lookupAction: async () => ({ approval: null,
+        receipt: committed ? { id: "receipt_one", status: "succeeded" } : null }),
+    });
+    const router = createOMRRouter(undefined, undefined, undefined, undefined,
+      undefined, undefined, services);
+    const first = await router.handle(request());
+    expect(first.status).toBe(200);
+    committed = true;
+    fetcher.mockClear();
+    const retry = await router.handle(request());
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toMatchObject({
+      status: "answered", receipt: { id: "receipt_one",
+        result: { title: "fixture" } },
+      usage: { totalTokens: 14 },
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute.mock.calls[1]![1].idempotencyKey)
+      .toBe(`assisted_${input.requestId}`);
+  });
+
+  it("does not disclose a recovered read when current execution policy denies it", async () => {
+    let committed = false;
+    const { services, execute, fetcher } = fixture({
+      lookupAction: async () => ({ approval: null,
+        receipt: committed ? { id: "receipt_one", status: "succeeded" } : null }),
+    });
+    await runAssistedTurn(request(), input, services);
+    committed = true;
+    execute.mockRejectedValueOnce({ code: "EXECUTION_CAPABILITY_DENIED" });
+    fetcher.mockClear();
+    const recovered = await runAssistedTurn(request(), input, services);
+    expect(recovered).toMatchObject({ status: "tool_error",
+      errorCode: "EXECUTION_CAPABILITY_DENIED" });
+    expect(recovered).not.toHaveProperty("receipt");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("does not disclose a receipt that disagrees with the saved read identity", async () => {
+    let committed = false;
+    const { services, execute } = fixture({
+      lookupAction: async () => ({ approval: null,
+        receipt: committed ? { id: "receipt_one", status: "succeeded" } : null }),
+    });
+    await runAssistedTurn(request(), input, services);
+    committed = true;
+    execute.mockResolvedValueOnce({ id: "receipt_foreign", status: "succeeded",
+      result: { title: "secret foreign result" } });
+    const recovered = await runAssistedTurn(request(), input, services);
+    expect(recovered).toMatchObject({ status: "tool_error",
+      receiptId: "receipt_one" });
+    expect(JSON.stringify(recovered)).not.toContain("secret foreign result");
   });
 
   it("recovers a write before a changed model could choose a read", async () => {

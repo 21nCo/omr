@@ -183,8 +183,7 @@ async function recoverTurn(request: Request, input: AssistedTurnInput,
   if (action.approval) return { ...common, status: "action_pending" as const,
     answer: `The previous approval ${action.approval.id} is ${action.approval.status}. Review its status before another action.` };
   if (action.receipt?.status === "succeeded") return { ...common,
-    status: "answered" as const, receiptId: action.receipt.id,
-    answer: `The previous read completed. Review receipt ${action.receipt.id}; its final model answer may have been interrupted.` };
+    ...await recoverReadResult(request, input, services, signal, binding, action.receipt.id) };
   if (action.receipt?.status === "failed") return { ...common,
     status: "tool_error" as const, receiptId: action.receipt.id,
     answer: `The previous read failed. Review receipt ${action.receipt.id} before another action.` };
@@ -193,6 +192,34 @@ async function recoverTurn(request: Request, input: AssistedTurnInput,
     answer: `The previous read receipt ${action.receipt.id} is ${action.receipt.status}. Check it before another action.` };
   return { ...common, status: "action_pending" as const,
     answer: "The previous action may still be starting. Check its receipt or approval before retrying." };
+}
+
+async function recoverReadResult(request: Request, input: AssistedTurnInput,
+  services: AssistedPlaygroundServices, signal: AbortSignal,
+  binding: TurnBinding | undefined, expectedReceiptId: string) {
+  if (binding?.outcome.kind !== "action" || binding.outcome.effect !== "read" ||
+      !binding.action) {
+    return { status: "action_pending" as const,
+      answer: "The read completed, but its result is unavailable here. Open its receipt." };
+  }
+  try {
+    const operation = services.execute(request, {
+      workspaceId: input.workspaceId, connectionId: binding.action.connectionId,
+      toolId: binding.outcome.toolId, params: binding.action.params,
+      idempotencyKey: `assisted_${input.requestId}`,
+    });
+    const receipt = await untilAbort(operation, signal);
+    const record = object(receipt);
+    if (record?.status !== "succeeded" || record.id !== expectedReceiptId)
+      return { status: "tool_error" as const, receiptId: expectedReceiptId,
+        answer: "The read could not be recovered. Check its receipt." };
+    return { status: "answered" as const, receipt, receiptId: record.id,
+      answer: "The read completed. Its result is shown in the receipt below." };
+  } catch (error) {
+    if (signal.aborted) return { status: "action_pending" as const,
+      answer: "The read receipt is being recovered. Retry this request shortly." };
+    return actionFailure(error);
+  }
 }
 
 /** Read a bounded upstream body, including error responses, without logging provider content. */
