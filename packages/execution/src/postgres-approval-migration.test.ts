@@ -244,6 +244,71 @@ describeDatabase("approval migration from origin/dev schema", () => {
       expect(concurrentStates.rows).toEqual([
         { id: firstId, status: "pending" }, { id: secondId, status: "rejected" },
       ]);
+      for (const decision of ["approve", "reject"] as const) {
+        const blockedId = `approval_deadline_${decision}`;
+        const siblingId = `approval_after_deadline_${decision}`;
+        for (const id of [blockedId, siblingId]) {
+          await store.create({ ...candidate, id, idempotencyKey: id,
+            expiresAt: Date.now() + 60_000, createdAt: Date.now(), updatedAt: Date.now() });
+        }
+        const blocker = new Client({ connectionString: databaseUrl! });
+        const directClient = new Client({ connectionString: databaseUrl! });
+        await blocker.connect();
+        await directClient.connect();
+        const backend = await directClient.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+        const decisionPid = backend.rows[0]!.pid;
+        const originalDirectQuery = directClient.query.bind(directClient);
+        let startedUpdate!: () => void;
+        const updateStarted = new Promise<void>((resolve) => { startedUpdate = resolve; });
+        const directStore = new PostgresExecutionApprovalStore({
+          connection: directClient.connection,
+          on: directClient.on.bind(directClient),
+          query: (sql: string, values?: unknown[]) => {
+            if (sql.startsWith("UPDATE omr_control.execution_approvals")) startedUpdate();
+            return originalDirectQuery(sql.replaceAll("omr_control.", `${qualified}.`), values);
+          },
+        } as Client, key, undefined, undefined, undefined, 500);
+        try {
+          await blocker.query("BEGIN");
+          await blocker.query(`UPDATE ${qualified}.execution_approvals
+            SET updated_at = updated_at WHERE id = $1`, [blockedId]);
+          const first = directStore[decision]({ approvalId: blockedId, actorUserId: "user_1",
+            now: Date.now(), clock: Date.now }).then(() => null, (error: unknown) => error);
+          await updateStarted;
+          const queued = directStore[decision]({ approvalId: siblingId, actorUserId: "user_1",
+            now: Date.now(), clock: Date.now }).then(() => null, (error: unknown) => error);
+          await expect(first).resolves.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
+          await expect(queued).resolves.toMatchObject({ code: "APPROVAL_TRANSACTION_REQUIRED" });
+          await expect(directStore.getForActor(blockedId, "user_1"))
+            .rejects.toMatchObject({ code: "APPROVAL_TRANSACTION_REQUIRED" });
+          await expect(directStore.claim({ approvalId: blockedId, actorUserId: "user_1",
+            principalKey: "web:user_1", now: Date.now(), clock: Date.now,
+            deadlineAt: Date.now() + 1_000 }))
+            .rejects.toMatchObject({ code: "APPROVAL_TRANSACTION_REQUIRED" });
+          await blocker.query("ROLLBACK");
+          let activeBackend = true;
+          for (let attempt = 0; attempt < 50 && activeBackend; attempt++) {
+            const activity = await client.query("SELECT 1 FROM pg_stat_activity WHERE pid = $1",
+              [decisionPid]);
+            activeBackend = activity.rows.length > 0;
+            if (activeBackend) await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          expect(activeBackend).toBe(false);
+          const unchanged = await client.query<{ status: string }>(
+            `SELECT status FROM ${qualified}.execution_approvals WHERE id = $1`, [blockedId]);
+          expect(unchanged.rows[0]?.status).toBe("pending");
+          const sibling = await store[decision]({ approvalId: siblingId, actorUserId: "user_1",
+            now: Date.now(), clock: Date.now });
+          expect(sibling.status).toBe(decision === "approve" ? "approved" : "rejected");
+          const stillUnchanged = await client.query<{ status: string }>(
+            `SELECT status FROM ${qualified}.execution_approvals WHERE id = $1`, [blockedId]);
+          expect(stillUnchanged.rows[0]?.status).toBe("pending");
+        } finally {
+          await blocker.query("ROLLBACK").catch(() => undefined);
+          await directClient.end().catch(() => undefined);
+          await blocker.end();
+        }
+      }
       await expect(store.getForActor("approval_fresh", "user_1"))
         .resolves.toMatchObject({ id: "approval_fresh", params: {} });
       await expect(store.getForActor("approval_fresh", "another_user"))

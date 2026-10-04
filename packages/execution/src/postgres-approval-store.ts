@@ -65,6 +65,7 @@ type ApprovalQuery = <R extends QueryResultRow>(sql: string, values?: unknown[])
 
 export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
   private decisionTail: Promise<void> = Promise.resolve();
+  private decisionSessionUsable = true;
 
   constructor(
     private readonly client: Client | null,
@@ -72,16 +73,23 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     private readonly claimConnectionString?: string,
     private readonly ownedQueries?: PostgresOwnedQueries,
     private readonly runOwnedClient?: RunOwnedApprovalClient,
+    private readonly decisionDeadlineMs = EXECUTION_INVOCATION_DEADLINE_MS,
   ) {
     if (wrappingKey.byteLength !== 32) throw new Error("Execution approval wrapping key must be 32 bytes");
     if (!client && !ownedQueries) throw new Error("An execution approval query connection is required");
     if (!client && !runOwnedClient) {
       throw new ApprovalTransactionRequiredError();
     }
+    if (!Number.isSafeInteger(decisionDeadlineMs) || decisionDeadlineMs <= 0) {
+      throw new Error("Invalid approval decision deadline");
+    }
   }
 
   private query<R extends QueryResultRow>(sql: string, values?: unknown[],
     deadlineAt?: number): Promise<QueryResult<R>> {
+    if (!this.decisionSessionUsable && !this.ownedQueries) {
+      throw new ApprovalTransactionRequiredError();
+    }
     return this.ownedQueries
       ? this.ownedQueries.query<R>(sql, values, deadlineAt)
       : this.client!.query<R>(sql, values);
@@ -275,10 +283,11 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
   /** Recheck expiry after lock acquisition before committing a decision. */
   private async decide(input: { approvalId: string; actorUserId: string; now: number;
     clock: () => number }, status: "approved" | "rejected"): Promise<ExecutionApproval> {
-    const deadlineAt = Date.now() + EXECUTION_INVOCATION_DEADLINE_MS;
-    const decideWithClient = async (client: Client): Promise<ExecutionApproval> => {
+    const deadlineAt = Date.now() + this.decisionDeadlineMs;
+    const decideWithClient = async (client: Client, direct = false): Promise<ExecutionApproval> => {
       const query = <R extends object>(sql: string, values?: unknown[]) =>
-        withinInvocationDeadline(deadlineAt, () => client.query<R>(sql, values));
+        direct ? this.directDecisionQuery<R>(client, deadlineAt, sql, values)
+          : withinInvocationDeadline(deadlineAt, () => client.query<R>(sql, values));
       await query("BEGIN");
       try {
         const result = await query<ApprovalRow>(
@@ -299,11 +308,22 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
         await query("COMMIT");
         return this.toApproval(row);
       } catch (error) {
-        await query("ROLLBACK").catch(() => undefined);
+        if (!direct) {
+          await query("ROLLBACK").catch(() => undefined);
+        } else if (this.decisionSessionUsable) {
+          // Cleanup needs its own budget after a decision has expired. Never
+          // release the gate while a rollback is still queued on this session.
+          try {
+            await this.directDecisionQuery(client, Date.now() + 1_000, "ROLLBACK");
+          } catch {
+            this.discardDecisionSession(client);
+          }
+        }
         throw error;
       }
     };
-    if (this.runOwnedClient) return this.runOwnedClient(deadlineAt, decideWithClient);
+    if (this.runOwnedClient) return this.runOwnedClient(deadlineAt,
+      (client) => decideWithClient(client));
     if (!this.client) throw new ApprovalTransactionRequiredError();
     // A directly supplied client is one PostgreSQL session. Keep its decision
     // transactions separate even when callers approve and reject concurrently.
@@ -312,9 +332,40 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     this.decisionTail = new Promise<void>((resolve) => { release = resolve; });
     await previous;
     try {
-      return await decideWithClient(this.client);
+      if (!this.decisionSessionUsable) throw new ApprovalTransactionRequiredError();
+      return await decideWithClient(this.client, true);
     } finally {
       release();
+    }
+  }
+
+  private discardDecisionSession(client: Client): void {
+    if (!this.decisionSessionUsable) return;
+    this.decisionSessionUsable = false;
+    client.on("error", () => undefined);
+    client.connection?.stream.destroy();
+  }
+
+  private async directDecisionQuery<R extends object>(client: Client, deadlineAt: number,
+    sql: string, values?: unknown[]): Promise<QueryResult<R>> {
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0) throw new ExecutionInvocationDeadlineError();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        client.query<R>(sql, values),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            // A queued ROLLBACK cannot cancel a query in progress. Closing the
+            // socket makes PostgreSQL roll back its transaction, and the store
+            // refuses to reuse this session for a later approval decision.
+            this.discardDecisionSession(client);
+            reject(new ExecutionInvocationDeadlineError());
+          }, remaining);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -326,6 +377,9 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     clock: () => number;
     deadlineAt: number;
   }): Promise<ExecutionApproval> {
+    if (!this.decisionSessionUsable && !this.claimConnectionString && !this.runOwnedClient) {
+      throw new ApprovalTransactionRequiredError();
+    }
     if (!this.claimConnectionString && (!this.client || this.client instanceof PostgresClient)) {
       throw new Error("Approval claims require a dedicated PostgreSQL connection");
     }
