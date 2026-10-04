@@ -35,7 +35,7 @@ jobs:
           test "$(git -C "$OMR_SUPERFUNCTIONS_WORKTREE" rev-parse HEAD)" = "$locked_sha"
       - name: Install and link locked dependencies
         run: |
-          npm ci
+          npm ci --ignore-scripts
           npm run sf:install
           npm run sf:build
           npm run sf:link
@@ -43,7 +43,7 @@ jobs:
       - name: Prepare packages and run focused vault contract
         run: |
           npm run test:prepare
-          npx vitest run packages/identity/src/openrouter-vault.test.ts apps/web/src/lib/openrouter-settings.test.ts apps/web/src/lib/server/openrouter-vault-route.test.ts
+          ./node_modules/.bin/vitest run packages/identity/src/openrouter-vault.test.ts apps/web/src/lib/openrouter-settings.test.ts apps/web/src/lib/server/openrouter-vault-route.test.ts
       - name: Check types and build
         run: |
           npm run typecheck

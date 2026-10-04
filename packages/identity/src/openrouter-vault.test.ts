@@ -139,9 +139,23 @@ describe("OpenRouter validation", () => {
       .resolves.toBeUndefined();
     expect(validStream.locked).toBe(false);
 
-    const cancel = vi.fn();
+    let cancelled = false;
+    let closed = false;
+    const cancel = vi.fn(() => { cancelled = true; });
     const oversizedStream = new ReadableStream<Uint8Array>({
-      start(controller) { controller.enqueue(new Uint8Array(4097)); },
+      start(controller) {
+        controller.enqueue(new Uint8Array(2048));
+        controller.enqueue(new Uint8Array(2049));
+      },
+      pull(controller) {
+        return new Promise<void>((resolve) => setTimeout(() => {
+          if (!cancelled && !closed) {
+            closed = true;
+            controller.close();
+          }
+          resolve();
+        }, 0));
+      },
       cancel,
     });
     await expect(validateOpenRouterKey(first, vi.fn(async () => new Response(oversizedStream)) as typeof fetch))

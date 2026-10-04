@@ -17,6 +17,7 @@
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
+    "sync": "svelte-kit sync",
     "typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run"
   }

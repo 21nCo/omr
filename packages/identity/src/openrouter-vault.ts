@@ -75,16 +75,21 @@ async function readValidationBody(response: Response): Promise<unknown> {
   try {
     const chunks: Uint8Array[] = [];
     let size = 0;
+    let oversized = false;
     for (;;) {
       // Sequential reads count each chunk before requesting another, preserving the 4096-byte limit.
       const { done, value } = await reader.read(); // NOSONAR (typescript:S9382)
       if (done) break;
       size += value.byteLength;
       if (size > 4096) {
-        await reader.cancel();
-        throw new Error("Provider response exceeds validation limit");
+        oversized = true;
+        break;
       }
       chunks.push(value);
+    }
+    if (oversized) {
+      await reader.cancel();
+      throw new Error("Provider response exceeds validation limit");
     }
     const bytes = new Uint8Array(size);
     let offset = 0;
