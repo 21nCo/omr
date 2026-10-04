@@ -88,6 +88,40 @@ describe("direct playground form", () => {
     } finally { await unmount(app); }
   });
 
+  it.each(["rejected", "no longer ready"] as const)(
+    "does not show an unconfirmed account as ready when selection is %s", async (failure) => {
+      const connections = ["one", "two"].map((id) => ({ id: `connection_${id}`,
+        workspaceId: "workspace_one", provider: "demo", label: `Account ${id}`,
+        status: "active", readiness: "ready", providerState: "ready",
+        selectable: failure === "rejected" || id === "one",
+        selected: id === "one" }));
+      let selectionPosts = 0;
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.startsWith("/api/control-plane")) return Response.json(overview(connections));
+        if (path.startsWith("/api/tools?")) return Response.json({ tools,
+          providers: [{ provider: "demo", state: "ready" }] });
+        if (path === "/api/connections/select") {
+          selectionPosts += 1;
+          return Response.json({ error: "CONNECTION_UNAVAILABLE" }, { status: 409 });
+        }
+        return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const app = mount(Playground, { target: document.body });
+      try {
+        await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>(
+          "#playground-connection")?.disabled).toBe(false));
+        select("playground-connection", "connection_two");
+        await vi.waitFor(() => expect(document.querySelector("[role=alert]")?.textContent)
+          .toContain(failure === "rejected" ? "select it again" : "no longer ready"));
+        expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value).toBe("");
+        expect(document.querySelector<HTMLSelectElement>("#playground-tool")?.disabled).toBe(true);
+        expect(document.body.textContent).not.toContain("Account two is ready");
+        expect(selectionPosts).toBe(failure === "rejected" ? 1 : 0);
+      } finally { await unmount(app); }
+    });
+
   it("guides refresh and reselection when a catalog tool disappears before manifest load", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
@@ -345,7 +379,7 @@ describe("direct playground form", () => {
   });
 
   it.each(["approve", "reject"] as const)("refreshes a failed %s decision and exposes expiry recovery", async (operation) => {
-    let status = "pending";
+    const expiresAt = Date.now() + 250;
     let statusCalls = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
@@ -356,10 +390,10 @@ describe("direct playground form", () => {
       if (path.startsWith("/api/tools/manifest")) return Response.json(tools[1]);
       if (path.startsWith("/api/approvals/status")) {
         statusCalls += 1;
-        return Response.json(approval(status));
+        return Response.json({ ...approval(Date.now() >= expiresAt ? "expired" : "pending"),
+          expiresAt });
       }
       if (path === `/api/approvals/${operation}`) {
-        status = "expired";
         return Response.json({ error: "APPROVAL_UNAVAILABLE" }, { status: 409 });
       }
       return Response.json({ error: "NOT_FOUND" }, { status: 404 });
@@ -377,6 +411,7 @@ describe("direct playground form", () => {
       expect(panel).toContain("Write fixture");
       expect(panel).toContain("demo.write");
       expect(panel).toContain("item · argument title");
+      await new Promise((resolve) => setTimeout(resolve, Math.max(0, expiresAt - Date.now() + 10)));
       button(operation === "approve" ? "Approve" : "Reject").click();
       await vi.waitFor(() => expect(document.querySelector("[aria-label='Approval']")?.textContent)
         .toContain("Approval · expired"));
@@ -423,7 +458,7 @@ describe("direct playground form", () => {
     } finally { await unmount(app); }
   });
 
-  it("submits the focused form control and ignores an in-flight result after workspace change", async () => {
+  it("submits through requestSubmit and ignores an in-flight result after workspace change", async () => {
     let finishRead!: (response: Response) => void;
     const pendingRead = new Promise<Response>((resolve) => { finishRead = resolve; });
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
@@ -450,7 +485,6 @@ describe("direct playground form", () => {
       const submitButton = button("Run read");
       submitButton.focus();
       expect(document.activeElement).toBe(submitButton);
-      submitButton.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
       submitButton.form?.requestSubmit(submitButton);
       await vi.waitFor(() => expect(fetchMock.mock.calls.some(([path]) =>
         String(path) === "/api/tools/execute")).toBe(true));

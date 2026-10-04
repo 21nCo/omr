@@ -711,6 +711,27 @@ describe("execution service", () => {
     expect(approvals.approvals.size).toBe(1);
   });
 
+  it.each(["pending", "approved"] as const)(
+    "settles an overdue %s approval on status read and permits a fresh intent without provider effect", async (status) => {
+      const { actionCall, approvals, service, workspace, advance } = await fixture();
+      const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+      const first = await requestApproval(service, { principal, toolId: "linear.create_issue",
+        params: { title: "same" }, ttlMs: 60_000 });
+      if (status === "approved") await service.approve(first.id, principal.userId);
+      advance(60_000);
+      await expect(service.approvalStatus(principal, first.id)).resolves.toMatchObject({
+        id: first.id, status: "expired" });
+      expect(approvals.approvals.get(first.id)?.status).toBe("expired");
+      await expect(status === "pending" ? service.approve(first.id, principal.userId)
+        : service.executeApproved(principal, first.id))
+        .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      const next = await requestApproval(service, { principal, toolId: "linear.create_issue",
+        params: { title: "same" }, ttlMs: 60_000 });
+      expect(next.id).not.toBe(first.id);
+      expect(next.status).toBe("pending");
+      expect(actionCall).not.toHaveBeenCalled();
+    });
+
   it("allows only one concurrent approved invocation and blocks revoked bindings", async () => {
     const { actionCall, connections, service, workspace } = await fixture();
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };

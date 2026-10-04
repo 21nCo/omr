@@ -35,6 +35,7 @@ export function createLinearActionKeys(makeKey: () => string,
       try { storage?.().setItem(approvalStorageKey(approvalId), identity); }
       catch { /* The current page still remembers the approval. */ }
     },
+    /** Clear a write fingerprint only after a server-confirmed terminal status. */
     async resetApprovalAfterSettlement(approvalId: string,
       probe: () => Promise<{ id: string; status: string }>,
       stillSelected: () => boolean = () => true): Promise<boolean> {
@@ -60,6 +61,7 @@ export function createLinearActionKeys(makeKey: () => string,
       } catch { /* The current page is already cleared. */ }
       return true;
     },
+    /** Recover the idempotency key for the exact action fingerprint. */
     async existingKey(toolId: string, workspaceId: string, connectionId: string,
       params: object): Promise<string | undefined> {
       const identity = await fingerprint(toolId, workspaceId, connectionId, params);
@@ -67,6 +69,7 @@ export function createLinearActionKeys(makeKey: () => string,
       try { return storage?.().getItem(identity) ?? undefined; }
       catch { return undefined; }
     },
+    /** Reuse a pending action key across reloads and allocate one for a fresh intent. */
     async key(toolId: string, workspaceId: string, connectionId: string, params: object): Promise<string> {
       const identity = await fingerprint(toolId, workspaceId, connectionId, params);
       let key = current.get(identity);
@@ -80,11 +83,13 @@ export function createLinearActionKeys(makeKey: () => string,
       current.set(identity, key);
       return key;
     },
+    /** Remove one exact fingerprint after the caller confirms it can be discarded. */
     async reset(toolId: string, workspaceId: string, connectionId: string, params: object): Promise<void> {
       const identity = await fingerprint(toolId, workspaceId, connectionId, params);
       current.delete(identity);
       try { storage?.().removeItem(identity); } catch { /* Memory is already cleared. */ }
     },
+    /** Probe settlement before releasing an action key when approval ID is unavailable. */
     async resetAfterSettlement(toolId: string, workspaceId: string, connectionId: string,
       params: object, probe: (idempotencyKey: string) => Promise<{ status: string }>,
       stillSelected: () => boolean = () => true): Promise<void> {

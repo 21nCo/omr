@@ -222,8 +222,21 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
         result.rows[0]?.approval_id !== targetId) throw new ExecutionIdempotencyConflictError();
   }
 
+  /** Persist expiry on a status read without changing executing or uncertain writes. */
   async getForActor(approvalId: string, actorUserId: string,
-    deadlineAt?: number): Promise<ExecutionApproval> {
+    deadlineAt?: number, now?: number): Promise<ExecutionApproval> {
+    if (now !== undefined) {
+      await this.query(
+        `UPDATE omr_control.execution_approvals AS approval
+         SET status = 'expired', updated_at = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint
+         WHERE id = $1 AND actor_user_id = $2
+           AND status IN ('pending', 'approved')
+           AND expires_at <= (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint
+           AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
+             WHERE workspace_id = approval.workspace_id AND user_id = $2)`,
+        [approvalId, actorUserId], deadlineAt,
+      );
+    }
     return this.transition(
       `SELECT ${COLUMNS} FROM omr_control.execution_approvals
        WHERE id = $1 AND actor_user_id = $2

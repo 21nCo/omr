@@ -27,17 +27,20 @@ export type PlaygroundCatalog = {
   providers: { provider: string; state: string }[];
 };
 
+/** Mirror the server's selectable binding gate for the chosen workspace. */
 export function playgroundConnectionReady(connection: PlaygroundConnection, workspaceId: string): boolean {
   return connection.workspaceId === workspaceId && connection.status === "active" &&
     connection.readiness === "ready" && connection.providerState === "ready" &&
     connection.selectable === true && !connection.cleanupOnly;
 }
 
+/** Offer only this workspace's browser-actionable unsettled approvals for recovery. */
 export function resumablePlaygroundApproval(approval: PlaygroundApproval, workspaceId: string): boolean {
   return approval.workspaceId === workspaceId && approval.browserActionable === true &&
     ["pending", "approved", "executing", "uncertain"].includes(approval.status);
 }
 
+/** Parse a top-level JSON object before it enters the shared execution service. */
 export function parsePlaygroundArguments(text: string): Record<string, unknown> {
   let value: unknown;
   try { value = JSON.parse(text); }
@@ -48,6 +51,7 @@ export function parsePlaygroundArguments(text: string): Record<string, unknown> 
   return value as Record<string, unknown>;
 }
 
+/** Turn the manifest's top-level fields into short form hints. */
 export function schemaHints(manifest: ToolManifest | null): { name: string; type: string;
   required: boolean; description: string }[] {
   const schema = manifest?.inputSchema;
@@ -64,6 +68,7 @@ export function schemaHints(manifest: ToolManifest | null): { name: string; type
   });
 }
 
+/** Pair shared API error codes with a concrete recovery step. */
 export function playgroundError(error: unknown): string {
   if (error instanceof PlaygroundRequestError) {
     const advice: Record<string, string> = {
@@ -89,6 +94,7 @@ export class PlaygroundRequestError extends Error {
   }
 }
 
+/** Use the same-origin APIs and retain receipt IDs on failed requests. */
 export function createPlaygroundRequest(fetchImpl: typeof fetch, login: () => void) {
   return async function request<T>(path: string, body?: unknown): Promise<T> {
     const response = await fetchImpl(path, { credentials: "same-origin", cache: "no-store",

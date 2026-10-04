@@ -25,11 +25,13 @@
   let busy = "";
   let generation = 0;
 
+  /** Return only the server-confirmed, selectable account. */
   function currentConnection(): PlaygroundConnection | undefined {
     return overview?.connections.find((item) => item.id === connectionId &&
-      playgroundConnectionReady(item, workspaceId));
+      item.selected && playgroundConnectionReady(item, workspaceId));
   }
 
+  /** Clear the visible action while retaining session-backed write identity. */
   function resetAction() {
     toolId = "";
     manifest = null;
@@ -41,6 +43,7 @@
     notice = "";
   }
 
+  /** Keep the current approval and resumable list in sync. */
   function showApproval(value: PlaygroundApproval) {
     approval = value;
     approvalNeedsRefresh = false;
@@ -51,6 +54,7 @@
         : [...overview.approvals, { ...value, browserActionable: true }] };
   }
 
+  /** Read every catalog page for the selected workspace. */
   async function discover(selectedWorkspaceId: string): Promise<PlaygroundCatalog> {
     const tools: ToolManifest[] = [];
     let cursor = "";
@@ -66,6 +70,7 @@
     return { tools, providers };
   }
 
+  /** Reload workspace authority, selected bindings, and tool catalog. */
   async function load(selectedWorkspaceId = "") {
     const turn = ++generation;
     loading = true;
@@ -92,13 +97,19 @@
     }
   }
 
+  /** Show account readiness only after selection and control-plane confirmation. */
   async function selectConnection(id: string) {
     const turn = ++generation;
-    connectionId = id;
+    connectionId = "";
     resetAction();
     catalog = null;
-    const connection = currentConnection();
-    if (!connection) return;
+    if (!id) return;
+    const connection = overview?.connections.find((item) => item.id === id &&
+      playgroundConnectionReady(item, workspaceId));
+    if (!connection) {
+      error = "That account is no longer ready. Refresh the workspace and select an available account.";
+      return;
+    }
     busy = "Selecting account…";
     try {
       await request("/api/connections/select", { workspaceId, provider: connection.provider,
@@ -108,20 +119,24 @@
         `/api/control-plane?workspaceId=${encodeURIComponent(workspaceId)}`);
       if (turn !== generation) return;
       overview = fresh;
-      catalog = await discover(workspaceId);
-      if (turn !== generation) return;
       if (!fresh.connections.some((item) => item.id === id && item.selected &&
         playgroundConnectionReady(item, workspaceId))) {
-        connectionId = "";
         throw new Error("That account is no longer ready. Select another account.");
       }
+      catalog = await discover(workspaceId);
+      if (turn !== generation) return;
+      connectionId = id;
     } catch (caught) {
-      if (turn === generation) error = playgroundError(caught);
+      if (turn === generation) {
+        connectionId = "";
+        error = `${playgroundError(caught)} Check the account in the control plane, then select it again.`;
+      }
     } finally {
       if (turn === generation) busy = "";
     }
   }
 
+  /** Resolve the current manifest before accepting arguments. */
   async function selectTool(id: string) {
     const turn = ++generation;
     resetAction();
@@ -142,6 +157,7 @@
     }
   }
 
+  /** Execute a read or request one approval for the exact write fingerprint. */
   async function submit() {
     if (busy || loading || approval || !manifest || !currentConnection()) return;
     const turn = generation;
@@ -187,6 +203,7 @@
     }
   }
 
+  /** Refresh status after every decision so retries follow persisted state. */
   async function approvalAction(operation: "approve" | "reject" | "execute" | "status") {
     if (!approval || busy || loading || (approvalNeedsRefresh && operation !== "status")) return;
     const turn = generation;
@@ -217,6 +234,7 @@
     }
   }
 
+  /** Recover an open approval without trusting the selected tool or draft arguments. */
   async function resumeApproval(id: string) {
     if (busy || loading) return;
     const turn = generation;
@@ -236,6 +254,7 @@
     }
   }
 
+  /** Mark an action unconfirmed when its status request fails. */
   async function refreshApproval(approvalId: string, turn: number) {
     try {
       const value = await request<PlaygroundApproval>(
@@ -249,6 +268,7 @@
     }
   }
 
+  /** Release the prior fingerprint only after server-confirmed settlement. */
   async function newAction() {
     if (!approval || busy || loading || !["consumed", "rejected", "failed", "expired"].includes(approval.status)) return;
     const turn = generation;

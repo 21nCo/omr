@@ -147,7 +147,8 @@ export interface ExecutionApproval {
 
 export interface ExecutionApprovalStore {
   create(approval: ExecutionApproval): Promise<ExecutionApproval>;
-  getForActor(approvalId: string, actorUserId: string, deadlineAt?: number): Promise<ExecutionApproval>;
+  getForActor(approvalId: string, actorUserId: string, deadlineAt?: number,
+    now?: number): Promise<ExecutionApproval>;
   approve(input: { approvalId: string; actorUserId: string; now: number }): Promise<ExecutionApproval>;
   reject(input: { approvalId: string; actorUserId: string; now: number }): Promise<ExecutionApproval>;
   claim(input: {
@@ -612,7 +613,8 @@ export class ExecutionService {
     if (principal.kind === "client" && !principal.capabilities.includes("approvals:create")) {
       throw new ExecutionCapabilityDeniedError("approvals:create");
     }
-    const approval = await this.requiredApprovals().getForActor(approvalId, principal.userId);
+    const approval = await this.requiredApprovals().getForActor(approvalId, principal.userId,
+      undefined, this.now());
     if (approval.principalKey !== principalKey(principal) ||
         (principal.workspaceId !== approval.workspaceId &&
           !(principal.kind === "web" && principal.workspaceId === ""))) {
