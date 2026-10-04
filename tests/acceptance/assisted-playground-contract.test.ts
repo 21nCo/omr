@@ -30,6 +30,8 @@ function choose(name = "tool_0", args = '{"title":"fixture"}') {
   return reply({ content: null, tool_calls: [{ function: { name, arguments: args } }] });
 }
 function fixture(overrides: Partial<AssistedPlaygroundServices> = {}) {
+  const bindings = new Map<string, Awaited<ReturnType<AssistedPlaygroundServices["loadTurn"]>>>();
+  const authenticate = overrides.authenticate ?? (async () => "alice");
   const fetcher = vi.fn<typeof fetch>();
   fetcher.mockResolvedValueOnce(choose()).mockResolvedValueOnce(reply({ content: "The item is ready." }));
   const execute = vi.fn(async () => ({ id: "receipt_one", status: "succeeded",
@@ -38,7 +40,9 @@ function fixture(overrides: Partial<AssistedPlaygroundServices> = {}) {
     params: { title: "fixture" }, previewReady: true, manifestCurrent: true }));
   const services: AssistedPlaygroundServices = {
     enabled: () => true,
-    authenticate: async () => "alice",
+    authenticate,
+    fingerprint: async (value, prompt) => JSON.stringify([
+      value.workspaceId, value.connectionId, value.model, prompt]),
     reserveTurn: async () => async () => undefined,
     withKey: async (_user, callback) => callback("sk-or-v1-alice-test"),
     connections: async () => [{ id: "account_one", workspaceId: "mine", provider: "demo",
@@ -46,6 +50,16 @@ function fixture(overrides: Partial<AssistedPlaygroundServices> = {}) {
       selectable: true }],
     discover: async () => [manifest], execute, requestApproval, fetcher,
     lookupAction: async () => ({ approval: null, receipt: null }),
+    loadTurn: async (req, key) => bindings.get(`${await authenticate(req)}:${key.workspaceId}:${key.requestId}`) ?? null,
+    bindTurn: async (userId, value) => {
+      const key = `${userId}:${value.workspaceId}:${value.requestId}`;
+      const prior = bindings.get(key);
+      if (prior) return { binding: prior, created: false };
+      const binding = { requestFingerprint: value.requestFingerprint, outcome: value.outcome,
+        ...(value.action ? { action: value.action } : {}) };
+      bindings.set(key, binding);
+      return { binding, created: true };
+    },
     ...overrides,
   };
   return { services, fetcher, execute, requestApproval };
@@ -267,8 +281,136 @@ describe("assisted-playground-contract", () => {
     expect(retry).toMatchObject({ status: "approval_required",
       approval: { id: "approval_original", status: "pending" } });
     expect(committed.size).toBe(1);
+    expect(fetcher).toHaveBeenCalledOnce();
     expect(requestApproval.mock.calls.map(([, action]) => action.idempotencyKey))
       .toEqual([`assisted_${input.requestId}`, `assisted_${input.requestId}`]);
+    expect(requestApproval.mock.calls.map(([, action]) => action.params))
+      .toEqual([{ title: "fixture" }, { title: "fixture" }]);
+  });
+
+  it("recovers a read before a changed model could choose a write or a model-only reply", async () => {
+    let committed = false;
+    const { services, fetcher, execute, requestApproval } = fixture({
+      discover: async () => [manifest, writeManifest],
+      lookupAction: async () => ({ approval: null,
+        receipt: committed ? { id: "receipt_original", status: "succeeded" } : null }),
+    });
+    await runAssistedTurn(request(), input, services);
+    committed = true;
+    fetcher.mockReset().mockResolvedValue(reply({ content: "Do nothing." }));
+    const recovered = await runAssistedTurn(request(), input, services);
+    expect(recovered).toMatchObject({ status: "answered", receiptId: "receipt_original",
+      toolId: "demo.read", usage: { totalTokens: 14 } });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(execute).toHaveBeenCalledOnce();
+    expect(requestApproval).not.toHaveBeenCalled();
+  });
+
+  it("recovers a write before a changed model could choose a read", async () => {
+    let committed = false;
+    const { services, fetcher, execute, requestApproval } = fixture({
+      discover: async () => [writeManifest, manifest],
+      lookupAction: async () => ({ receipt: null,
+        approval: committed ? { id: "approval_original", status: "pending" } : null }),
+    });
+    await runAssistedTurn(request(), input, services);
+    committed = true;
+    fetcher.mockReset().mockResolvedValue(choose("tool_1"));
+    const recovered = await runAssistedTurn(request(), input, services);
+    expect(recovered).toMatchObject({ status: "action_pending", toolId: "demo.write",
+      usage: { totalTokens: 14 } });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(requestApproval).toHaveBeenCalledOnce();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("replays saved parameters if cancellation lands before dispatch", async () => {
+    const controller = new AbortController();
+    let persisted: Awaited<ReturnType<AssistedPlaygroundServices["loadTurn"]>> = null;
+    const { services, fetcher, execute } = fixture({
+      loadTurn: async () => persisted,
+      bindTurn: async (_user, value) => {
+        persisted = { requestFingerprint: value.requestFingerprint, outcome: value.outcome,
+          action: value.action };
+        controller.abort();
+        return { binding: persisted, created: true };
+      },
+    });
+    await expect(runAssistedTurn(request(undefined, controller.signal), input, services))
+      .rejects.toMatchObject({ code: "ASSISTED_CANCELLED" });
+    expect(execute).not.toHaveBeenCalled();
+    fetcher.mockReset().mockResolvedValue(choose("tool_0", '{"title":"changed"}'));
+    const recovered = await runAssistedTurn(request(), input, services);
+    expect(recovered).toMatchObject({ status: "answered", toolId: "demo.read",
+      receipt: { id: "receipt_one" } });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute.mock.calls[0]![1].params).toEqual({ title: "fixture" });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("rejects reuse of a request ID with changed model, prompt, or connection", async () => {
+    const { services, fetcher, execute } = fixture();
+    await runAssistedTurn(request(), input, services);
+    fetcher.mockClear();
+    for (const changed of [{ model: "fixture/other" }, { prompt: "Different" },
+      { connectionId: "account_two" }]) {
+      await expect(runAssistedTurn(request(), { ...input, ...changed }, services))
+        .rejects.toMatchObject({ code: "ASSISTED_REQUEST_CONFLICT" });
+    }
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it("returns the original model-only answer without another paid choice", async () => {
+    const { services, fetcher, execute } = fixture();
+    fetcher.mockReset().mockResolvedValueOnce(reply({ content: "No matching tool." }));
+    const first = await runAssistedTurn(request(), input, services);
+    const second = await runAssistedTurn(request(), input, services);
+    expect(second).toEqual(first);
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("does not recover another user's turn under the same workspace and request ID", async () => {
+    let user = "alice";
+    const { services, fetcher, execute } = fixture({ authenticate: async () => user });
+    fetcher.mockReset().mockResolvedValueOnce(choose()).mockResolvedValueOnce(
+      reply({ content: "Alice's result" })).mockResolvedValueOnce(choose()).mockResolvedValueOnce(
+      reply({ content: "Bob's result" }));
+    const alice = await runAssistedTurn(request(), input, services);
+    user = "bob";
+    const bob = await runAssistedTurn(request(), input, services);
+    expect(alice).toMatchObject({ status: "answered", answer: "Alice's result" });
+    expect(bob).toMatchObject({ status: "answered", answer: "Bob's result" });
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(fetcher).toHaveBeenCalledTimes(4);
+  });
+
+  it("bounds quota, discovery, vault and cleanup waits with the right timeout reason", async () => {
+    let finishQuota!: (release: () => Promise<void>) => void;
+    const lateRelease = vi.fn(async () => undefined);
+    const quota = fixture({ turnMs: 30, reserveTurn: () =>
+      new Promise((resolve) => { finishQuota = resolve; }) });
+    await expect(runAssistedTurn(request(), input, quota.services)).rejects
+      .toMatchObject({ code: "ASSISTED_TIMEOUT" });
+    finishQuota(lateRelease);
+    await vi.waitFor(() => expect(lateRelease).toHaveBeenCalledOnce());
+    expect(quota.fetcher).not.toHaveBeenCalled();
+
+    const discovery = fixture({ turnMs: 30, discover: () => new Promise(() => undefined) });
+    await expect(runAssistedTurn(request(), input, discovery.services)).rejects
+      .toMatchObject({ code: "ASSISTED_TIMEOUT" });
+    expect(discovery.fetcher).not.toHaveBeenCalled();
+
+    const vault = fixture({ turnMs: 30, withKey: () => new Promise(() => undefined) });
+    await expect(runAssistedTurn(request(), input, vault.services)).rejects
+      .toMatchObject({ code: "ASSISTED_TIMEOUT" });
+    expect(vault.fetcher).not.toHaveBeenCalled();
+
+    const cleanup = fixture({ turnMs: 30, reserveTurn: async () =>
+      () => new Promise(() => undefined) });
+    const result = await runAssistedTurn(request(), input, cleanup.services);
+    expect(result).toMatchObject({ status: "answered", receipt: { id: "receipt_one" } });
   });
 
   it("retains reported usage and safe guidance on paid OpenRouter errors", async () => {

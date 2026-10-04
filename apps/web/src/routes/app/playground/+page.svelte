@@ -133,7 +133,7 @@
           if (turn === generation) showApproval(recovered);
         }
         if (status.receipt && turn === generation) {
-          notice = `Read receipt ${status.receipt.id} is ${status.receipt.status}. Retry the same request to recover its answer.`;
+          notice = `Read receipt ${status.receipt.id} is ${status.receipt.status}. Retry the same request to recover its saved action and usage.`;
         }
       }
       const fresh = await request<PlaygroundOverview>(

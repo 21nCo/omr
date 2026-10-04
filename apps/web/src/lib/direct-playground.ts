@@ -98,6 +98,7 @@ export function playgroundError(error: unknown): string {
       ASSISTED_MODEL_INVALID: "Enter a model identifier such as provider/model.",
       ASSISTED_PROMPT_INVALID: "Enter a request under 2,000 characters without an API key.",
       ASSISTED_REQUEST_ID_INVALID: "This request could not be identified. Reload and try again.",
+      ASSISTED_REQUEST_CONFLICT: "This request ID belongs to a different model, prompt, or account. Start a new request.",
       ASSISTED_KEY_REJECTED: "OpenRouter rejected your personal key. Check it in Settings.",
       ASSISTED_MODEL_REJECTED: "OpenRouter rejected this model or request. Choose a tool-capable model and check the prompt.",
       ASSISTED_CONNECTION_UNAVAILABLE: "Select a ready account in this workspace again.",

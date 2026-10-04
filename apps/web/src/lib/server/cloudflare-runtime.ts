@@ -12,7 +12,8 @@ import {
 } from "@oh-my-router/connections";
 import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
 import { ApprovalUnavailableError, decodeExecutionWrappingKey, deriveExecutionFingerprintKey, ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
-import { connectPostgresExecutionReceipts, lookupPostgresAssistedAction } from "@oh-my-router/execution/postgres";
+import { bindPostgresAssistedTurn, connectPostgresExecutionReceipts,
+  lookupPostgresAssistedAction, lookupPostgresAssistedTurn } from "@oh-my-router/execution/postgres";
 import { AssistedTurnQuotaExceededError, connectPostgresIdentityRuntime,
   connectPostgresOpenRouterVault, reservePostgresAssistedTurn } from "@oh-my-router/identity/postgres";
 import { OpenRouterVaultError } from "@oh-my-router/identity";
@@ -988,9 +989,32 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
     }),
   });
 
+  const assistedActor = async (request: Request, workspaceId: string) => {
+    const origin = new URL(event.request.url).origin;
+    const identity = await connectPostgresIdentityRuntime({
+      connectionString: databaseConnectionString(event),
+      environment: { resolve: () => ({ issuer: origin, baseUrl: origin }) },
+    });
+    try {
+      const session = await identity.requireSession(request);
+      await identity.workspaces.requireMembership(workspaceId, session.actorId);
+      return session.actorId;
+    } finally { await identity.close(); }
+  };
+
   const assistedPlayground: AssistedPlaygroundServices = {
     enabled: () => assistedPlaygroundEnabled(environment(event)),
     authenticate: (request) => requireWebUser(event, request),
+    async fingerprint(input, prompt) {
+      const bytes = await deriveExecutionFingerprintKey(executionWrappingKey(event));
+      const key = await crypto.subtle.importKey("raw", bytes,
+        { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+      const data = new TextEncoder().encode(JSON.stringify([
+        "omr-assisted-turn-v1", input.workspaceId, input.connectionId, input.model, prompt]));
+      const digest = await crypto.subtle.sign("HMAC", key, data);
+      return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0"))
+        .join("");
+    },
     async reserveTurn(userId) {
       try { return await reservePostgresAssistedTurn(databaseConnectionString(event), userId); }
       catch (error) {
@@ -1024,19 +1048,27 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
     execute: (request, input) => execution.execute(request, input),
     requestApproval: (request, input) => execution.requestApproval(request, input),
     async lookupAction(request, input) {
-      const origin = new URL(event.request.url).origin;
-      const identity = await connectPostgresIdentityRuntime({
-        connectionString: databaseConnectionString(event),
-        environment: { resolve: () => ({ issuer: origin, baseUrl: origin }) },
-      });
-      let userId: string;
-      try {
-        const session = await identity.requireSession(request);
-        await identity.workspaces.requireMembership(input.workspaceId, session.actorId);
-        userId = session.actorId;
-      } finally { await identity.close(); }
+      const userId = await assistedActor(request, input.workspaceId);
       return lookupPostgresAssistedAction({ connectionString: databaseConnectionString(event),
         userId, workspaceId: input.workspaceId, requestId: input.requestId });
+    },
+    async loadTurn(request, input) {
+      const userId = await assistedActor(request, input.workspaceId);
+      const binding = await lookupPostgresAssistedTurn({
+        connectionString: databaseConnectionString(event), userId,
+        workspaceId: input.workspaceId, requestId: input.requestId,
+        wrappingKey: decodeExecutionWrappingKey(requiredSecret(event,
+          "EXECUTION_RESULT_WRAPPING_KEY")),
+      });
+      return binding as Awaited<ReturnType<AssistedPlaygroundServices["loadTurn"]>>;
+    },
+    async bindTurn(userId, input) {
+      const result = await bindPostgresAssistedTurn({
+        connectionString: databaseConnectionString(event), userId, ...input,
+        wrappingKey: decodeExecutionWrappingKey(requiredSecret(event,
+          "EXECUTION_RESULT_WRAPPING_KEY")),
+      });
+      return result as Awaited<ReturnType<AssistedPlaygroundServices["bindTurn"]>>;
     },
   };
 

@@ -1,6 +1,6 @@
 import type { JsonValue } from "@oh-my-router/tools";
 
-export type CiphertextContext = { kind: "approval-params" | "receipt-result";
+export type CiphertextContext = { kind: "approval-params" | "receipt-result" | "assisted-action";
   workspaceId: string; id: string };
 
 function associatedData(context: CiphertextContext): Uint8Array<ArrayBuffer> {
