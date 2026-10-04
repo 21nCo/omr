@@ -1,0 +1,28 @@
+apps/web/src/lib/server/assisted-playground.ts
+  h_a39f9495f9ec1d 186,197-224
+docs/assisted-playground.md
+  h_a39f9495f9ec1d 11-16,31-33
+packages/execution/migrations/0022_assisted_turn_bindings.sql
+  h_a39f9495f9ec1d 1-3,10-11,15,17-18,23-25
+packages/execution/src/assisted-turn-binding-postgres.integration.test.ts
+  h_a39f9495f9ec1d 4,70-101
+packages/execution/src/assisted-turn-binding-postgres.ts
+  h_a39f9495f9ec1d 6-7,16,26-31,50-51,53-54,56-58,74-75,79-82,86-87,89-92,94-95,97-98
+packages/execution/src/postgres-crypto.ts
+  h_a39f9495f9ec1d 3
+tests/acceptance/assisted-playground-contract.test.ts
+  h_a39f9495f9ec1d 298-299,305-306,308-309,313-370
+tests/acceptance/direct-playground-ui.test.ts
+  h_a39f9495f9ec1d 846-851,879-882
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "541cea23175d2ecae6c64c246b65fdc683e0042e",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
