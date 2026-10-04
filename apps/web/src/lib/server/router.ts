@@ -1,5 +1,5 @@
 import { createRouter, RouterError } from "@superfunctions/http";
-import { AssistedPlaygroundError, type AssistedPlaygroundServices,
+import { AssistedPlaygroundError, assistedActionStatus, type AssistedPlaygroundServices,
   runAssistedTurn } from "./assisted-playground.js";
 import {
   CLIENT_CAPABILITIES,
@@ -401,7 +401,8 @@ export function createOMRRouter(
     onError: (error, request) => {
       if (error instanceof RouterError) return error.toResponse();
       if (error instanceof AssistedPlaygroundError) {
-        return Response.json({ error: error.code }, { status: error.status,
+        return Response.json({ error: error.code,
+          ...(error.usage ? { usage: error.usage, model: error.model } : {}) }, { status: error.status,
           headers: PRIVATE_RESPONSE });
       }
       if (error instanceof DeviceAuthorizationError) {
@@ -567,6 +568,18 @@ export function createOMRRouter(
     },
     routes: [
       {
+        method: "GET",
+        path: "/api/playground/assisted/status",
+        handler: async (request) => {
+          if (!assistedPlaygroundServices) throw new RuntimeUnavailableError("Assisted playground is unavailable");
+          const query = new URL(request.url).searchParams;
+          return Response.json(await assistedActionStatus(request, {
+            workspaceId: query.get("workspaceId") ?? "",
+            requestId: query.get("requestId") ?? "",
+          }, assistedPlaygroundServices), { headers: PRIVATE_RESPONSE });
+        },
+      },
+      {
         method: "POST",
         path: "/api/playground/assisted",
         handler: async (request, context) => {
@@ -577,6 +590,7 @@ export function createOMRRouter(
             connectionId: requiredString(body, "connectionId"),
             model: requiredString(body, "model"),
             prompt: requiredString(body, "prompt"),
+            requestId: requiredString(body, "requestId"),
           }, assistedPlaygroundServices), { headers: PRIVATE_RESPONSE });
         },
       },

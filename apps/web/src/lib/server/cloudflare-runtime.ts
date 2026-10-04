@@ -12,8 +12,9 @@ import {
 } from "@oh-my-router/connections";
 import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
 import { ApprovalUnavailableError, decodeExecutionWrappingKey, deriveExecutionFingerprintKey, ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
-import { connectPostgresExecutionReceipts } from "@oh-my-router/execution/postgres";
-import { connectPostgresIdentityRuntime, connectPostgresOpenRouterVault } from "@oh-my-router/identity/postgres";
+import { connectPostgresExecutionReceipts, lookupPostgresAssistedAction } from "@oh-my-router/execution/postgres";
+import { AssistedTurnQuotaExceededError, connectPostgresIdentityRuntime,
+  connectPostgresOpenRouterVault, reservePostgresAssistedTurn } from "@oh-my-router/identity/postgres";
 import { OpenRouterVaultError } from "@oh-my-router/identity";
 import { connectPostgresPlugFn, verifiedGithubScopes, verifiedLinearScopes, verifiedNotionScopes, verifiedSlackScopes } from "@oh-my-router/plugfn-runtime";
 import {
@@ -26,7 +27,7 @@ import {
   type ProviderStatus,
 } from "@oh-my-router/tools";
 import type { IntegrationConfig } from "plugfn";
-import type { AssistedPlaygroundServices } from "./assisted-playground.js";
+import { AssistedPlaygroundError, type AssistedPlaygroundServices } from "./assisted-playground.js";
 import { assistedPlaygroundEnabled } from "./direct-playground-rollout.js";
 
 import {
@@ -990,6 +991,15 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
   const assistedPlayground: AssistedPlaygroundServices = {
     enabled: () => assistedPlaygroundEnabled(environment(event)),
     authenticate: (request) => requireWebUser(event, request),
+    async reserveTurn(userId) {
+      try { return await reservePostgresAssistedTurn(databaseConnectionString(event), userId); }
+      catch (error) {
+        if (error instanceof AssistedTurnQuotaExceededError) {
+          throw new AssistedPlaygroundError("ASSISTED_RATE_LIMITED", 429);
+        }
+        throw error;
+      }
+    },
     async withKey(userId, callback) {
       const runtime = await connectPostgresOpenRouterVault({
         connectionString: openRouterVaultConnectionString(event),
@@ -1013,6 +1023,21 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
     },
     execute: (request, input) => execution.execute(request, input),
     requestApproval: (request, input) => execution.requestApproval(request, input),
+    async lookupAction(request, input) {
+      const origin = new URL(event.request.url).origin;
+      const identity = await connectPostgresIdentityRuntime({
+        connectionString: databaseConnectionString(event),
+        environment: { resolve: () => ({ issuer: origin, baseUrl: origin }) },
+      });
+      let userId: string;
+      try {
+        const session = await identity.requireSession(request);
+        await identity.workspaces.requireMembership(input.workspaceId, session.actorId);
+        userId = session.actorId;
+      } finally { await identity.close(); }
+      return lookupPostgresAssistedAction({ connectionString: databaseConnectionString(event),
+        userId, workspaceId: input.workspaceId, requestId: input.requestId });
+    },
   };
 
   return { device, connections, tools, execution, controlPlane, openRouterVault, assistedPlayground };

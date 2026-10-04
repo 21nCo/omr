@@ -787,14 +787,18 @@ describe("direct playground form", () => {
   });
 
   it("shows a bounded assisted answer, model usage and the direct receipt without a key field", async () => {
+    const requestIds: string[] = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path.startsWith("/api/control-plane")) return Response.json(overview());
       if (path.startsWith("/api/tools?")) return Response.json({ tools,
         providers: [{ provider: "demo", state: "ready" }] });
       if (path === "/api/playground/assisted") {
-        expect(JSON.parse(String(init?.body))).toMatchObject({ workspaceId: "workspace_one",
+        const sent = JSON.parse(String(init?.body));
+        requestIds.push(sent.requestId);
+        expect(sent).toMatchObject({ workspaceId: "workspace_one",
           connectionId: "connection_one", model: "fixture/model", prompt: "Find fixture" });
+        expect(sent.requestId).toMatch(/^[0-9a-f-]{36}$/);
         return Response.json({ status: "answered", answer: "Fixture found.", model: "fixture/model",
           servedModels: ["fixture/served"], toolId: "demo.read",
           usage: { promptTokens: 10, completionTokens: 4, totalTokens: 14, costUsd: 0.00002 },
@@ -821,17 +825,28 @@ describe("direct playground form", () => {
       expect(document.body.textContent).toContain("$0.000020");
       expect(document.body.textContent).toContain("receipt_assisted");
       expect(document.querySelector("input[type=password]")).toBeNull();
+      await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+      button("Ask model").click();
+      await vi.waitFor(() => expect(requestIds).toHaveLength(2));
+      expect(requestIds[1]).not.toBe(requestIds[0]);
     } finally { await unmount(app); }
   });
 
   it("cancels an in-flight assisted request and does not render its late result", async () => {
     let release: ((response: Response) => void) | undefined;
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const requestIds: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path.startsWith("/api/control-plane")) return Response.json(overview());
       if (path.startsWith("/api/tools?")) return Response.json({ tools,
         providers: [{ provider: "demo", state: "ready" }] });
-      if (path === "/api/playground/assisted") return new Promise<Response>((resolve) => { release = resolve; });
+      if (path === "/api/playground/assisted") {
+        requestIds.push(JSON.parse(String(init?.body)).requestId);
+        return requestIds.length === 1 ? new Promise<Response>((resolve) => { release = resolve; })
+          : Response.json({ status: "answered", answer: "Recovered answer", model: "fixture/model",
+            servedModels: ["fixture/served"], usage: { promptTokens: 1,
+              completionTokens: 1, totalTokens: 2, costUsd: 0.00001 } });
+      }
       return Response.json({ error: "NOT_FOUND" }, { status: 404 });
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -855,6 +870,50 @@ describe("direct playground form", () => {
           costUsd: null } }));
       await vi.waitFor(() => expect(document.body.textContent).toContain("Request cancelled"));
       expect(document.body.textContent).not.toContain("Late answer");
+      button("Ask model").click();
+      await vi.waitFor(() => expect(document.body.textContent).toContain("Recovered answer"));
+      expect(requestIds).toHaveLength(2);
+      expect(requestIds[1]).toBe(requestIds[0]);
+    } finally { await unmount(app); }
+  });
+
+  it("recovers a committed assisted approval after its response is lost", async () => {
+    let release: ((response: Response) => void) | undefined;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/control-plane")) return Response.json(overview());
+      if (path.startsWith("/api/tools?")) return Response.json({ tools,
+        providers: [{ provider: "demo", state: "ready" }] });
+      if (path === "/api/playground/assisted") return new Promise<Response>((resolve) => { release = resolve; });
+      if (path.startsWith("/api/playground/assisted/status")) return Response.json({
+        approval: { id: "approval_one", status: "pending" }, receipt: null });
+      if (path.startsWith("/api/approvals/status")) return Response.json(approval("pending"));
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body,
+      props: { data: { assistedEnabled: true } as never } });
+    try {
+      await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value)
+        .toBe("connection_one"));
+      for (const [id, value] of [["assisted-model", "fixture/model"],
+        ["assisted-prompt", "Write fixture"]]) {
+        const field = document.getElementById(id) as HTMLInputElement;
+        field.value = value;
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+      button("Ask model").click();
+      await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+      button("Cancel request").click();
+      release!(Response.json({ status: "approval_required", answer: "Late approval",
+        model: "fixture/model", servedModels: [], usage: { promptTokens: 1,
+          completionTokens: 1, totalTokens: 2, costUsd: null }, approval: approval("pending") }));
+      await vi.waitFor(() => expect(document.querySelector("[aria-label='Approval']")?.textContent)
+        .toContain("pending"));
+      expect(document.body.textContent).not.toContain("Late approval");
+      expect(fetchMock.mock.calls.filter(([path]) => String(path) === "/api/playground/assisted"))
+        .toHaveLength(1);
     } finally { await unmount(app); }
   });
 

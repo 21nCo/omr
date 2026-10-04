@@ -4,7 +4,7 @@
   import { createLinearActionKeys } from "$lib/linear-action-keys.js";
   import { recoverProviderReconciliation } from "$lib/workspace-catalog.js";
   import { createPlaygroundRequest, parsePlaygroundArguments, playgroundConnectionReady,
-    playgroundError, resumablePlaygroundApproval, schemaHints, type AssistedPlaygroundResult,
+    playgroundError, PlaygroundRequestError, resumablePlaygroundApproval, schemaHints, type AssistedPlaygroundResult,
     type PlaygroundApproval, type PlaygroundCatalog,
     type PlaygroundConnection, type PlaygroundOverview, type PlaygroundReceipt } from "$lib/direct-playground.js";
   import type { ToolManifest } from "@oh-my-router/tools";
@@ -70,15 +70,36 @@
     notice = "";
     busy = "Asking model…";
     try {
+      const model = assistedModel.trim();
+      const prompt = assistedPrompt.trim();
+      const requestId = await actionKeys.key("assisted", workspaceId, account.id, { model, prompt });
+      if (turn !== generation || controller.signal.aborted) return;
       const result = await request<AssistedPlaygroundResult>("/api/playground/assisted", {
-        workspaceId, connectionId: account.id, model: assistedModel.trim(), prompt: assistedPrompt.trim(),
+        workspaceId, connectionId: account.id, model, prompt, requestId,
       }, controller.signal);
       if (turn !== generation || controller.signal.aborted) return;
       assistedResult = result;
       if (result.receipt) receipt = result.receipt;
-      if (result.approval) showApproval(result.approval);
+      if (result.approval) {
+        showApproval(result.approval);
+        await actionKeys.bindApproval(result.approval.id, "assisted", workspaceId, account.id,
+          { model, prompt });
+      }
+      if (result.status === "answered" || result.status === "model_error") {
+        await actionKeys.reset("assisted", workspaceId, account.id, { model, prompt });
+      }
+      if (result.status === "action_pending") await refreshAssistedApprovals(turn);
     } catch (caught) {
-      if (turn === generation && !controller.signal.aborted) error = playgroundError(caught);
+      if (turn === generation && !controller.signal.aborted) {
+        error = playgroundError(caught);
+        if (caught instanceof PlaygroundRequestError && caught.usage) {
+          assistedResult = { status: "model_error", answer: error, errorCode: caught.code,
+            model: assistedModel.trim(), servedModels: caught.model ? [caught.model] : [],
+            usage: caught.usage };
+          error = "";
+        }
+        await refreshAssistedApprovals(turn);
+      }
     } finally {
       if (turn === generation && assistedController === controller) {
         busy = "";
@@ -92,6 +113,33 @@
     assistedController = null;
     busy = "";
     notice = "Request cancelled. If a tool already started, check its receipt or approval before retrying.";
+    void refreshAssistedApprovals(generation);
+  }
+
+  /** Reconcile approvals after a lost or cancelled response without clearing retry identity. */
+  async function refreshAssistedApprovals(turn: number) {
+    try {
+      const account = currentConnection();
+      const requestId = account ? await actionKeys.existingKey("assisted", workspaceId, account.id,
+        { model: assistedModel.trim(), prompt: assistedPrompt.trim() }) : undefined;
+      if (requestId && turn === generation) {
+        const status = await request<{ approval: { id: string; status: string } | null;
+          receipt: { id: string; status: string } | null }>(
+          `/api/playground/assisted/status?${new URLSearchParams({ workspaceId, requestId })}`);
+        if (turn !== generation) return;
+        if (status.approval) {
+          const recovered = await request<PlaygroundApproval>(
+            `/api/approvals/status?${new URLSearchParams({ approvalId: status.approval.id, workspaceId })}`);
+          if (turn === generation) showApproval(recovered);
+        }
+        if (status.receipt && turn === generation) {
+          notice = `Read receipt ${status.receipt.id} is ${status.receipt.status}. Retry the same request to recover its answer.`;
+        }
+      }
+      const fresh = await request<PlaygroundOverview>(
+        `/api/control-plane?workspaceId=${encodeURIComponent(workspaceId)}`);
+      if (turn === generation && overview) overview = { ...overview, approvals: fresh.approvals };
+    } catch { /* The retained request identity still fences a retry. */ }
   }
 
   /** Keep the current approval and resumable list in sync. */

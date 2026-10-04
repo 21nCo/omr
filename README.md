@@ -86,6 +86,9 @@ and selects at most one action.
 Reads return a receipt and a bounded answer; writes stop at the existing approval
 review. The page reports provider token counts and cost when available and allows
 request cancellation. No conversation history or autonomous retries are kept.
+Assisted turns use a PostgreSQL-backed per-user request and concurrency limit. See
+[the assisted playground contract](docs/assisted-playground.md) for migration,
+retry recovery and rollout details.
 
 Run focused package tests with `npm run test --workspace=<package-name>`. Set
 `OMR_TEST_DATABASE_URL` to a disposable PostgreSQL database to enable the real

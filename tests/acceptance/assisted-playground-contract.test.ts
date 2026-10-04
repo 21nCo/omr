@@ -16,7 +16,8 @@ const manifest: ToolManifest = {
 const writeManifest: ToolManifest = { ...manifest, id: "demo.write", action: "write",
   contract: { ...manifest.contract, effect: "write" } };
 const input = { workspaceId: "mine", connectionId: "account_one",
-  model: "fixture/model", prompt: "Find my item" };
+  model: "fixture/model", prompt: "Find my item",
+  requestId: "27475482-05a0-4cce-9cb5-b4ebbe1a56ab" };
 function request(origin = "https://omr.invalid", signal?: AbortSignal): Request {
   return new Request(`${origin}/api/playground/assisted`, { method: "POST",
     headers: { origin, "content-type": "application/json" }, body: JSON.stringify(input), signal });
@@ -38,11 +39,13 @@ function fixture(overrides: Partial<AssistedPlaygroundServices> = {}) {
   const services: AssistedPlaygroundServices = {
     enabled: () => true,
     authenticate: async () => "alice",
+    reserveTurn: async () => async () => undefined,
     withKey: async (_user, callback) => callback("sk-or-v1-alice-test"),
     connections: async () => [{ id: "account_one", workspaceId: "mine", provider: "demo",
       selected: true, status: "active", readiness: "ready", providerState: "ready",
       selectable: true }],
     discover: async () => [manifest], execute, requestApproval, fetcher,
+    lookupAction: async () => ({ approval: null, receipt: null }),
     ...overrides,
   };
   return { services, fetcher, execute, requestApproval };
@@ -126,7 +129,8 @@ describe("assisted-playground-contract", () => {
       choose("tool_0", `{"title":"${"x".repeat(ASSISTED_LIMITS.argumentsChars)}"}`)]) {
       const { services, fetcher, execute, requestApproval } = fixture();
       fetcher.mockReset().mockResolvedValue(response);
-      await expect(runAssistedTurn(request(), input, services)).rejects.toHaveProperty("code");
+      await expect(runAssistedTurn(request(), input, services)).resolves
+        .toMatchObject({ status: "model_error", usage: { totalTokens: 14, costUsd: 0.00002 } });
       expect(execute).not.toHaveBeenCalled();
       expect(requestApproval).not.toHaveBeenCalled();
     }
@@ -143,7 +147,7 @@ describe("assisted-playground-contract", () => {
     failure.fetcher.mockReset().mockResolvedValue(Response.json({ error: "sk-or-v1-hidden" },
       { status: 401 }));
     await expect(runAssistedTurn(request(), input, failure.services)).rejects
-      .toMatchObject({ code: "ASSISTED_MODEL_UNAVAILABLE" });
+      .toMatchObject({ code: "ASSISTED_KEY_REJECTED" });
     expect(failure.execute).not.toHaveBeenCalled();
   });
 
@@ -175,6 +179,148 @@ describe("assisted-playground-contract", () => {
     await expect(runAssistedTurn(request(), input, oversized.services)).rejects
       .toMatchObject({ code: "ASSISTED_MODEL_RESPONSE_TOO_LARGE" });
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("caps offered tools before payment and preserves readable nested content without credentials", async () => {
+    const { services, fetcher } = fixture({ discover: async () => Array.from({ length: 15 }, (_, index) =>
+      ({ ...manifest, id: `demo.read_${index}` })) });
+    await runAssistedTurn(request(), input, services);
+    const sent = JSON.parse(String(fetcher.mock.calls[0]![1]?.body));
+    expect(sent.tools).toHaveLength(ASSISTED_LIMITS.tools);
+    const result = safeResult({ pages: [{ title: "Roadmap", content: {
+      text: "The milestone is ready", credential: "nested-password",
+      privateKey: "-----BEGIN PRIVATE KEY-----" } }],
+    metadata: { sessionCookie: "cookie-value", note: "sk-or-v1-hidden" } },
+    ["title", "text"]);
+    expect(result).toContain("Roadmap");
+    expect(result).toContain("The milestone is ready");
+    for (const secret of ["nested-password", "PRIVATE KEY", "cookie-value", "sk-or-v1-hidden"])
+      expect(result).not.toContain(secret);
+  });
+
+  it("denies a second same-user turn before payment and releases the claim on model error", async () => {
+    let active = false;
+    let calls = 0;
+    const reserveTurn: AssistedPlaygroundServices["reserveTurn"] = async () => {
+      calls += 1;
+      if (active) throw new Error("quota denied");
+      active = true;
+      return async () => { active = false; };
+    };
+    let finish!: (value: Response) => void;
+    const first = fixture({ reserveTurn, fetcher: vi.fn(() => new Promise<Response>((resolve) => {
+      finish = resolve;
+    })) as typeof fetch });
+    const running = runAssistedTurn(request(), input, first.services);
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    const second = fixture({ reserveTurn });
+    await expect(runAssistedTurn(request(), input, second.services)).rejects
+      .toThrow("quota denied");
+    expect(second.fetcher).not.toHaveBeenCalled();
+    finish(Response.json({ choices: [{ message: { content: "done" } }] }));
+    await running;
+    expect(active).toBe(false);
+    expect(calls).toBe(2);
+  });
+
+  it("bounds delayed reads and approvals while retaining one retry identity", async () => {
+    for (const write of [false, true]) {
+      let finish!: (value: unknown) => void;
+      const action = vi.fn(() => new Promise<unknown>((resolve) => { finish = resolve; }));
+      const { services, fetcher } = fixture({ turnMs: 10,
+        ...(write ? { discover: async () => [writeManifest], requestApproval: action }
+          : { execute: action }) });
+      const pending = await runAssistedTurn(request(), input, services);
+      expect(pending).toMatchObject({ status: "action_pending", requestId: input.requestId,
+        usage: { totalTokens: 14 } });
+      expect(action).toHaveBeenCalledOnce();
+      expect(action.mock.calls[0]![1]).toMatchObject({
+        idempotencyKey: `assisted_${input.requestId}` });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      finish(write ? { id: "approval_existing", status: "pending" }
+        : { id: "receipt_existing", status: "succeeded", result: {} });
+    }
+  });
+
+  it("replays one committed approval after the first response times out", async () => {
+    let finish!: () => void;
+    const firstResponse = new Promise<void>((resolve) => { finish = resolve; });
+    const committed = new Map<string, { id: string; status: string }>();
+    const requestApproval = vi.fn(async (_request: Request, action: {
+      idempotencyKey: string }) => {
+      let approval = committed.get(action.idempotencyKey);
+      if (!approval) {
+        approval = { id: "approval_original", status: "pending" };
+        committed.set(action.idempotencyKey, approval);
+        await firstResponse;
+      }
+      return approval;
+    });
+    const { services, fetcher } = fixture({ turnMs: 5,
+      discover: async () => [writeManifest], requestApproval });
+    fetcher.mockReset().mockImplementation(async () => choose());
+    const first = await runAssistedTurn(request(), input, services);
+    expect(first).toMatchObject({ status: "action_pending", requestId: input.requestId });
+    finish();
+    services.turnMs = 1000;
+    const retry = await runAssistedTurn(request(), input, services);
+    expect(retry).toMatchObject({ status: "approval_required",
+      approval: { id: "approval_original", status: "pending" } });
+    expect(committed.size).toBe(1);
+    expect(requestApproval.mock.calls.map(([, action]) => action.idempotencyKey))
+      .toEqual([`assisted_${input.requestId}`, `assisted_${input.requestId}`]);
+  });
+
+  it("retains reported usage and safe guidance on paid OpenRouter errors", async () => {
+    const { services, fetcher } = fixture();
+    fetcher.mockReset().mockResolvedValue(Response.json({ error: "secret upstream detail",
+      usage: { prompt_tokens: 8, completion_tokens: 0, total_tokens: 8, cost: 0.0001 } },
+    { status: 400 }));
+    const router = createOMRRouter(undefined, undefined, undefined, undefined,
+      undefined, undefined, services);
+    const response = await router.handle(request());
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({ error: "ASSISTED_MODEL_REJECTED",
+      usage: { totalTokens: 8, costUsd: 0.0001 } });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it("wires the production HTTP route through personal quota and shared action seams", async () => {
+    const observed: string[] = [];
+    const { services, execute } = fixture({
+      reserveTurn: async (userId) => { observed.push(`claim:${userId}`);
+        return async () => { observed.push(`release:${userId}`); }; },
+    });
+    const router = createOMRRouter(undefined, undefined, undefined, undefined,
+      undefined, undefined, services);
+    const response = await router.handle(request());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ status: "answered",
+      receipt: { id: "receipt_one" }, usage: { totalTokens: 28 } });
+    expect(observed).toEqual(["claim:alice", "release:alice"]);
+    expect(execute.mock.calls[0]![1].idempotencyKey).toBe(`assisted_${input.requestId}`);
+
+    const write = fixture({ discover: async () => [writeManifest] });
+    const writeRouter = createOMRRouter(undefined, undefined, undefined, undefined,
+      undefined, undefined, write.services);
+    const approvalResponse = await writeRouter.handle(request());
+    expect(approvalResponse.status).toBe(200);
+    expect(await approvalResponse.json()).toMatchObject({ status: "approval_required",
+      approval: { id: "approval_one", status: "pending" } });
+    expect(write.requestApproval.mock.calls[0]![1].idempotencyKey)
+      .toBe(`assisted_${input.requestId}`);
+    expect(write.execute).not.toHaveBeenCalled();
+
+    const lookupAction = vi.fn(async () => ({ approval: { id: "approval_one", status: "pending" },
+      receipt: null }));
+    const statusRouter = createOMRRouter(undefined, undefined, undefined, undefined,
+      undefined, undefined, fixture({ lookupAction }).services);
+    const status = await statusRouter.handle(new Request(
+      `https://omr.invalid/api/playground/assisted/status?workspaceId=mine&requestId=${input.requestId}`));
+    expect(status.status).toBe(200);
+    expect(await status.json()).toMatchObject({ approval: { id: "approval_one", status: "pending" } });
+    expect(lookupAction).toHaveBeenCalledWith(expect.any(Request),
+      { workspaceId: "mine", requestId: input.requestId });
   });
 
   it("stops before a tool on client cancellation and on timeout", async () => {

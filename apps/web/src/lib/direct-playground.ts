@@ -30,9 +30,9 @@ export type PlaygroundCatalog = {
   providers: { provider: string; state: string }[];
 };
 export type AssistedPlaygroundResult = {
-  status: "answered" | "approval_required" | "tool_error";
+  status: "answered" | "approval_required" | "tool_error" | "model_error" | "action_pending";
   answer: string; model: string; servedModels: string[]; toolId?: string;
-  errorCode?: string; receiptId?: string;
+  errorCode?: string; receiptId?: string; requestId?: string;
   usageIncomplete?: boolean;
   approval?: PlaygroundApproval; receipt?: PlaygroundReceipt;
   usage: { promptTokens: number | null; completionTokens: number | null;
@@ -94,6 +94,12 @@ export function playgroundError(error: unknown): string {
       EXECUTION_IN_PROGRESS: "This action is still running. Check its approval status before retrying.",
       EXECUTION_FAILED: "Check the receipt and account health in the control plane. Verify the provider outcome before retrying a write.",
       ASSISTED_DISABLED: "Assisted testing is not enabled yet.",
+      ASSISTED_RATE_LIMITED: "Your assisted requests are limited to one at a time and ten per hour. Try later.",
+      ASSISTED_MODEL_INVALID: "Enter a model identifier such as provider/model.",
+      ASSISTED_PROMPT_INVALID: "Enter a request under 2,000 characters without an API key.",
+      ASSISTED_REQUEST_ID_INVALID: "This request could not be identified. Reload and try again.",
+      ASSISTED_KEY_REJECTED: "OpenRouter rejected your personal key. Check it in Settings.",
+      ASSISTED_MODEL_REJECTED: "OpenRouter rejected this model or request. Choose a tool-capable model and check the prompt.",
       ASSISTED_CONNECTION_UNAVAILABLE: "Select a ready account in this workspace again.",
       ASSISTED_NO_TOOLS: "No bounded tools are available for this account.",
       ASSISTED_MODEL_UNAVAILABLE: "OpenRouter did not complete the request. Check the key and model, then retry.",
@@ -112,7 +118,8 @@ export function playgroundError(error: unknown): string {
 
 export class PlaygroundRequestError extends Error {
   /** Preserve the API code and receipt so the page can guide recovery. */
-  constructor(readonly code: string, message: string, readonly receiptId?: string) {
+  constructor(readonly code: string, message: string, readonly receiptId?: string,
+    readonly usage?: AssistedPlaygroundResult["usage"], readonly model?: string) {
     super(message); this.name = "PlaygroundRequestError";
   }
 }
@@ -126,10 +133,11 @@ export function createPlaygroundRequest(fetchImpl: typeof fetch, login: () => vo
       ...(body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify(body) }) });
     const value = await response.json().catch(() => ({})) as T & { error?: string; message?: string;
-      receiptId?: string };
+      receiptId?: string; usage?: AssistedPlaygroundResult["usage"]; model?: string };
     if (response.status === 401 && !value.error?.endsWith("RECONNECT_REQUIRED")) login();
     if (!response.ok) throw new PlaygroundRequestError(value.error ?? "HTTP_ERROR",
-      value.message ?? value.error ?? `Request failed (${response.status})`, value.receiptId);
+      value.message ?? value.error ?? `Request failed (${response.status})`, value.receiptId,
+      value.usage, value.model);
     return value;
   };
 }
