@@ -1,0 +1,40 @@
+.env.example
+  h_a39f9495f9ec1d 16-18
+apps/web/src/app.d.ts
+  h_a39f9495f9ec1d 11
+apps/web/src/lib/openrouter-settings.test.ts
+  h_a39f9495f9ec1d 2-3,7-8,10,12-29
+apps/web/src/lib/openrouter-settings.ts
+  h_a39f9495f9ec1d 8-34,36-39,49
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 17,49-50,226,241-249,959
+apps/web/src/lib/server/openrouter-vault-route.test.ts
+  h_a39f9495f9ec1d 6,11-60,99-101
+apps/web/src/lib/server/router.ts
+  h_a39f9495f9ec1d 422-425
+apps/web/src/routes/app/+page.svelte
+  h_a39f9495f9ec1d 1410,1413,1480-1481
+apps/web/src/routes/app/settings/+page.svelte
+  h_a39f9495f9ec1d 3-5,11,20-26,28-36,38,43-48,53,57,74-77,90
+docs/openrouter-vault.md
+  h_a39f9495f9ec1d 5,13-14,17,19
+packages/identity/src/openrouter-vault-postgres.integration.test.ts
+  h_a39f9495f9ec1d 46
+packages/identity/src/openrouter-vault-postgres.ts
+  h_a39f9495f9ec1d 10,23,30,45,51,60
+packages/identity/src/openrouter-vault.test.ts
+  h_a39f9495f9ec1d 46-49,85-88,90-92
+packages/identity/src/openrouter-vault.ts
+  h_a39f9495f9ec1d 23-24,50-52,56,62,69-94,113-115,133,140,155,171,180,184
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "87122b7ed0e2d7ca17a918978d5526a250e29d10",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
