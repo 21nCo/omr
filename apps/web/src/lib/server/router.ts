@@ -419,9 +419,10 @@ export function createOMRRouter(
         return Response.json({ error: error.code }, { status: 403 });
       }
       if (error instanceof OpenRouterVaultError) {
-        const status = error.code === "OPENROUTER_KEY_INVALID" ? 422 :
-          error.code === "OPENROUTER_KEY_MISSING" ? 404 :
-          error.code === "OPENROUTER_KEY_CONFLICT" ? 409 : 503;
+        let status = 503;
+        if (error.code === "OPENROUTER_KEY_INVALID") status = 422;
+        else if (error.code === "OPENROUTER_KEY_MISSING") status = 404;
+        else if (error.code === "OPENROUTER_KEY_CONFLICT") status = 409;
         return Response.json({ error: error.code }, { status, headers: PRIVATE_RESPONSE });
       }
       if (error instanceof WorkspaceInputError) {

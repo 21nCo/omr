@@ -14,6 +14,7 @@ import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
 import { ApprovalUnavailableError, decodeExecutionWrappingKey, deriveExecutionFingerprintKey, ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
 import { connectPostgresExecutionReceipts } from "@oh-my-router/execution/postgres";
 import { connectPostgresIdentityRuntime, connectPostgresOpenRouterVault } from "@oh-my-router/identity/postgres";
+import { OpenRouterVaultError } from "@oh-my-router/identity";
 import { connectPostgresPlugFn, verifiedGithubScopes, verifiedLinearScopes, verifiedNotionScopes, verifiedSlackScopes } from "@oh-my-router/plugfn-runtime";
 import {
   createPlugFnToolCatalog,
@@ -45,6 +46,8 @@ type OMRBindings = Cloudflare.Env & {
   OPENROUTER_VAULT_HYPERDRIVE?: { connectionString: string };
   DATABASE_URL?: string;
   OPENROUTER_VAULT_DATABASE_URL?: string;
+  OMR_OPENROUTER_VAULT_ENABLED?: string;
+  OMR_OPENROUTER_VAULT_CACHE_DISABLED_CONFIRMED?: string;
   DEVICE_CREDENTIAL_WRAPPING_KEY?: string;
   EXECUTION_RESULT_WRAPPING_KEY?: string;
   PLUGFN_ENCRYPTION_KEY?: string;
@@ -220,7 +223,7 @@ export function createOpenRouterVaultRouteServices(options: {
   async function run<T>(request: Request, mutating: boolean,
     operation: (vault: Awaited<ReturnType<typeof connectPostgresOpenRouterVault>>["vault"], userId: string) => Promise<T>,
   ): Promise<T> {
-    if (!options.enabled()) throw new RuntimeUnavailableError("OpenRouter settings are pending verification");
+    if (!options.enabled()) throw new OpenRouterVaultError("OPENROUTER_VAULT_DISABLED");
     if (mutating) requireSameOrigin(request);
     const userId = await options.requireUser(request);
     const runtime = await options.open();
@@ -233,6 +236,15 @@ export function createOpenRouterVaultRouteServices(options: {
     check: (request) => run(request, true, (vault, userId) => vault.check(userId)),
     delete: (request) => run(request, true, (vault, userId) => vault.delete(userId)),
   };
+}
+
+/** Refuse vault traffic until the dedicated Hyperdrive cache setting is verified. */
+export function openRouterVaultRolloutEnabled(env: {
+  OMR_OPENROUTER_VAULT_ENABLED?: string;
+  OMR_OPENROUTER_VAULT_CACHE_DISABLED_CONFIRMED?: string;
+}): boolean {
+  return env.OMR_OPENROUTER_VAULT_ENABLED === "true" &&
+    env.OMR_OPENROUTER_VAULT_CACHE_DISABLED_CONFIRMED === "true";
 }
 
 /** Mutating cookie requests need origin proof; bearer clients have explicit credentials. */
@@ -944,7 +956,7 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
   };
 
   const openRouterVault = createOpenRouterVaultRouteServices({
-    enabled: () => environment(event).OMR_OPENROUTER_VAULT_ENABLED === "true",
+    enabled: () => openRouterVaultRolloutEnabled(environment(event)),
     requireUser: (request) => requireWebUser(event, request),
     open: () => connectPostgresOpenRouterVault({
       connectionString: openRouterVaultConnectionString(event),

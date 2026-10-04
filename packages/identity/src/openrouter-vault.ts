@@ -20,7 +20,8 @@ export interface OpenRouterVaultStore {
 
 export class OpenRouterVaultError extends Error {
   constructor(readonly code: "OPENROUTER_KEY_INVALID" | "OPENROUTER_VALIDATION_UNAVAILABLE" |
-    "OPENROUTER_KEY_MISSING" | "OPENROUTER_KEY_CONFLICT" | "OPENROUTER_VAULT_UNAVAILABLE") {
+    "OPENROUTER_KEY_MISSING" | "OPENROUTER_KEY_CONFLICT" | "OPENROUTER_VAULT_UNAVAILABLE" |
+    "OPENROUTER_VAULT_DISABLED") {
     super(code);
   }
 }
@@ -46,20 +47,48 @@ export function decodeOpenRouterVaultKeys(encoded: string, activeKeyId: string):
   try {
     const values: unknown = JSON.parse(encoded);
     if (!values || typeof values !== "object" || Array.isArray(values) ||
-      typeof activeKeyId !== "string" || !/^[A-Za-z0-9_-]{1,32}$/.test(activeKeyId)) throw new Error();
+      typeof activeKeyId !== "string" || !/^[A-Za-z0-9_-]{1,32}$/.test(activeKeyId)) {
+      throw new Error("Invalid vault key ring shape or active ID");
+    }
     const keys = new Map<string, Uint8Array<ArrayBuffer>>();
     for (const [id, value] of Object.entries(values)) {
       if (!/^[A-Za-z0-9_-]{1,32}$/.test(id) || typeof value !== "string" || !/^[0-9a-fA-F]{64}$/.test(value)) {
-        throw new Error();
+        throw new Error("Invalid vault key ID or key bytes");
       }
       const bytes = new Uint8Array(new ArrayBuffer(32));
       for (let i = 0; i < 32; i += 1) bytes[i] = Number.parseInt(value.slice(i * 2, i * 2 + 2), 16);
       keys.set(id, bytes);
     }
-    if (!keys.has(activeKeyId)) throw new Error();
+    if (!keys.has(activeKeyId)) throw new Error("Active vault key is missing");
     return { keys, activeKeyId };
   } catch {
     throw new OpenRouterVaultError("OPENROUTER_VAULT_UNAVAILABLE");
+  }
+}
+
+/** Read a small response body without exposing provider text in errors or logs. */
+async function readValidationBody(response: Response): Promise<unknown> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("Provider response has no body");
+  try {
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > 4096) {
+        await reader.cancel();
+        throw new Error("Provider response exceeds validation limit");
+      }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    return JSON.parse(decoder.decode(bytes)) as unknown;
+  } finally {
+    reader.releaseLock();
   }
 }
 
@@ -81,23 +110,10 @@ export async function validateOpenRouterKey(key: string, fetcher: typeof fetch =
   if (response.status === 401 || response.status === 403) throw new OpenRouterVaultError("OPENROUTER_KEY_INVALID");
   if (!response.ok) throw new OpenRouterVaultError("OPENROUTER_VALIDATION_UNAVAILABLE");
   try {
-    // Reject management keys: they cannot call completion endpoints.
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error();
-    const chunks: Uint8Array[] = [];
-    let size = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > 4096) { await reader.cancel(); throw new Error(); }
-      chunks.push(value);
+    const body = await readValidationBody(response) as { data?: { is_management_key?: unknown; is_provisioning_key?: unknown } };
+    if (!body?.data || typeof body.data.is_management_key !== "boolean") {
+      throw new Error("Provider response has no key classification");
     }
-    const bytes = new Uint8Array(size);
-    let offset = 0;
-    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-    const body = JSON.parse(decoder.decode(bytes)) as { data?: { is_management_key?: unknown; is_provisioning_key?: unknown } };
-    if (!body.data || typeof body.data.is_management_key !== "boolean") throw new Error();
     if (body.data.is_management_key || body.data.is_provisioning_key === true) {
       throw new OpenRouterVaultError("OPENROUTER_KEY_INVALID");
     }
@@ -114,12 +130,14 @@ export class OpenRouterVault {
     private readonly fetcher: typeof fetch = fetch,
   ) {}
 
+  /** Return only masked metadata for the authenticated personal owner. */
   async status(userId: string): Promise<OpenRouterKeyStatus> {
     const row = await this.store.get(userId);
     return row ? { configured: true, maskedKey: `••••${row.lastFour}`,
       validation: row.validation, checkedAt: row.checkedAt } : { configured: false };
   }
 
+  /** Validate, encrypt and compare revisions so an interrupted save cannot undo removal. */
   async save(userId: string, key: string): Promise<OpenRouterKeyStatus> {
     const expectedRevision = await this.store.revision(userId);
     await validateOpenRouterKey(key, this.fetcher);
@@ -134,6 +152,7 @@ export class OpenRouterVault {
     return this.status(userId);
   }
 
+  /** Apply a provider result only to the revision that was checked. */
   async check(userId: string): Promise<OpenRouterKeyStatus> {
     const row = await this.store.get(userId);
     if (!row) throw new OpenRouterVaultError("OPENROUTER_KEY_MISSING");
@@ -149,6 +168,7 @@ export class OpenRouterVault {
     return this.status(userId);
   }
 
+  /** Replace the row with a tombstone to fence in-flight saves and checks. */
   async delete(userId: string): Promise<OpenRouterKeyStatus> {
     await this.store.delete(userId);
     return { configured: false };
@@ -157,10 +177,11 @@ export class OpenRouterVault {
   /** Future playground callers must authenticate their user on each invocation. */
   async withKey<T>(userId: string, call: (key: string) => Promise<T>): Promise<T> {
     const row = await this.store.get(userId);
-    if (!row || row.validation !== "valid") throw new OpenRouterVaultError("OPENROUTER_KEY_MISSING");
+    if (row?.validation !== "valid") throw new OpenRouterVaultError("OPENROUTER_KEY_MISSING");
     return call(await this.decrypt(row, userId));
   }
 
+  /** Authenticate ciphertext against the personal owner before releasing plaintext. */
   private async decrypt(row: OpenRouterKeyRow, userId: string): Promise<string> {
     const bytes = this.ring.keys.get(row.keyId);
     if (!bytes) throw new OpenRouterVaultError("OPENROUTER_VAULT_UNAVAILABLE");

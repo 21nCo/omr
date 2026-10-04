@@ -43,7 +43,7 @@ describeDatabase("personal OpenRouter PostgreSQL vault", () => {
     const raw = await client.query<{ encoded: string; last_four: string }>(
       `SELECT encode(ciphertext, 'hex') AS encoded, last_four
        FROM omr_identity.openrouter_keys WHERE user_id=$1`, [alice]);
-    expect(raw.rows[0]?.encoded).not.toContain(keyA);
+    expect(raw.rows[0]?.encoded).not.toContain(Buffer.from(keyA).toString("hex"));
     expect(raw.rows[0]?.last_four).toBe("cccc");
     await expect(vault.withKey(alice, async (key) => key)).resolves.toBe(keyA);
     await client.query("DELETE FROM omr_identity.users WHERE id=$1", [alice]);

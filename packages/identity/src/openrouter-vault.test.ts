@@ -43,7 +43,10 @@ describe("personal OpenRouter key vault", () => {
     await expect(vault.withKey("bob", async () => "used")).rejects.toMatchObject({ code: "OPENROUTER_KEY_MISSING" });
     const stored = store.rows.get("alice")!;
     expect(JSON.stringify(stored)).not.toContain(first);
-    expect(new TextDecoder().decode(stored.ciphertext)).not.toContain(first);
+    expect(Array.from(stored.ciphertext)).not.toEqual(Array.from(new TextEncoder().encode(first)));
+    expect(Buffer.from(stored.ciphertext).toString("hex"))
+      .not.toContain(Buffer.from(first).toString("hex"));
+    expect(stored).toMatchObject({ keyId: "v1", lastFour: "aaaa" });
     expect(await vault.withKey("alice", async (key) => key)).toBe(first);
     await vault.save("alice", second);
     expect(await vault.withKey("alice", async (key) => key)).toBe(second);
@@ -79,10 +82,14 @@ describe("personal OpenRouter key vault", () => {
     fetcher.mockResolvedValueOnce(fixtureResponse(401));
     expect((await vault.check("alice")).validation).toBe("invalid");
     await expect(vault.withKey("alice", async () => "used")).rejects.toMatchObject({ code: "OPENROUTER_KEY_MISSING" });
+    let releaseOldCheck!: (response: Response) => void;
+    fetcher.mockImplementationOnce(() => new Promise<Response>((resolve) => { releaseOldCheck = resolve; }));
+    const staleCheck = vault.check("alice");
+    await vi.waitFor(() => expect(releaseOldCheck).toBeTypeOf("function"));
     await vault.save("alice", second);
-    const saved = store.rows.get("alice")!;
-    await store.markValidation("alice", "stale-revision", "invalid", Date.now());
-    expect(store.rows.get("alice")).toEqual(saved);
+    releaseOldCheck(fixtureResponse(401));
+    expect((await staleCheck).validation).toBe("valid");
+    expect(await vault.withKey("alice", async (key) => key)).toBe(second);
     store.removeAccount("alice");
     await expect(vault.withKey("alice", async () => "used")).rejects.toMatchObject({ code: "OPENROUTER_KEY_MISSING" });
   });

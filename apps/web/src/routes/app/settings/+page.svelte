@@ -1,13 +1,14 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { openRouterSettingsError, openRouterSettingsMessage,
+  import { openRouterSettingsCanMutate, openRouterSettingsDraftAfter,
+    openRouterSettingsError, openRouterSettingsMessage, parseOpenRouterSettingsStatus,
+    type OpenRouterSettingsAvailability,
     type OpenRouterSettingsStatus } from "$lib/openrouter-settings.js";
 
   let status: OpenRouterSettingsStatus | null = null;
   let key = "";
   let busy: "" | "save" | "check" | "delete" = "";
-  let loading = true;
-  let disabled = false;
+  let availability: OpenRouterSettingsAvailability = "loading";
   let error = "";
 
   async function send(method: "GET" | "PUT" | "POST" | "DELETE", path: string, value?: string) {
@@ -16,29 +17,44 @@
       ...(value !== undefined ? { headers: { "content-type": "application/json" },
         body: JSON.stringify({ key: value }) } : {}),
     });
-    const body = await response.json().catch(() => ({})) as OpenRouterSettingsStatus & { error?: string };
-    if (response.status === 401) { location.assign("/login"); return null; }
-    if (!response.ok) {
-      if (response.status === 503 && method === "GET") disabled = true;
-      throw new Error(openRouterSettingsError(body.error ?? ""));
+    const body: unknown = await response.json().catch(() => null);
+    const code = body && typeof body === "object" && "error" in body &&
+      typeof body.error === "string" ? body.error : "";
+    if (response.status === 401) {
+      location.assign(`/login?returnTo=${encodeURIComponent(location.pathname + location.search)}`);
+      return null;
     }
-    return body;
+    if (!response.ok) {
+      if (method === "GET") {
+        availability = code === "OPENROUTER_VAULT_DISABLED" ? "disabled" : "unavailable";
+      }
+      throw new Error(openRouterSettingsError(code));
+    }
+    const parsed = parseOpenRouterSettingsStatus(body);
+    if (!parsed) {
+      availability = "unavailable";
+      throw new Error("Could not load your saved key status. Try again later.");
+    }
+    return parsed;
   }
 
   onMount(() => {
     void (async () => {
-      try { status = await send("GET", "/api/settings/openrouter"); }
-      catch (caught) { if (!disabled) error = caught instanceof Error ? caught.message : "Could not load settings."; }
-      finally { loading = false; }
+      try {
+        status = await send("GET", "/api/settings/openrouter");
+        if (status) availability = "ready";
+      } catch {
+        if (availability === "loading") availability = "unavailable";
+      }
     })();
   });
 
   async function act(operation: "save" | "check" | "delete") {
-    if (busy || disabled) return;
+    if (busy || !openRouterSettingsCanMutate(availability, status)) return;
     busy = operation;
     error = "";
     const submitted = key;
-    key = "";
+    key = openRouterSettingsDraftAfter(operation, key);
     try {
       const result = await send(operation === "save" ? "PUT" : operation === "check" ? "POST" : "DELETE",
         operation === "check" ? "/api/settings/openrouter/check" : "/api/settings/openrouter",
@@ -55,12 +71,10 @@
 <main>
   <a href="/app">← Control plane</a>
   <h1>Personal OpenRouter key</h1>
-  <p>This key belongs to your account and is available only to your playground requests, in any selected workspace.</p>
-  {#if loading}
-    <p role="status">Loading settings…</p>
-  {:else}
-    <p role="status">{openRouterSettingsMessage(status, busy, disabled)}</p>
-    {#if !disabled}
+  <p>This key belongs to your account. A future playground will use it only for your requests, in any selected workspace.</p>
+  <p role="status">{openRouterSettingsMessage(status, busy, availability)}</p>
+  {#if availability !== "loading"}
+    {#if openRouterSettingsCanMutate(availability, status)}
       <label for="openrouter-key">{status?.configured ? "Replacement key" : "OpenRouter key"}</label>
       <input id="openrouter-key" type="password" autocomplete="off" spellcheck="false"
         bind:value={key} disabled={!!busy} />
@@ -73,7 +87,7 @@
           <button onclick={() => void act("delete")} disabled={!!busy}>Remove key</button>
         {/if}
       </div>
-      <p>The key is sent once for validation and is never shown again. Removing it stops future playground use.</p>
+      <p>The key is sent once for validation and is never shown again. Removing it prevents future playground use.</p>
     {/if}
     {#if error}<p role="alert">{error}</p>{/if}
   {/if}
