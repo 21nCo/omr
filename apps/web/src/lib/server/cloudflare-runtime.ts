@@ -13,7 +13,7 @@ import {
 import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
 import { ApprovalUnavailableError, decodeExecutionWrappingKey, deriveExecutionFingerprintKey, ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
 import { connectPostgresExecutionReceipts } from "@oh-my-router/execution/postgres";
-import { connectPostgresIdentityRuntime } from "@oh-my-router/identity/postgres";
+import { connectPostgresIdentityRuntime, connectPostgresOpenRouterVault } from "@oh-my-router/identity/postgres";
 import { connectPostgresPlugFn, verifiedGithubScopes, verifiedLinearScopes, verifiedNotionScopes, verifiedSlackScopes } from "@oh-my-router/plugfn-runtime";
 import {
   createPlugFnToolCatalog,
@@ -33,6 +33,7 @@ import {
   type DeviceRouteServices,
   type ExecutionRouteServices,
   type ToolRouteServices,
+  type OpenRouterVaultRouteServices,
   RequestOriginDeniedError,
 } from "./router.js";
 import { resolveScopedCatalog } from "./scoped-catalog.js";
@@ -41,7 +42,9 @@ import { providerReconciliationReceipts, publicBrowserApproval, recoverProviderA
 
 type OMRBindings = Cloudflare.Env & {
   HYPERDRIVE?: { connectionString: string };
+  OPENROUTER_VAULT_HYPERDRIVE?: { connectionString: string };
   DATABASE_URL?: string;
+  OPENROUTER_VAULT_DATABASE_URL?: string;
   DEVICE_CREDENTIAL_WRAPPING_KEY?: string;
   EXECUTION_RESULT_WRAPPING_KEY?: string;
   PLUGFN_ENCRYPTION_KEY?: string;
@@ -54,6 +57,7 @@ export interface CloudflareRouteServices {
   tools: ToolRouteServices;
   execution: ExecutionRouteServices;
   controlPlane: ControlPlaneRouteServices;
+  openRouterVault: OpenRouterVaultRouteServices;
 }
 
 /** Require Worker bindings before constructing any server-side runtime. */
@@ -70,6 +74,14 @@ export function databaseConnectionString(event: RequestEvent): string {
   if (!connectionString) {
     throw new RuntimeUnavailableError("Database binding is unavailable");
   }
+  return connectionString;
+}
+
+function openRouterVaultConnectionString(event: RequestEvent): string {
+  const env = environment(event);
+  const connectionString = env.OPENROUTER_VAULT_HYPERDRIVE?.connectionString ??
+    env.OPENROUTER_VAULT_DATABASE_URL;
+  if (!connectionString) throw new RuntimeUnavailableError("OpenRouter vault database binding is unavailable");
   return connectionString;
 }
 
@@ -197,6 +209,30 @@ function requireSameOrigin(request: Request): void {
   if (request.headers.get("origin") !== new URL(request.url).origin) {
     throw new RequestOriginDeniedError("A same-origin browser request is required");
   }
+}
+
+/** Build the browser-only vault boundary with injectable identity and storage for contract probes. */
+export function createOpenRouterVaultRouteServices(options: {
+  enabled(): boolean;
+  requireUser(request: Request): Promise<string>;
+  open(): Promise<Awaited<ReturnType<typeof connectPostgresOpenRouterVault>>>;
+}): OpenRouterVaultRouteServices {
+  async function run<T>(request: Request, mutating: boolean,
+    operation: (vault: Awaited<ReturnType<typeof connectPostgresOpenRouterVault>>["vault"], userId: string) => Promise<T>,
+  ): Promise<T> {
+    if (!options.enabled()) throw new RuntimeUnavailableError("OpenRouter settings are pending verification");
+    if (mutating) requireSameOrigin(request);
+    const userId = await options.requireUser(request);
+    const runtime = await options.open();
+    try { return await operation(runtime.vault, userId); }
+    finally { await runtime.close(); }
+  }
+  return {
+    status: (request) => run(request, false, (vault, userId) => vault.status(userId)),
+    save: (request, key) => run(request, true, (vault, userId) => vault.save(userId, key)),
+    check: (request) => run(request, true, (vault, userId) => vault.check(userId)),
+    delete: (request) => run(request, true, (vault, userId) => vault.delete(userId)),
+  };
 }
 
 /** Mutating cookie requests need origin proof; bearer clients have explicit credentials. */
@@ -907,7 +943,17 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
     },
   };
 
-  return { device, connections, tools, execution, controlPlane };
+  const openRouterVault = createOpenRouterVaultRouteServices({
+    enabled: () => environment(event).OMR_OPENROUTER_VAULT_ENABLED === "true",
+    requireUser: (request) => requireWebUser(event, request),
+    open: () => connectPostgresOpenRouterVault({
+      connectionString: openRouterVaultConnectionString(event),
+      keys: requiredSecret(event, "OPENROUTER_VAULT_KEYS"),
+      activeKeyId: requiredSecret(event, "OPENROUTER_VAULT_ACTIVE_KEY_ID"),
+    }),
+  });
+
+  return { device, connections, tools, execution, controlPlane, openRouterVault };
 }
 
 /** Public /api routes accept remote MCP grants only for self-revocation. */

@@ -3,6 +3,9 @@ export {
   type CreateOMRIdentityRuntimeOptions,
   type OMRIdentityRuntime,
 } from "./runtime.js";
+export { OpenRouterVault, OpenRouterVaultError, decodeOpenRouterVaultKeys,
+  validateOpenRouterKey, type OpenRouterKeyStatus, type OpenRouterVaultStore,
+  type OpenRouterKeyRow } from "./openrouter-vault.js";
 export {
   WorkspaceAccessDeniedError,
   WorkspaceAuthority,
