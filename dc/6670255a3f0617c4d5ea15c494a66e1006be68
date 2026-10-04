@@ -1,0 +1,20 @@
+apps/web/src/lib/linear-action-keys.ts
+  h_a39f9495f9ec1d 32-33,47-52
+apps/web/src/lib/server/reconciliation-receipts.test.ts
+  h_a39f9495f9ec1d 17-18
+packages/execution/src/postgres-approval-migration.test.ts
+  h_a39f9495f9ec1d 184-191,206-246
+packages/execution/src/postgres-approval-store.ts
+  h_a39f9495f9ec1d 67-68,308-318
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "dc6670255a3f0617c4d5ea15c494a66e1006be68",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
