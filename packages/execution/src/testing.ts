@@ -191,20 +191,29 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
     });
   }
 
-  async getForActor(approvalId: string, actorUserId: string): Promise<ExecutionApproval> {
+  /** Settle an overdue, undecided approval before reporting its status to its actor. */
+  getForActor(approvalId: string, actorUserId: string, _deadlineAt?: number,
+    now?: number): Promise<ExecutionApproval> {
     const approval = this.approvals.get(approvalId);
     if (approval?.actorUserId !== actorUserId || !this.isMember(approval.workspaceId, actorUserId)) {
-      throw new ApprovalUnavailableError();
+      return Promise.reject(new ApprovalUnavailableError());
     }
-    return structuredClone(approval);
+    if (now !== undefined && approval.expiresAt <= now &&
+        (approval.status === "pending" || approval.status === "approved")) {
+      approval.status = "expired";
+      approval.updatedAt = now;
+    }
+    return Promise.resolve(structuredClone(approval));
   }
 
   async approve(input: {
     approvalId: string;
     actorUserId: string;
     now: number;
+    clock: () => number;
   }): Promise<ExecutionApproval> {
-    const approval = this.pendingForActor(input.approvalId, input.actorUserId, input.now);
+    const approval = this.pendingForActor(input.approvalId, input.actorUserId,
+      Math.max(input.now, input.clock()));
     approval.status = "approved";
     approval.approvedBy = input.actorUserId;
     approval.decidedAt = input.now;
@@ -216,8 +225,10 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
     approvalId: string;
     actorUserId: string;
     now: number;
+    clock: () => number;
   }): Promise<ExecutionApproval> {
-    const approval = this.pendingForActor(input.approvalId, input.actorUserId, input.now);
+    const approval = this.pendingForActor(input.approvalId, input.actorUserId,
+      Math.max(input.now, input.clock()));
     approval.status = "rejected";
     approval.decidedAt = input.now;
     approval.updatedAt = input.now;
@@ -229,9 +240,11 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
     actorUserId: string;
     principalKey: string;
     now: number;
+    clock: () => number;
     deadlineAt: number;
   }): Promise<ExecutionApproval> {
     if (Date.now() >= input.deadlineAt) throw new ExecutionInvocationDeadlineError();
+    const now = Math.max(input.now, input.clock());
     const approval = this.approvals.get(input.approvalId);
     if (approval?.status === "uncertain" && approval.actorUserId === input.actorUserId &&
         approval.principalKey === input.principalKey && approval.executionReceiptId &&
@@ -246,15 +259,15 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
         approval.principalKey === input.principalKey &&
         approval.executionReceiptId === null &&
         this.isMember(approval.workspaceId, input.actorUserId) &&
-        input.now - approval.updatedAt >= EXECUTION_STALE_AFTER_MS) {
-      this.reconcileStaleExecutingClaim(approval, input.now);
+        now - approval.updatedAt >= EXECUTION_STALE_AFTER_MS) {
+      this.reconcileStaleExecutingClaim(approval, now);
     }
     if (
       !approval ||
       approval.status !== "approved" ||
       approval.actorUserId !== input.actorUserId ||
       approval.principalKey !== input.principalKey ||
-      approval.expiresAt <= input.now ||
+      approval.expiresAt <= now ||
       !this.isMember(approval.workspaceId, input.actorUserId)
     ) {
       throw new ApprovalUnavailableError();
@@ -403,6 +416,23 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
             approval.toolId === "notion.pages.create" || approval.toolId === "notion.pages.update") &&
           (approval.status === "uncertain" ||
             (approval.status === "executing" && approval.toolId.startsWith("notion.")) ||
+            ((approval.status === "pending" || approval.status === "approved") &&
+              approval.expiresAt > input.now)))
+        .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id))
+        .slice(0, input.limit)
+        .map((approval) => structuredClone(approval));
+    });
+  }
+
+  listOutstandingBrowserForActor(input: { workspaceId: string; actorUserId: string;
+    now: number; limit: number }): Promise<ExecutionApproval[]> {
+    return Promise.resolve().then(() => {
+      if (!this.isMember(input.workspaceId, input.actorUserId)) return [];
+      return [...this.approvals.values()]
+        .filter((approval) => approval.workspaceId === input.workspaceId &&
+          approval.actorUserId === input.actorUserId &&
+          approval.principalKey === `web:${input.actorUserId}` &&
+          (approval.status === "executing" || approval.status === "uncertain" ||
             ((approval.status === "pending" || approval.status === "approved") &&
               approval.expiresAt > input.now)))
         .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id))

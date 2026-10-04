@@ -30,6 +30,15 @@ export class LinearIntentTransactionRequiredError extends Error {
   }
 }
 
+/** Approval decisions require a transactional client to fence membership changes. */
+export class ApprovalTransactionRequiredError extends Error {
+  readonly code = "APPROVAL_TRANSACTION_REQUIRED";
+  constructor() {
+    super("Approval decisions require a transactional PostgreSQL connection");
+    this.name = "ApprovalTransactionRequiredError";
+  }
+}
+
 export async function withinInvocationDeadline<T>(deadlineAt: number, operation: () => Promise<T>): Promise<T> {
   const remaining = deadlineAt - Date.now();
   if (remaining <= 0) throw new ExecutionInvocationDeadlineError();
@@ -147,14 +156,22 @@ export interface ExecutionApproval {
 
 export interface ExecutionApprovalStore {
   create(approval: ExecutionApproval): Promise<ExecutionApproval>;
-  getForActor(approvalId: string, actorUserId: string, deadlineAt?: number): Promise<ExecutionApproval>;
-  approve(input: { approvalId: string; actorUserId: string; now: number }): Promise<ExecutionApproval>;
-  reject(input: { approvalId: string; actorUserId: string; now: number }): Promise<ExecutionApproval>;
+  /** Use the service's epoch-millisecond clock for expiry in every store. */
+  getForActor(approvalId: string, actorUserId: string, deadlineAt?: number,
+    now?: number): Promise<ExecutionApproval>;
+  /** Re-sample the same clock after a PostgreSQL membership lock before committing. */
+  approve(input: { approvalId: string; actorUserId: string; now: number;
+    clock: () => number }): Promise<ExecutionApproval>;
+  /** Re-sample expiry after a lock, including a concurrent revocation wait. */
+  reject(input: { approvalId: string; actorUserId: string; now: number;
+    clock: () => number }): Promise<ExecutionApproval>;
+  /** Claim remains fenced if expiry advances while opening or locking the connection. */
   claim(input: {
     approvalId: string;
     actorUserId: string;
     principalKey: string;
     now: number;
+    clock: () => number;
     deadlineAt: number;
   }): Promise<ExecutionApproval>;
   consume(input: { approvalId: string; receiptId: string; now: number;
@@ -173,6 +190,9 @@ export interface ExecutionApprovalStore {
   }): Promise<ExecutionApproval[]>;
   /** A bounded page of actionable provider approvals outside recent history. */
   listOutstandingProviderForActor(input: { workspaceId: string; actorUserId: string;
+    now: number; limit: number }): Promise<ExecutionApproval[]>;
+  /** A bounded page of unsettled browser approvals across every tool provider. */
+  listOutstandingBrowserForActor(input: { workspaceId: string; actorUserId: string;
     now: number; limit: number }): Promise<ExecutionApproval[]>;
 }
 
@@ -593,18 +613,19 @@ export class ExecutionService {
   /** Revalidate the manifest and redacted preview before recording consent. */
   async approve(approvalId: string, actorUserId: string): Promise<ExecutionApproval> {
     const approvals = this.requiredApprovals();
-    const approval = await approvals.getForActor(approvalId, actorUserId);
+    const now = this.now();
+    const approval = await approvals.getForActor(approvalId, actorUserId, undefined, now);
     const manifest = this.catalog.get(approval.toolId);
     if (!manifest || !validToolInput(manifest, approval.params) ||
         !approvalPreviewReady(manifest, approval.manifestHash, approval.params)) {
       throw new ApprovalUnavailableError();
     }
-    return approvals.approve({ approvalId, actorUserId, now: this.now() });
+    return approvals.approve({ approvalId, actorUserId, now: this.now(), clock: this.now });
   }
 
   /** Reject only an approval owned by this actor; no provider effect is entered. */
   async reject(approvalId: string, actorUserId: string): Promise<ExecutionApproval> {
-    return this.requiredApprovals().reject({ approvalId, actorUserId, now: this.now() });
+    return this.requiredApprovals().reject({ approvalId, actorUserId, now: this.now(), clock: this.now });
   }
 
   /** Disclose approval state only to its original principal and workspace. */
@@ -612,7 +633,8 @@ export class ExecutionService {
     if (principal.kind === "client" && !principal.capabilities.includes("approvals:create")) {
       throw new ExecutionCapabilityDeniedError("approvals:create");
     }
-    const approval = await this.requiredApprovals().getForActor(approvalId, principal.userId);
+    const approval = await this.requiredApprovals().getForActor(approvalId, principal.userId,
+      undefined, this.now());
     if (approval.principalKey !== principalKey(principal) ||
         (principal.workspaceId !== approval.workspaceId &&
           !(principal.kind === "web" && principal.workspaceId === ""))) {
@@ -621,13 +643,11 @@ export class ExecutionService {
     return approval;
   }
 
-  /** Record an actor's verified provider-side decision for an uncertain Linear or Slack write. */
+  /** Record an actor's verified provider-side decision for an exact uncertain write receipt. */
   async reconcileUncertain(principal: ExecutionPrincipal, approvalId: string,
     decision: "effect_present" | "effect_absent"): Promise<ExecutionApproval> {
     const approval = await this.approvalStatus(principal, approvalId);
-    if (!(approval.toolId.startsWith("linear.") || approval.toolId === "slack.messages.post" ||
-        approval.toolId === "notion.pages.create" || approval.toolId === "notion.pages.update") ||
-        !["effect_present", "effect_absent"].includes(decision)) throw new ApprovalUnavailableError();
+    if (!["effect_present", "effect_absent"].includes(decision)) throw new ApprovalUnavailableError();
     const recorded = (value: ExecutionApproval) => value.reconciledAs === decision &&
       value.status === (decision === "effect_present" ? "consumed" : "failed") &&
       Boolean(value.executionReceiptId);
@@ -661,6 +681,7 @@ export class ExecutionService {
         actorUserId: principal.userId,
         principalKey: principalKey(principal),
         now: this.now(),
+        clock: this.now,
         deadlineAt,
       }));
     } catch (error) {
@@ -784,7 +805,7 @@ export class ExecutionService {
     try {
       await withinInvocationDeadline(deadlineAt, () => approvals.claim({
         approvalId: approval.id, actorUserId: principal.userId,
-        principalKey: principalKey(principal), now: this.now(), deadlineAt,
+        principalKey: principalKey(principal), now: this.now(), clock: this.now, deadlineAt,
       }));
       throw new ApprovalUnavailableError();
     } catch (error) {

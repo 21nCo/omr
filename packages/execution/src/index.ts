@@ -11,6 +11,7 @@ export {
   SlackExecutionError,
   NotionExecutionError,
   LinearIntentTransactionRequiredError,
+  ApprovalTransactionRequiredError,
   ExecutionIdempotencyConflictError,
   ExecutionInProgressError,
   ExecutionOutcomeUnknownError,

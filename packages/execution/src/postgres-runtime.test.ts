@@ -156,7 +156,7 @@ describe("PostgreSQL execution runtime", () => {
     try {
       const pending = runtime.approvals.claim({ approvalId: "approval_1",
         actorUserId: "user_1", principalKey: "web:user_1", now: Date.now(),
-        deadlineAt: Date.now() + 2_000 }).catch((error: unknown) => error);
+        deadlineAt: Date.now() + 2_000, clock: () => Date.now() }).catch((error: unknown) => error);
       await vi.waitFor(() => expect(mockState.clients[0]?.queries.some((sql) =>
         sql.includes("UPDATE omr_control.execution_approvals"))).toBe(true));
       await runtime.close();
@@ -164,7 +164,7 @@ describe("PostgreSQL execution runtime", () => {
       expect(await pending).toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
       await expect(runtime.approvals.claim({ approvalId: "approval_1",
         actorUserId: "user_1", principalKey: "web:user_1", now: Date.now(),
-        deadlineAt: Date.now() + 2_000 })).rejects.toThrow(/closed/);
+        deadlineAt: Date.now() + 2_000, clock: () => Date.now() })).rejects.toThrow(/closed/);
       expect(mockState.clients).toHaveLength(1);
     } finally {
       mockState.stallClaimAt = -1;
@@ -346,7 +346,7 @@ describe("PostgreSQL execution runtime", () => {
     });
     try {
       await expect(runtime.approvals.claim({ approvalId: "approval_1", actorUserId: "user_1",
-        principalKey: "web:user_1", now: Date.now(), deadlineAt: Date.now() + 40 }))
+        principalKey: "web:user_1", now: Date.now(), deadlineAt: Date.now() + 40, clock: () => Date.now() }))
         .rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
       expect(mockState.clients[0]?.ended).toBe(true);
     } finally {
@@ -368,7 +368,7 @@ describe("PostgreSQL execution runtime", () => {
     });
     try {
       await expect(runtime.approvals.claim({ approvalId: "approval_1", actorUserId: "user_1",
-        principalKey: "web:user_1", now: Date.now(), deadlineAt: Date.now() + 1_000 }))
+        principalKey: "web:user_1", now: Date.now(), deadlineAt: Date.now() + 1_000, clock: () => Date.now() }))
         .rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN",
           receiptId: "execution_known_uncertain" });
       expect(mockState.clients[0]?.ended).toBe(true);
@@ -393,7 +393,7 @@ describe("PostgreSQL execution runtime", () => {
     });
     try {
       await expect(runtime.approvals.claim({ approvalId: "approval_1", actorUserId: "user_1",
-        principalKey: "web:user_1", now: Date.now(), deadlineAt: Date.now() + 1_000 }))
+        principalKey: "web:user_1", now: Date.now(), deadlineAt: Date.now() + 1_000, clock: () => Date.now() }))
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
       expect(mockState.clients[0]?.ended).toBe(true);
     } finally {
@@ -413,7 +413,7 @@ describe("PostgreSQL execution runtime", () => {
     try {
       const results = await Promise.allSettled(Array.from({ length: 20 }, (_, index) =>
         runtime.approvals.claim({ approvalId: `approval_${index}`, actorUserId: "user_1",
-          principalKey: "web:user_1", now: Date.now(), deadlineAt: Date.now() + 1_000 })));
+          principalKey: "web:user_1", now: Date.now(), deadlineAt: Date.now() + 1_000, clock: () => Date.now() })));
       expect(results).toEqual(Array.from({ length: 20 }, () =>
         expect.objectContaining({ status: "rejected",
           reason: expect.objectContaining({ code: "APPROVAL_UNAVAILABLE" }) })));

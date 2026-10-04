@@ -14,9 +14,14 @@ export function linearApprovalNotice(status: string): string {
 
 /** Keep retry identities across a browser reload without storing issue text. */
 export function createLinearActionKeys(makeKey: () => string,
-  storage?: () => Pick<Storage, "getItem" | "setItem" | "removeItem">,
+  storage?: () => Pick<Storage, "getItem" | "setItem" | "removeItem"> &
+    Partial<Pick<Storage, "key" | "length">>,
   provider = "Linear") {
   const current = new Map<string, string>();
+  const approvalIdentities = new Map<string, string>();
+  /** Name one approval's storage record without persisting its arguments. */
+  const approvalStorageKey = (approvalId: string) => `${PREFIX}approval:${approvalId}`;
+  /** Derive a stable action identity from the selected account and arguments. */
   const fingerprint = async (toolId: string, workspaceId: string, connectionId: string,
     params: object): Promise<string> => {
     const selected = JSON.stringify([toolId, workspaceId, connectionId, params]);
@@ -24,7 +29,73 @@ export function createLinearActionKeys(makeKey: () => string,
     return `${PREFIX}${[...new Uint8Array(digest)]
       .map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
   };
+  /** Collect only action keys; denied browser storage leaves in-page keys available. */
+  const candidateActionKeys = (): Map<string, string> => {
+    const candidates = new Map(current);
+    try {
+      const saved = storage?.();
+      if (saved?.key && typeof saved.length === "number") {
+        for (let index = 0; index < saved.length; index++) {
+          const identity = saved.key(index);
+          if (identity && new RegExp(`^${PREFIX}[0-9a-f]{64}$`).test(identity)) {
+            const key = saved.getItem(identity);
+            if (key) candidates.set(identity, key);
+          }
+        }
+      }
+    } catch { /* Memory still covers this page if browser storage is denied. */ }
+    return candidates;
+  };
+  /** Match a server-confirmed approval to an exact retained key without storing arguments. */
+  const identityForKeyDigest = async (digest: string): Promise<string | undefined> => {
+    if (!/^[0-9a-f]{64}$/.test(digest)) return undefined;
+    for (const [identity, key] of candidateActionKeys()) {
+      const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
+      const actual = [...new Uint8Array(bytes)]
+        .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      if (actual === digest) return identity;
+    }
+    return undefined;
+  };
   return {
+    /** Associate a server approval with its secret-free fingerprint for reload recovery. */
+    async bindApproval(approvalId: string, toolId: string, workspaceId: string,
+      connectionId: string, params: object): Promise<void> {
+      const identity = await fingerprint(toolId, workspaceId, connectionId, params);
+      approvalIdentities.set(approvalId, identity);
+      try { storage?.().setItem(approvalStorageKey(approvalId), identity); }
+      catch { /* The current page still remembers the approval. */ }
+    },
+    /** Clear a write fingerprint only after a server-confirmed terminal status. */
+    async resetApprovalAfterSettlement(approvalId: string,
+      probe: () => Promise<{ id: string; status: string; actionKeyDigest?: string }>,
+      stillSelected: () => boolean = () => true): Promise<boolean> {
+      const approval = await probe();
+      if (approval.id !== approvalId) throw new Error("Approval changed. Check its status before another action.");
+      if (!["consumed", "rejected", "failed", "expired"].includes(approval.status)) {
+        throw new Error(approval.status === "uncertain"
+          ? `Verify this uncertain ${provider} action and reconcile its receipt before starting another.`
+          : `This ${provider} action is still active. Finish or reject it before starting another.`);
+      }
+      let identity = approvalIdentities.get(approvalId);
+      if (!identity) {
+        try { identity = storage?.().getItem(approvalStorageKey(approvalId)) ?? undefined; }
+        catch { /* Recovery without browser storage is still safe. */ }
+      }
+      if (!identity && approval.actionKeyDigest) {
+        identity = await identityForKeyDigest(approval.actionKeyDigest);
+      }
+      if (!stillSelected()) return false;
+      if (!identity || !new RegExp(`^${PREFIX}[0-9a-f]{64}$`).test(identity)) return false;
+      current.delete(identity);
+      approvalIdentities.delete(approvalId);
+      try {
+        storage?.().removeItem(identity);
+        storage?.().removeItem(approvalStorageKey(approvalId));
+      } catch { /* The current page is already cleared. */ }
+      return true;
+    },
+    /** Recover the idempotency key for the exact action fingerprint. */
     async existingKey(toolId: string, workspaceId: string, connectionId: string,
       params: object): Promise<string | undefined> {
       const identity = await fingerprint(toolId, workspaceId, connectionId, params);
@@ -32,6 +103,7 @@ export function createLinearActionKeys(makeKey: () => string,
       try { return storage?.().getItem(identity) ?? undefined; }
       catch { return undefined; }
     },
+    /** Reuse a pending action key across reloads and allocate one for a fresh intent. */
     async key(toolId: string, workspaceId: string, connectionId: string, params: object): Promise<string> {
       const identity = await fingerprint(toolId, workspaceId, connectionId, params);
       let key = current.get(identity);
@@ -45,11 +117,13 @@ export function createLinearActionKeys(makeKey: () => string,
       current.set(identity, key);
       return key;
     },
+    /** Remove one exact fingerprint after the caller confirms it can be discarded. */
     async reset(toolId: string, workspaceId: string, connectionId: string, params: object): Promise<void> {
       const identity = await fingerprint(toolId, workspaceId, connectionId, params);
       current.delete(identity);
       try { storage?.().removeItem(identity); } catch { /* Memory is already cleared. */ }
     },
+    /** Probe settlement before releasing an action key when approval ID is unavailable. */
     async resetAfterSettlement(toolId: string, workspaceId: string, connectionId: string,
       params: object, probe: (idempotencyKey: string) => Promise<{ status: string }>,
       stillSelected: () => boolean = () => true): Promise<void> {

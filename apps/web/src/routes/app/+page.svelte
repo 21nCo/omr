@@ -11,6 +11,9 @@
   import { slackApprovalNotice } from "$lib/slack-approval-notice.js";
   import { V1_PROVIDERS } from "@oh-my-router/tools";
   import type { LinearAccess, SlackAccess } from "@oh-my-router/connections";
+  import type { PageData } from "./$types";
+
+  export let data: PageData;
 
   type WorkspaceAccess = {
     workspace: { id: string; name: string; kind: "personal" | "team" };
@@ -899,6 +902,7 @@
     <div class="account">
       <span>{overview?.actor.email ?? "Signed in"}</span>
       <a class="quiet" href="/app/clients">Client access</a>
+      {#if data.directPlaygroundEnabled}<a class="quiet" href="/app/playground">Test a tool</a>{/if}
       <a class="quiet" href="/app/settings">Personal settings</a>
       <a class="quiet" href="/oauth/manage">MCP access</a>
       <button class="quiet" onclick={() => void signOut()} disabled={busy === "sign-out"}>Sign out</button>
@@ -1318,7 +1322,7 @@
         <section class="panel approvals">
           <div class="panel-heading"><div><p class="kicker">Human in the loop</p><h2>Approvals</h2></div></div>
           <form class="inline-form" onsubmit={(event) => { event.preventDefault(); recoveredApprovalId = recoveryInput.trim(); recoveryError = ""; automaticApprovalLookup = null; void load(); }}>
-            <label for="recover-approval">Find an older Linear, Slack, or Notion approval by ID</label>
+            <label for="recover-approval">Find an older approval by ID</label>
             <input id="recover-approval" bind:value={recoveryInput} maxlength="128" placeholder="Approval ID" />
             <button class="quiet compact" type="submit" disabled={Boolean(busy) || !recoveryInput.trim()}>Find approval</button>
             {#if recoveredApprovalId}<button class="quiet compact" type="button" disabled={Boolean(busy)}
@@ -1341,7 +1345,7 @@
                   <button class="danger compact" disabled={Boolean(busy) || Boolean(error) || loading} onclick={() => void mutate(`reject:${approval.id}`, "/api/approvals/reject", { approvalId: approval.id }, `Rejected ${approval.toolId}.`)}>Reject</button>
                   {#if !approval.browserActionable}<p class="approval-context">After approval, execute this action from the originating CLI or MCP client.</p>{/if}
                 {:else if approval.status === "uncertain"}
-                  <p class="approval-context">The outcome is unknown. Check receipt {approval.executionReceiptId ?? "pending"} against the selected {approval.toolId.startsWith("slack.") ? "Slack workspace and channel" : approval.toolId.startsWith("notion.") ? "Notion page and title" : "Linear workspace and issue"} before recording a decision.</p>
+                  <p class="approval-context">The outcome is unknown. Check receipt {approval.executionReceiptId ?? "pending"} against the selected provider account and affected resource before recording a decision.</p>
                   {#if !approval.browserActionable}
                     <p class="approval-context">Record the verified outcome from the originating CLI or MCP client. This browser session cannot reconcile its grant.</p>
                   {:else}

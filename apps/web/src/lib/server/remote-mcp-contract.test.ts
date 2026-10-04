@@ -146,6 +146,7 @@ vi.mock("./router.js", () => ({
             capabilities: fixture.capabilities as never }, String(body?.approvalId));
           await approvals.claim({ approvalId: String(body?.approvalId), actorUserId: "user_one",
             principalKey: "client:client_one:grant:grant_one", now: Date.now(),
+            clock: Date.now,
             deadlineAt: Date.now() + 60_000 });
         } catch (error) {
           return Response.json({ error: (error as { code: string }).code }, { status: 409 });

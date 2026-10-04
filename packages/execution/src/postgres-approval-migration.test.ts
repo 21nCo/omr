@@ -181,8 +181,14 @@ describeDatabase("approval migration from origin/dev schema", () => {
 
       // Point the store at this isolated schema; its SQL otherwise matches production.
       const originalQuery = client.query.bind(client);
-      const fixtureClient = { query: (sql: string, values?: unknown[]) =>
-        originalQuery(sql.replaceAll("omr_control.", `${qualified}.`), values) } as unknown as Client;
+      let decisionBegins = 0;
+      let afterDecisionQuery: ((sql: string, values?: unknown[]) => Promise<void>) | undefined;
+      const fixtureClient = { query: async (sql: string, values?: unknown[]) => {
+        const result = await originalQuery(sql.replaceAll("omr_control.", `${qualified}.`), values);
+        if (sql === "BEGIN") decisionBegins++;
+        await afterDecisionQuery?.(sql, values);
+        return result;
+      } } as unknown as Client;
       const store = new PostgresExecutionApprovalStore(fixtureClient, key);
       const candidate: ExecutionApproval = {
         id: "approval_new", workspaceId: "workspace_1", actorUserId: "user_1",
@@ -197,13 +203,119 @@ describeDatabase("approval migration from origin/dev schema", () => {
       });
       await expect(store.create({ ...candidate, id: "approval_fresh", idempotencyKey: "fresh-key" }))
         .resolves.toMatchObject({ id: "approval_fresh", status: "pending" });
+      const firstId = "approval_concurrent_approve";
+      const secondId = "approval_concurrent_reject";
+      const concurrentExpiry = Date.now() + 60_000;
+      for (const id of [firstId, secondId]) {
+        await store.create({ ...candidate, id, idempotencyKey: id,
+          expiresAt: concurrentExpiry, createdAt: Date.now(), updatedAt: Date.now() });
+      }
+      let enterFirst!: () => void;
+      let releaseFirst!: () => void;
+      const firstUpdated = new Promise<void>((resolve) => { enterFirst = resolve; });
+      const firstReleased = new Promise<void>((resolve) => { releaseFirst = resolve; });
+      let firstClock = concurrentExpiry - 1;
+      decisionBegins = 0;
+      afterDecisionQuery = async (sql, values) => {
+        if (sql.startsWith("UPDATE omr_control.execution_approvals") && values?.[0] === firstId) {
+          enterFirst();
+          await firstReleased;
+        }
+      };
+      const firstDecision = store.approve({ approvalId: firstId, actorUserId: "user_1",
+        now: firstClock, clock: () => firstClock }).then(
+        () => null, (error: unknown) => error);
+      await firstUpdated;
+      const secondDecision = store.reject({ approvalId: secondId, actorUserId: "user_1",
+        now: concurrentExpiry - 1, clock: () => concurrentExpiry - 1 });
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(decisionBegins).toBe(1);
+      } finally {
+        firstClock = concurrentExpiry;
+        releaseFirst();
+      }
+      await expect(firstDecision).resolves.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      await expect(secondDecision).resolves.toMatchObject({ status: "rejected" });
+      afterDecisionQuery = undefined;
+      const concurrentStates = await client.query<{ id: string; status: string }>(
+        `SELECT id, status FROM ${qualified}.execution_approvals WHERE id IN ($1, $2) ORDER BY id`,
+        [firstId, secondId]);
+      expect(concurrentStates.rows).toEqual([
+        { id: firstId, status: "pending" }, { id: secondId, status: "rejected" },
+      ]);
+      for (const decision of ["approve", "reject"] as const) {
+        const blockedId = `approval_deadline_${decision}`;
+        const siblingId = `approval_after_deadline_${decision}`;
+        for (const id of [blockedId, siblingId]) {
+          await store.create({ ...candidate, id, idempotencyKey: id,
+            expiresAt: Date.now() + 60_000, createdAt: Date.now(), updatedAt: Date.now() });
+        }
+        const blocker = new Client({ connectionString: databaseUrl! });
+        const directClient = new Client({ connectionString: databaseUrl! });
+        await blocker.connect();
+        await directClient.connect();
+        const backend = await directClient.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+        const decisionPid = backend.rows[0]!.pid;
+        const originalDirectQuery = directClient.query.bind(directClient);
+        let startedUpdate!: () => void;
+        const updateStarted = new Promise<void>((resolve) => { startedUpdate = resolve; });
+        const directStore = new PostgresExecutionApprovalStore({
+          connection: directClient.connection,
+          on: directClient.on.bind(directClient),
+          query: (sql: string, values?: unknown[]) => {
+            if (sql.startsWith("UPDATE omr_control.execution_approvals")) startedUpdate();
+            return originalDirectQuery(sql.replaceAll("omr_control.", `${qualified}.`), values);
+          },
+        } as Client, key, undefined, undefined, undefined, 500);
+        try {
+          await blocker.query("BEGIN");
+          await blocker.query(`UPDATE ${qualified}.execution_approvals
+            SET updated_at = updated_at WHERE id = $1`, [blockedId]);
+          const first = directStore[decision]({ approvalId: blockedId, actorUserId: "user_1",
+            now: Date.now(), clock: Date.now }).then(() => null, (error: unknown) => error);
+          await updateStarted;
+          const queued = directStore[decision]({ approvalId: siblingId, actorUserId: "user_1",
+            now: Date.now(), clock: Date.now }).then(() => null, (error: unknown) => error);
+          await expect(first).resolves.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
+          await expect(queued).resolves.toMatchObject({ code: "APPROVAL_TRANSACTION_REQUIRED" });
+          await expect(directStore.getForActor(blockedId, "user_1"))
+            .rejects.toMatchObject({ code: "APPROVAL_TRANSACTION_REQUIRED" });
+          await expect(directStore.claim({ approvalId: blockedId, actorUserId: "user_1",
+            principalKey: "web:user_1", now: Date.now(), clock: Date.now,
+            deadlineAt: Date.now() + 1_000 }))
+            .rejects.toMatchObject({ code: "APPROVAL_TRANSACTION_REQUIRED" });
+          await blocker.query("ROLLBACK");
+          let activeBackend = true;
+          for (let attempt = 0; attempt < 50 && activeBackend; attempt++) {
+            const activity = await client.query("SELECT 1 FROM pg_stat_activity WHERE pid = $1",
+              [decisionPid]);
+            activeBackend = activity.rows.length > 0;
+            if (activeBackend) await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          expect(activeBackend).toBe(false);
+          const unchanged = await client.query<{ status: string }>(
+            `SELECT status FROM ${qualified}.execution_approvals WHERE id = $1`, [blockedId]);
+          expect(unchanged.rows[0]?.status).toBe("pending");
+          const sibling = await store[decision]({ approvalId: siblingId, actorUserId: "user_1",
+            now: Date.now(), clock: Date.now });
+          expect(sibling.status).toBe(decision === "approve" ? "approved" : "rejected");
+          const stillUnchanged = await client.query<{ status: string }>(
+            `SELECT status FROM ${qualified}.execution_approvals WHERE id = $1`, [blockedId]);
+          expect(stillUnchanged.rows[0]?.status).toBe("pending");
+        } finally {
+          await blocker.query("ROLLBACK").catch(() => undefined);
+          await directClient.end().catch(() => undefined);
+          await blocker.end();
+        }
+      }
       await expect(store.getForActor("approval_fresh", "user_1"))
         .resolves.toMatchObject({ id: "approval_fresh", params: {} });
       await expect(store.getForActor("approval_fresh", "another_user"))
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
       for (const decision of ["approve", "reject"] as const) {
         const id = `approval_expiring_${decision}`;
-        const expiresAt = Date.now() + 750;
+        const expiresAt = Date.now() + 60_000;
         await store.create({ ...candidate, id, idempotencyKey: id,
           expiresAt, createdAt: Date.now(), updatedAt: Date.now() });
         const blocker = new Client({ connectionString: databaseUrl! });
@@ -213,27 +325,46 @@ describeDatabase("approval migration from origin/dev schema", () => {
           await blocker.query(`UPDATE ${qualified}.workspace_memberships SET user_id = user_id
             WHERE workspace_id = 'workspace_1' AND user_id = 'user_1'`);
           let settled = false;
-          const pending = store[decision]({ approvalId: id, actorUserId: "user_1", now: Date.now() })
+          let clockNow = expiresAt - 1;
+          const pending = store[decision]({ approvalId: id, actorUserId: "user_1",
+            now: clockNow, clock: () => clockNow })
             .finally(() => { settled = true; });
           await new Promise((resolve) => setTimeout(resolve, 40));
           expect(settled).toBe(false);
-          await new Promise((resolve) => setTimeout(resolve, Math.max(0, expiresAt - Date.now() + 30)));
+          clockNow = expiresAt;
           await blocker.query("COMMIT");
           await expect(pending).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
           const state = await client.query(`SELECT status FROM ${qualified}.execution_approvals WHERE id = $1`, [id]);
           expect(state.rows[0]?.status).toBe("pending");
+          await expect(store.getForActor(id, "user_1", undefined, expiresAt))
+            .resolves.toMatchObject({ status: "expired" });
+          const settledState = await client.query(`SELECT status FROM ${qualified}.execution_approvals WHERE id = $1`, [id]);
+          expect(settledState.rows[0]?.status).toBe("expired");
         } finally {
           await blocker.query("ROLLBACK");
           await blocker.end();
         }
       }
+      const approvedId = "approval_expiring_approved";
+      const approvedExpiresAt = Date.now() + 60_000;
+      await store.create({ ...candidate, id: approvedId, idempotencyKey: approvedId,
+        expiresAt: approvedExpiresAt, createdAt: Date.now(), updatedAt: Date.now() });
+      await store.approve({ approvalId: approvedId, actorUserId: "user_1", now: approvedExpiresAt - 1, clock: () => approvedExpiresAt - 1 });
+      await expect(store.getForActor(approvedId, "user_1", undefined, approvedExpiresAt - 1))
+        .resolves.toMatchObject({ status: "approved" });
+      await expect(store.getForActor(approvedId, "user_1", undefined, approvedExpiresAt))
+        .resolves.toMatchObject({ status: "expired" });
+      await client.query(`UPDATE ${qualified}.execution_approvals SET expires_at = 1
+        WHERE id = 'approval_inflight'`);
+      await expect(store.getForActor("approval_inflight", "user_1", undefined, Date.now()))
+        .resolves.toMatchObject({ status: "uncertain" });
       const revoker = new Client({ connectionString: databaseUrl! });
       await revoker.connect();
       try {
         await revoker.query("BEGIN");
         await revoker.query(`DELETE FROM ${qualified}.workspace_memberships WHERE user_id = 'user_1'`);
         let decisionSettled = false;
-        const racingDecision = store.approve({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5 })
+        const racingDecision = store.approve({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5, clock: () => 5 })
           .then(() => { decisionSettled = true; return null; }, (error: unknown) => {
             decisionSettled = true;
             return error;
@@ -248,14 +379,14 @@ describeDatabase("approval migration from origin/dev schema", () => {
       }
       await expect(store.getForActor("approval_fresh", "user_1"))
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
-      await expect(store.approve({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5 }))
+      await expect(store.approve({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5, clock: () => 5 }))
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
-      await expect(store.reject({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5 }))
+      await expect(store.reject({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5, clock: () => 5 }))
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
       await client.query(`INSERT INTO ${qualified}.workspace_memberships VALUES ('workspace_1', 'user_1')`);
-      await store.approve({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5 });
+      await store.approve({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5, clock: () => 5 });
       await store.claim({ approvalId: "approval_fresh", actorUserId: "user_1",
-        principalKey: "web:user_1", now: 6, deadlineAt: Date.now() + 1_000 });
+        principalKey: "web:user_1", now: 6, deadlineAt: Date.now() + 1_000, clock: () => 6 });
       await client.query(`INSERT INTO ${qualified}.execution_receipts
         (id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash, connection_id,
          provider_connection_id, idempotency_key, status, request_hash, started_at, created_at, updated_at)
@@ -273,7 +404,7 @@ describeDatabase("approval migration from origin/dev schema", () => {
       await expect(store.uncertain({ approvalId: "approval_fresh", receiptId: "execution_reconcile", now: 7 }))
         .resolves.toMatchObject({ status: "uncertain", executionReceiptId: "execution_reconcile" });
       await expect(store.claim({ approvalId: "approval_fresh", actorUserId: "user_1",
-        principalKey: "web:user_1", now: 8, deadlineAt: Date.now() + 1_000 })).rejects.toMatchObject({
+        principalKey: "web:user_1", now: 8, deadlineAt: Date.now() + 1_000, clock: () => 8 })).rejects.toMatchObject({
         code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: "execution_reconcile",
       });
       const count = await client.query<{ count: string }>(

@@ -117,9 +117,9 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     const approval = approvalFixture(now, { toolId });
     await runtime.approvals.create(approval);
     await runtime.approvals.approve({ approvalId: approval.id, actorUserId: approval.actorUserId,
-      now: now + 1 });
+      now: now + 1, clock: () => now + 1 });
     await runtime.approvals.claim({ approvalId: approval.id, actorUserId: approval.actorUserId,
-      principalKey: approval.principalKey, now: now + 2, deadlineAt: Date.now() + 2_000 });
+      principalKey: approval.principalKey, now: now + 2, deadlineAt: Date.now() + 2_000, clock: () => now + 2 });
     const receipt = receiptFixture(approval, now);
     await runtime.receipts.reserve(receipt);
     await runtime.receipts.beginDispatch(receipt.id, now + 3);
@@ -267,6 +267,44 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       .some((approval) => approval.id === expired.id)).toBe(false);
   });
 
+  it("recovers old browser approvals across providers after recent history fills", async () => {
+    const now = Date.now();
+    const github = await runtime.approvals.create(approvalFixture(now - 100_000,
+      { toolId: "github.issues.create", status: "pending", expiresAt: now + 60_000 }));
+    const linear = await runtime.approvals.create(approvalFixture(now - 99_999,
+      { toolId: "linear.issues.update", status: "executing", expiresAt: now - 1 }));
+    await runtime.approvals.create(approvalFixture(now - 99_998,
+      { toolId: "github.issues.create", principalKey: "client:cli:grant", status: "pending",
+        expiresAt: now + 60_000 }));
+    await runtime.approvals.create(approvalFixture(now - 99_997,
+      { toolId: "github.issues.create", status: "approved", expiresAt: now - 1 }));
+    for (let index = 0; index < 60; index++) await runtime.approvals.create(
+      approvalFixture(now - 60_000 + index, { status: "consumed" }));
+    const actor = { workspaceId, actorUserId: github.actorUserId, now, limit: 50 };
+    expect((await runtime.approvals.listForActor(actor)).some((item) => item.id === github.id)).toBe(false);
+    expect((await runtime.approvals.listOutstandingProviderForActor(actor))
+      .some((item) => item.id === github.id || item.id === linear.id)).toBe(false);
+    expect((await runtime.approvals.listOutstandingBrowserForActor(actor)).map((item) => item.id))
+      .toEqual([linear.id, github.id]);
+    expect(await runtime.approvals.listOutstandingBrowserForActor({ ...actor,
+      workspaceId: "foreign_workspace" })).toEqual([]);
+    expect(await runtime.approvals.listOutstandingBrowserForActor({ ...actor,
+      actorUserId: "other_actor" })).toEqual([]);
+    const observer = new Client({ connectionString: connectionString! });
+    await observer.connect();
+    try {
+      await observer.query(`DELETE FROM omr_control.workspace_memberships
+        WHERE workspace_id = $1 AND user_id = $2`, [workspaceId, github.actorUserId]);
+      expect(await runtime.approvals.listOutstandingBrowserForActor(actor)).toEqual([]);
+    } finally {
+      await observer.query(`INSERT INTO omr_control.workspace_memberships
+        (id, workspace_id, user_id, role, created_at, updated_at)
+        VALUES ($1, $2, $3, 'member', $4, $4) ON CONFLICT DO NOTHING`,
+      [`membership_${crypto.randomUUID()}`, workspaceId, github.actorUserId, Date.now()]);
+      await observer.end();
+    }
+  });
+
   it("reads the exact reconciliation receipt only for its current workspace member", async () => {
     const { approval, receipt } = await uncertainProviderApproval("linear.issues.update");
     const lookup = { workspaceId, actorUserId: approval.actorUserId,
@@ -302,9 +340,9 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       providerConnectionId: first.providerConnectionId });
     const [a, b] = await Promise.all([runtime.approvals.create(first), runtime.approvals.create(second)]);
     expect(a.id).toBe(b.id);
-    await runtime.approvals.approve({ approvalId: a.id, actorUserId: a.actorUserId, now: now + 1 });
+    await runtime.approvals.approve({ approvalId: a.id, actorUserId: a.actorUserId, now: now + 1, clock: () => now + 1 });
     await runtime.approvals.claim({ approvalId: a.id, actorUserId: a.actorUserId,
-      principalKey: a.principalKey, now: now + 2, deadlineAt: Date.now() + 2_000 });
+      principalKey: a.principalKey, now: now + 2, deadlineAt: Date.now() + 2_000, clock: () => now + 2 });
     const receipt = receiptFixture(a, now);
     await runtime.receipts.reserve(receipt);
     await runtime.receipts.beginDispatch(receipt.id, now + 3);
@@ -577,10 +615,10 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     const approval = approvalFixture(now, { manifestHash: `sha256-${"b".repeat(64)}` });
     await runtime.approvals.create(approval);
     await runtime.approvals.approve({ approvalId: approval.id,
-      actorUserId: "execution_owner", now: now + 1 });
+      actorUserId: "execution_owner", now: now + 1, clock: () => now + 1 });
     await runtime.approvals.claim({ approvalId: approval.id,
       actorUserId: "execution_owner", principalKey: approval.principalKey,
-      now: now + 2, deadlineAt: Date.now() + 1_000 });
+      now: now + 2, deadlineAt: Date.now() + 1_000, clock: () => now + 2 });
     const receipt = receiptFixture(approval, now, { requestHash: `sha256-${"c".repeat(64)}` });
     await runtime.receipts.reserve(receipt);
     await runtime.receipts.beginDispatch(receipt.id, now + 3);
@@ -623,10 +661,10 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     const approval = approvalFixture(now);
     await runtime.approvals.create(approval);
     await runtime.approvals.approve({ approvalId: approval.id,
-      actorUserId: "execution_owner", now: now + 1 });
+      actorUserId: "execution_owner", now: now + 1, clock: () => now + 1 });
     await runtime.approvals.claim({ approvalId: approval.id,
       actorUserId: "execution_owner", principalKey: approval.principalKey,
-      now: now + 2, deadlineAt: Date.now() + 1_000 });
+      now: now + 2, deadlineAt: Date.now() + 1_000, clock: () => now + 2 });
     const receipt = receiptFixture(approval, now);
     await runtime.receipts.reserve(receipt);
     await runtime.receipts.beginDispatch(receipt.id, now + 3);
@@ -670,26 +708,26 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     await expect(runtime.approvals.approve({
       approvalId: approval.id,
       actorUserId: "other_user",
-      now: now + 1,
+      now: now + 1, clock: () => now + 1
     })).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
     await runtime.approvals.approve({
       approvalId: approval.id,
       actorUserId: "execution_owner",
-      now: now + 1,
+      now: now + 1, clock: () => now + 1
     });
     await expect(runtime.approvals.claim({
       approvalId: approval.id,
       actorUserId: "execution_owner",
       principalKey: "web:execution_owner",
       now: now + 2,
-      deadlineAt: Date.now() + 1_000,
+      deadlineAt: Date.now() + 1_000, clock: () => now + 2
     })).resolves.toMatchObject({ status: "executing" });
     await expect(runtime.approvals.claim({
       approvalId: approval.id,
       actorUserId: "execution_owner",
       principalKey: "web:execution_owner",
       now: now + 3,
-      deadlineAt: Date.now() + 1_000,
+      deadlineAt: Date.now() + 1_000, clock: () => now + 3
     })).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
 
     const client = new Client({ connectionString: connectionString! });
@@ -711,7 +749,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     const approval = approvalFixture(now);
     await runtime.approvals.create(approval);
     await runtime.approvals.approve({ approvalId: approval.id,
-      actorUserId: "execution_owner", now: now + 1 });
+      actorUserId: "execution_owner", now: now + 1, clock: () => now + 1 });
     const revoker = new Client({ connectionString: connectionString! });
     await revoker.connect();
     try {
@@ -720,12 +758,12 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
         WHERE workspace_id = $1 AND user_id = 'execution_owner' FOR UPDATE`, [workspaceId]);
       await expect(runtime.approvals.claim({ approvalId: approval.id,
         actorUserId: "execution_owner", principalKey: "web:execution_owner",
-        now: now + 2, deadlineAt: Date.now() + 80 }))
+        now: now + 2, deadlineAt: Date.now() + 80, clock: () => now + 2 }))
         .rejects.toMatchObject({ code: "EXECUTION_INVOCATION_TIMEOUT" });
       await revoker.query("ROLLBACK");
       await expect(runtime.approvals.claim({ approvalId: approval.id,
         actorUserId: "execution_owner", principalKey: "web:execution_owner",
-        now: now + 3, deadlineAt: Date.now() + 1_000 }))
+        now: now + 3, deadlineAt: Date.now() + 1_000, clock: () => now + 3 }))
         .resolves.toMatchObject({ status: "executing" });
       const observer = new Client({ connectionString: connectionString! });
       await observer.connect();
@@ -734,7 +772,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
           WHERE id = $1`, [approval.id, Date.now() - EXECUTION_STALE_AFTER_MS - 5_000]);
         await expect(runtime.approvals.claim({ approvalId: approval.id,
           actorUserId: "execution_owner", principalKey: "web:execution_owner",
-          now: Date.now(), deadlineAt: Date.now() + 1_000 }))
+          now: Date.now(), deadlineAt: Date.now() + 1_000, clock: () => Date.now() }))
           .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
         const state = await observer.query<{ status: string }>(
           `SELECT status FROM omr_control.execution_approvals WHERE id = $1`, [approval.id]);
@@ -753,10 +791,10 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     const approval = approvalFixture(now, { manifestHash: `sha256-${"e".repeat(64)}` });
     await runtime.approvals.create(approval);
     await runtime.approvals.approve({ approvalId: approval.id,
-      actorUserId: "execution_owner", now: now + 1 });
+      actorUserId: "execution_owner", now: now + 1, clock: () => now + 1 });
     await runtime.approvals.claim({ approvalId: approval.id,
       actorUserId: "execution_owner", principalKey: "web:execution_owner",
-      now: now + 2, deadlineAt: Date.now() + 1_000 });
+      now: now + 2, deadlineAt: Date.now() + 1_000, clock: () => now + 2 });
     const receipt = receiptFixture(approval, now);
     await runtime.receipts.reserve(receipt);
     await runtime.receipts.beginDispatch(receipt.id, now + 3);
@@ -768,7 +806,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
         WHERE id = $1`, [approval.id, Date.now() - EXECUTION_STALE_AFTER_MS - 5_000]);
       await expect(runtime.approvals.claim({ approvalId: approval.id,
         actorUserId: "execution_owner", principalKey: "web:execution_owner",
-        now: Date.now(), deadlineAt: Date.now() + 1_000 }))
+        now: Date.now(), deadlineAt: Date.now() + 1_000, clock: () => Date.now() }))
         .rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: receipt.id });
       const state = await observer.query<{ status: string; execution_receipt_id: string }>(
         `SELECT status, execution_receipt_id FROM omr_control.execution_approvals WHERE id = $1`,
@@ -787,9 +825,9 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     const approval = approvalFixture(now);
     await runtime.approvals.create(approval);
     await runtime.approvals.approve({ approvalId: approval.id,
-      actorUserId: approval.actorUserId, now: now + 1 });
+      actorUserId: approval.actorUserId, now: now + 1, clock: () => now + 1 });
     await runtime.approvals.claim({ approvalId: approval.id, actorUserId: approval.actorUserId,
-      principalKey: approval.principalKey, now: now + 2, deadlineAt: Date.now() + 1_000 });
+      principalKey: approval.principalKey, now: now + 2, deadlineAt: Date.now() + 1_000, clock: () => now + 2 });
     const receipt = receiptFixture(approval, now);
     await runtime.receipts.reserve(receipt);
     await runtime.receipts.beginDispatch(receipt.id, now + 3);
@@ -804,7 +842,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       await blocker.query("SELECT id FROM omr_control.execution_receipts WHERE id = $1 FOR UPDATE", [receipt.id]);
       const claim = () => runtime.approvals.claim({ approvalId: approval.id,
         actorUserId: approval.actorUserId, principalKey: approval.principalKey,
-        now: Date.now(), deadlineAt: Date.now() + 5_000 });
+        now: Date.now(), deadlineAt: Date.now() + 5_000, clock: () => Date.now() });
       const first = claim();
       const second = claim();
       await vi.waitFor(async () => {
@@ -843,9 +881,9 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     const approval = approvalFixture(now);
     await runtime.approvals.create(approval);
     await runtime.approvals.approve({ approvalId: approval.id,
-      actorUserId: approval.actorUserId, now: now + 1 });
+      actorUserId: approval.actorUserId, now: now + 1, clock: () => now + 1 });
     await runtime.approvals.claim({ approvalId: approval.id, actorUserId: approval.actorUserId,
-      principalKey: approval.principalKey, now: now + 2, deadlineAt: Date.now() + 2_000 });
+      principalKey: approval.principalKey, now: now + 2, deadlineAt: Date.now() + 2_000, clock: () => now + 2 });
     const receipt = receiptFixture(approval, now);
     await runtime.receipts.reserve(receipt);
     await runtime.receipts.beginDispatch(receipt.id, now + 3);
@@ -861,7 +899,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
         result: { id: "committed_issue" }, now: Date.now(), deadlineAt: Date.now() + 3_000 });
       await expect(runtime.approvals.claim({ approvalId: approval.id,
         actorUserId: approval.actorUserId, principalKey: approval.principalKey,
-        now: Date.now(), deadlineAt: Date.now() + 2_000 }))
+        now: Date.now(), deadlineAt: Date.now() + 2_000, clock: () => Date.now() }))
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
       const settled = await runtime.approvals.getForActor(approval.id, approval.actorUserId);
       const current = await runtime.receipts.findByIdempotency({ workspaceId: approval.workspaceId,
@@ -876,22 +914,26 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
 
   it("does not claim an approval that expires behind a membership lock", async () => {
     const now = Date.now();
-    const approval = approvalFixture(now, { expiresAt: now + 300 });
+    const approval = approvalFixture(now, { expiresAt: now + 60_000 });
     await runtime.approvals.create(approval);
     await runtime.approvals.approve({ approvalId: approval.id,
-      actorUserId: "execution_owner", now: now + 1 });
+      actorUserId: "execution_owner", now: now + 1, clock: () => now + 1 });
     const revoker = new Client({ connectionString: connectionString! });
     await revoker.connect();
     try {
       await revoker.query("BEGIN");
       await revoker.query(`SELECT id FROM omr_control.workspace_memberships
         WHERE workspace_id = $1 AND user_id = 'execution_owner' FOR UPDATE`, [workspaceId]);
+      let clockNow = now + 2;
       const claim = runtime.approvals.claim({ approvalId: approval.id,
         actorUserId: "execution_owner", principalKey: "web:execution_owner",
-        now: now + 2, deadlineAt: Date.now() + 2_000 });
-      await new Promise((resolve) => setTimeout(resolve, 350));
+        now: now + 2, deadlineAt: Date.now() + 2_000, clock: () => clockNow });
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      clockNow = approval.expiresAt;
       await revoker.query("ROLLBACK");
       await expect(claim).rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
+      await expect(runtime.approvals.getForActor(approval.id, approval.actorUserId,
+        undefined, clockNow)).resolves.toMatchObject({ status: "expired" });
     } finally {
       await revoker.query("ROLLBACK").catch(() => undefined);
       await revoker.end();
@@ -900,19 +942,20 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
 
   it("does not claim an approval that expires while opening its connection", async () => {
     const now = Date.now();
-    const approval = approvalFixture(now, { expiresAt: now + 300 });
+    const approval = approvalFixture(now, { expiresAt: now + 60_000 });
     await runtime.approvals.create(approval);
     await runtime.approvals.approve({ approvalId: approval.id,
-      actorUserId: "execution_owner", now: now + 1 });
+      actorUserId: "execution_owner", now: now + 1, clock: () => now + 1 });
     const originalConnect = Client.prototype.connect;
+    let clockNow = now + 2;
     vi.spyOn(Client.prototype, "connect").mockImplementation(async function (this: Client) {
-      await new Promise((resolve) => setTimeout(resolve, 350));
-      return originalConnect.call(this);
+      await originalConnect.call(this);
+      clockNow = approval.expiresAt;
     });
     try {
       await expect(runtime.approvals.claim({ approvalId: approval.id,
         actorUserId: "execution_owner", principalKey: "web:execution_owner",
-        now: now + 2, deadlineAt: Date.now() + 2_000 }))
+        now: now + 2, deadlineAt: Date.now() + 2_000, clock: () => clockNow }))
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
     } finally {
       vi.restoreAllMocks();
@@ -930,10 +973,10 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
           const approval = approvalFixture(now);
           await runtime.approvals.create(approval);
           await runtime.approvals.approve({ approvalId: approval.id,
-            actorUserId: "execution_owner", now: now + 1 });
+            actorUserId: "execution_owner", now: now + 1, clock: () => now + 1 });
           await runtime.approvals.claim({ approvalId: approval.id,
             actorUserId: "execution_owner", principalKey: "web:execution_owner",
-            now: now + 2, deadlineAt: Date.now() + 2_000 });
+            now: now + 2, deadlineAt: Date.now() + 2_000, clock: () => now + 2 });
           let associatedApprovalId: string | null = approval.id;
           if (association === "legacy") associatedApprovalId = null;
           if (association === "foreign") associatedApprovalId = `approval_foreign_${crypto.randomUUID()}`;
@@ -972,14 +1015,14 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
             ["running", "succeeded", "uncertain"].includes(status);
           await expect(runtime.approvals.claim({ approvalId: approval.id,
             actorUserId: "execution_owner", principalKey: "web:execution_owner",
-            now: Date.now(), deadlineAt: Date.now() + 2_000 })).rejects.toMatchObject(exactEffect
+            now: Date.now(), deadlineAt: Date.now() + 2_000, clock: () => Date.now() })).rejects.toMatchObject(exactEffect
             ? { code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: receipt.id }
             : { code: "APPROVAL_UNAVAILABLE" });
           await observer.query(`UPDATE omr_control.execution_approvals
             SET status = 'executing', execution_receipt_id = NULL WHERE id = $1`, [approval.id]);
           await expect(runtime.approvals.claim({ approvalId: approval.id,
             actorUserId: "execution_owner", principalKey: "web:execution_owner",
-            now: Date.now(), deadlineAt: Date.now() + 2_000 }))
+            now: Date.now(), deadlineAt: Date.now() + 2_000, clock: () => Date.now() }))
             .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
           const fresh = await observer.query<{ status: string; execution_receipt_id: string | null }>(
             `SELECT status, execution_receipt_id FROM omr_control.execution_approvals WHERE id = $1`,
@@ -992,7 +1035,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
             : { code: "APPROVAL_UNAVAILABLE" };
           await expect(runtime.approvals.claim({ approvalId: approval.id,
             actorUserId: "execution_owner", principalKey: "web:execution_owner",
-            now: Date.now(), deadlineAt: Date.now() + 2_000 })).rejects.toMatchObject(expected);
+            now: Date.now(), deadlineAt: Date.now() + 2_000, clock: () => Date.now() })).rejects.toMatchObject(expected);
           const state = await observer.query<{ status: string; execution_receipt_id: string | null }>(
             `SELECT status, execution_receipt_id FROM omr_control.execution_approvals WHERE id = $1`,
             [approval.id]);
@@ -1023,10 +1066,10 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     const approval = approvalFixture(now);
     await runtime.approvals.create(approval);
     await runtime.approvals.approve({ approvalId: approval.id,
-      actorUserId: "execution_owner", now: now + 1 });
+      actorUserId: "execution_owner", now: now + 1, clock: () => now + 1 });
     await runtime.approvals.claim({ approvalId: approval.id,
       actorUserId: "execution_owner", principalKey: approval.principalKey,
-      now: now + 2, deadlineAt: Date.now() + 2_000 });
+      now: now + 2, deadlineAt: Date.now() + 2_000, clock: () => now + 2 });
     const receipt = receiptFixture(approval, now);
     await runtime.receipts.reserve(receipt);
     const observer = new Client({ connectionString: connectionString! });
@@ -1047,7 +1090,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
         [receipt.id]);
       const pending = isolated.approvals.claim({ approvalId: approval.id,
         actorUserId: "execution_owner", principalKey: approval.principalKey,
-        now: Date.now(), deadlineAt: Date.now() + 1_000 }).catch((error: unknown) => error);
+        now: Date.now(), deadlineAt: Date.now() + 1_000, clock: () => Date.now() }).catch((error: unknown) => error);
       await vi.waitFor(async () => {
         const state = await monitor.query<{ count: string }>(
           `SELECT count(*)::text AS count FROM pg_stat_activity
@@ -1068,7 +1111,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
         [receipt.id]);
       const closingClaim = isolated.approvals.claim({ approvalId: approval.id,
         actorUserId: "execution_owner", principalKey: approval.principalKey,
-        now: Date.now(), deadlineAt: Date.now() + 5_000 }).catch((error: unknown) => error);
+        now: Date.now(), deadlineAt: Date.now() + 5_000, clock: () => Date.now() }).catch((error: unknown) => error);
       await vi.waitFor(async () => {
         const state = await monitor.query<{ count: string }>(
           `SELECT count(*)::text AS count FROM pg_stat_activity
@@ -1088,7 +1131,7 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       await observer.query("ROLLBACK");
       await expect(runtime.approvals.claim({ approvalId: approval.id,
         actorUserId: "execution_owner", principalKey: approval.principalKey,
-        now: Date.now(), deadlineAt: Date.now() + 2_000 }))
+        now: Date.now(), deadlineAt: Date.now() + 2_000, clock: () => Date.now() }))
         .rejects.toMatchObject({ code: "APPROVAL_UNAVAILABLE" });
       const after = await observer.query<{ approval_status: string; receipt_status: string;
         error_code: string }>(
@@ -1176,16 +1219,25 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     const observer = new Client({ connectionString: connectionString! });
     await observer.connect();
     try {
-      const count = async () => Number((await observer.query<{ count: string }>(
-        `SELECT count(*) FROM pg_stat_activity
-         WHERE left(application_name, length($1) + 1) = $1 || ':'`, [applicationName])).rows[0]?.count);
-      expect(await count()).toBe(0);
+      const activeBackends = async () => {
+        await observer.query("SELECT pg_stat_clear_snapshot()");
+        return (await observer.query<{ pid: number; state: string; wait_event_type: string | null }>(
+          `SELECT pid, state, wait_event_type FROM pg_stat_activity
+           WHERE left(application_name, length($1) + 1) = $1 || ':'`, [applicationName])).rows;
+      };
+      expect(await activeBackends()).toEqual([]);
       const results = await Promise.allSettled(Array.from({ length: 20 }, (_, index) =>
         isolated.approvals.claim({ approvalId: `missing_${index}`, actorUserId: "execution_owner",
-          principalKey: "web:execution_owner", now: Date.now(), deadlineAt: Date.now() + 3_000 })));
+          principalKey: "web:execution_owner", now: Date.now(), deadlineAt: Date.now() + 3_000, clock: () => Date.now() })));
       expect(results.every((result) => result.status === "rejected" &&
         (result.reason as { code?: string }).code === "APPROVAL_UNAVAILABLE")).toBe(true);
-      expect(await count()).toBe(0);
+      // Client socket close and PostgreSQL backend exit are separate events.
+      // A just-closed backend can remain visible for one statistics sample.
+      await vi.waitFor(async () => expect(await activeBackends()).toEqual([]),
+        { timeout: 2_000, interval: 20 });
+      await isolated.close();
+      await vi.waitFor(async () => expect(await activeBackends()).toEqual([]),
+        { timeout: 2_000, interval: 20 });
     } finally {
       await isolated.close();
       await observer.end();
@@ -1264,9 +1316,9 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     const approval = approvalFixture(now);
     await runtime.approvals.create(approval);
     await runtime.approvals.approve({ approvalId: approval.id,
-      actorUserId: approval.actorUserId, now: now + 1 });
+      actorUserId: approval.actorUserId, now: now + 1, clock: () => now + 1 });
     await runtime.approvals.claim({ approvalId: approval.id, actorUserId: approval.actorUserId,
-      principalKey: approval.principalKey, now: now + 2, deadlineAt: Date.now() + 1_000 });
+      principalKey: approval.principalKey, now: now + 2, deadlineAt: Date.now() + 1_000, clock: () => now + 2 });
     const receipt = receiptFixture(approval, now);
     await runtime.receipts.reserve(receipt);
     await runtime.receipts.beginDispatch(receipt.id, now + 3);
