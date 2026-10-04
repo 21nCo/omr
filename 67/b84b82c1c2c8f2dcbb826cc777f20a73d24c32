@@ -1,0 +1,20 @@
+.github/workflows/vault-contract.yml
+  h_a39f9495f9ec1d 1-50
+docs/decisions/dependencies.md
+  h_a39f9495f9ec1d 26
+packages/identity/src/openrouter-vault.test.ts
+  h_a39f9495f9ec1d 129-152
+packages/identity/src/openrouter-vault.ts
+  h_a39f9495f9ec1d 79-80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "67b84b82c1c2c8f2dcbb826cc777f20a73d24c32",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
