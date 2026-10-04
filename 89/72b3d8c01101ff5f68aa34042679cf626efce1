@@ -1,0 +1,38 @@
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 809-810
+  h_a39f9495f9ec1d 719,746,802,804-808
+apps/web/src/lib/linear-action-keys.ts
+  h_a39f9495f9ec1d 32-33,47-52
+packages/execution/src/postgres-approval-migration.test.ts
+  h_a39f9495f9ec1d 184-191,206-246
+apps/web/src/routes/app/playground/+page.svelte
+  h_a39f9495f9ec1d 453,455-456,459,462-463,465
+  h_a39f9495f9ec1d 4,199,239-270,454,457-458,460-461,464,466
+packages/execution/src/postgres-approval-store.ts
+  h_a39f9495f9ec1d 67-68,308-318
+apps/web/src/lib/server/reconciliation-receipts.test.ts
+  h_a39f9495f9ec1d 17-18
+  h_a39f9495f9ec1d 23-45
+apps/web/src/lib/server/reconciliation-receipts.ts
+  h_a39f9495f9ec1d 71,75
+  h_a39f9495f9ec1d 55,63-70,72-74
+apps/web/src/lib/direct-playground.ts
+  h_a39f9495f9ec1d 16-17
+packages/execution/src/execution.test.ts
+  h_a39f9495f9ec1d 87,273-295
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 646,650
+tests/acceptance/direct-playground-ui.test.ts
+  h_a39f9495f9ec1d 199-237
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8972b3d8c01101ff5f68aa34042679cf626efce1",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
