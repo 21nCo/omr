@@ -267,6 +267,44 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
       .some((approval) => approval.id === expired.id)).toBe(false);
   });
 
+  it("recovers old browser approvals across providers after recent history fills", async () => {
+    const now = Date.now();
+    const github = await runtime.approvals.create(approvalFixture(now - 100_000,
+      { toolId: "github.issues.create", status: "pending", expiresAt: now + 60_000 }));
+    const linear = await runtime.approvals.create(approvalFixture(now - 99_999,
+      { toolId: "linear.issues.update", status: "executing", expiresAt: now - 1 }));
+    await runtime.approvals.create(approvalFixture(now - 99_998,
+      { toolId: "github.issues.create", principalKey: "client:cli:grant", status: "pending",
+        expiresAt: now + 60_000 }));
+    await runtime.approvals.create(approvalFixture(now - 99_997,
+      { toolId: "github.issues.create", status: "approved", expiresAt: now - 1 }));
+    for (let index = 0; index < 60; index++) await runtime.approvals.create(
+      approvalFixture(now - 60_000 + index, { status: "consumed" }));
+    const actor = { workspaceId, actorUserId: github.actorUserId, now, limit: 50 };
+    expect((await runtime.approvals.listForActor(actor)).some((item) => item.id === github.id)).toBe(false);
+    expect((await runtime.approvals.listOutstandingProviderForActor(actor))
+      .some((item) => item.id === github.id || item.id === linear.id)).toBe(false);
+    expect((await runtime.approvals.listOutstandingBrowserForActor(actor)).map((item) => item.id))
+      .toEqual([linear.id, github.id]);
+    expect(await runtime.approvals.listOutstandingBrowserForActor({ ...actor,
+      workspaceId: "foreign_workspace" })).toEqual([]);
+    expect(await runtime.approvals.listOutstandingBrowserForActor({ ...actor,
+      actorUserId: "other_actor" })).toEqual([]);
+    const observer = new Client({ connectionString: connectionString! });
+    await observer.connect();
+    try {
+      await observer.query(`DELETE FROM omr_control.workspace_memberships
+        WHERE workspace_id = $1 AND user_id = $2`, [workspaceId, github.actorUserId]);
+      expect(await runtime.approvals.listOutstandingBrowserForActor(actor)).toEqual([]);
+    } finally {
+      await observer.query(`INSERT INTO omr_control.workspace_memberships
+        (id, workspace_id, user_id, role, created_at, updated_at)
+        VALUES ($1, $2, $3, 'member', $4, $4) ON CONFLICT DO NOTHING`,
+      [`membership_${crypto.randomUUID()}`, workspaceId, github.actorUserId, Date.now()]);
+      await observer.end();
+    }
+  });
+
   it("reads the exact reconciliation receipt only for its current workspace member", async () => {
     const { approval, receipt } = await uncertainProviderApproval("linear.issues.update");
     const lookup = { workspaceId, actorUserId: approval.actorUserId,
@@ -1181,16 +1219,25 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     const observer = new Client({ connectionString: connectionString! });
     await observer.connect();
     try {
-      const count = async () => Number((await observer.query<{ count: string }>(
-        `SELECT count(*) FROM pg_stat_activity
-         WHERE left(application_name, length($1) + 1) = $1 || ':'`, [applicationName])).rows[0]?.count);
-      expect(await count()).toBe(0);
+      const activeBackends = async () => {
+        await observer.query("SELECT pg_stat_clear_snapshot()");
+        return (await observer.query<{ pid: number; state: string; wait_event_type: string | null }>(
+          `SELECT pid, state, wait_event_type FROM pg_stat_activity
+           WHERE left(application_name, length($1) + 1) = $1 || ':'`, [applicationName])).rows;
+      };
+      expect(await activeBackends()).toEqual([]);
       const results = await Promise.allSettled(Array.from({ length: 20 }, (_, index) =>
         isolated.approvals.claim({ approvalId: `missing_${index}`, actorUserId: "execution_owner",
           principalKey: "web:execution_owner", now: Date.now(), deadlineAt: Date.now() + 3_000, clock: () => Date.now() })));
       expect(results.every((result) => result.status === "rejected" &&
         (result.reason as { code?: string }).code === "APPROVAL_UNAVAILABLE")).toBe(true);
-      expect(await count()).toBe(0);
+      // Client socket close and PostgreSQL backend exit are separate events.
+      // A just-closed backend can remain visible for one statistics sample.
+      await vi.waitFor(async () => expect(await activeBackends()).toEqual([]),
+        { timeout: 2_000, interval: 20 });
+      await isolated.close();
+      await vi.waitFor(async () => expect(await activeBackends()).toEqual([]),
+        { timeout: 2_000, interval: 20 });
     } finally {
       await isolated.close();
       await observer.end();

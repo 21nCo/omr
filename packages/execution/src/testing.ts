@@ -424,6 +424,23 @@ export class MemoryExecutionApprovalStore implements ExecutionApprovalStore {
     });
   }
 
+  listOutstandingBrowserForActor(input: { workspaceId: string; actorUserId: string;
+    now: number; limit: number }): Promise<ExecutionApproval[]> {
+    return Promise.resolve().then(() => {
+      if (!this.isMember(input.workspaceId, input.actorUserId)) return [];
+      return [...this.approvals.values()]
+        .filter((approval) => approval.workspaceId === input.workspaceId &&
+          approval.actorUserId === input.actorUserId &&
+          approval.principalKey === `web:${input.actorUserId}` &&
+          (approval.status === "executing" || approval.status === "uncertain" ||
+            ((approval.status === "pending" || approval.status === "approved") &&
+              approval.expiresAt > input.now)))
+        .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id))
+        .slice(0, input.limit)
+        .map((approval) => structuredClone(approval));
+    });
+  }
+
   private pendingForActor(approvalId: string, actorUserId: string, now: number): ExecutionApproval {
     const approval = this.approvals.get(approvalId);
     if (

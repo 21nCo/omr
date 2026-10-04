@@ -5,9 +5,55 @@ import { MemoryExecutionApprovalStore, MemoryExecutionReceiptStore } from "@oh-m
 import { createWorkspaceCatalogLoader, effectAbsentAvailable, effectPresentAvailable,
   type WorkspaceCatalogState } from "../workspace-catalog.js";
 import { providerReconciliationReceipts, publicBrowserApproval, recoverProviderApproval,
-  visibleApprovals } from "./reconciliation-receipts.js";
+  publicBrowserApprovalStatus, visibleApprovals } from "./reconciliation-receipts.js";
+
+describe("browser approval status identity", () => {
+  it("links a saved write key without disclosing it to browser or client responses", async () => {
+    const approval = { id: "approval-A", workspaceId: "workspace-A", actorUserId: "alice",
+      principalKey: "web:alice", toolId: "linear.issues.create", idempotencyKey: "private-key-A",
+      params: {}, manifestHash: "manifest", status: "consumed" } as ExecutionApproval;
+    const browser = await publicBrowserApprovalStatus(approval, null, true);
+    const client = await publicBrowserApprovalStatus(approval, null, false);
+    expect("actionKeyDigest" in browser && browser.actionKeyDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect("actionKeyDigest" in client).toBe(false);
+    expect(JSON.stringify(browser)).not.toContain(approval.idempotencyKey);
+    expect(JSON.stringify(client)).not.toContain(approval.idempotencyKey);
+  });
+});
 
 describe("Linear reconciliation history", () => {
+  it("keeps old unsettled browser writes across providers outside recent history", async () => {
+    let member = true;
+    const receipts = new MemoryExecutionReceiptStore(() => member);
+    const store = new MemoryExecutionApprovalStore(() => member, receipts);
+    const now = 1_000;
+    const old = { id: "old-github", workspaceId: "workspace-A", actorUserId: "alice",
+      principalKey: "web:alice", toolId: "github.issues.create", status: "pending",
+      expiresAt: now + 1_000, createdAt: 1 } as ExecutionApproval;
+    store.approvals.set(old.id, old);
+    store.approvals.set("old-linear", { ...old, id: "old-linear", toolId: "linear.issues.update",
+      status: "executing", expiresAt: 0, createdAt: 2 });
+    store.approvals.set("client", { ...old, id: "client", principalKey: "client:cli:grant",
+      createdAt: 3 });
+    store.approvals.set("expired", { ...old, id: "expired", status: "approved",
+      expiresAt: now - 1, createdAt: 4 });
+    for (let index = 0; index < 60; index++) store.approvals.set(`terminal-${index}`,
+      { ...old, id: `terminal-${index}`, status: "consumed", createdAt: index + 5 });
+    const actor = { workspaceId: old.workspaceId, actorUserId: old.actorUserId, now, limit: 50 };
+    const recent = await store.listForActor(actor);
+    const provider = await store.listOutstandingProviderForActor(actor);
+    expect(recent.some((item) => item.id === old.id)).toBe(false);
+    expect(provider.some((item) => item.id === old.id || item.id === "old-linear")).toBe(false);
+    const browser = await store.listOutstandingBrowserForActor(actor);
+    expect(browser.map((item) => item.id)).toEqual(["old-linear", "old-github"]);
+    expect(visibleApprovals(recent, [...provider, ...browser], null, now).map((item) => item.id))
+      .toContain(old.id);
+    expect(await store.listOutstandingBrowserForActor({ ...actor, actorUserId: "bob" })).toEqual([]);
+    expect(await store.listOutstandingBrowserForActor({ ...actor, workspaceId: "workspace-B" })).toEqual([]);
+    member = false;
+    expect(await store.listOutstandingBrowserForActor(actor)).toEqual([]);
+  });
+
   it.each(["notion.pages.create", "notion.pages.update"])(
     "discovers an old executing %s approval after reload beyond recent history", async (toolId) => {
       const receipts = new MemoryExecutionReceiptStore(() => true);

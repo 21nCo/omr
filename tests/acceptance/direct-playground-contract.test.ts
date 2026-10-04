@@ -9,6 +9,7 @@ import { WorkspaceAuthority } from "@oh-my-router/identity";
 import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
 import { ToolCatalog } from "@oh-my-router/tools";
 import { createOMRRouter } from "../../apps/web/src/lib/server/router.js";
+import { publicBrowserApprovalStatus } from "../../apps/web/src/lib/server/reconciliation-receipts.js";
 import { createPlaygroundRequest, parsePlaygroundArguments, playgroundConnectionReady,
   playgroundError, resumablePlaygroundApproval, schemaHints } from "../../apps/web/src/lib/direct-playground.js";
 import { directPlaygroundEnabled } from "../../apps/web/src/lib/server/direct-playground-rollout.js";
@@ -110,8 +111,8 @@ describe("direct-playground-contract", () => {
       reject: async (_request, id) => publicApproval(await service.reject(id, actorUserId), catalog.get("demo.write")),
       executeApproved: async (_request, id) => publicReceipt(await service.executeApproved(
         principal(workspace.id), id)),
-      approvalStatus: async (_request, id, workspaceId) => publicApproval(await service.approvalStatus(
-        principal(workspaceId ?? ""), id), catalog.get("demo.write")),
+      approvalStatus: async (_request, id, workspaceId) => publicBrowserApprovalStatus(
+        await service.approvalStatus(principal(workspaceId ?? ""), id), catalog.get("demo.write"), true),
     });
     const api = createPlaygroundRequest(async (path, init) => router.handle(new Request(
       `https://omr.invalid${path}`, init)), () => { throw new Error("unexpected login redirect"); });
@@ -146,8 +147,11 @@ describe("direct-playground-contract", () => {
     expect(write).toMatchObject({ status: "succeeded", result: { action: "write" } });
     expect(write.id).toBeTruthy();
     expect(provider).toHaveBeenCalledTimes(2);
-    expect((await api<{ status: string }>(`/api/approvals/status?approvalId=${approval.id}&workspaceId=${workspace.id}`))
-      .status).toBe("consumed");
+    const settled = await api<{ status: string; actionKeyDigest: string }>(
+      `/api/approvals/status?approvalId=${approval.id}&workspaceId=${workspace.id}`);
+    expect(settled.status).toBe("consumed");
+    expect(settled.actionKeyDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(JSON.stringify(settled)).not.toContain("fixture-write-1");
     const replay = await api<{ id: string }>("/api/approvals/execute", { approvalId: approval.id });
     expect(replay.id).toBe(write.id);
     expect(provider).toHaveBeenCalledTimes(2);

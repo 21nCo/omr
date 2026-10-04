@@ -24,9 +24,9 @@ export async function until(check, label, deadline = Date.now() + 15_000,
 /** Attempt every cleanup step and report failures without hiding the probe error. */
 export async function cleanupAll(steps, report) {
   let failed = false;
-  for (const step of steps) {
-    try { await step(); }
-    catch (error) { failed = true; report(error); }
-  }
+  await steps.reduce((previous, step) => previous.then(step).catch((error) => {
+    failed = true;
+    report(error);
+  }), Promise.resolve());
   return failed;
 }

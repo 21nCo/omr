@@ -49,6 +49,19 @@ export function publicBrowserApproval(
   };
 }
 
+/** Give an authenticated browser a non-replayable link to its saved action key. */
+export async function publicBrowserApprovalStatus(
+  approval: ExecutionApproval, manifest: ToolManifest | null | undefined, browser: boolean,
+) {
+  const visible = publicApproval(approval, manifest);
+  if (!browser) return visible;
+  const bytes = new TextEncoder().encode(approval.idempotencyKey);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const actionKeyDigest = [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return { ...visible, actionKeyDigest };
+}
+
 /** Keep exact provider reconciliation evidence available beyond recent history. */
 export async function providerReconciliationReceipts(
   approvals: readonly Pick<ExecutionApproval, "id" | "status" | "toolId" | "executionReceiptId">[],

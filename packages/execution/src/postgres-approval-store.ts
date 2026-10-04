@@ -691,6 +691,21 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     return Promise.all(result.rows.map((row) => this.toApproval(row)));
   }
 
+  async listOutstandingBrowserForActor(input: { workspaceId: string; actorUserId: string;
+    now: number; limit: number }): Promise<ExecutionApproval[]> {
+    const result = await this.query<ApprovalRow>(
+      `SELECT ${COLUMNS} FROM omr_control.execution_approvals
+       WHERE workspace_id = $1 AND actor_user_id = $2 AND principal_key = $5
+         AND (status IN ('executing', 'uncertain') OR
+           (status IN ('pending', 'approved') AND expires_at > $3))
+         AND EXISTS (SELECT 1 FROM omr_control.workspace_memberships
+           WHERE workspace_id = $1 AND user_id = $2)
+       ORDER BY created_at DESC, id DESC LIMIT $4`,
+      [input.workspaceId, input.actorUserId, input.now, input.limit, `web:${input.actorUserId}`],
+    );
+    return Promise.all(result.rows.map((row) => this.toApproval(row)));
+  }
+
   private async transition(query: string, values: unknown[], deadlineAt?: number): Promise<ExecutionApproval> {
     const result = await this.query<ApprovalRow>(query, values, deadlineAt);
     if (!result.rows[0]) throw new ApprovalUnavailableError();

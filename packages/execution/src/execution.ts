@@ -191,6 +191,9 @@ export interface ExecutionApprovalStore {
   /** A bounded page of actionable provider approvals outside recent history. */
   listOutstandingProviderForActor(input: { workspaceId: string; actorUserId: string;
     now: number; limit: number }): Promise<ExecutionApproval[]>;
+  /** A bounded page of unsettled browser approvals across every tool provider. */
+  listOutstandingBrowserForActor(input: { workspaceId: string; actorUserId: string;
+    now: number; limit: number }): Promise<ExecutionApproval[]>;
 }
 
 export interface PlugFnActionPort {

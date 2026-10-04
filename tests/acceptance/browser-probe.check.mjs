@@ -26,11 +26,16 @@ test("cleanup reports every failure and still reaches later steps", async () => 
   const reported = [];
   const reached = [];
   const failed = await cleanupAll([
-    async () => { throw new Error("Chrome shutdown failed"); },
+    async () => {
+      reached.push("Chrome start");
+      await Promise.resolve();
+      reached.push("Chrome end");
+      throw new Error("Chrome shutdown failed");
+    },
     async () => { reached.push("server"); },
     async () => { throw new Error("profile removal failed"); },
   ], (error) => reported.push(error.message));
   assert.equal(failed, true);
-  assert.deepEqual(reached, ["server"]);
+  assert.deepEqual(reached, ["Chrome start", "Chrome end", "server"]);
   assert.deepEqual(reported, ["Chrome shutdown failed", "profile removal failed"]);
 });

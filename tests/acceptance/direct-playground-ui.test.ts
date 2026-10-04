@@ -60,6 +60,22 @@ function overview(connections = [{ id: "connection_one", workspaceId: "workspace
 afterEach(() => { vi.unstubAllGlobals(); sessionStorage.clear(); document.body.replaceChildren(); });
 
 describe("direct playground form", () => {
+  it.each([
+    { code: "AUTHFN_UNAUTHENTICATED", message: "Sign in again", redirects: true },
+    { code: "LINEAR_RECONNECT_REQUIRED", message: "Reconnect Linear in the control plane", redirects: false },
+  ])("handles $code during workspace load", async ({ code, message, redirects }) => {
+    const assign = vi.fn();
+    vi.stubGlobal("location", { pathname: "/app/playground", assign });
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ error: code, message }, { status: 401 })));
+    const app = mount(Playground, { target: document.body });
+    try {
+      await vi.waitFor(() => expect(document.querySelector("[role=alert]")?.textContent)
+        .toContain(message));
+      expect(assign.mock.calls).toEqual(redirects
+        ? [["/login?returnTo=%2Fapp%2Fplayground"]] : []);
+    } finally { await unmount(app); }
+  });
+
   it("refreshes selection and catalog after switching provider accounts", async () => {
     const connections = ["one", "two"].map((id) => ({ id: `connection_${id}`,
       workspaceId: "workspace_one", provider: "demo", label: `Account ${id}`,
@@ -293,6 +309,92 @@ describe("direct playground form", () => {
       submit();
       await vi.waitFor(() => expect(approvals.size).toBe(3));
       expect(writes).toBe(2);
+    } finally { await unmount(app); }
+  });
+
+  it("starts a fresh identical write after a lost approval response and resumed settlement", async () => {
+    const approvals = new Map<string, PlaygroundApproval>();
+    const keyToApproval = new Map<string, string>();
+    let firstKey = "";
+    let approvalPosts = 0;
+    let writes = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, string> : {};
+      if (path.startsWith("/api/control-plane")) return Response.json(overview(undefined,
+        [...approvals.values()].filter((item) => item.status === "pending")));
+      if (path.startsWith("/api/tools?")) return Response.json({ tools,
+        providers: [{ provider: "demo", state: "ready" }] });
+      if (path.startsWith("/api/tools/manifest")) return Response.json(tools[1]);
+      if (path === "/api/approvals") {
+        approvalPosts += 1;
+        let id = keyToApproval.get(body.idempotencyKey);
+        if (!id) {
+          id = `approval_${keyToApproval.size + 1}`;
+          keyToApproval.set(body.idempotencyKey, id);
+          approvals.set(id, { ...approval("pending"), id });
+        }
+        if (!firstKey) {
+          firstKey = body.idempotencyKey;
+          throw new TypeError("response lost after approval commit");
+        }
+        return Response.json(approvals.get(id));
+      }
+      if (path.startsWith("/api/approvals/status")) {
+        const id = new URL(`https://omr.invalid${path}`).searchParams.get("approvalId") ?? "";
+        const rawKey = [...keyToApproval].find(([, value]) => value === id)?.[0] ?? "";
+        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rawKey));
+        return Response.json({ ...approvals.get(id), actionKeyDigest: [...new Uint8Array(digest)]
+          .map((byte) => byte.toString(16).padStart(2, "0")).join("") });
+      }
+      if (path === "/api/approvals/approve") {
+        const current = approvals.get(body.approvalId)!;
+        approvals.set(current.id, { ...current, status: "approved" });
+        return Response.json(approvals.get(current.id));
+      }
+      if (path === "/api/approvals/execute") {
+        writes += 1;
+        const current = approvals.get(body.approvalId)!;
+        approvals.set(current.id, { ...current, status: "consumed" });
+        return Response.json({ id: `receipt_${writes}`, status: "succeeded", result: {}, errorCode: null });
+      }
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    let app = mount(Playground, { target: document.body });
+    const argumentsText = '{"title":"same action"}';
+    const enterWrite = async () => {
+      select("playground-tool", "demo.write");
+      await vi.waitFor(() => expect(button("Request approval").disabled).toBe(false));
+      const field = document.getElementById("playground-arguments") as HTMLTextAreaElement;
+      field.value = argumentsText;
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      submit();
+    };
+    try {
+      await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>(
+        "#playground-tool")?.disabled).toBe(false));
+      await enterWrite();
+      await vi.waitFor(() => expect(document.querySelector("[role=alert]")?.textContent)
+        .toContain("response lost"));
+      expect(writes).toBe(0);
+      expect(approvalPosts).toBe(1);
+      await unmount(app);
+      document.body.replaceChildren();
+      app = mount(Playground, { target: document.body });
+      await vi.waitFor(() => expect(button("Review approval").disabled).toBe(false));
+      button("Review approval").click();
+      await vi.waitFor(() => expect(button("Approve").disabled).toBe(false));
+      button("Approve").click();
+      await vi.waitFor(() => expect(button("Execute approved change").disabled).toBe(false));
+      button("Execute approved change").click();
+      await vi.waitFor(() => expect(button("Start a new action").disabled).toBe(false));
+      button("Start a new action").click();
+      await vi.waitFor(() => expect(document.body.textContent).toContain("Ready for a new action"));
+      await enterWrite();
+      await vi.waitFor(() => expect(keyToApproval.size).toBe(2));
+      expect([...keyToApproval.keys()][1]).not.toBe(firstKey);
+      expect(writes).toBe(1);
     } finally { await unmount(app); }
   });
   it.each(["destructive", "unknown"])(

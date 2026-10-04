@@ -57,6 +57,31 @@ describe("Linear browser action identity", () => {
     expect(await reloaded.key("demo.write", "workspace-A", "connection-A", params)).not.toBe(original);
   });
 
+  it("releases only the settled key when an approval response was lost", async () => {
+    let next = 0;
+    const values = new Map<string, string>();
+    const storage = () => ({ getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+      removeItem: (key: string) => { values.delete(key); },
+      get length() { return values.size; },
+      key: (index: number) => [...values.keys()][index] ?? null });
+    const make = () => createLinearActionKeys(() => `action-${++next}`, storage, "connected tool");
+    const first = make();
+    const old = await first.key("demo.write", "workspace-A", "connection-A", { title: "first" });
+    const unrelated = await first.key("demo.write", "workspace-A", "connection-A", { title: "second" });
+    const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256",
+      new TextEncoder().encode(old)))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    const reloaded = make();
+    await expect(reloaded.resetApprovalAfterSettlement("approval-A",
+      async () => ({ id: "approval-A", status: "uncertain", actionKeyDigest: digest }))).rejects.toThrow();
+    expect(await reloaded.key("demo.write", "workspace-A", "connection-A", { title: "first" })).toBe(old);
+    expect(await reloaded.resetApprovalAfterSettlement("approval-A",
+      async () => ({ id: "approval-A", status: "consumed", actionKeyDigest: digest }))).toBe(true);
+    expect(await reloaded.key("demo.write", "workspace-A", "connection-A", { title: "first" })).not.toBe(old);
+    expect(await reloaded.key("demo.write", "workspace-A", "connection-A", { title: "second" }))
+      .toBe(unrelated);
+  });
+
   it.each(["linear.issues.create", "linear.issues.update"])(
     "keeps a live %s key through replay and resets only after settlement", async (toolId) => {
       let next = 0;

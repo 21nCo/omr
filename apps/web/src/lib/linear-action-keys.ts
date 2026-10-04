@@ -14,7 +14,8 @@ export function linearApprovalNotice(status: string): string {
 
 /** Keep retry identities across a browser reload without storing issue text. */
 export function createLinearActionKeys(makeKey: () => string,
-  storage?: () => Pick<Storage, "getItem" | "setItem" | "removeItem">,
+  storage?: () => Pick<Storage, "getItem" | "setItem" | "removeItem"> &
+    Partial<Pick<Storage, "key" | "length">>,
   provider = "Linear") {
   const current = new Map<string, string>();
   const approvalIdentities = new Map<string, string>();
@@ -28,6 +29,30 @@ export function createLinearActionKeys(makeKey: () => string,
     return `${PREFIX}${[...new Uint8Array(digest)]
       .map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
   };
+  /** Match a server-confirmed approval to an exact retained key without storing arguments. */
+  const identityForKeyDigest = async (digest: string): Promise<string | undefined> => {
+    if (!/^[0-9a-f]{64}$/.test(digest)) return undefined;
+    const candidates = new Map(current);
+    try {
+      const saved = storage?.();
+      if (saved?.key && typeof saved.length === "number") {
+        for (let index = 0; index < saved.length; index++) {
+          const identity = saved.key(index);
+          if (identity && new RegExp(`^${PREFIX}[0-9a-f]{64}$`).test(identity)) {
+            const key = saved.getItem(identity);
+            if (key) candidates.set(identity, key);
+          }
+        }
+      }
+    } catch { /* Memory still covers this page if browser storage is denied. */ }
+    for (const [identity, key] of candidates) {
+      const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
+      const actual = [...new Uint8Array(bytes)]
+        .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      if (actual === digest) return identity;
+    }
+    return undefined;
+  };
   return {
     /** Associate a server approval with its secret-free fingerprint for reload recovery. */
     async bindApproval(approvalId: string, toolId: string, workspaceId: string,
@@ -39,7 +64,7 @@ export function createLinearActionKeys(makeKey: () => string,
     },
     /** Clear a write fingerprint only after a server-confirmed terminal status. */
     async resetApprovalAfterSettlement(approvalId: string,
-      probe: () => Promise<{ id: string; status: string }>,
+      probe: () => Promise<{ id: string; status: string; actionKeyDigest?: string }>,
       stillSelected: () => boolean = () => true): Promise<boolean> {
       const approval = await probe();
       if (approval.id !== approvalId) throw new Error("Approval changed. Check its status before another action.");
@@ -52,6 +77,9 @@ export function createLinearActionKeys(makeKey: () => string,
       if (!identity) {
         try { identity = storage?.().getItem(approvalStorageKey(approvalId)) ?? undefined; }
         catch { /* Recovery without browser storage is still safe. */ }
+      }
+      if (!identity && approval.actionKeyDigest) {
+        identity = await identityForKeyDigest(approval.actionKeyDigest);
       }
       if (!stillSelected()) return false;
       if (!identity || !new RegExp(`^${PREFIX}[0-9a-f]{64}$`).test(identity)) return false;

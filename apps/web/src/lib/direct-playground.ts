@@ -11,6 +11,7 @@ export type PlaygroundApproval = {
   action: string; effect: string; resources: { kind: string; parameter?: string }[];
   previewMode: "opaque" | "redacted" | "unavailable";
   expiresAt: number; executionReceiptId?: string | null;
+  actionKeyDigest?: string;
   browserActionable?: boolean;
 };
 export type PlaygroundReceipt = {

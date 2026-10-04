@@ -39,7 +39,8 @@ import {
 } from "./router.js";
 import { resolveScopedCatalog } from "./scoped-catalog.js";
 import { publicConnections, publicConnectionsAfterMutation } from "./connection-view.js";
-import { providerReconciliationReceipts, publicBrowserApproval, recoverProviderApproval, visibleApprovals } from "./reconciliation-receipts.js";
+import { providerReconciliationReceipts, publicBrowserApproval, publicBrowserApprovalStatus,
+  recoverProviderApproval, visibleApprovals } from "./reconciliation-receipts.js";
 
 type OMRBindings = Cloudflare.Env & {
   HYPERDRIVE?: { connectionString: string };
@@ -799,7 +800,7 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
       if (principal.kind === "web" && !workspaceId) throw new ApprovalUnavailableError();
       return withExecution(async (service, catalog) => {
         const approval = await service.approvalStatus(principal, approvalId);
-        return publicApproval(approval, catalog.get(approval.toolId));
+        return publicBrowserApprovalStatus(approval, catalog.get(approval.toolId), principal.kind === "web");
       });
     },
     async reconcileUncertain(request, approvalId, decision, workspaceId) {
@@ -869,7 +870,8 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
         });
         const connectionService = new PlugFnConnectionOrchestrator(connections.connections, plugfn.plugfn);
         const now = Date.now();
-        const [availableConnections, orphanedConnections, recentApprovals, outstandingProvider, recoveredApproval, executions] = await Promise.all([
+        const [availableConnections, orphanedConnections, recentApprovals, outstandingProvider,
+          outstandingBrowser, recoveredApproval, executions] = await Promise.all([
           connectionService.listAvailable({
             actorUserId: session.actorId,
             workspaceId: selected.workspace.id,
@@ -889,6 +891,12 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
             now,
             limit: 50,
           }),
+          activity.approvals.listOutstandingBrowserForActor({
+            actorUserId: session.actorId,
+            workspaceId: selected.workspace.id,
+            now,
+            limit: 50,
+          }),
           recoverProviderApproval(activity.approvals, recoveredApprovalId,
             selected.workspace.id, session.actorId, now),
           activity.receipts.listForActor({
@@ -897,7 +905,8 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
             limit: 50,
           }),
         ]);
-        const approvals = visibleApprovals(recentApprovals, outstandingProvider, recoveredApproval, now);
+        const approvals = visibleApprovals(recentApprovals,
+          [...outstandingProvider, ...outstandingBrowser], recoveredApproval, now);
         const approvalCatalog = await createPlugFnToolCatalog(plugfn.plugfn, configuredProviders(plugfn.plugfn));
         const reconciliationReceipts = await providerReconciliationReceipts(
           approvals, activity.receipts, selected.workspace.id, session.actorId);
