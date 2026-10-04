@@ -1,0 +1,18 @@
+apps/web/src/lib/linear-action-keys.ts
+  h_a39f9495f9ec1d 19,53-58
+apps/web/src/routes/app/playground/+page.svelte
+  h_a39f9495f9ec1d 16-17
+tests/acceptance/direct-playground-ui.test.ts
+  h_a39f9495f9ec1d 928-1030
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5dc8a22c5fdd03c4435c5c6893ed91e4fa6cff16",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
