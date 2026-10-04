@@ -126,6 +126,30 @@ describe("personal OpenRouter key vault", () => {
 });
 
 describe("OpenRouter validation", () => {
+  it("bounds chunked provider responses, cancels oversized streams, and releases the reader", async () => {
+    const body = JSON.stringify({ data: { is_management_key: false } });
+    const chunks = [body.slice(0, 10), body.slice(10)];
+    const validStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk));
+        controller.close();
+      },
+    });
+    await expect(validateOpenRouterKey(first, vi.fn(async () => new Response(validStream)) as typeof fetch))
+      .resolves.toBeUndefined();
+    expect(validStream.locked).toBe(false);
+
+    const cancel = vi.fn();
+    const oversizedStream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array(4097)); },
+      cancel,
+    });
+    await expect(validateOpenRouterKey(first, vi.fn(async () => new Response(oversizedStream)) as typeof fetch))
+      .rejects.toMatchObject({ code: "OPENROUTER_VALIDATION_UNAVAILABLE" });
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(oversizedStream.locked).toBe(false);
+  });
+
   it("rejects malformed and management keys without sending malformed values or exposing provider text", async () => {
     const fetcher = vi.fn(async () => fixtureResponse(200, { data: { is_management_key: true } }));
     await expect(validateOpenRouterKey("bad key", fetcher as typeof fetch)).rejects

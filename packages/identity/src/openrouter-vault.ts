@@ -76,7 +76,8 @@ async function readValidationBody(response: Response): Promise<unknown> {
     const chunks: Uint8Array[] = [];
     let size = 0;
     for (;;) {
-      const { done, value } = await reader.read();
+      // Sequential reads count each chunk before requesting another, preserving the 4096-byte limit.
+      const { done, value } = await reader.read(); // NOSONAR (typescript:S9382)
       if (done) break;
       size += value.byteLength;
       if (size > 4096) {
