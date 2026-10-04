@@ -1,0 +1,22 @@
+apps/web/src/lib/openrouter-settings.test.ts
+  h_a39f9495f9ec1d 26
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 83,224
+docs/decisions/dependencies.md
+  h_a39f9495f9ec1d 26-27
+docs/openrouter-vault.md
+  h_a39f9495f9ec1d 5
+packages/identity/src/openrouter-vault.ts
+  h_a39f9495f9ec1d 40,45
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cd25acf4d2f8a1755423026c18ee99ff9f4ad6be",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
