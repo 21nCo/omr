@@ -66,6 +66,10 @@ packages/execution/migrations/
 packages/plugfn-runtime/migrations/
 ```
 
+Personal OpenRouter vault rollout, dedicated database grants, secret rotation and
+rollback are described in [the vault plan](docs/openrouter-vault.md). Its settings
+route stays disabled until OMR-15 completes disposable live acceptance.
+
 Run focused package tests with `npm run test --workspace=<package-name>`. Set
 `OMR_TEST_DATABASE_URL` to a disposable PostgreSQL database to enable the real
 database isolation and transaction canaries.

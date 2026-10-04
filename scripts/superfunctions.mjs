@@ -150,7 +150,7 @@ function printStatus(status) {
 
 function installDependencies() {
   assertWorktree();
-  run("npm", ["ci"], { cwd: superfunctionsRoot });
+  run("npm", ["ci", "--ignore-scripts"], { cwd: superfunctionsRoot });
 }
 
 function buildPackages() {

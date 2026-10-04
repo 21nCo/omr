@@ -899,6 +899,7 @@
     <div class="account">
       <span>{overview?.actor.email ?? "Signed in"}</span>
       <a class="quiet" href="/app/clients">Client access</a>
+      <a class="quiet" href="/app/settings">Personal settings</a>
       <a class="quiet" href="/oauth/manage">MCP access</a>
       <button class="quiet" onclick={() => void signOut()} disabled={busy === "sign-out"}>Sign out</button>
     </div>
@@ -1406,10 +1407,10 @@
   :global(body) { margin: 0; color: #eeeee7; background: #0e0f0d; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
   :global(button), :global(input), :global(select) { font: inherit; }
   .shell { min-height: 100vh; background: radial-gradient(circle at 70% -10%, rgba(183, 215, 106, 0.1), transparent 28rem); }
-  header { display: flex; align-items: center; justify-content: space-between; min-height: 4.8rem; padding: 0 clamp(1rem, 4vw, 3.5rem); border-bottom: 1px solid #292c27; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 4.8rem; padding: 0 clamp(1rem, 4vw, 3.5rem); border-bottom: 1px solid #292c27; }
   .brand { display: flex; align-items: center; gap: 0.8rem; color: inherit; text-decoration: none; }
   .brand span { padding: 0.5rem 0.6rem; border-radius: 0.55rem; color: #10110f; background: #b7d76a; font-size: 0.78rem; font-weight: 900; letter-spacing: 0.06em; }
-  .account { display: flex; align-items: center; gap: 1rem; color: #8f9589; font-size: 0.86rem; }
+  .account { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: .5rem 1rem; color: #8f9589; font-size: 0.86rem; }
   main { width: min(100% - 2rem, 92rem); margin: 0 auto; padding: clamp(2rem, 5vw, 4rem) 0 5rem; }
   .hero { display: flex; align-items: end; justify-content: space-between; gap: 2rem; margin-bottom: 2.5rem; }
   .eyebrow, .kicker { margin: 0 0 0.45rem; color: #b7d76a; font-size: 0.72rem; font-weight: 850; letter-spacing: 0.15em; text-transform: uppercase; }
@@ -1476,6 +1477,8 @@
     .metrics { grid-template-columns: 1fr; }
   }
   @media (max-width: 620px) {
+    header { align-items: flex-start; flex-direction: column; padding-top: 1rem; padding-bottom: 1rem; }
+    .account { justify-content: flex-start; width: 100%; }
     .account > span { display: none; }
     .form-grid { grid-template-columns: 1fr; }
     .row { align-items: flex-start; flex-wrap: wrap; }

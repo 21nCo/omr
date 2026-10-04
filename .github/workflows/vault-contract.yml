@@ -1,0 +1,51 @@
+name: Vault contract
+
+on:
+  pull_request:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+jobs:
+  vault-contract:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: omr
+    env:
+      OMR_SUPERFUNCTIONS_WORKTREE: ${{ github.workspace }}/super-functions
+    steps:
+      - name: Check out OMR
+        uses: actions/checkout@v4
+        with:
+          path: omr
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: omr/package-lock.json
+      - name: Check out locked Super Functions revision
+        run: |
+          locked_sha="$(node -p "require('./superfunctions.lock.json').baseSha")"
+          git clone https://github.com/21nCo/super-functions.git "$OMR_SUPERFUNCTIONS_WORKTREE"
+          git -C "$OMR_SUPERFUNCTIONS_WORKTREE" switch -c omr/upstream "$locked_sha"
+          test "$(git -C "$OMR_SUPERFUNCTIONS_WORKTREE" rev-parse HEAD)" = "$locked_sha"
+      - name: Install and link locked dependencies
+        run: |
+          npm ci --ignore-scripts
+          npm run sf:install
+          npm run sf:build
+          npm run sf:link
+          npm run sf:smoke
+      - name: Prepare packages and run focused vault contract
+        run: |
+          npm run test:prepare
+          ./node_modules/.bin/vitest run packages/identity/src/openrouter-vault.test.ts apps/web/src/lib/openrouter-settings.test.ts apps/web/src/lib/server/openrouter-vault-route.test.ts
+      - name: Check types and build
+        run: |
+          npm run typecheck
+          npm run build

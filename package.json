@@ -12,7 +12,7 @@
     "dev": "npm run dev --workspace=@oh-my-router/web",
     "typecheck": "turbo run typecheck",
     "test": "npm run test:prepare && vitest run",
-    "test:prepare": "turbo run build --filter='./packages/*' && npm exec --workspace=@oh-my-router/web -- svelte-kit sync",
+    "test:prepare": "turbo run build --filter='./packages/*' && npm run sync --workspace=@oh-my-router/web",
     "test:phase-00": "vitest run tests/acceptance/phase-00.test.ts",
     "sf:status": "node scripts/superfunctions.mjs status",
     "sf:install": "node scripts/superfunctions.mjs install",
