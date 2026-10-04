@@ -1,0 +1,43 @@
+apps/web/src/lib/linear-action-keys.test.ts
+  h_a39f9495f9ec1d 60-84
+apps/web/src/lib/server/reconciliation-receipts.test.ts
+  h_a39f9495f9ec1d 8-22
+  h_a39f9495f9ec1d 25-56
+tests/acceptance/direct-playground-contract.test.ts
+  h_a39f9495f9ec1d 12,114-115,150-154
+apps/web/src/lib/server/reconciliation-receipts.ts
+  h_a39f9495f9ec1d 52-64
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 42-43,803
+  h_a39f9495f9ec1d 873-874,894-899,908-909
+apps/web/src/lib/direct-playground.ts
+  h_a39f9495f9ec1d 14
+apps/web/src/lib/linear-action-keys.ts
+  h_a39f9495f9ec1d 17-18,32-55,67,81-83
+tests/acceptance/browser-probe.mjs
+  h_a39f9495f9ec1d 27-30
+tests/acceptance/direct-playground-ui.test.ts
+  h_a39f9495f9ec1d 63-78,314-399
+tests/acceptance/browser-probe.check.mjs
+  h_a39f9495f9ec1d 29-34,39
+packages/execution/src/postgres.integration.test.ts
+  h_a39f9495f9ec1d 1222-1228,1234-1240
+  h_a39f9495f9ec1d 270-307
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 194-196
+packages/execution/src/postgres-approval-store.ts
+  h_a39f9495f9ec1d 694-708
+packages/execution/src/testing.ts
+  h_a39f9495f9ec1d 427-443
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "763bb35c17e836b585e899fb58fe15bd52451690",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
