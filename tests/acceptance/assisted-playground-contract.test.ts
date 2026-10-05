@@ -479,6 +479,51 @@ describe("assisted-playground-contract", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { status: "succeeded", expected: "answered", terminal: true },
+    { status: "failed", expected: "tool_error", terminal: true },
+    { status: "running", expected: "action_pending", terminal: false },
+    { status: "uncertain", expected: "action_pending", terminal: false },
+  ])("recovers a $status write receipt without its approval as a write", async ({ status, expected, terminal }) => {
+    let persistedReceipt = false;
+    const { services, fetcher, execute, requestApproval } = fixture({
+      discover: async () => [writeManifest],
+      lookupAction: async () => ({ approval: null,
+        receipt: persistedReceipt ? { id: "receipt_write", status } : null }),
+    });
+    await runAssistedTurn(request(), input, services);
+    persistedReceipt = true;
+    fetcher.mockClear();
+    const recovered = await runAssistedTurn(request(), input, services);
+    expect(recovered).toMatchObject({ status: expected, toolId: "demo.write",
+      receiptId: "receipt_write", usage: { totalTokens: 14 } });
+    expect(recovered.answer).toContain("write");
+    expect(recovered.answer).not.toContain("read");
+    expect(recovered).not.toHaveProperty("terminalFailure");
+    if (terminal) expect(recovered).toMatchObject({ terminalWrite: true });
+    else expect(recovered).not.toHaveProperty("terminalWrite");
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+    expect(requestApproval).toHaveBeenCalledOnce();
+  });
+
+  it("keeps an approval-present write on its approval path after receipt recovery", async () => {
+    let committed = false;
+    const { services, execute, requestApproval } = fixture({
+      discover: async () => [writeManifest],
+      lookupAction: async () => ({ approval: committed ? { id: "approval_one", status: "executing" } : null,
+        receipt: committed ? { id: "receipt_write", status: "running" } : null }),
+    });
+    await runAssistedTurn(request(), input, services);
+    committed = true;
+    const recovered = await runAssistedTurn(request(), input, services);
+    expect(recovered).toMatchObject({ status: "action_pending", toolId: "demo.write" });
+    expect(recovered.answer).toContain("approval");
+    expect(recovered).not.toHaveProperty("terminalWrite");
+    expect(execute).not.toHaveBeenCalled();
+    expect(requestApproval).toHaveBeenCalledOnce();
+  });
+
   it("replays saved parameters if cancellation lands before dispatch", async () => {
     const controller = new AbortController();
     let persisted: Awaited<ReturnType<AssistedPlaygroundServices["loadTurn"]>> = null;

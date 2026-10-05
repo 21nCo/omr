@@ -33,8 +33,10 @@ export type AssistedPlaygroundResult = {
   status: "answered" | "approval_required" | "tool_error" | "model_error" | "action_pending";
   answer: string; model: string; servedModels: string[]; toolId?: string;
   errorCode?: string; receiptId?: string; requestId?: string;
-  /** Only a confirmed failed read receipt permits a fresh identical request. */
+  /** A confirmed failed read permits a fresh identical request. */
   terminalFailure?: boolean;
+  /** A terminal write receipt requires an explicit, status-checked fresh intent. */
+  terminalWrite?: boolean;
   usageIncomplete?: boolean;
   approval?: PlaygroundApproval; receipt?: PlaygroundReceipt;
   usage: { promptTokens: number | null; completionTokens: number | null;

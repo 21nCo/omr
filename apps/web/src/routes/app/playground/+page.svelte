@@ -33,6 +33,8 @@
   let assistedPrompt = "";
   let assistedModel = "";
   let assistedResult: AssistedPlaygroundResult | null = null;
+  let assistedIntent: { workspaceId: string; connectionId: string; model: string;
+    prompt: string; requestId: string } | null = null;
   let assistedController: AbortController | null = null;
   let selectedAccount: PlaygroundConnection | undefined;
   $: selectedAccount = overview?.connections.find((item) => item.id === connectionId &&
@@ -56,6 +58,7 @@
     assistedController?.abort();
     assistedController = null;
     assistedResult = null;
+    assistedIntent = null;
   }
 
   /** Keep the model request bound to the currently selected workspace and account. */
@@ -66,6 +69,7 @@
     const controller = new AbortController();
     assistedController = controller;
     assistedResult = null;
+    assistedIntent = null;
     receipt = null;
     error = "";
     notice = "";
@@ -80,13 +84,14 @@
       }, controller.signal);
       if (turn !== generation || controller.signal.aborted) return;
       assistedResult = result;
+      assistedIntent = { workspaceId, connectionId: account.id, model, prompt, requestId };
       if (result.receipt) receipt = result.receipt;
       if (result.approval) {
         showApproval(result.approval);
         await actionKeys.bindApproval(result.approval.id, "assisted", workspaceId, account.id,
           { model, prompt });
       }
-      if (result.status === "answered" || result.status === "model_error" ||
+      if ((result.status === "answered" && !result.terminalWrite) || result.status === "model_error" ||
           (result.status === "tool_error" && result.terminalFailure)) {
         await actionKeys.reset("assisted", workspaceId, account.id, { model, prompt });
       }
@@ -135,7 +140,7 @@
           if (turn === generation) showApproval(recovered);
         }
         if (status.receipt && turn === generation) {
-          notice = `Read receipt ${status.receipt.id} is ${status.receipt.status}. Retry the same request to recover its saved action and usage.`;
+          notice = `Action receipt ${status.receipt.id} is ${status.receipt.status}. Retry the same request to recover its saved action and usage.`;
         }
       }
       const fresh = await request<PlaygroundOverview>(
@@ -436,6 +441,40 @@
     }
   }
 
+  /** A write whose approval row is gone still needs a fresh, confirmed user intent. */
+  async function newAssistedWrite() {
+    const result = assistedResult;
+    const intent = assistedIntent;
+    const account = currentConnection();
+    if (!result?.terminalWrite || !result.receiptId || !intent || approval || !account || busy || loading ||
+        intent.workspaceId !== workspaceId || intent.connectionId !== account.id) return;
+    const turn = generation;
+    busy = "Checking settlement…";
+    error = "";
+    try {
+      const requestId = await actionKeys.existingKey("assisted", intent.workspaceId,
+        intent.connectionId, { model: intent.model, prompt: intent.prompt });
+      if (requestId !== intent.requestId) throw new Error("The saved action changed. Reload and check its receipt.");
+      const state = await request<{ approval: { id: string; status: string } | null;
+        receipt: { id: string; status: string } | null }>(
+          `/api/playground/assisted/status?${new URLSearchParams({ workspaceId: intent.workspaceId, requestId })}`);
+      if (state.approval || state.receipt?.id !== result.receiptId ||
+          !["succeeded", "failed"].includes(state.receipt.status)) {
+        throw new Error("Write settlement is not confirmed. Check its approval and receipt before another action.");
+      }
+      if (turn !== generation || assistedResult !== result || assistedIntent !== intent ||
+          currentConnection()?.id !== account.id) return;
+      await actionKeys.reset("assisted", intent.workspaceId, intent.connectionId,
+        { model: intent.model, prompt: intent.prompt });
+      resetAction();
+      notice = "Ready for a new action. Review the account and request before sending it.";
+    } catch (caught) {
+      if (turn === generation) error = playgroundError(caught);
+    } finally {
+      if (turn === generation) busy = "";
+    }
+  }
+
   onMount(() => { void load(); });
 </script>
 
@@ -536,8 +575,14 @@
           output {assistedResult.usage.completionTokens ?? "unavailable"})
           · Cost{assistedResult.usageIncomplete ? " reported so far" : ""}: {assistedResult.usage.costUsd === null ? "unavailable" : `$${assistedResult.usage.costUsd.toFixed(6)}`}</p>
         {#if assistedResult.toolId}<p>Selected tool: <code>{assistedResult.toolId}</code></p>{/if}
+        {#if assistedResult.receiptId && !assistedResult.receipt}
+          <p>Receipt: <code>{assistedResult.receiptId}</code></p>
+        {/if}
         {#if assistedResult.errorCode}<p role="alert">Tool error: <code>{assistedResult.errorCode}</code>
           {#if assistedResult.receiptId} · Receipt: <code>{assistedResult.receiptId}</code>{/if}</p>{/if}
+        {#if assistedResult.terminalWrite && !approval}
+          <button type="button" disabled={!!busy || loading} onclick={() => void newAssistedWrite()}>Start a new action</button>
+        {/if}
       {/if}
     </section>
   {/if}

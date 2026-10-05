@@ -171,6 +171,20 @@ async function recoverTurn(request: Request, input: AssistedTurnInput,
   }
   if (action.approval) return { ...common, status: "action_pending" as const,
     answer: `The previous approval ${action.approval.id} is ${action.approval.status}. Review its status before another action.` };
+  if (action.receipt && outcome?.kind === "action" && outcome.effect === "write") {
+    const { id, status } = action.receipt;
+    if (status === "succeeded" || status === "failed") return { ...common,
+      status: status === "succeeded" ? "answered" as const : "tool_error" as const,
+      terminalWrite: true, receiptId: id,
+      answer: status === "succeeded"
+        ? `The previous write completed. Review receipt ${id} before starting another action.`
+        : `The previous write failed. Review receipt ${id} and verify the provider outcome before starting another action.` };
+    return { ...common, status: "action_pending" as const, receiptId: id,
+      answer: `The previous write receipt ${id} is ${status}. Verify its outcome before another action.` };
+  }
+  if (action.receipt && outcome?.kind !== "action") return { ...common,
+    status: "action_pending" as const, receiptId: action.receipt.id,
+    answer: `The previous action receipt ${action.receipt.id} is ${action.receipt.status}. Its saved kind is unavailable; review the receipt before another action.` };
   if (action.receipt?.status === "succeeded") return { ...common,
     ...await recoverReadResult(request, input, services, signal, binding, action.receipt.id) };
   if (action.receipt?.status === "failed") return { ...common,

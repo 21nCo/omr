@@ -919,6 +919,110 @@ describe("direct playground form", () => {
     } finally { await unmount(app); }
   });
 
+  it.each(["succeeded", "failed", "running", "uncertain"])(
+    "keeps a recovered %s write identity until explicit receipt settlement", async (receiptStatus) => {
+      const requestIds: string[] = [];
+      const terminal = receiptStatus === "succeeded" || receiptStatus === "failed";
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = String(input);
+        if (path.startsWith("/api/control-plane")) return Response.json(overview());
+        if (path.startsWith("/api/tools?")) return Response.json({ tools,
+          providers: [{ provider: "demo", state: "ready" }] });
+        if (path.startsWith("/api/playground/assisted/status")) return Response.json({
+          approval: null, receipt: { id: "receipt_write", status: receiptStatus } });
+        if (path === "/api/playground/assisted") {
+          requestIds.push(JSON.parse(String(init?.body)).requestId);
+          return Response.json({ status: receiptStatus === "failed" ? "tool_error"
+            : terminal ? "answered" : "action_pending", terminalWrite: terminal,
+            answer: `The previous write is ${receiptStatus}`, receiptId: "receipt_write",
+            model: "fixture/model", servedModels: ["fixture/served"], toolId: "demo.write",
+            usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2, costUsd: 0.00001 } });
+        }
+        return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const app = mount(Playground, { target: document.body,
+        props: { data: { assistedEnabled: true } as never } });
+      try {
+        await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value)
+          .toBe("connection_one"));
+        for (const [id, value] of [["assisted-model", "fixture/model"],
+          ["assisted-prompt", "Write fixture"]]) {
+          const field = document.getElementById(id) as HTMLInputElement;
+          field.value = value;
+          field.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+        button("Ask model").click();
+        await vi.waitFor(() => expect(document.body.textContent).toContain(`The previous write is ${receiptStatus}`));
+        button("Ask model").click();
+        await vi.waitFor(() => expect(requestIds).toHaveLength(2));
+        expect(requestIds[1]).toBe(requestIds[0]);
+        const start = [...document.querySelectorAll("button")].find((item) =>
+          item.textContent?.trim() === "Start a new action");
+        expect(!!start).toBe(terminal);
+        if (terminal) {
+          if (receiptStatus === "succeeded") {
+            const prompt = document.getElementById("assisted-prompt") as HTMLTextAreaElement;
+            prompt.value = "A different draft";
+            prompt.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+          start!.click();
+          await vi.waitFor(() => expect(document.body.textContent).toContain("Ready for a new action"));
+          if (receiptStatus === "succeeded") {
+            const prompt = document.getElementById("assisted-prompt") as HTMLTextAreaElement;
+            prompt.value = "Write fixture";
+            prompt.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+          button("Ask model").click();
+          await vi.waitFor(() => expect(requestIds).toHaveLength(3));
+          expect(requestIds[2]).not.toBe(requestIds[1]);
+        }
+      } finally { await unmount(app); }
+    });
+
+  it("refuses a fresh write identity when the receipt settlement probe disagrees", async () => {
+    const requestIds: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.startsWith("/api/control-plane")) return Response.json(overview());
+      if (path.startsWith("/api/tools?")) return Response.json({ tools,
+        providers: [{ provider: "demo", state: "ready" }] });
+      if (path.startsWith("/api/playground/assisted/status")) return Response.json({
+        approval: null, receipt: { id: "receipt_write", status: "uncertain" } });
+      if (path === "/api/playground/assisted") {
+        requestIds.push(JSON.parse(String(init?.body)).requestId);
+        return Response.json({ status: "answered", terminalWrite: true,
+          answer: "The previous write completed", receiptId: "receipt_write",
+          model: "fixture/model", servedModels: ["fixture/served"], toolId: "demo.write",
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2, costUsd: 0.00001 } });
+      }
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body,
+      props: { data: { assistedEnabled: true } as never } });
+    try {
+      await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value)
+        .toBe("connection_one"));
+      for (const [id, value] of [["assisted-model", "fixture/model"],
+        ["assisted-prompt", "Write fixture"]]) {
+        const field = document.getElementById(id) as HTMLInputElement;
+        field.value = value;
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+      button("Ask model").click();
+      await vi.waitFor(() => expect(button("Start a new action").disabled).toBe(false));
+      button("Start a new action").click();
+      await vi.waitFor(() => expect(document.querySelector("[role=alert]")?.textContent)
+        .toContain("not confirmed"));
+      button("Ask model").click();
+      await vi.waitFor(() => expect(requestIds).toHaveLength(2));
+      expect(requestIds[1]).toBe(requestIds[0]);
+    } finally { await unmount(app); }
+  });
+
   it("cancels an in-flight assisted request and does not render its late result", async () => {
     let release: ((response: Response) => void) | undefined;
     const requestIds: string[] = [];
