@@ -1,0 +1,26 @@
+apps/web/src/lib/direct-playground.ts
+  h_a39f9495f9ec1d 21
+apps/web/src/lib/server/assisted-playground.ts
+  h_a39f9495f9ec1d 69-97,189,248-249,370,372-388,560,565-566,571-572,576-577
+apps/web/src/lib/server/router.ts
+  h_a39f9495f9ec1d 2,570-583
+apps/web/src/routes/app/playground/+page.svelte
+  h_a39f9495f9ec1d 88-93,673-679,684-686
+docs/assisted-playground.md
+  h_a39f9495f9ec1d 44-47
+tests/acceptance/assisted-playground-contract.test.ts
+  h_a39f9495f9ec1d 242-243,356,377-381,388-471
+tests/acceptance/direct-playground-ui.test.ts
+  h_a39f9495f9ec1d 805,827-831,1046
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f3518fc0afdcfc62a8b96cc41b9a509c4449dffe",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
