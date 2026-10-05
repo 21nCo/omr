@@ -66,6 +66,35 @@ export async function assistedActionStatus(request: Request, input: {
   return services.lookupAction(request, input);
 }
 
+/** Explicit access to the full receipt, replayed through current execution policy. */
+export async function assistedFullReadReceipt(request: Request, input: {
+  workspaceId: string; requestId: string; receiptId: string },
+  services: AssistedPlaygroundServices) {
+  if (!services.enabled()) throw new AssistedPlaygroundError("ASSISTED_DISABLED", 404);
+  if (request.headers.has("authorization")) throw new AssistedPlaygroundError("ASSISTED_ORIGIN_DENIED", 403);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.requestId) ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(input.receiptId) || !input.workspaceId)
+    throw new AssistedPlaygroundError("ASSISTED_REQUEST_ID_INVALID", 400);
+  const signal = AbortSignal.any([request.signal, AbortSignal.timeout(ASSISTED_LIMITS.turnMs)]);
+  await untilAbort(services.authenticate(request), signal);
+  const binding = await untilAbort(services.loadTurn(request, input), signal);
+  if (binding?.outcome.kind !== "action" || binding.outcome.effect !== "read" || !binding.action)
+    throw new AssistedPlaygroundError("ASSISTED_RECEIPT_UNAVAILABLE", 404);
+  const action = await untilAbort(services.lookupAction(request, input), signal);
+  if (action.receipt?.id !== input.receiptId ||
+      !["succeeded", "failed"].includes(action.receipt.status))
+    throw new AssistedPlaygroundError("ASSISTED_RECEIPT_UNAVAILABLE", 404);
+  const receipt = await untilAbort(services.execute(request, {
+    workspaceId: input.workspaceId, connectionId: binding.action.connectionId,
+    toolId: binding.outcome.toolId, params: binding.action.params,
+    idempotencyKey: `assisted_${input.requestId}`,
+  }), signal);
+  const record = object(receipt);
+  if (record?.id !== input.receiptId || record.status !== action.receipt.status)
+    throw new AssistedPlaygroundError("ASSISTED_RECEIPT_UNAVAILABLE", 404);
+  return receipt;
+}
+
 function actionFailure(error: unknown) {
   const record = object(error);
   const code = typeof record?.code === "string" && /^[A-Z][A-Z0-9_]{1,79}$/.test(record.code)
@@ -157,7 +186,7 @@ async function recoverTurn(request: Request, input: AssistedTurnInput,
       const failed = object(receipt)?.status === "failed";
       return { ...common, status: succeeded ? "answered" as const
         : failed ? "tool_error" as const : "action_pending" as const,
-        ...(failed ? { terminalFailure: true } : {}), receipt, answer: succeeded
+        ...(failed ? { terminalFailure: true } : {}), receipt: projectReadReceipt(receipt), answer: succeeded
           ? "The selected read completed. Review its receipt; final answer generation was interrupted."
           : failed ? "The selected read did not complete. Review its receipt before another action."
             : "The selected read is still pending. Check its receipt before another action." };
@@ -216,8 +245,8 @@ async function recoverReadResult(request: Request, input: AssistedTurnInput,
     if (record?.status !== "succeeded" || record.id !== expectedReceiptId)
       return { status: "tool_error" as const, receiptId: expectedReceiptId,
         answer: "The read could not be recovered. Check its receipt." };
-    return { status: "answered" as const, receipt, receiptId: record.id,
-      answer: "The read completed. Its result is shown in the receipt below." };
+    return { status: "answered" as const, receipt: projectReadReceipt(receipt), receiptId: record.id,
+      answer: "The read completed. Review its bounded receipt preview or download the full receipt." };
   } catch (error) {
     if (signal.aborted) return { status: "action_pending" as const,
       answer: "The read receipt is being recovered. Retry this request shortly." };
@@ -338,8 +367,25 @@ export function safeResult(value: unknown, inputSensitiveKeys: readonly string[]
   };
   const encoded = JSON.stringify(redact(value, 0)) ?? "null";
   if (unsafeContent) return withheldResult;
+  const marker = "\n[TRUNCATED]";
   return encoded.length <= ASSISTED_LIMITS.resultChars ? encoded
-    : `${encoded.slice(0, ASSISTED_LIMITS.resultChars)}\n[TRUNCATED]`;
+    : `${encoded.slice(0, ASSISTED_LIMITS.resultChars - marker.length)}${marker}`;
+}
+
+/** The assisted response carries a bounded preview and receipt identity only. */
+function projectReadReceipt(receipt: unknown, sensitiveKeys: readonly string[] = []) {
+  const record = object(receipt);
+  if (!record) return null;
+  if (typeof record.id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(record.id) ||
+      !["reserved", "running", "succeeded", "failed", "uncertain"].includes(String(record.status)))
+    throw new AssistedPlaygroundError("ASSISTED_RECEIPT_INVALID", 502);
+  const preview = safeResult(record.result, sensitiveKeys);
+  return { id: record.id, status: record.status,
+    errorCode: typeof record.errorCode === "string" ? record.errorCode.slice(0, 80) : null,
+    result: preview === withheldResult ? null : preview,
+    resultWithheld: preview === withheldResult,
+    resultTruncated: preview.endsWith("\n[TRUNCATED]"),
+  };
 }
 
 /** One user turn: one model tool choice and one policy checked tool action. */
@@ -511,21 +557,24 @@ export async function runAssistedTurn(request: Request, input: AssistedTurnInput
             answer: failed ? "The tool did not complete. Check its receipt before retrying."
               : "The read may still be finishing. Check its receipt before retrying this request.",
             ...(failed ? { terminalFailure: true } : { requestId: input.requestId }),
-            toolId: chosen.manifest.id, receipt, model: input.model,
+            toolId: chosen.manifest.id, receipt: projectReadReceipt(receipt), model: input.model,
             servedModels: [choice.model], usage: choice.usage };
         }
         if (signal.aborted) return { status: "answered" as const,
           answer: "The tool completed, but preview generation was interrupted. Review the receipt.",
-          toolId: chosen.manifest.id, receipt, model: input.model,
+          toolId: chosen.manifest.id, receipt: projectReadReceipt(receipt,
+            chosen.manifest.contract.sensitiveKeys), model: input.model,
           servedModels: [choice.model], usage: choice.usage, usageIncomplete: true };
         const result = safeResult(publicResult.result, chosen.manifest.contract.sensitiveKeys);
         if (result === withheldResult) return { status: "answered" as const,
           answer: "The tool completed, but its result could not be safely previewed. Review the receipt.",
-          toolId: chosen.manifest.id, receipt, model: input.model,
+          toolId: chosen.manifest.id, receipt: projectReadReceipt(receipt,
+            chosen.manifest.contract.sensitiveKeys), model: input.model,
           servedModels: [choice.model], usage: choice.usage };
         return { status: "answered" as const,
           answer: `The read completed. Result preview: ${result.slice(0, 1600)}. Review the receipt for the full result.`,
-          toolId: chosen.manifest.id, receipt, model: input.model,
+          toolId: chosen.manifest.id, receipt: projectReadReceipt(receipt,
+            chosen.manifest.contract.sensitiveKeys), model: input.model,
           servedModels: [choice.model], usage: choice.usage };
       }), signal);
     } catch (error) {

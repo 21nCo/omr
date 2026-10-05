@@ -1,5 +1,5 @@
 import { createRouter, RouterError } from "@superfunctions/http";
-import { AssistedPlaygroundError, assistedActionStatus, type AssistedPlaygroundServices,
+import { AssistedPlaygroundError, assistedActionStatus, assistedFullReadReceipt, type AssistedPlaygroundServices,
   runAssistedTurn } from "./assisted-playground.js";
 import {
   CLIENT_CAPABILITIES,
@@ -567,6 +567,20 @@ export function createOMRRouter(
       return Response.json({ error: "INTERNAL_ERROR" }, { status: 500 });
     },
     routes: [
+      {
+        method: "GET",
+        path: "/api/playground/assisted/receipt",
+        handler: async (request) => {
+          if (!assistedPlaygroundServices) throw new RuntimeUnavailableError("Assisted playground is unavailable");
+          const query = new URL(request.url).searchParams;
+          return Response.json(await assistedFullReadReceipt(request, {
+            workspaceId: query.get("workspaceId") ?? "",
+            requestId: query.get("requestId") ?? "",
+            receiptId: query.get("receiptId") ?? "",
+          }, assistedPlaygroundServices), { headers: { ...PRIVATE_RESPONSE,
+            "content-disposition": "attachment; filename=assisted-receipt.json" } });
+        },
+      },
       {
         method: "GET",
         path: "/api/playground/assisted/status",

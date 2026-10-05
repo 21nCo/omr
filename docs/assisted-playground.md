@@ -41,5 +41,7 @@ acceptance is implied by the local fixtures.
 After a read, a bounded projection of short, plain prose and nonsensitive structured
 fields can appear in the local answer. Encoded, serialized, credential-labeled, or
 oversized text is withheld from that preview. No tool result is sent to OpenRouter.
-The authenticated execution receipt shows the full read result to the user, and the
-assisted response points to that receipt when a preview is withheld.
+The assisted response and recovery path include only a bounded, redacted receipt preview
+and its identifier. A separate download fetches the full receipt by its saved request ID
+through current authenticated execution policy. The browser never renders an unexpected
+unbounded result from the assisted response.

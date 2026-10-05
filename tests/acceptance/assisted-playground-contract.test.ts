@@ -239,7 +239,8 @@ describe("assisted-playground-contract", () => {
     execute.mockResolvedValueOnce({ id: "receipt_secret", status: "succeeded", result: resultValue });
     const result = await runAssistedTurn(request(), input, services);
     expect(result).toMatchObject({ status: "answered", receipt: {
-      id: "receipt_secret", result: resultValue }, usage: { totalTokens: 14 } });
+      id: "receipt_secret", result: null, resultWithheld: true }, usage: { totalTokens: 14 } });
+    expect(JSON.stringify(result)).not.toContain(value);
     expect(result.answer).toContain("could not be safely previewed");
     expect(fetcher).toHaveBeenCalledOnce();
     expect(safeResult(resultValue, [])).not.toContain(value);
@@ -352,7 +353,7 @@ describe("assisted-playground-contract", () => {
     const recovered = await runAssistedTurn(request(), input, services);
     expect(recovered).toMatchObject({ status: "answered", receiptId: "receipt_original",
       toolId: "demo.read", usage: { totalTokens: 14 },
-      receipt: { result: { title: "fixture" } } });
+      receipt: { result: '{"title":"fixture"}' } });
     expect(fetcher).not.toHaveBeenCalled();
     expect(execute).toHaveBeenCalledTimes(2);
     expect(execute.mock.calls[1]![1]).toEqual(execute.mock.calls[0]![1]);
@@ -373,15 +374,99 @@ describe("assisted-playground-contract", () => {
     fetcher.mockClear();
     const retry = await router.handle(request());
     expect(retry.status).toBe(200);
-    expect(await retry.json()).toMatchObject({
-      status: "answered", receipt: { id: "receipt_one",
-        result: { title: "fixture" } },
-      usage: { totalTokens: 14 },
-    });
+    const body = await retry.json();
+    expect(body).toMatchObject({ status: "answered", receipt: { id: "receipt_one" },
+      usage: { totalTokens: 14 } });
+    expect(body.receipt.result).toContain('"title":"fixture"');
+    expect(body.receipt.result).not.toContain("do not reveal");
     expect(fetcher).not.toHaveBeenCalled();
     expect(execute).toHaveBeenCalledTimes(2);
     expect(execute.mock.calls[1]![1].idempotencyKey)
       .toBe(`assisted_${input.requestId}`);
+  });
+
+  it("bounds nested receipt data on initial and recovered read responses", async () => {
+    let committed = false;
+    const fullResult = { pages: Array.from({ length: 100 }, (_, index) => ({
+      title: `Page ${index} ${"A ".repeat(150)}`, notes: { text: "Readable update ".repeat(25) },
+    })) };
+    const { services, execute, fetcher } = fixture({ lookupAction: async () => ({ approval: null,
+      receipt: committed ? { id: "receipt_large", status: "succeeded" } : null }) });
+    execute.mockResolvedValue({ id: "receipt_large", status: "succeeded", result: fullResult });
+    const router = createOMRRouter(undefined, undefined, undefined, undefined,
+      undefined, undefined, services);
+    const first = await router.handle(request());
+    committed = true;
+    const recovered = await router.handle(request());
+    for (const response of [first, recovered]) {
+      const body = await response.text();
+      const parsed = JSON.parse(body);
+      expect(body.length).toBeLessThan(ASSISTED_LIMITS.resultChars + 3000);
+      expect(parsed.receipt).toMatchObject({ id: "receipt_large", status: "succeeded",
+        resultTruncated: true });
+      expect(parsed.receipt.result.length).toBeLessThanOrEqual(ASSISTED_LIMITS.resultChars);
+      expect(body).not.toContain("Page 99");
+    }
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it.each(["running", "failed"])("bounds a %s read receipt and keeps its identity", async (status) => {
+    const { services, execute } = fixture();
+    execute.mockResolvedValue({ id: "receipt_large", status,
+      result: { pages: Array.from({ length: 100 }, () => ({ title: "A ".repeat(150) })) } });
+    const result = await runAssistedTurn(request(), input, services);
+    expect(result).toMatchObject({ status: status === "failed" ? "tool_error" : "action_pending",
+      receipt: { id: "receipt_large", status } });
+    expect(JSON.stringify(result).length).toBeLessThan(ASSISTED_LIMITS.resultChars + 3000);
+    if (status === "failed") expect(result).toMatchObject({ terminalFailure: true });
+    else expect(result).toMatchObject({ requestId: input.requestId });
+  });
+
+  it("downloads a full read receipt only through the saved user and current execution policy", async () => {
+    let user = "alice";
+    let allowed = true;
+    let committed = false;
+    const fullResult = { pages: Array.from({ length: 100 }, () => "A".repeat(400)) };
+    const { services, execute } = fixture({
+      authenticate: async () => user,
+      lookupAction: async () => ({ approval: null,
+        receipt: committed ? { id: "receipt_full", status: "succeeded" } : null }),
+    });
+    execute.mockImplementation(async () => {
+      if (!allowed) throw Object.assign(new Error("denied"), { code: "EXECUTION_CAPABILITY_DENIED" });
+      return { id: "receipt_full", status: "succeeded", result: fullResult };
+    });
+    await runAssistedTurn(request(), input, services);
+    committed = true;
+    const router = createOMRRouter(undefined, undefined, undefined, undefined,
+      undefined, undefined, services);
+    const url = `https://omr.invalid/api/playground/assisted/receipt?workspaceId=mine&requestId=${input.requestId}&receiptId=receipt_full`;
+    const response = await router.handle(new Request(url));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-disposition")).toContain("attachment");
+    expect(await response.json()).toMatchObject({ id: "receipt_full", result: fullResult });
+    user = "bob";
+    expect((await router.handle(new Request(url))).status).toBe(404);
+    user = "alice";
+    allowed = false;
+    expect((await router.handle(new Request(url))).status).not.toBe(200);
+    expect((await router.handle(new Request(url.replace("receipt_full", "receipt_other")))).status)
+      .toBe(404);
+  });
+
+  it("does not expose a write receipt through the read download route", async () => {
+    let committed = false;
+    const { services, execute } = fixture({ discover: async () => [writeManifest],
+      lookupAction: async () => ({ approval: null,
+        receipt: committed ? { id: "receipt_write", status: "succeeded" } : null }) });
+    await runAssistedTurn(request(), input, services);
+    committed = true;
+    const router = createOMRRouter(undefined, undefined, undefined, undefined,
+      undefined, undefined, services);
+    const response = await router.handle(new Request(
+      `https://omr.invalid/api/playground/assisted/receipt?workspaceId=mine&requestId=${input.requestId}&receiptId=receipt_write`));
+    expect(response.status).toBe(404);
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it("marks only a confirmed failed read receipt as terminal across lost responses", async () => {

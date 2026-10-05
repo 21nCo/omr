@@ -85,7 +85,12 @@
       if (turn !== generation || controller.signal.aborted) return;
       assistedResult = result;
       assistedIntent = { workspaceId, connectionId: account.id, model, prompt, requestId };
-      if (result.receipt) receipt = result.receipt;
+      if (result.receipt) {
+        // Assisted receipts use a bounded string preview; never render an unexpected full result.
+        const preview = result.receipt.result;
+        receipt = preview === null || (typeof preview === "string" && preview.length <= 8000)
+          ? result.receipt : { ...result.receipt, result: null, resultTruncated: true };
+      }
       if (result.approval) {
         showApproval(result.approval);
         await actionKeys.bindApproval(result.approval.id, "assisted", workspaceId, account.id,
@@ -665,11 +670,20 @@
     <section aria-label="Execution result">
       <h2>Result · {receipt.status}</h2>
       <p>Receipt: <code>{receipt.id}</code></p>
+      {#if assistedResult?.receipt?.id === receipt.id && assistedIntent &&
+          ["succeeded", "failed"].includes(receipt.status)}
+        <a href={`/api/playground/assisted/receipt?${new URLSearchParams({
+          workspaceId: assistedIntent.workspaceId, requestId: assistedIntent.requestId,
+          receiptId: receipt.id,
+        })}`} download="assisted-receipt.json">Download full authorized receipt</a>
+      {/if}
       {#if receipt.errorCode}<p>Error code: <code>{receipt.errorCode}</code></p>{/if}
       {#if receipt.status === "failed" || receipt.status === "uncertain" || receipt.errorCode}
         <p role="alert">Check this receipt and account health in the <a href="/app">control plane</a>. Verify the provider outcome before retrying a write.</p>
       {/if}
-      {#if receipt.result !== null}<pre>{JSON.stringify(receipt.result, null, 2)}</pre>{/if}
+      {#if receipt.resultWithheld}<p>Result preview withheld. Download the full authorized receipt to inspect it.</p>{/if}
+      {#if receipt.resultTruncated}<p>Result preview truncated. Download the full authorized receipt to inspect it.</p>{/if}
+      {#if receipt.result !== null}<pre>{typeof receipt.result === "string" ? receipt.result : JSON.stringify(receipt.result, null, 2)}</pre>{/if}
     </section>
   {/if}
 </main>

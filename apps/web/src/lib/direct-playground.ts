@@ -18,6 +18,7 @@ export type PlaygroundApproval = {
 };
 export type PlaygroundReceipt = {
   id: string; status: string; result: unknown; errorCode: string | null;
+  resultWithheld?: boolean; resultTruncated?: boolean;
 };
 export type PlaygroundOverview = {
   workspaces: { workspace: { id: string; name: string } }[];

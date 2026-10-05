@@ -802,7 +802,7 @@ describe("direct playground form", () => {
         return Response.json({ status: "answered", answer: "Fixture found.", model: "fixture/model",
           servedModels: ["fixture/served"], toolId: "demo.read",
           usage: { promptTokens: 10, completionTokens: 4, totalTokens: 14, costUsd: 0.00002 },
-          receipt: { id: "receipt_assisted", status: "succeeded", result: { title: "fixture" },
+          receipt: { id: "receipt_assisted", status: "succeeded", result: "oversized private item ".repeat(5000),
             errorCode: null } });
       }
       return Response.json({ error: "NOT_FOUND" }, { status: 404 });
@@ -824,6 +824,11 @@ describe("direct playground form", () => {
       expect(document.body.textContent).toContain("Tokens: 14");
       expect(document.body.textContent).toContain("$0.000020");
       expect(document.body.textContent).toContain("receipt_assisted");
+      expect(document.querySelector("[aria-label='Execution result']")?.textContent)
+        .toContain("Result preview truncated");
+      expect(document.body.textContent).not.toContain("oversized private item");
+      expect(document.querySelector<HTMLAnchorElement>("a[download='assisted-receipt.json']")?.href)
+        .toContain("receiptId=receipt_assisted");
       expect(document.querySelector("input[type=password]")).toBeNull();
       await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
       button("Ask model").click();
@@ -1038,7 +1043,7 @@ describe("direct playground form", () => {
             answer: "The read completed. Its result is shown in the receipt below.",
             receiptId: "receipt_recovered",
             receipt: { id: "receipt_recovered", status: "succeeded",
-              result: { title: "Recovered private item" }, errorCode: null },
+              result: '{"title":"Recovered private item"}', errorCode: null },
             model: "fixture/model",
             servedModels: ["fixture/served"], usage: { promptTokens: 1,
               completionTokens: 1, totalTokens: 2, costUsd: 0.00001 } });
