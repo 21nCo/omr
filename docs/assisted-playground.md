@@ -1,6 +1,6 @@
 # Bounded assisted playground
 
-OMR-14 adds a single OpenRouter tool choice and, after one read, an optional short answer.
+OMR-14 adds a single OpenRouter tool choice and, after one read, a local result preview.
 Writes stop at the existing approval; execution still uses the direct approval UI.
 `OMR_ASSISTED_PLAYGROUND_ENABLED` remains off until OMR-15's staged personal-key and
 connected-provider acceptance. Direct playground use has a separate flag.
@@ -37,3 +37,9 @@ typecheck and build. OMR-15 owns observed Railway PostgreSQL migration and permi
 OpenRouter and connected-provider sandbox behavior, Cloudflare Preview deadline and
 limits, and authenticated Aside Browser recovery with a personal test key. No live
 acceptance is implied by the local fixtures.
+
+After a read, a bounded projection of short, plain prose and nonsensitive structured
+fields can appear in the local answer. Encoded, serialized, credential-labeled, or
+oversized text is withheld from that preview. No tool result is sent to OpenRouter.
+The authenticated execution receipt shows the full read result to the user, and the
+assisted response points to that receipt when a preview is withheld.
