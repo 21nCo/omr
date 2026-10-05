@@ -874,6 +874,8 @@ describe("direct playground form", () => {
         await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
         button("Ask model").click();
         await vi.waitFor(() => expect(document.body.textContent).toContain("Check read receipt"));
+        const receiptLink = document.querySelector<HTMLAnchorElement>("a[download='assisted-receipt.json']");
+        expect(receiptLink?.href?.includes("receiptId=receipt_read") ?? false).toBe(terminalFailure);
         await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
         button("Ask model").click();
         await vi.waitFor(() => expect(requestIds).toHaveLength(2));
@@ -918,6 +920,9 @@ describe("direct playground form", () => {
       await vi.waitFor(() => expect(requestIds).toHaveLength(2));
       expect(requestIds[1]).toBe(requestIds[0]);
       await vi.waitFor(() => expect(document.body.textContent).toContain("The previous read failed"));
+      const receiptLink = document.querySelector<HTMLAnchorElement>("a[download='assisted-receipt.json']");
+      expect(receiptLink?.href).toContain(`requestId=${requestIds[1]}`);
+      expect(receiptLink?.href).toContain("receiptId=receipt_failed");
       button("Ask model").click();
       await vi.waitFor(() => expect(requestIds).toHaveLength(3));
       expect(requestIds[2]).not.toBe(requestIds[1]);
@@ -963,6 +968,7 @@ describe("direct playground form", () => {
         button("Ask model").click();
         await vi.waitFor(() => expect(requestIds).toHaveLength(2));
         expect(requestIds[1]).toBe(requestIds[0]);
+        expect(document.querySelector("a[download='assisted-receipt.json']")).toBeNull();
         const start = [...document.querySelectorAll("button")].find((item) =>
           item.textContent?.trim() === "Start a new action");
         expect(!!start).toBe(terminal);
@@ -1076,6 +1082,8 @@ describe("direct playground form", () => {
         .toContain("Recovered private item"));
       expect(document.querySelector("[aria-label='Execution result']")?.textContent)
         .toContain("receipt_recovered");
+      expect(document.querySelector<HTMLAnchorElement>("a[download='assisted-receipt.json']")?.href)
+        .toContain("receiptId=receipt_recovered");
       expect(requestIds).toHaveLength(2);
       expect(requestIds[1]).toBe(requestIds[0]);
     } finally { await unmount(app); }

@@ -258,6 +258,10 @@ describe("assisted-playground-contract", () => {
     { source: "Notion numeric title", field: "title", value: "0000" },
     { source: "GitHub numeric body", field: "body", value: "9876" },
     { source: "generic nested numeric note", field: "note", value: "1234" },
+    { source: "Slack embedded sign-in code", field: "text", value: "Use 1234 to sign in" },
+    { source: "Notion embedded code", field: "title", value: "Enter 4321 to continue" },
+    { source: "GitHub embedded login number", field: "body", value: "Your login number is 9876" },
+    { source: "generic embedded unlock code", field: "note", value: "Use 0000 to unlock" },
     { source: "generic identifier", field: "description", value: "apiKey123" },
     { source: "generic verification note", field: "note", value: "Your verification code is 123456" },
     { source: "generic mixed-case value", field: "note", value: "AbCdEfGhIjKlMnOp" },
@@ -658,26 +662,42 @@ describe("assisted-playground-contract", () => {
       .toBe(404);
   });
 
-  it("downloads a failed read receipt without replaying the failed provider call", async () => {
+  it("downloads an initial or recovered failed read receipt only with current access and no redispatch", async () => {
     let committed = false;
+    let user = "alice";
+    let allowed = true;
     const { services, execute, readReceipt } = fixture({
+      authenticate: async () => user,
       lookupAction: async () => ({ approval: null,
         receipt: committed ? { id: "receipt_failed", status: "failed" } : null }),
     });
     execute.mockResolvedValue({ id: "receipt_failed", status: "failed", errorCode: "READ_FAILED" });
-    readReceipt.mockResolvedValue({ id: "receipt_failed", status: "failed", errorCode: "READ_FAILED",
-      result: null });
-    await runAssistedTurn(request(), input, services);
+    readReceipt.mockImplementation(async () => {
+      if (!allowed) throw Object.assign(new Error("denied"), { code: "EXECUTION_CAPABILITY_DENIED" });
+      return { id: "receipt_failed", status: "failed", errorCode: "READ_FAILED", result: null };
+    });
+    const initial = await runAssistedTurn(request(), input, services);
+    expect(initial).toMatchObject({ status: "tool_error", terminalFailure: true,
+      receipt: { id: "receipt_failed", status: "failed" } });
     committed = true;
+    const recovered = await runAssistedTurn(request(), input, services);
+    expect(recovered).toMatchObject({ status: "tool_error", terminalFailure: true,
+      receiptId: "receipt_failed" });
     const router = createOMRRouter(undefined, undefined, undefined, undefined,
       undefined, undefined, services);
-    const response = await router.handle(new Request(
-      `https://omr.invalid/api/playground/assisted/receipt?workspaceId=mine&requestId=${input.requestId}&receiptId=receipt_failed`));
+    const url = `https://omr.invalid/api/playground/assisted/receipt?workspaceId=mine&requestId=${input.requestId}&receiptId=receipt_failed`;
+    const response = await router.handle(new Request(url));
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ id: "receipt_failed", status: "failed",
       errorCode: "READ_FAILED" });
     expect(execute).toHaveBeenCalledOnce();
     expect(readReceipt).toHaveBeenCalledOnce();
+    user = "bob";
+    expect((await router.handle(new Request(url))).status).toBe(404);
+    user = "alice";
+    allowed = false;
+    expect((await router.handle(new Request(url))).status).not.toBe(200);
+    expect(execute).toHaveBeenCalledOnce();
   });
 
   it("uses saved manifest sensitivity in recovered previews and withholds legacy previews", async () => {

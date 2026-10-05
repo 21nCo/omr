@@ -582,6 +582,12 @@
         {#if assistedResult.toolId}<p>Selected tool: <code>{assistedResult.toolId}</code></p>{/if}
         {#if assistedResult.receiptId && !assistedResult.receipt}
           <p>Receipt: <code>{assistedResult.receiptId}</code></p>
+          {#if assistedResult.terminalFailure && assistedIntent}
+            <a href={`/api/playground/assisted/receipt?${new URLSearchParams({
+              workspaceId: assistedIntent.workspaceId, requestId: assistedIntent.requestId,
+              receiptId: assistedResult.receiptId,
+            })}`} download="assisted-receipt.json">Download full authorized receipt</a>
+          {/if}
         {/if}
         {#if assistedResult.errorCode}<p role="alert">Tool error: <code>{assistedResult.errorCode}</code>
           {#if assistedResult.receiptId} · Receipt: <code>{assistedResult.receiptId}</code>{/if}</p>{/if}
