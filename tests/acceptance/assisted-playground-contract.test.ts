@@ -276,6 +276,12 @@ describe("assisted-playground-contract", () => {
     { source: "generic identifier", field: "description", value: "apiKey123" },
     { source: "generic verification note", field: "note", value: "Your verification code is 123456" },
     { source: "generic mixed-case value", field: "note", value: "AbCdEfGhIjKlMnOp" },
+    { source: "Slack security answer", field: "text", value: "Security answer is bluebird" },
+    { source: "Notion recovery answer", field: "title", value: "Recovery answer is bluebird" },
+    { source: "GitHub challenge response", field: "body", value: "Challenge response is bluebird" },
+    { source: "nested generic memorable word", field: "note", value: "Memorable word is bluebird" },
+    { source: "nested generic maiden name", field: "note", value: "Mother's maiden name is bluebird" },
+    { source: "joined security label", field: "note", value: "securityanswer is bluebird" },
     { source: "Slack numeric text", field: "text", value: 123456 },
   ])("withholds credential-like $source on initial and recovered reads", async ({ field, value }) => {
     let committed = false;
@@ -317,6 +323,15 @@ describe("assisted-playground-contract", () => {
     }
     expect(fetcher).toHaveBeenCalledOnce();
     expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("withholds account challenge answers stored under provider field names", () => {
+    for (const field of ["securityAnswer", "recoveryAnswer", "challengeResponse",
+      "memorableWordHint", "maidenNameQuestion"]) {
+      const preview = safeResult({ note: "Review FAQ for details", [field]: "bluebird" }, []);
+      expect(preview).toContain("Review FAQ for details");
+      expect(preview).not.toContain("bluebird");
+    }
   });
 
   it.each([
@@ -379,7 +394,11 @@ describe("assisted-playground-contract", () => {
     { source: "Notion title", status: "failed", field: "title", secret: "Enter QRS to proceed" },
     { source: "GitHub body", status: "running", field: "body", secret: "Use 123 to continue" },
     { source: "nested note", status: "failed", field: "note", secret: "Enter A7B to proceed" },
-  ])("withholds short codes in an initial $status $source receipt and its recovery",
+    { source: "Slack security answer", status: "running", field: "text", secret: "Security answer is bluebird" },
+    { source: "Notion recovery answer", status: "failed", field: "title", secret: "Recovery answer is bluebird" },
+    { source: "GitHub challenge response", status: "running", field: "body", secret: "Challenge response is bluebird" },
+    { source: "nested memorable word", status: "failed", field: "note", secret: "Memorable word is bluebird" },
+  ])("withholds unsafe values in an initial $status $source receipt and its recovery",
     async ({ status, field, secret }) => {
       let committed = false;
       const { services, execute, fetcher } = fixture({ lookupAction: async () => ({ approval: null,

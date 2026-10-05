@@ -335,7 +335,7 @@ async function modelCall(fetcher: typeof fetch, key: string, model: string,
 
 /** Only a small, plain-text projection of an untrusted result may enter the answer. */
 const withheldResult = "[WITHHELD_UNSAFE_TOOL_RESULT]";
-const sensitiveOutputKey = /(?:token|secret|password|key|authorization|credential|private|passphrase|cookie|session|verification|passcode|code|pin|otp)/i;
+const sensitiveOutputKey = /(?:token|secret|password|key|authorization|credential|private|passphrase|cookie|session|verification|passcode|code|pin|otp|security|recovery|backup|challenge|response|answer|memorable|maiden|question|hint)/i;
 // Provider object keys are untrusted content too. Only fixed, ordinary field
 // labels enter a preview; every other label gets a position-based replacement.
 const previewFieldNames = new Set(["pages", "content", "text", "title", "body",
@@ -344,8 +344,11 @@ const previewFieldNames = new Set(["pages", "content", "text", "title", "body",
 // Long credential markers are unsafe even when a provider glues them to other
 // letters or digits (for example, "hunter2password" or "token4321"). Short,
 // common words still need word boundaries to preserve ordinary prose.
-const credentialMarker = /(?:password|passphrase|credential|authorization|bearer|cookie|session|private|secret|token)/i;
-const sensitiveWord = /\b(?:api|access|refresh|client|auth|key|verification|verify|passcode|code|otp|pin|cvv|cvc|login|unlock)\b|\b(?:sign|log)\s+in\b/i;
+const credentialMarker = /(?:password|passphrase|credential|authorization|bearer|cookie|session|private|secret|token|security|recovery|backup|challenge|memorable|maiden)/i;
+// Natural-language answers to account challenges are credentials even when the
+// answer itself looks like an ordinary lowercase word. Check the context before
+// admitting any of that prose into an assisted preview.
+const sensitiveWord = /\b(?:api|access|refresh|client|auth|key|verification|verify|passcode|code|otp|pin|cvv|cvc|login|unlock|security|recovery|recover|backup|challenge|response|answer|memorable|maiden|question|hint|mother|father|birthplace|birthdate)\b|\b(?:sign|log)\s+in\b/i;
 // A mixed letter/number word can be a credential with no separator. A bare
 // number of any length can be a security code; only labeled years are admitted.
 // Arbitrary uppercase words are indistinguishable from short letter-only
