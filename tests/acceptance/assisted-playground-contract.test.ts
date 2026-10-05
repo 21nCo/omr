@@ -268,6 +268,11 @@ describe("assisted-playground-contract", () => {
     { source: "generic short code", field: "note", value: "Enter 789 to proceed" },
     { source: "generic one-digit code", field: "note", value: "Enter 7 to proceed" },
     { source: "generic alphanumeric code", field: "note", value: "Enter A7B to proceed" },
+    { source: "Slack uppercase code", field: "text", value: "Enter ABC to proceed" },
+    { source: "Notion uppercase code", field: "title", value: "Enter QRS to proceed" },
+    { source: "GitHub uppercase code", field: "body", value: "Your sign in code is XYZ" },
+    { source: "nested generic uppercase code", field: "note", value: "Review WXY for details" },
+    { source: "ordinary word used as a code", field: "note", value: "Enter FAQ to proceed" },
     { source: "generic identifier", field: "description", value: "apiKey123" },
     { source: "generic verification note", field: "note", value: "Your verification code is 123456" },
     { source: "generic mixed-case value", field: "note", value: "AbCdEfGhIjKlMnOp" },
@@ -369,24 +374,29 @@ describe("assisted-playground-contract", () => {
     expect(execute).toHaveBeenCalledOnce();
   });
 
-  it.each(["running", "failed"])("withholds short codes in an initial %s receipt and its recovery", async (status) => {
-    let committed = false;
-    const secret = "Enter 123 to proceed";
-    const { services, execute, fetcher } = fixture({ lookupAction: async () => ({ approval: null,
-      receipt: committed ? { id: "receipt_one", status } : null }) });
-    execute.mockResolvedValue({ id: "receipt_one", status,
-      result: { text: secret, title: "Roadmap is ready" } });
-    const initial = await runAssistedTurn(request(), input, services);
-    committed = true;
-    const recovered = await runAssistedTurn(request(), input, services);
-    expect(initial).toMatchObject({ status: status === "failed" ? "tool_error" : "action_pending",
-      receipt: { id: "receipt_one", result: null, resultWithheld: true } });
-    expect(recovered).toMatchObject({ status: status === "failed" ? "tool_error" : "action_pending",
-      receiptId: "receipt_one" });
-    for (const response of [initial, recovered]) expect(JSON.stringify(response)).not.toContain(secret);
-    expect(fetcher).toHaveBeenCalledOnce();
-    expect(execute).toHaveBeenCalledOnce();
-  });
+  it.each([
+    { source: "Slack text", status: "running", field: "text", secret: "Enter ABC to proceed" },
+    { source: "Notion title", status: "failed", field: "title", secret: "Enter QRS to proceed" },
+    { source: "GitHub body", status: "running", field: "body", secret: "Use 123 to continue" },
+    { source: "nested note", status: "failed", field: "note", secret: "Enter A7B to proceed" },
+  ])("withholds short codes in an initial $status $source receipt and its recovery",
+    async ({ status, field, secret }) => {
+      let committed = false;
+      const { services, execute, fetcher } = fixture({ lookupAction: async () => ({ approval: null,
+        receipt: committed ? { id: "receipt_one", status } : null }) });
+      execute.mockResolvedValue({ id: "receipt_one", status,
+        result: { pages: [{ content: { [field]: secret } }], title: "Roadmap is ready" } });
+      const initial = await runAssistedTurn(request(), input, services);
+      committed = true;
+      const recovered = await runAssistedTurn(request(), input, services);
+      expect(initial).toMatchObject({ status: status === "failed" ? "tool_error" : "action_pending",
+        receipt: { id: "receipt_one", result: null, resultWithheld: true } });
+      expect(recovered).toMatchObject({ status: status === "failed" ? "tool_error" : "action_pending",
+        receiptId: "receipt_one" });
+      for (const response of [initial, recovered]) expect(JSON.stringify(response)).not.toContain(secret);
+      expect(fetcher).toHaveBeenCalledOnce();
+      expect(execute).toHaveBeenCalledOnce();
+    });
 
   it.each(["running", "failed"])("removes provider object keys from a %s read receipt", async (status) => {
     let committed = false;
@@ -410,7 +420,7 @@ describe("assisted-playground-contract", () => {
     let committed = false;
     const resultValue = { slack: { text: "Release 2026 is ready" },
       notion: { title: "Roadmap is ready" }, github: { body: "Review complete" },
-      note: "The milestone is ready" };
+      note: "The milestone is ready", description: "Review FAQ for details" };
     const { services, execute, fetcher } = fixture({ lookupAction: async () => ({ approval: null,
       receipt: committed ? { id: "receipt_one", status: "succeeded" } : null }) });
     execute.mockResolvedValue({ id: "receipt_one", status: "succeeded", result: resultValue });
@@ -420,7 +430,8 @@ describe("assisted-playground-contract", () => {
     for (const response of [initial, recovered]) {
       expect(response).toMatchObject({ status: "answered", receipt: { resultWithheld: false } });
       for (const text of ["Release 2026 is ready", "Roadmap is ready", "Review complete",
-        "The milestone is ready"]) expect(JSON.stringify(response)).toContain(text);
+        "The milestone is ready", "Review FAQ for details"])
+        expect(JSON.stringify(response)).toContain(text);
     }
     expect(fetcher).toHaveBeenCalledOnce();
     expect(execute).toHaveBeenCalledTimes(2);
@@ -429,8 +440,11 @@ describe("assisted-playground-contract", () => {
   it("admits an explicitly labeled year but rejects bare short codes and mixed letters in prose", () => {
     expect(safeResult({ text: "Release 2026 is ready" }, []))
       .toContain("Release 2026 is ready");
+    expect(safeResult({ text: "Review FAQ for details" }, [])).toContain("Review FAQ for details");
     for (const text of ["Enter 123 to proceed", "Your CVV is 123", "Use 7 to continue",
-      "Enter A7B to proceed", "The CVC is 456", "Your CVV is ABC"]) {
+      "Enter A7B to proceed", "The CVC is 456", "Your CVV is ABC",
+      "Enter ABC to proceed", "Enter QRS to proceed", "Review WXY for details",
+      "Enter FAQ to proceed", "FAQ"]) {
       expect(safeResult({ text }, [])).toBe("[WITHHELD_UNSAFE_TOOL_RESULT]");
     }
   });

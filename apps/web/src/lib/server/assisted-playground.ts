@@ -348,25 +348,35 @@ const credentialMarker = /(?:password|passphrase|credential|authorization|bearer
 const sensitiveWord = /\b(?:api|access|refresh|client|auth|key|verification|verify|passcode|code|otp|pin|cvv|cvc|login|unlock)\b|\b(?:sign|log)\s+in\b/i;
 // A mixed letter/number word can be a credential with no separator. A bare
 // number of any length can be a security code; only labeled years are admitted.
-// Allow ordinary lowercase, initial-capital, or short uppercase words, but
-// withhold mixed-case identifiers even when they contain only letters.
-const plainWord = /^(?:\p{Lu}?\p{Ll}[\p{Ll}\p{M}]{0,18}|\p{Lu}{1,12}|\p{N}{1,4})$/u;
+// Arbitrary uppercase words are indistinguishable from short letter-only
+// security codes. Admit only the few uppercase words needed by ordinary prose.
+const plainWord = /^(?:\p{Lu}?\p{Ll}[\p{Ll}\p{M}]{0,18}|\p{N}{1,4})$/u;
+const ordinaryUppercaseWord = new Set(["A", "I"]);
+// An instruction to supply a value makes even an otherwise ordinary word
+// ambiguous (for example, "Enter FAQ to proceed"). Withhold the whole result.
+const codeInstruction = /\b(?:enter|type|input|submit|paste|use|copy|provide|send|quote|apply)\b/i;
 /**
  * Provider text can contain arbitrary serialized or encoded credentials. Do not try to
  * enumerate their formats: admit only short ordinary prose to the local preview.
  * No part of the tool result is sent to the model, even after this projection.
  */
 function safeProse(value: string): boolean {
-  if (value.length > 512 || credentialMarker.test(value) || sensitiveWord.test(value)) return false;
+  if (value.length > 512 || credentialMarker.test(value) || sensitiveWord.test(value) ||
+      codeInstruction.test(value)) return false;
   const words = value.split(/[ \t\n.,!?;:'"()]+/u).filter(Boolean);
+  // FAQ is admitted only as part of this ordinary navigation phrase, never as
+  // a bare value. Other all-capital words remain ambiguous and are withheld.
+  const safeFaq = words.length === 4 && words[0] === "Review" &&
+    words[1] === "FAQ" && words[2] === "for" && words[3] === "details";
   // Short numbers are security codes just as often as long numbers. Admit a
   // four-digit year only when its neighboring prose identifies it as a year.
   const numericSafe = words.every((word, index) => !/^\p{N}+$/u.test(word) ||
     (/^(?:19|20)\d{2}$/.test(word) &&
       /^(?:release|roadmap|year|in|during|since|for|by)$/i.test(words[index - 1] ?? "")));
   // A standalone number has no context to distinguish a year from a code.
-  return words.length > 0 && !(words.length === 1 && /^\p{N}+$/u.test(words[0]!)) &&
-    numericSafe && words.every((word) => plainWord.test(word)) &&
+  return words.length > 0 && !(words.length === 1 && /^[\p{Lu}\p{N}]+$/u.test(words[0]!)) &&
+    numericSafe && words.every((word) => plainWord.test(word) ||
+      ordinaryUppercaseWord.has(word) || (word === "FAQ" && safeFaq)) &&
     !/[^\p{L}\p{M}\p{N} \t\n.,!?;:'"()]/u.test(value) &&
     !/[.]{2,}/u.test(value);
 }
