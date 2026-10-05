@@ -249,6 +249,52 @@ describe("assisted-playground-contract", () => {
     expect(JSON.stringify(fetcher.mock.calls)).not.toContain(value);
   });
 
+  it.each([
+    { source: "Slack text", field: "text", value: "password123" },
+    { source: "Notion title", field: "title", value: "token4321" },
+    { source: "GitHub body", field: "body", value: "hunter2password" },
+    { source: "generic note", field: "note", value: "mycredentialword" },
+    { source: "generic identifier", field: "description", value: "apiKey123" },
+  ])("withholds glued credential words in $source on initial and recovered reads", async ({ field, value }) => {
+    let committed = false;
+    const resultValue = { pages: [{ [field]: value }], summary: "Roadmap 2026 is ready" };
+    const { services, execute, fetcher } = fixture({ lookupAction: async () => ({ approval: null,
+      receipt: committed ? { id: "receipt_one", status: "succeeded" } : null }) });
+    execute.mockResolvedValue({ id: "receipt_one", status: "succeeded", result: resultValue });
+    const initial = await runAssistedTurn(request(), input, services);
+    committed = true;
+    const recovered = await runAssistedTurn(request(), input, services);
+    for (const response of [initial, recovered]) {
+      expect(response).toMatchObject({ status: "answered", receipt: {
+        id: "receipt_one", result: null, resultWithheld: true } });
+      expect(JSON.stringify(response)).not.toContain(value);
+    }
+    expect(safeResult(resultValue, [])).not.toContain(value);
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(JSON.stringify(fetcher.mock.calls)).not.toContain(value);
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps ordinary prose visible in initial and recovered read previews", async () => {
+    let committed = false;
+    const resultValue = { slack: { text: "Release 2026 is ready" },
+      notion: { title: "Roadmap is ready" }, github: { body: "Review complete" },
+      note: "The milestone is ready" };
+    const { services, execute, fetcher } = fixture({ lookupAction: async () => ({ approval: null,
+      receipt: committed ? { id: "receipt_one", status: "succeeded" } : null }) });
+    execute.mockResolvedValue({ id: "receipt_one", status: "succeeded", result: resultValue });
+    const initial = await runAssistedTurn(request(), input, services);
+    committed = true;
+    const recovered = await runAssistedTurn(request(), input, services);
+    for (const response of [initial, recovered]) {
+      expect(response).toMatchObject({ status: "answered", receipt: { resultWithheld: false } });
+      for (const text of ["Release 2026 is ready", "Roadmap is ready", "Review complete",
+        "The milestone is ready"]) expect(JSON.stringify(response)).toContain(text);
+    }
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
   it("locally previews safe nested Slack, Notion and GitHub content after redacting secret fields", async () => {
     const { services, fetcher, execute } = fixture();
     execute.mockResolvedValueOnce({ id: "receipt_safe", status: "succeeded", result: {
