@@ -254,6 +254,10 @@ describe("assisted-playground-contract", () => {
     { source: "Notion title", field: "title", value: "token4321" },
     { source: "GitHub body", field: "body", value: "hunter2password" },
     { source: "generic note", field: "note", value: "mycredentialword" },
+    { source: "Slack numeric text", field: "text", value: "1234" },
+    { source: "Notion numeric title", field: "title", value: "0000" },
+    { source: "GitHub numeric body", field: "body", value: "9876" },
+    { source: "generic nested numeric note", field: "note", value: "1234" },
     { source: "generic identifier", field: "description", value: "apiKey123" },
     { source: "generic verification note", field: "note", value: "Your verification code is 123456" },
     { source: "generic mixed-case value", field: "note", value: "AbCdEfGhIjKlMnOp" },
@@ -270,7 +274,8 @@ describe("assisted-playground-contract", () => {
     for (const response of [initial, recovered]) {
       expect(response).toMatchObject({ status: "answered", receipt: {
         id: "receipt_one", result: null, resultWithheld: true } });
-      expect(JSON.stringify(response)).not.toContain(String(value));
+      expect(response.answer).not.toContain(String(value));
+      expect(JSON.stringify(response.receipt)).not.toContain(String(value));
     }
     expect(safeResult(resultValue, [])).not.toContain(String(value));
     expect(fetcher).toHaveBeenCalledOnce();
@@ -334,7 +339,7 @@ describe("assisted-playground-contract", () => {
 
   it.each(["running", "failed"])("withholds unsafe result data on an initial %s read and its recovery", async (status) => {
     let committed = false;
-    const secret = "Your verification code is 123456";
+    const secret = "1234";
     const { services, execute, fetcher } = fixture({ lookupAction: async () => ({ approval: null,
       receipt: committed ? { id: "receipt_one", status } : null }) });
     execute.mockResolvedValue({ id: "receipt_one", status,
@@ -390,6 +395,56 @@ describe("assisted-playground-contract", () => {
     }
     expect(fetcher).toHaveBeenCalledOnce();
     expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds provider traversal before reading a wide or nested result on both read paths", async () => {
+    let committed = false;
+    let getterReads = 0;
+    const wide: Record<string, unknown> = { summary: "Release 2026 is ready" };
+    for (let index = 0; index < 2000; index += 1) {
+      Object.defineProperty(wide, `provider_${index}`, { enumerable: true,
+        get() { getterReads += 1; if (getterReads > 200) throw Error("unbounded projection");
+          return { pages: [{ content: { text: "Readable update" } }] }; } });
+    }
+    const { services, execute, fetcher } = fixture({ lookupAction: async () => ({ approval: null,
+      receipt: committed ? { id: "receipt_wide", status: "succeeded" } : null }) });
+    execute.mockResolvedValue({ id: "receipt_wide", status: "succeeded", result: wide });
+    const initial = await runAssistedTurn(request(), input, services);
+    committed = true;
+    const recovered = await runAssistedTurn(request(), input, services);
+    for (const response of [initial, recovered]) {
+      expect(response).toMatchObject({ status: "answered", receipt: {
+        id: "receipt_wide", resultWithheld: false, resultTruncated: true } });
+      expect(JSON.stringify(response)).toContain("Release 2026 is ready");
+      expect(JSON.stringify(response).length).toBeLessThan(ASSISTED_LIMITS.resultChars + 3000);
+    }
+    expect(getterReads).toBeLessThanOrEqual(200);
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["running", "failed"])("bounds traversal of a %s receipt before recovery", async (status) => {
+    let committed = false;
+    let getterReads = 0;
+    const wide: Record<string, unknown> = {};
+    for (let index = 0; index < 1000; index += 1) {
+      Object.defineProperty(wide, `provider_${index}`, { enumerable: true,
+        get() { getterReads += 1; if (getterReads > 80) throw Error("unbounded projection");
+          return "Public summary"; } });
+    }
+    const { services, execute } = fixture({ lookupAction: async () => ({ approval: null,
+      receipt: committed ? { id: "receipt_wide", status } : null }) });
+    execute.mockResolvedValue({ id: "receipt_wide", status, result: wide });
+    const initial = await runAssistedTurn(request(), input, services);
+    committed = true;
+    const recovered = await runAssistedTurn(request(), input, services);
+    expect(initial).toMatchObject({ status: status === "failed" ? "tool_error" : "action_pending",
+      receipt: { id: "receipt_wide", resultTruncated: true } });
+    expect(JSON.stringify(initial).length).toBeLessThan(ASSISTED_LIMITS.resultChars + 3000);
+    expect(recovered).toMatchObject({ status: status === "failed" ? "tool_error" : "action_pending",
+      receiptId: "receipt_wide" });
+    expect(getterReads).toBeLessThanOrEqual(80);
+    expect(execute).toHaveBeenCalledOnce();
   });
 
   it("locally previews safe nested Slack, Notion and GitHub content after redacting secret fields", async () => {

@@ -359,17 +359,28 @@ const plainWord = /^(?:\p{Lu}?\p{Ll}[\p{Ll}\p{M}]{0,18}|\p{Lu}{1,12}|\p{N}{1,4})
 function safeProse(value: string): boolean {
   if (value.length > 512 || credentialMarker.test(value) || sensitiveWord.test(value)) return false;
   const words = value.split(/[ \t\n.,!?;:'"()]+/u).filter(Boolean);
-  return words.length > 0 && words.every((word) => plainWord.test(word)) &&
+  // A standalone number has no context to distinguish a year from a short
+  // verification code. A year inside ordinary prose can still be previewed.
+  return words.length > 0 && !(words.length === 1 && /^\p{N}+$/u.test(words[0]!)) &&
+    words.every((word) => plainWord.test(word)) &&
     !/[^\p{L}\p{M}\p{N} \t\n.,!?;:'"()]/u.test(value) &&
     !/[.]{2,}/u.test(value);
 }
 export function safeResult(value: unknown, inputSensitiveKeys: readonly string[]): string {
   const sensitive = new Set(inputSensitiveKeys.map((key) => key.split(/[.\[\]]/).filter(Boolean).at(-1)?.toLowerCase()));
   let unsafeContent = false;
+  let truncated = false;
+  let visited = 0;
+  let textCharsLeft = 6000;
+  // These shared budgets bound work across the whole tree, not once per level.
+  // A provider can return very wide or deeply nested objects on any read path.
   const redact = (item: unknown, depth: number): unknown => {
-    if (depth > 8) return "[TRUNCATED]";
+    if (depth > 8 || visited >= 160) { truncated = true; return "[TRUNCATED]"; }
+    visited += 1;
     if (typeof item === "string") {
       if (!safeProse(item)) { unsafeContent = true; return "[REDACTED]"; }
+      if (item.length > textCharsLeft) { truncated = true; return "[TRUNCATED]"; }
+      textCharsLeft -= item.length;
       return item;
     }
     // A bare provider number has no prose context and may be a code or token.
@@ -377,19 +388,33 @@ export function safeResult(value: unknown, inputSensitiveKeys: readonly string[]
       unsafeContent = true;
       return "[REDACTED]";
     }
-    if (Array.isArray(item)) return item.slice(0, 40).map((entry) => redact(entry, depth + 1));
+    if (Array.isArray(item)) {
+      const result: unknown[] = [];
+      for (let index = 0; index < item.length && index < 40; index += 1) {
+        if (truncated) break;
+        result.push(redact(item[index], depth + 1));
+      }
+      if (item.length > result.length) truncated = true;
+      return result;
+    }
     const record = object(item);
     if (!record) return item;
-    return Object.fromEntries(Object.entries(record).slice(0, 80).map(([key, entry], index) => {
+    const result: Record<string, unknown> = Object.create(null);
+    let index = 0;
+    for (const key in record) {
+      if (!Object.hasOwn(record, key)) continue;
+      if (index >= 80 || truncated) { truncated = true; break; }
       const label = previewFieldNames.has(key) ? key : `field_${index + 1}`;
-      return [label, sensitiveOutputKey.test(key) || sensitive.has(key.toLowerCase())
-        ? "[REDACTED]" : redact(entry, depth + 1)];
-    }));
+      result[label] = sensitiveOutputKey.test(key) || sensitive.has(key.toLowerCase())
+        ? "[REDACTED]" : redact(record[key], depth + 1);
+      index += 1;
+    }
+    return result;
   };
   const encoded = JSON.stringify(redact(value, 0)) ?? "null";
   if (unsafeContent) return withheldResult;
   const marker = "\n[TRUNCATED]";
-  return encoded.length <= ASSISTED_LIMITS.resultChars ? encoded
+  return !truncated && encoded.length <= ASSISTED_LIMITS.resultChars ? encoded
     : `${encoded.slice(0, ASSISTED_LIMITS.resultChars - marker.length)}${marker}`;
 }
 
