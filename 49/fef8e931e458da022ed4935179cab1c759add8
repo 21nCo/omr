@@ -1,0 +1,16 @@
+apps/web/src/lib/server/assisted-playground.ts
+  h_a39f9495f9ec1d 339-343,383-385
+tests/acceptance/assisted-playground-contract.test.ts
+  h_a39f9495f9ec1d 302-334,341,345-348,357-374,574-575,585-586
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "49fef8e931e458da022ed4935179cab1c759add8",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
