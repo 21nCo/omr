@@ -1,0 +1,22 @@
+apps/web/src/lib/server/assisted-playground.ts
+  h_a39f9495f9ec1d 22,41-43,72,90,93,192-193,252-253,367,379,385-387,510-511,566-567
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 1049-1060
+packages/execution/src/execution.test.ts
+  h_a39f9495f9ec1d 733-758
+packages/execution/src/execution.ts
+  h_a39f9495f9ec1d 474-510
+tests/acceptance/assisted-playground-contract.test.ts
+  h_a39f9495f9ec1d 39-40,53,67,210,432,437,450-451,461-512,515,526
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "83a9d85c476e3afe51988d12e93b5577678bb80e",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
