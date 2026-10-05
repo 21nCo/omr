@@ -1,0 +1,21 @@
+apps/web/src/lib/server/assisted-playground.ts
+  s_d52385ad0fbd0d::t_9d1a461c693982 348-350,362-364
+tests/acceptance/assisted-playground-contract.test.ts
+  s_d52385ad0fbd0d::t_409eb0688e6c38 265-270,372-390,429-437,629-630,647
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cf050d2ed403271871abb16fceb98e7a3e487d90",
+  "prompts": {},
+  "sessions": {
+    "s_d52385ad0fbd0d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f1cc-46a9-73a2-bf93-2e81a58b21fc",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
