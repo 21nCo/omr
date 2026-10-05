@@ -19,7 +19,7 @@ type Usage = { promptTokens: number | null; completionTokens: number | null;
 type ModelReply = { content: string | null; calls: { name: string; arguments: string }[];
   usage: Usage; model: string };
 type TurnOutcome = { kind: "action"; effect: "read" | "write"; toolId: string;
-  servedModel: string; usage: Usage } | { kind: "model";
+  servedModel: string; usage: Usage; sensitiveKeys?: string[] } | { kind: "model";
   response: { status: "answered" | "model_error"; answer: string; model: string;
     servedModels: string[]; usage: Usage; errorCode?: string } };
 type TurnBinding = { requestFingerprint: string; outcome: TurnOutcome;
@@ -38,6 +38,9 @@ export interface AssistedPlaygroundServices {
   discover(request: Request, workspaceId: string, provider: string): Promise<ToolManifest[]>;
   execute(request: Request, input: { workspaceId: string; connectionId: string;
     toolId: string; params: Record<string, unknown>; idempotencyKey: string }): Promise<unknown>;
+  readReceipt(request: Request, input: { workspaceId: string; connectionId: string;
+    toolId: string; params: Record<string, unknown>; idempotencyKey: string;
+    receiptId: string }): Promise<unknown>;
   requestApproval(request: Request, input: { workspaceId: string; connectionId: string;
     toolId: string; params: Record<string, unknown>; idempotencyKey: string }): Promise<unknown>;
   lookupAction(request: Request, input: { workspaceId: string; requestId: string }): Promise<{
@@ -66,7 +69,7 @@ export async function assistedActionStatus(request: Request, input: {
   return services.lookupAction(request, input);
 }
 
-/** Explicit access to the full receipt, replayed through current execution policy. */
+/** Explicit read-only access to the full receipt through current execution policy. */
 export async function assistedFullReadReceipt(request: Request, input: {
   workspaceId: string; requestId: string; receiptId: string },
   services: AssistedPlaygroundServices) {
@@ -84,10 +87,10 @@ export async function assistedFullReadReceipt(request: Request, input: {
   if (action.receipt?.id !== input.receiptId ||
       !["succeeded", "failed"].includes(action.receipt.status))
     throw new AssistedPlaygroundError("ASSISTED_RECEIPT_UNAVAILABLE", 404);
-  const receipt = await untilAbort(services.execute(request, {
+  const receipt = await untilAbort(services.readReceipt(request, {
     workspaceId: input.workspaceId, connectionId: binding.action.connectionId,
     toolId: binding.outcome.toolId, params: binding.action.params,
-    idempotencyKey: `assisted_${input.requestId}`,
+    idempotencyKey: `assisted_${input.requestId}`, receiptId: input.receiptId,
   }), signal);
   const record = object(receipt);
   if (record?.id !== input.receiptId || record.status !== action.receipt.status)
@@ -186,7 +189,8 @@ async function recoverTurn(request: Request, input: AssistedTurnInput,
       const failed = object(receipt)?.status === "failed";
       return { ...common, status: succeeded ? "answered" as const
         : failed ? "tool_error" as const : "action_pending" as const,
-        ...(failed ? { terminalFailure: true } : {}), receipt: projectReadReceipt(receipt), answer: succeeded
+        ...(failed ? { terminalFailure: true } : {}), receipt: projectReadReceipt(receipt,
+          outcome.sensitiveKeys), answer: succeeded
           ? "The selected read completed. Review its receipt; final answer generation was interrupted."
           : failed ? "The selected read did not complete. Review its receipt before another action."
             : "The selected read is still pending. Check its receipt before another action." };
@@ -245,7 +249,8 @@ async function recoverReadResult(request: Request, input: AssistedTurnInput,
     if (record?.status !== "succeeded" || record.id !== expectedReceiptId)
       return { status: "tool_error" as const, receiptId: expectedReceiptId,
         answer: "The read could not be recovered. Check its receipt." };
-    return { status: "answered" as const, receipt: projectReadReceipt(receipt), receiptId: record.id,
+    return { status: "answered" as const, receipt: projectReadReceipt(receipt,
+      binding.outcome.sensitiveKeys), receiptId: record.id,
       answer: "The read completed. Review its bounded receipt preview or download the full receipt." };
   } catch (error) {
     if (signal.aborted) return { status: "action_pending" as const,
@@ -347,7 +352,6 @@ function safeProse(value: string): boolean {
 }
 export function safeResult(value: unknown, inputSensitiveKeys: readonly string[]): string {
   const sensitive = new Set(inputSensitiveKeys.map((key) => key.split(/[.\[\]]/).filter(Boolean).at(-1)?.toLowerCase()));
-  const contentKeys = new Set(["title", "text", "body", "description"]);
   let unsafeContent = false;
   const redact = (item: unknown, depth: number): unknown => {
     if (depth > 8) return "[TRUNCATED]";
@@ -360,8 +364,7 @@ export function safeResult(value: unknown, inputSensitiveKeys: readonly string[]
     if (!record) return item;
     return Object.fromEntries(Object.entries(record).slice(0, 80).map(([key, entry]) => {
       if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(key)) unsafeContent = true;
-      return [key, sensitiveOutputKey.test(key) ||
-        (sensitive.has(key.toLowerCase()) && !contentKeys.has(key.toLowerCase()))
+      return [key, sensitiveOutputKey.test(key) || sensitive.has(key.toLowerCase())
         ? "[REDACTED]" : redact(entry, depth + 1)];
     }));
   };
@@ -373,13 +376,15 @@ export function safeResult(value: unknown, inputSensitiveKeys: readonly string[]
 }
 
 /** The assisted response carries a bounded preview and receipt identity only. */
-function projectReadReceipt(receipt: unknown, sensitiveKeys: readonly string[] = []) {
+function projectReadReceipt(receipt: unknown, sensitiveKeys?: readonly string[]) {
   const record = object(receipt);
   if (!record) return null;
   if (typeof record.id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(record.id) ||
       !["reserved", "running", "succeeded", "failed", "uncertain"].includes(String(record.status)))
     throw new AssistedPlaygroundError("ASSISTED_RECEIPT_INVALID", 502);
-  const preview = safeResult(record.result, sensitiveKeys);
+  // Old bindings have no manifest sensitivity snapshot: never guess from result keys.
+  const preview = Array.isArray(sensitiveKeys) && sensitiveKeys.every((key) => typeof key === "string")
+    ? safeResult(record.result, sensitiveKeys) : withheldResult;
   return { id: record.id, status: record.status,
     errorCode: typeof record.errorCode === "string" ? record.errorCode.slice(0, 80) : null,
     result: preview === withheldResult ? null : preview,
@@ -502,7 +507,8 @@ export async function runAssistedTurn(request: Request, input: AssistedTurnInput
         if (!object(params)) return modelOnly(modelError("ASSISTED_ARGUMENTS_INVALID"));
         const effect = chosen.manifest.contract.effect === "read" ? "read" : "write";
         const saved = await bind({ kind: "action", effect, toolId: chosen.manifest.id,
-          servedModel: choice.model, usage: choice.usage },
+          servedModel: choice.model, usage: choice.usage,
+          ...(effect === "read" ? { sensitiveKeys: [...chosen.manifest.contract.sensitiveKeys] } : {}) },
         { connectionId: input.connectionId, params: params as Record<string, unknown> });
         if (!saved.created) return recoverTurn(request, input, services, signal,
           saved.binding, userId);
@@ -557,7 +563,8 @@ export async function runAssistedTurn(request: Request, input: AssistedTurnInput
             answer: failed ? "The tool did not complete. Check its receipt before retrying."
               : "The read may still be finishing. Check its receipt before retrying this request.",
             ...(failed ? { terminalFailure: true } : { requestId: input.requestId }),
-            toolId: chosen.manifest.id, receipt: projectReadReceipt(receipt), model: input.model,
+            toolId: chosen.manifest.id, receipt: projectReadReceipt(receipt,
+              chosen.manifest.contract.sensitiveKeys), model: input.model,
             servedModels: [choice.model], usage: choice.usage };
         }
         if (signal.aborted) return { status: "answered" as const,

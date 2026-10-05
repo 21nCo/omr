@@ -1046,6 +1046,18 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
       return found.tools;
     },
     execute: (request, input) => execution.execute(request, input),
+    async readReceipt(request, input) {
+      // This cookie GET has no Origin header. Authenticate the session and let the
+      // execution service recheck the selected account and current read policy.
+      const principal = await authenticate(event, request, input.workspaceId, undefined, false);
+      if (principal.kind !== "web") throw new ConnectionAccessDeniedError();
+      return withExecution(async (service) => {
+        const receipt = await service.readReceipt({ principal, toolId: input.toolId,
+          params: input.params as JsonValue, connectionId: input.connectionId,
+          idempotencyKey: input.idempotencyKey, receiptId: input.receiptId });
+        return receipt ? publicReceipt(receipt) : null;
+      });
+    },
     requestApproval: (request, input) => execution.requestApproval(request, input),
     async lookupAction(request, input) {
       const userId = await assistedActor(request, input.workspaceId);
