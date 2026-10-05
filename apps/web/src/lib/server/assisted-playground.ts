@@ -336,6 +336,11 @@ async function modelCall(fetcher: typeof fetch, key: string, model: string,
 /** Only a small, plain-text projection of an untrusted result may enter the answer. */
 const withheldResult = "[WITHHELD_UNSAFE_TOOL_RESULT]";
 const sensitiveOutputKey = /(?:token|secret|password|key|authorization|credential|private|passphrase|cookie|session|verification|passcode|code|pin|otp)/i;
+// Provider object keys are untrusted content too. Only fixed, ordinary field
+// labels enter a preview; every other label gets a position-based replacement.
+const previewFieldNames = new Set(["pages", "content", "text", "title", "body",
+  "description", "metadata", "note", "slack", "notion", "github", "summary",
+  "name", "message", "status", "id", "items", "results"]);
 // Long credential markers are unsafe even when a provider glues them to other
 // letters or digits (for example, "hunter2password" or "token4321"). Short,
 // common words still need word boundaries to preserve ordinary prose.
@@ -375,9 +380,9 @@ export function safeResult(value: unknown, inputSensitiveKeys: readonly string[]
     if (Array.isArray(item)) return item.slice(0, 40).map((entry) => redact(entry, depth + 1));
     const record = object(item);
     if (!record) return item;
-    return Object.fromEntries(Object.entries(record).slice(0, 80).map(([key, entry]) => {
-      if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(key)) unsafeContent = true;
-      return [key, sensitiveOutputKey.test(key) || sensitive.has(key.toLowerCase())
+    return Object.fromEntries(Object.entries(record).slice(0, 80).map(([key, entry], index) => {
+      const label = previewFieldNames.has(key) ? key : `field_${index + 1}`;
+      return [label, sensitiveOutputKey.test(key) || sensitive.has(key.toLowerCase())
         ? "[REDACTED]" : redact(entry, depth + 1)];
     }));
   };

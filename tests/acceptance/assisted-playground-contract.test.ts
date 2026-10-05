@@ -299,21 +299,75 @@ describe("assisted-playground-contract", () => {
     expect(execute).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    { source: "Slack text", result: { slack: { text: "Release is ready",
+      AbCdEfGhIjKlMnOp: "Public summary" } }, secret: "AbCdEfGhIjKlMnOp",
+      safe: "Release is ready" },
+    { source: "Notion title", result: { notion: { title: "Roadmap is ready",
+      "key-9876-hidden": "Public summary" } }, secret: "key-9876-hidden",
+      safe: "Roadmap is ready" },
+    { source: "GitHub body", result: { github: { body: "Review complete",
+      XyZaBcDeFgHiJkLm: "Public summary" } }, secret: "XyZaBcDeFgHiJkLm",
+      safe: "Review complete" },
+    { source: "generic nested field", result: { pages: [{ content: { note: "The milestone is ready",
+      qwertyuiopasdfgh: "Public summary" } }] }, secret: "qwertyuiopasdfgh",
+      safe: "The milestone is ready" },
+  ])("removes provider-controlled object keys from initial and recovered $source previews",
+    async ({ result: resultValue, secret, safe }) => {
+      let committed = false;
+      const { services, execute, fetcher } = fixture({ lookupAction: async () => ({ approval: null,
+        receipt: committed ? { id: "receipt_one", status: "succeeded" } : null }) });
+      execute.mockResolvedValue({ id: "receipt_one", status: "succeeded", result: resultValue });
+      const initial = await runAssistedTurn(request(), input, services);
+      committed = true;
+      const recovered = await runAssistedTurn(request(), input, services);
+      for (const response of [initial, recovered]) {
+        expect(response).toMatchObject({ status: "answered", receipt: {
+          id: "receipt_one", resultWithheld: false } });
+        expect(JSON.stringify(response)).not.toContain(secret);
+        expect(JSON.stringify(response)).toContain(safe);
+      }
+      expect(safeResult(resultValue, [])).not.toContain(secret);
+      expect(fetcher).toHaveBeenCalledOnce();
+      expect(execute).toHaveBeenCalledTimes(2);
+    });
+
   it.each(["running", "failed"])("withholds unsafe result data on an initial %s read and its recovery", async (status) => {
     let committed = false;
     const secret = "Your verification code is 123456";
     const { services, execute, fetcher } = fixture({ lookupAction: async () => ({ approval: null,
       receipt: committed ? { id: "receipt_one", status } : null }) });
     execute.mockResolvedValue({ id: "receipt_one", status,
-      result: { text: secret, title: "Public summary" } });
+      result: { text: secret, title: "Public summary", AbCdEfGhIjKlMnOp: "Safe note" } });
     const initial = await runAssistedTurn(request(), input, services);
     committed = true;
     const recovered = await runAssistedTurn(request(), input, services);
-    for (const response of [initial, recovered]) expect(JSON.stringify(response)).not.toContain(secret);
+    for (const response of [initial, recovered]) {
+      expect(JSON.stringify(response)).not.toContain(secret);
+      expect(JSON.stringify(response)).not.toContain("AbCdEfGhIjKlMnOp");
+    }
     expect(initial).toMatchObject({ status: status === "failed" ? "tool_error" : "action_pending",
       receipt: { id: "receipt_one", result: null, resultWithheld: true } });
     expect(recovered).toMatchObject({ status: status === "failed" ? "tool_error" : "action_pending",
       receiptId: "receipt_one" });
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it.each(["running", "failed"])("removes provider object keys from a %s read receipt", async (status) => {
+    let committed = false;
+    const secret = "AbCdEfGhIjKlMnOp";
+    const { services, execute, fetcher } = fixture({ lookupAction: async () => ({ approval: null,
+      receipt: committed ? { id: "receipt_one", status } : null }) });
+    execute.mockResolvedValue({ id: "receipt_one", status,
+      result: { text: "Release is ready", [secret]: "Public summary" } });
+    const initial = await runAssistedTurn(request(), input, services);
+    committed = true;
+    const recovered = await runAssistedTurn(request(), input, services);
+    expect(initial).toMatchObject({ status: status === "failed" ? "tool_error" : "action_pending",
+      receipt: { id: "receipt_one", resultWithheld: false } });
+    expect(JSON.stringify(initial)).toContain("Release is ready");
+    for (const response of [initial, recovered]) expect(JSON.stringify(response)).not.toContain(secret);
     expect(fetcher).toHaveBeenCalledOnce();
     expect(execute).toHaveBeenCalledOnce();
   });
@@ -517,7 +571,8 @@ describe("assisted-playground-contract", () => {
     let user = "alice";
     let allowed = true;
     let committed = false;
-    const fullResult = { pages: Array.from({ length: 100 }, () => "A".repeat(400)) };
+    const fullResult = { AbCdEfGhIjKlMnOp: "Public summary",
+      pages: Array.from({ length: 100 }, () => "A".repeat(400)) };
     const { services, execute, readReceipt } = fixture({
       authenticate: async () => user,
       lookupAction: async () => ({ approval: null,
@@ -527,7 +582,8 @@ describe("assisted-playground-contract", () => {
       if (!allowed) throw Object.assign(new Error("denied"), { code: "EXECUTION_CAPABILITY_DENIED" });
       return { id: "receipt_full", status: "succeeded", result: fullResult };
     });
-    await runAssistedTurn(request(), input, services);
+    const preview = await runAssistedTurn(request(), input, services);
+    expect(JSON.stringify(preview)).not.toContain("AbCdEfGhIjKlMnOp");
     committed = true;
     const router = createOMRRouter(undefined, undefined, undefined, undefined,
       undefined, undefined, services);
