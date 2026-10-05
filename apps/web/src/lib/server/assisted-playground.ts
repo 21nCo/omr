@@ -335,15 +335,17 @@ async function modelCall(fetcher: typeof fetch, key: string, model: string,
 
 /** Only a small, plain-text projection of an untrusted result may enter the answer. */
 const withheldResult = "[WITHHELD_UNSAFE_TOOL_RESULT]";
-const sensitiveOutputKey = /(?:token|secret|password|api.?key|authorization|credential|private|passphrase|cookie|session)/i;
+const sensitiveOutputKey = /(?:token|secret|password|key|authorization|credential|private|passphrase|cookie|session|verification|passcode|code|pin|otp)/i;
 // Long credential markers are unsafe even when a provider glues them to other
 // letters or digits (for example, "hunter2password" or "token4321"). Short,
 // common words still need word boundaries to preserve ordinary prose.
 const credentialMarker = /(?:password|passphrase|credential|authorization|bearer|cookie|session|private|secret|token)/i;
-const sensitiveWord = /\b(?:api|access|refresh|client|auth|key)\b/i;
+const sensitiveWord = /\b(?:api|access|refresh|client|auth|key|verification|passcode|code|otp|pin)\b/i;
 // A mixed letter/number word can be a credential with no separator. Whole
-// number words remain useful in ordinary summaries such as "Roadmap 2026".
-const plainWord = /^(?:[\p{L}\p{M}]{1,20}|\p{N}{1,20})$/u;
+// number words remain useful for years; longer runs can be one-time codes.
+// Allow ordinary lowercase, initial-capital, or short uppercase words, but
+// withhold mixed-case identifiers even when they contain only letters.
+const plainWord = /^(?:\p{Lu}?\p{Ll}[\p{Ll}\p{M}]{0,18}|\p{Lu}{1,12}|\p{N}{1,4})$/u;
 /**
  * Provider text can contain arbitrary serialized or encoded credentials. Do not try to
  * enumerate their formats: admit only short ordinary prose to the local preview.
@@ -364,6 +366,11 @@ export function safeResult(value: unknown, inputSensitiveKeys: readonly string[]
     if (typeof item === "string") {
       if (!safeProse(item)) { unsafeContent = true; return "[REDACTED]"; }
       return item;
+    }
+    // A bare provider number has no prose context and may be a code or token.
+    if (typeof item === "number" || typeof item === "bigint") {
+      unsafeContent = true;
+      return "[REDACTED]";
     }
     if (Array.isArray(item)) return item.slice(0, 40).map((entry) => redact(entry, depth + 1));
     const record = object(item);

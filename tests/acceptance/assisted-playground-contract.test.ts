@@ -255,7 +255,10 @@ describe("assisted-playground-contract", () => {
     { source: "GitHub body", field: "body", value: "hunter2password" },
     { source: "generic note", field: "note", value: "mycredentialword" },
     { source: "generic identifier", field: "description", value: "apiKey123" },
-  ])("withholds glued credential words in $source on initial and recovered reads", async ({ field, value }) => {
+    { source: "generic verification note", field: "note", value: "Your verification code is 123456" },
+    { source: "generic mixed-case value", field: "note", value: "AbCdEfGhIjKlMnOp" },
+    { source: "Slack numeric text", field: "text", value: 123456 },
+  ])("withholds credential-like $source on initial and recovered reads", async ({ field, value }) => {
     let committed = false;
     const resultValue = { pages: [{ [field]: value }], summary: "Roadmap 2026 is ready" };
     const { services, execute, fetcher } = fixture({ lookupAction: async () => ({ approval: null,
@@ -267,12 +270,52 @@ describe("assisted-playground-contract", () => {
     for (const response of [initial, recovered]) {
       expect(response).toMatchObject({ status: "answered", receipt: {
         id: "receipt_one", result: null, resultWithheld: true } });
-      expect(JSON.stringify(response)).not.toContain(value);
+      expect(JSON.stringify(response)).not.toContain(String(value));
     }
-    expect(safeResult(resultValue, [])).not.toContain(value);
+    expect(safeResult(resultValue, [])).not.toContain(String(value));
     expect(fetcher).toHaveBeenCalledOnce();
-    expect(JSON.stringify(fetcher.mock.calls)).not.toContain(value);
+    expect(JSON.stringify(fetcher.mock.calls)).not.toContain(String(value));
     expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("redacts a generic key in both read paths while retaining ordinary prose", async () => {
+    let committed = false;
+    const secrets = ["AbCdEfGhIjKlMnOp", "abcde", "seven"];
+    const { services, execute, fetcher } = fixture({ lookupAction: async () => ({ approval: null,
+      receipt: committed ? { id: "receipt_one", status: "succeeded" } : null }) });
+    execute.mockResolvedValue({ id: "receipt_one", status: "succeeded",
+      result: { key: secrets[0], accessKey: secrets[1], recoveryCode: secrets[2],
+        note: "The milestone is ready" } });
+    const initial = await runAssistedTurn(request(), input, services);
+    committed = true;
+    const recovered = await runAssistedTurn(request(), input, services);
+    for (const response of [initial, recovered]) {
+      expect(response).toMatchObject({ status: "answered", receipt: {
+        id: "receipt_one", resultWithheld: false } });
+      for (const secret of secrets) expect(JSON.stringify(response)).not.toContain(secret);
+      expect(JSON.stringify(response)).toContain("The milestone is ready");
+    }
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["running", "failed"])("withholds unsafe result data on an initial %s read and its recovery", async (status) => {
+    let committed = false;
+    const secret = "Your verification code is 123456";
+    const { services, execute, fetcher } = fixture({ lookupAction: async () => ({ approval: null,
+      receipt: committed ? { id: "receipt_one", status } : null }) });
+    execute.mockResolvedValue({ id: "receipt_one", status,
+      result: { text: secret, title: "Public summary" } });
+    const initial = await runAssistedTurn(request(), input, services);
+    committed = true;
+    const recovered = await runAssistedTurn(request(), input, services);
+    for (const response of [initial, recovered]) expect(JSON.stringify(response)).not.toContain(secret);
+    expect(initial).toMatchObject({ status: status === "failed" ? "tool_error" : "action_pending",
+      receipt: { id: "receipt_one", result: null, resultWithheld: true } });
+    expect(recovered).toMatchObject({ status: status === "failed" ? "tool_error" : "action_pending",
+      receiptId: "receipt_one" });
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
   });
 
   it("keeps ordinary prose visible in initial and recovered read previews", async () => {
