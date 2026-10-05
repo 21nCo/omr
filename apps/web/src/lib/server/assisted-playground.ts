@@ -345,9 +345,9 @@ const previewFieldNames = new Set(["pages", "content", "text", "title", "body",
 // letters or digits (for example, "hunter2password" or "token4321"). Short,
 // common words still need word boundaries to preserve ordinary prose.
 const credentialMarker = /(?:password|passphrase|credential|authorization|bearer|cookie|session|private|secret|token)/i;
-const sensitiveWord = /\b(?:api|access|refresh|client|auth|key|verification|verify|passcode|code|otp|pin|login|unlock)\b|\b(?:sign|log)\s+in\b/i;
-// A mixed letter/number word can be a credential with no separator. Whole
-// number words remain useful for years; longer runs can be one-time codes.
+const sensitiveWord = /\b(?:api|access|refresh|client|auth|key|verification|verify|passcode|code|otp|pin|cvv|cvc|login|unlock)\b|\b(?:sign|log)\s+in\b/i;
+// A mixed letter/number word can be a credential with no separator. A bare
+// number of any length can be a security code; only labeled years are admitted.
 // Allow ordinary lowercase, initial-capital, or short uppercase words, but
 // withhold mixed-case identifiers even when they contain only letters.
 const plainWord = /^(?:\p{Lu}?\p{Ll}[\p{Ll}\p{M}]{0,18}|\p{Lu}{1,12}|\p{N}{1,4})$/u;
@@ -359,9 +359,9 @@ const plainWord = /^(?:\p{Lu}?\p{Ll}[\p{Ll}\p{M}]{0,18}|\p{Lu}{1,12}|\p{N}{1,4})
 function safeProse(value: string): boolean {
   if (value.length > 512 || credentialMarker.test(value) || sensitiveWord.test(value)) return false;
   const words = value.split(/[ \t\n.,!?;:'"()]+/u).filter(Boolean);
-  // A long number inside a sentence can be a login code. Only a year with an
-  // explicit temporal label is distinguishable enough for this small preview.
-  const numericSafe = words.every((word, index) => !/^\p{N}{4,}$/u.test(word) ||
+  // Short numbers are security codes just as often as long numbers. Admit a
+  // four-digit year only when its neighboring prose identifies it as a year.
+  const numericSafe = words.every((word, index) => !/^\p{N}+$/u.test(word) ||
     (/^(?:19|20)\d{2}$/.test(word) &&
       /^(?:release|roadmap|year|in|during|since|for|by)$/i.test(words[index - 1] ?? "")));
   // A standalone number has no context to distinguish a year from a code.

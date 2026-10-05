@@ -262,6 +262,12 @@ describe("assisted-playground-contract", () => {
     { source: "Notion embedded code", field: "title", value: "Enter 4321 to continue" },
     { source: "GitHub embedded login number", field: "body", value: "Your login number is 9876" },
     { source: "generic embedded unlock code", field: "note", value: "Use 0000 to unlock" },
+    { source: "Slack short CVV", field: "text", value: "Your CVV is 123" },
+    { source: "Notion short CVC", field: "title", value: "The CVC is 456" },
+    { source: "GitHub short login number", field: "body", value: "Use 123 to continue" },
+    { source: "generic short code", field: "note", value: "Enter 789 to proceed" },
+    { source: "generic one-digit code", field: "note", value: "Enter 7 to proceed" },
+    { source: "generic alphanumeric code", field: "note", value: "Enter A7B to proceed" },
     { source: "generic identifier", field: "description", value: "apiKey123" },
     { source: "generic verification note", field: "note", value: "Your verification code is 123456" },
     { source: "generic mixed-case value", field: "note", value: "AbCdEfGhIjKlMnOp" },
@@ -363,6 +369,25 @@ describe("assisted-playground-contract", () => {
     expect(execute).toHaveBeenCalledOnce();
   });
 
+  it.each(["running", "failed"])("withholds short codes in an initial %s receipt and its recovery", async (status) => {
+    let committed = false;
+    const secret = "Enter 123 to proceed";
+    const { services, execute, fetcher } = fixture({ lookupAction: async () => ({ approval: null,
+      receipt: committed ? { id: "receipt_one", status } : null }) });
+    execute.mockResolvedValue({ id: "receipt_one", status,
+      result: { text: secret, title: "Roadmap is ready" } });
+    const initial = await runAssistedTurn(request(), input, services);
+    committed = true;
+    const recovered = await runAssistedTurn(request(), input, services);
+    expect(initial).toMatchObject({ status: status === "failed" ? "tool_error" : "action_pending",
+      receipt: { id: "receipt_one", result: null, resultWithheld: true } });
+    expect(recovered).toMatchObject({ status: status === "failed" ? "tool_error" : "action_pending",
+      receiptId: "receipt_one" });
+    for (const response of [initial, recovered]) expect(JSON.stringify(response)).not.toContain(secret);
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
   it.each(["running", "failed"])("removes provider object keys from a %s read receipt", async (status) => {
     let committed = false;
     const secret = "AbCdEfGhIjKlMnOp";
@@ -399,6 +424,15 @@ describe("assisted-playground-contract", () => {
     }
     expect(fetcher).toHaveBeenCalledOnce();
     expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("admits an explicitly labeled year but rejects bare short codes and mixed letters in prose", () => {
+    expect(safeResult({ text: "Release 2026 is ready" }, []))
+      .toContain("Release 2026 is ready");
+    for (const text of ["Enter 123 to proceed", "Your CVV is 123", "Use 7 to continue",
+      "Enter A7B to proceed", "The CVC is 456", "Your CVV is ABC"]) {
+      expect(safeResult({ text }, [])).toBe("[WITHHELD_UNSAFE_TOOL_RESULT]");
+    }
   });
 
   it("bounds provider traversal before reading a wide or nested result on both read paths", async () => {
@@ -592,7 +626,8 @@ describe("assisted-playground-contract", () => {
   it("bounds nested receipt data on initial and recovered read responses", async () => {
     let committed = false;
     const fullResult = { pages: Array.from({ length: 100 }, (_, index) => ({
-      title: `Page ${index} ${"A ".repeat(150)}`, notes: { text: "Readable update ".repeat(25) },
+      title: index === 99 ? "Page Final" : `Page Preview ${"A ".repeat(150)}`,
+      notes: { text: "Readable update ".repeat(25) },
     })) };
     const { services, execute, fetcher } = fixture({ lookupAction: async () => ({ approval: null,
       receipt: committed ? { id: "receipt_large", status: "succeeded" } : null }) });
@@ -609,7 +644,7 @@ describe("assisted-playground-contract", () => {
       expect(parsed.receipt).toMatchObject({ id: "receipt_large", status: "succeeded",
         resultTruncated: true });
       expect(parsed.receipt.result.length).toBeLessThanOrEqual(ASSISTED_LIMITS.resultChars);
-      expect(body).not.toContain("Page 99");
+      expect(body).not.toContain("Page Final");
     }
     expect(fetcher).toHaveBeenCalledOnce();
   });
