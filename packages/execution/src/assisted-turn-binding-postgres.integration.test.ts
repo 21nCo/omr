@@ -89,6 +89,22 @@ describeDatabase("assisted turn PostgreSQL binding", () => {
     expect((await lookupPostgresAssistedTurn(common))?.outcome).toEqual({ kind: "pending" });
   });
 
+  it("cleans a proven undispatched pending claim only for its owner", async () => {
+    const common = { connectionString: connectionString!, workspaceId,
+      requestId: crypto.randomUUID(), wrappingKey, userId: "pending_alice",
+      requestFingerprint: "same-request" };
+    const claimId = crypto.randomUUID();
+    const otherId = crypto.randomUUID();
+    expect((await claimPostgresAssistedTurn({ ...common, claimId })).created).toBe(true);
+    expect(await startPostgresAssistedModel({ ...common, claimId })).toBe(true);
+    await abandonPostgresAssistedTurn({ ...common, claimId: otherId, includePending: true });
+    await abandonPostgresAssistedTurn({ ...common, claimId });
+    expect((await lookupPostgresAssistedTurn(common))?.outcome).toEqual({ kind: "pending" });
+    await abandonPostgresAssistedTurn({ ...common, claimId, includePending: true });
+    expect(await lookupPostgresAssistedTurn(common)).toBeNull();
+    expect((await claimPostgresAssistedTurn({ ...common, claimId: otherId })).created).toBe(true);
+  });
+
   it("rolls back a claim when decoding its post-insert row fails", async () => {
     const requestId = `decode_failure_${crypto.randomUUID()}`;
     await client.query(`CREATE FUNCTION omr_control.corrupt_assisted_claim_fixture()
@@ -120,14 +136,16 @@ describeDatabase("assisted turn PostgreSQL binding", () => {
 
   it("claims and finalizes with the documented binding privileges", async () => {
     const role = `omr_assisted_worker_${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`;
-    await client.query(`CREATE ROLE ${role} LOGIN`);
+    const password = crypto.randomUUID().replaceAll("-", "") +
+      crypto.randomUUID().replaceAll("-", "");
+    await client.query(`CREATE ROLE ${role} LOGIN PASSWORD '${password}'`);
     try {
       await client.query(`GRANT USAGE ON SCHEMA omr_control TO ${role}`);
       await client.query(`GRANT SELECT, INSERT, UPDATE, DELETE
         ON omr_control.assisted_turn_bindings TO ${role}`);
       const workerUrl = new URL(connectionString!);
       workerUrl.username = role;
-      workerUrl.password = "";
+      workerUrl.password = password;
       const common = { connectionString: workerUrl.toString(), workspaceId,
         requestId: crypto.randomUUID(), wrappingKey, userId: "worker_alice",
         requestFingerprint: "same-request", claimId: crypto.randomUUID() };

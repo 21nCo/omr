@@ -851,6 +851,31 @@ describe("direct playground form", () => {
     } finally { await unmount(app); }
   });
 
+  it("labels partial model usage and cost without implying a complete charge", async () => {
+    const fetchMock = vi.fn(async (value: RequestInfo | URL) => {
+      const fixtureResponse = assistedFixtureResponse(String(value));
+      if (fixtureResponse) return fixtureResponse;
+      if (String(value) === "/api/playground/assisted") return Response.json({
+        status: "model_error", answer: "The model request failed.",
+        model: "fixture/model", servedModels: ["fixture/served"],
+        usageIncomplete: true, usage: { promptTokens: 10, completionTokens: null,
+          totalTokens: null, costUsd: null },
+      });
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body,
+      props: { data: { assistedEnabled: true } as never } });
+    try {
+      await enterAssistedPrompt("Find fixture");
+      button("Ask model").click();
+      await vi.waitFor(() => expect(document.body.textContent).toContain("The model request failed."));
+      expect(document.body.textContent).toContain("Tokens reported so far: unavailable");
+      expect(document.body.textContent).toContain("Cost reported so far: unavailable");
+      expect(document.body.textContent).toContain("input 10");
+    } finally { await unmount(app); }
+  });
+
   it.each([
     { status: "tool_error", terminalFailure: true, fresh: true },
     { status: "tool_error", terminalFailure: false, fresh: false },

@@ -20,7 +20,7 @@ type BindingRow = { request_fingerprint: string; outcome: Record<string, unknown
 type TurnIdentity = { connectionString: string; userId: string; workspaceId: string;
   requestId: string; requestFingerprint: string; wrappingKey: Uint8Array<ArrayBuffer> };
 type ClaimIdentity = TurnIdentity & { claimId: string };
-type ClaimKey = Omit<ClaimIdentity, "wrappingKey">;
+type ClaimKey = Omit<ClaimIdentity, "wrappingKey"> & { includePending?: boolean };
 
 async function readBinding(client: pg.Client, input: TurnIdentity): Promise<AssistedTurnBinding | null> {
   const result = await client.query<BindingRow>(`
@@ -149,15 +149,15 @@ export async function startPostgresAssistedModel(input: ClaimKey): Promise<boole
   });
 }
 
-/** A pre-dispatch failure may release only its own unpaid claim. */
+/** A proven pre-dispatch failure may release its own claimed or started row. */
 export async function abandonPostgresAssistedTurn(input: ClaimKey): Promise<void> {
   await withClient(input.connectionString, async (client) => {
     await client.query(`DELETE FROM omr_control.assisted_turn_bindings
       WHERE workspace_id = $1 AND actor_user_id = $2 AND request_id = $3
         AND request_fingerprint = $4 AND claim_id = $5
-        AND outcome->>'kind' = 'claimed'`,
+        AND outcome->>'kind' = ANY($6::text[])`,
     [input.workspaceId, input.userId, input.requestId, input.requestFingerprint,
-      input.claimId]);
+      input.claimId, input.includePending ? ["claimed", "pending"] : ["claimed"]]);
   });
 }
 

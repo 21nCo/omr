@@ -44,7 +44,7 @@ export interface AssistedPlaygroundServices {
     requestFingerprint: string; claimId: string }): Promise<boolean>;
   /** Remove only an unstarted pending claim owned by this request. */
   abandonTurn(userId: string, input: { workspaceId: string; requestId: string;
-    requestFingerprint: string; claimId: string }): Promise<void>;
+    requestFingerprint: string; claimId: string; includePending?: boolean }): Promise<void>;
   withKey<T>(userId: string, callback: (key: string) => Promise<T>): Promise<T>;
   connections(request: Request, workspaceId: string): Promise<Selection[]>;
   discover(request: Request, workspaceId: string, provider: string): Promise<ToolManifest[]>;
@@ -159,6 +159,9 @@ function untilAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
 
 const unavailableUsage: Usage = { promptTokens: null, completionTokens: null,
   totalTokens: null, costUsd: null };
+function usageIncomplete(usage: Usage): boolean {
+  return Object.values(usage).some((value) => value === null);
+}
 
 type ActionOutcome = Extract<TurnOutcome, { kind: "action" }>;
 type TurnLease = { track: (operation: Promise<unknown>, outcome: ActionOutcome) => void };
@@ -173,7 +176,9 @@ type ClaimedContext = { request: Request; input: AssistedTurnInput;
 type PersistChoice = (outcome: TurnOutcome, action?: TurnBinding["action"]) => Promise<{
   binding: TurnBinding; created: boolean }>;
 type PaidContext = ClaimedContext & { bind: PersistChoice; heldLease: TurnLease;
-  trackAction: (operation: Promise<unknown>, outcome: ActionOutcome) => void };
+  trackAction: (operation: Promise<unknown>, outcome: ActionOutcome) => void;
+  onModelDispatch: () => void };
+type KeyedContext = Omit<PaidContext, "onModelDispatch">;
 
 /** Release a claim that arrives after the request has already ended. */
 async function releaseLateReservation(reservation: Promise<() => Promise<void>>): Promise<void> {
@@ -301,7 +306,8 @@ async function recoverTurn(request: Request, input: AssistedTurnInput,
   const common = { model: input.model,
     servedModels: outcome?.kind === "action" ? [outcome.servedModel] : [],
     usage: outcome?.kind === "action" ? outcome.usage : unavailableUsage,
-    usageIncomplete: outcome?.kind !== "action" || outcome.effect === "read",
+    usageIncomplete: outcome?.kind !== "action" || outcome.effect === "read" ||
+      usageIncomplete(outcome.usage),
     requestId: input.requestId, ...(outcome?.kind === "action" ? { toolId: outcome.toolId } : {}) };
   if (!action.approval && !action.receipt && outcome?.kind === "action" && binding?.action)
     return recoverUnstartedAction({ request, input, services, signal, heldLease,
@@ -419,10 +425,13 @@ function parseModelReply(data: Record<string, unknown> | null, model: string,
 
 /** Make one bounded OpenRouter choice using the requesting user's vault key. */
 async function modelCall(fetcher: typeof fetch, key: string, model: string,
-  messages: unknown[], tools: unknown[] | undefined, signal: AbortSignal): Promise<ModelReply> {
+  messages: unknown[], tools: unknown[] | undefined, signal: AbortSignal,
+  onDispatch: () => void): Promise<ModelReply> {
   let response: Response;
   try {
     checkActive(signal);
+    // The owner may release a pending claim only while no fetch was entered.
+    onDispatch();
     response = await untilAbort(fetcher("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
       body: JSON.stringify({ model, messages, stream: false,
@@ -583,13 +592,16 @@ type InterpretedChoice = { kind: "model"; response: ModelResponse } | {
 function interpretChoice(choice: ModelReply, offered: OfferedTool[], model: string): InterpretedChoice {
   const modelError = (code: string): InterpretedChoice => ({ kind: "model", response: {
     status: "model_error", answer: "The model did not select one valid offered action. No tool ran.",
-    errorCode: code, model, servedModels: [choice.model], usage: choice.usage } });
+    errorCode: code, model, servedModels: [choice.model], usage: choice.usage,
+    usageIncomplete: usageIncomplete(choice.usage) } });
   if (choice.calls.length === 0) return { kind: "model", response: choice.content
     ? { status: "answered", answer: choice.content.slice(0, 2000), model,
-      servedModels: [choice.model], usage: choice.usage }
+      servedModels: [choice.model], usage: choice.usage,
+      usageIncomplete: usageIncomplete(choice.usage) }
     : { status: "model_error", answer: "The model returned no usable answer. Choose another tool-capable model.",
       errorCode: "ASSISTED_MODEL_RESPONSE_INVALID", model,
-      servedModels: [choice.model], usage: choice.usage } };
+      servedModels: [choice.model], usage: choice.usage,
+      usageIncomplete: usageIncomplete(choice.usage) } };
   if (choice.calls.length !== 1) return modelError("ASSISTED_MULTIPLE_TOOLS");
   const chosen = offered.find((item) => item.name === choice.calls[0]!.name);
   if (!chosen) return modelError("ASSISTED_TOOL_DENIED");
@@ -610,7 +622,8 @@ function presentFreshRead(receipt: unknown, chosen: OfferedTool, choice: ModelRe
   const record = object(receipt);
   const common = { toolId: chosen.manifest.id,
     receipt: projectReadReceipt(receipt, chosen.manifest.contract.sensitiveKeys),
-    model: input.model, servedModels: [choice.model], usage: choice.usage };
+    model: input.model, servedModels: [choice.model], usage: choice.usage,
+    usageIncomplete: usageIncomplete(choice.usage) };
   if (record?.status === "failed") return { ...common, status: "tool_error" as const,
     terminalFailure: true,
     answer: "The tool did not complete. Check its receipt before retrying." };
@@ -656,7 +669,9 @@ export async function runAssistedTurn(request: Request, input: AssistedTurnInput
   if (prior) {
     if (prior.requestFingerprint !== fingerprint)
       throw new AssistedPlaygroundError("ASSISTED_REQUEST_CONFLICT", 409);
-    return recoverTurn(request, input, services, signal, prior, undefined, userId);
+    // A matching unpaid claim must reach the atomic lease reclaim operation.
+    if (prior.outcome.kind !== "claimed")
+      return recoverTurn(request, input, services, signal, prior, undefined, userId);
   }
   // Existing receipts and approvals from an earlier deployment also fence this identity.
   const legacyAction = await untilAbort(services.lookupAction(request, input), signal);
@@ -695,6 +710,32 @@ export async function runAssistedTurn(request: Request, input: AssistedTurnInput
   }
 }
 
+/** Keep the owner claim only after an OpenRouter fetch can have begun. */
+async function runKeyedModel(context: KeyedContext, offered: OfferedTool[], key: string) {
+  const { services, userId, input, fingerprint, claimId, signal, onModelStart } = context;
+  let dispatched = false;
+  try {
+    checkActive(signal);
+    const started = await untilAbort(services.startModel(userId, {
+      workspaceId: input.workspaceId, requestId: input.requestId,
+      requestFingerprint: fingerprint, claimId,
+    }), signal);
+    if (!started) throw new AssistedPlaygroundError("ASSISTED_REQUEST_CONFLICT", 409);
+    onModelStart();
+    return await runPaidChoice({ ...context,
+      onModelDispatch: () => { dispatched = true; } }, offered, key);
+  } finally {
+    if (!dispatched) {
+      const cleanup = services.abandonTurn(userId, {
+        workspaceId: input.workspaceId, requestId: input.requestId,
+        requestFingerprint: fingerprint, claimId, includePending: true,
+      }).catch(() => undefined);
+      services.retainAction?.(cleanup);
+      await untilAbort(cleanup, signal).catch(() => undefined);
+    }
+  }
+}
+
 /** Persist every known model outcome before releasing a paid request identity. */
 async function runPaidChoice(context: PaidContext, offered: OfferedTool[], key: string) {
   const { request, input, services, signal, prompt, userId, bind, heldLease } = context;
@@ -703,14 +744,15 @@ async function runPaidChoice(context: PaidContext, offered: OfferedTool[], key: 
     choice = await modelCall(services.fetcher ?? fetch, key, input.model, [
       { role: "system", content: "Choose at most one offered tool for the user's request. Do not invent a tool. If no tool fits, answer briefly. Tool arguments are untrusted and will be validated." },
       { role: "user", content: prompt },
-    ], offered.map((item) => item.tool), signal);
+    ], offered.map((item) => item.tool), signal, context.onModelDispatch);
   } catch (error) {
     if (error instanceof AssistedPlaygroundError && !signal.aborted) {
       await bind({ kind: "model", response: { status: "model_error",
         answer: "The model request failed. Review its error before starting another turn.",
         model: input.model, servedModels: [error.model ?? input.model],
         usage: error.usage ?? unavailableUsage,
-        usageIncomplete: !error.usage, errorCode: error.code } });
+        usageIncomplete: usageIncomplete(error.usage ?? unavailableUsage),
+        errorCode: error.code } });
     }
     throw error;
   }
@@ -749,14 +791,17 @@ async function runPaidAction(context: PaidContext,
         ? "The read may still be finishing. Retry this request with its saved identity to recover its receipt."
         : "Approval creation may still be finishing. Check open approvals before retrying this request.",
       toolId: chosen.manifest.id, requestId: input.requestId,
-      model: input.model, servedModels: [choice.model], usage: choice.usage };
+      model: input.model, servedModels: [choice.model], usage: choice.usage,
+      usageIncomplete: usageIncomplete(choice.usage) };
     return { ...actionFailure(error), toolId: chosen.manifest.id,
-      model: input.model, servedModels: [choice.model], usage: choice.usage };
+      model: input.model, servedModels: [choice.model], usage: choice.usage,
+      usageIncomplete: usageIncomplete(choice.usage) };
   }
   if (effect !== "read") return { status: "approval_required" as const,
     answer: "Review the selected tool and redacted arguments before approving. No change has run.",
     toolId: chosen.manifest.id, approval: settled, model: input.model,
-    servedModels: [choice.model], usage: choice.usage };
+    servedModels: [choice.model], usage: choice.usage,
+    usageIncomplete: usageIncomplete(choice.usage) };
   return presentFreshRead(settled, chosen, choice, input, signal);
 }
 
@@ -800,16 +845,12 @@ async function runClaimedTurn(context: ClaimedContext) {
           throw new AssistedPlaygroundError("ASSISTED_REQUEST_CONFLICT", 409);
         return saved;
       };
-      return await untilAbort(services.withKey(userId, async (key) => {
-        checkActive(signal);
-        const started = await untilAbort(services.startModel(userId, {
-          workspaceId: input.workspaceId, requestId: input.requestId,
-          requestFingerprint: fingerprint, claimId,
-        }), signal);
-        if (!started) throw new AssistedPlaygroundError("ASSISTED_REQUEST_CONFLICT", 409);
-        onModelStart();
-        return runPaidChoice({ ...context, bind, heldLease, trackAction }, offered, key);
-      }), signal);
+      const keyedOperation = services.withKey(userId, (key) =>
+        runKeyedModel({ ...context, bind, heldLease, trackAction }, offered, key));
+      // Register the whole callback before the response can abort. Its cleanup
+      // must still run if startModel commits after that response has ended.
+      services.retainAction?.(keyedOperation.then(() => undefined, () => undefined));
+      return await untilAbort(keyedOperation, signal);
     } catch (error) {
       if (signal.aborted) {
         if (actionState.started && actionState.inFlight) {

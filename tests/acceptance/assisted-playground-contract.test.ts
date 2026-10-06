@@ -3,6 +3,8 @@ import type { ToolManifest } from "@oh-my-router/tools";
 import { createOMRRouter } from "../../apps/web/src/lib/server/router.js";
 import { ASSISTED_LIMITS, AssistedPlaygroundError, runAssistedTurn, safeResult,
   type AssistedPlaygroundServices } from "../../apps/web/src/lib/server/assisted-playground.js";
+import { ASSISTED_UNPAID_CLAIM_MS } from
+  "../../packages/execution/src/assisted-turn-binding-postgres.js";
 
 const manifest: ToolManifest = {
   catalogSchemaVersion: "1.0.0", id: "demo.read", provider: "demo",
@@ -32,6 +34,7 @@ function choose(name = "tool_0", args = '{"title":"fixture"}') {
 function fixture(overrides: Partial<AssistedPlaygroundServices> = {}) {
   const bindings = new Map<string, Awaited<ReturnType<AssistedPlaygroundServices["loadTurn"]>>>();
   const claimIds = new Map<string, string>();
+  const claimStartedAt = new Map<string, number>();
   const authenticate = overrides.authenticate ?? (async () => "alice");
   const fetcher = vi.fn<typeof fetch>();
   fetcher.mockResolvedValueOnce(choose());
@@ -52,11 +55,21 @@ function fixture(overrides: Partial<AssistedPlaygroundServices> = {}) {
     claimTurn: async (userId, value) => {
       const key = `${userId}:${value.workspaceId}:${value.requestId}`;
       const prior = bindings.get(key);
-      if (prior) return { binding: prior, created: false };
+      if (prior) {
+        if (prior.outcome.kind === "claimed" &&
+            prior.requestFingerprint === value.requestFingerprint &&
+            Date.now() - (claimStartedAt.get(key) ?? Date.now()) >= ASSISTED_UNPAID_CLAIM_MS) {
+          claimIds.set(key, value.claimId);
+          claimStartedAt.set(key, Date.now());
+          return { binding: prior, created: true };
+        }
+        return { binding: prior, created: false };
+      }
       const binding = { requestFingerprint: value.requestFingerprint,
         outcome: { kind: "claimed" as const } };
       bindings.set(key, binding);
       claimIds.set(key, value.claimId);
+      claimStartedAt.set(key, Date.now());
       return { binding, created: true };
     },
     startModel: async (userId, value) => {
@@ -70,9 +83,12 @@ function fixture(overrides: Partial<AssistedPlaygroundServices> = {}) {
       const key = `${userId}:${value.workspaceId}:${value.requestId}`;
       const prior = bindings.get(key);
       if (prior?.requestFingerprint === value.requestFingerprint &&
-          prior.outcome.kind === "claimed" && claimIds.get(key) === value.claimId) {
+          (prior.outcome.kind === "claimed" ||
+            (value.includePending && prior.outcome.kind === "pending")) &&
+          claimIds.get(key) === value.claimId) {
         bindings.delete(key);
         claimIds.delete(key);
+        claimStartedAt.delete(key);
       }
     },
     withKey: async (_user, callback) => callback("synthetic-openrouter-alice-key"),
@@ -93,7 +109,10 @@ function fixture(overrides: Partial<AssistedPlaygroundServices> = {}) {
     },
     ...overrides,
   };
-  return { services, fetcher, execute, readReceipt, requestApproval };
+  return { services, fetcher, execute, readReceipt, requestApproval,
+    expireClaim: (userId = "alice") => claimStartedAt.set(
+      `${userId}:${input.workspaceId}:${input.requestId}`,
+      Date.now() - ASSISTED_UNPAID_CLAIM_MS - 1) };
 }
 
 describe("assisted-playground-contract", () => {
@@ -148,6 +167,123 @@ describe("assisted-playground-contract", () => {
     expect(retry).toMatchObject({ status: "action_pending", usageIncomplete: true });
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
+
+  it.each(["read", "write", "model"] as const)(
+    "reclaims an expired unpaid %s claim through the server retry path", async (kind) => {
+      const { services, fetcher, execute, requestApproval, expireClaim } = fixture({
+        discover: async () => [kind === "write" ? writeManifest : manifest],
+      });
+      const claimInput = { workspaceId: input.workspaceId, requestId: input.requestId,
+        requestFingerprint: await services.fingerprint(input, input.prompt),
+        claimId: crypto.randomUUID() };
+      expect((await services.claimTurn("alice", claimInput)).created).toBe(true);
+      const active = await runAssistedTurn(request(), input, services);
+      expect(active).toMatchObject({ status: "action_pending" });
+      await expect(runAssistedTurn(request(), { ...input, prompt: "Changed intent" }, services))
+        .rejects.toMatchObject({ code: "ASSISTED_REQUEST_CONFLICT" });
+      expect(fetcher).not.toHaveBeenCalled();
+      expireClaim();
+      fetcher.mockReset().mockResolvedValue(kind === "model"
+        ? reply({ content: "Review complete" }) : choose());
+      const recovered = await runAssistedTurn(request(), input, services);
+      expect(recovered.status).toBe(kind === "write" ? "approval_required" : "answered");
+      expect(fetcher).toHaveBeenCalledOnce();
+      expect(execute).toHaveBeenCalledTimes(kind === "read" ? 1 : 0);
+      expect(requestApproval).toHaveBeenCalledTimes(kind === "write" ? 1 : 0);
+      const retry = await runAssistedTurn(request(), input, services);
+      expect(retry.status).not.toBe("model_error");
+      expect(fetcher).toHaveBeenCalledOnce();
+    });
+
+  it("clears an owner-fenced pending row when cancellation wins before fetch", async () => {
+    const controller = new AbortController();
+    const retained: Promise<void>[] = [];
+    const { services, fetcher } = fixture({
+      retainAction: (operation) => { retained.push(operation); },
+    });
+    const startModel = services.startModel;
+    services.startModel = async (userId, value) => {
+      const started = await startModel(userId, value);
+      controller.abort();
+      return started;
+    };
+    await expect(runAssistedTurn(request(undefined, controller.signal), input, services))
+      .rejects.toMatchObject({ code: "ASSISTED_CANCELLED" });
+    await Promise.all(retained);
+    expect(fetcher).not.toHaveBeenCalled();
+    services.startModel = startModel;
+    const result = await runAssistedTurn(request(), input, services);
+    expect(result.status).toBe("answered");
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it("retains cleanup when a committed start settles after the response aborts", async () => {
+    const controller = new AbortController();
+    const retained: Promise<void>[] = [];
+    let finishStart!: () => void;
+    const { services, fetcher } = fixture({
+      retainAction: (operation) => { retained.push(operation); },
+    });
+    const startModel = services.startModel;
+    services.startModel = async (userId, value) => {
+      const started = await startModel(userId, value);
+      expect(retained).toHaveLength(1);
+      controller.abort();
+      await new Promise<void>((resolve) => { finishStart = resolve; });
+      return started;
+    };
+    await expect(runAssistedTurn(request(undefined, controller.signal), input, services))
+      .rejects.toMatchObject({ code: "ASSISTED_CANCELLED" });
+    expect(fetcher).not.toHaveBeenCalled();
+    finishStart();
+    await vi.waitFor(() => expect(retained.length).toBeGreaterThanOrEqual(2));
+    await Promise.all(retained);
+    services.startModel = startModel;
+    expect((await runAssistedTurn(request(), input, services)).status).toBe("answered");
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it("marks partial usage on model success, rejection and saved recovery", async () => {
+    const partial = { prompt_tokens: 10, completion_tokens: null,
+      total_tokens: null, cost: null };
+    const { services, fetcher } = fixture();
+    fetcher.mockReset().mockResolvedValue(reply({ content: "Review complete" }, partial));
+    const answer = await runAssistedTurn(request(), input, services);
+    expect(answer).toMatchObject({ status: "answered", usageIncomplete: true,
+      usage: { promptTokens: 10, totalTokens: null, costUsd: null } });
+    expect(await runAssistedTurn(request(), input, services)).toEqual(answer);
+
+    const second = fixture();
+    second.fetcher.mockReset().mockResolvedValue(Response.json({ usage: partial,
+      error: "synthetic private detail" }, { status: 401 }));
+    await expect(runAssistedTurn(request(), input, second.services)).rejects
+      .toMatchObject({ code: "ASSISTED_KEY_REJECTED" });
+    const error = await runAssistedTurn(request(), input, second.services);
+    expect(error).toMatchObject({ status: "model_error", usageIncomplete: true,
+      usage: { promptTokens: 10, totalTokens: null, costUsd: null } });
+    expect(second.fetcher).toHaveBeenCalledOnce();
+  });
+
+  it.each(["read", "write"] as const)(
+    "keeps partial usage visible for fresh and recovered %s actions", async (effect) => {
+      const { services, fetcher } = fixture({
+        discover: async () => [effect === "read" ? manifest : writeManifest],
+      });
+      fetcher.mockReset().mockResolvedValue(reply({ content: null, tool_calls: [{
+        function: { name: "tool_0", arguments: '{"title":"fixture"}' },
+      }] }, { prompt_tokens: 10, completion_tokens: 4,
+        total_tokens: 14, cost: null }));
+      const first = await runAssistedTurn(request(), input, services);
+      expect(first).toMatchObject({ usageIncomplete: true,
+        usage: { totalTokens: 14, costUsd: null } });
+      services.lookupAction = effect === "read"
+        ? async () => ({ approval: null, receipt: { id: "receipt_one", status: "succeeded" } })
+        : async () => ({ approval: { id: "approval_one", status: "pending" }, receipt: null });
+      const recovered = await runAssistedTurn(request(), input, services);
+      expect(recovered).toMatchObject({ usageIncomplete: true,
+        usage: { totalTokens: 14, costUsd: null } });
+      expect(fetcher).toHaveBeenCalledOnce();
+    });
 
   it("abandons a claim after prepayment failure so the request can retry", async () => {
     let discoveries = 0;
@@ -1257,18 +1393,18 @@ describe("assisted-playground-contract", () => {
       retainAction: (settlement) => { retained.push(settlement); },
     });
     const pending = runAssistedTurn(request(undefined, controller.signal), input, services);
-    await vi.waitFor(() => expect(retained).toHaveLength(1));
+    await vi.waitFor(() => expect(retained).toHaveLength(2));
     controller.abort();
     const result = await pending;
     expect(result).toMatchObject({ status: "action_pending", requestId: input.requestId });
-    expect(retained).toHaveLength(1);
+    expect(retained).toHaveLength(2);
     expect(release).not.toHaveBeenCalled();
     expect(reserveTurn).toHaveBeenCalledOnce();
     if (effect === "read") expect(execute).toHaveBeenCalledOnce();
     else expect(requestApproval).toHaveBeenCalledOnce();
     settle(effect === "read" ? { id: "receipt_late", status: "succeeded" }
       : { id: "approval_late", status: "pending" });
-    await retained[0];
+    await Promise.all(retained);
     expect(release).toHaveBeenCalledOnce();
   });
 
@@ -1421,12 +1557,12 @@ describe("assisted-playground-contract", () => {
       } }),
     });
     const pending = runAssistedTurn(request(undefined, controller.signal), input, services);
-    await vi.waitFor(() => expect(retained).toHaveLength(1));
+    await vi.waitFor(() => expect(retained).toHaveLength(2));
     controller.abort();
     expect(await pending).toMatchObject({ status: "action_pending", requestId: input.requestId });
     expect(release).not.toHaveBeenCalled();
     finish({ id: "receipt_race", status: "succeeded", result: { title: "Roadmap is ready" } });
-    await retained[0];
+    await Promise.all(retained);
     expect(release).toHaveBeenCalledOnce();
     expect(reserveRecovery).not.toHaveBeenCalled();
     expect(fetcher).toHaveBeenCalledOnce();
