@@ -1,15 +1,20 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import type { PageData } from "./$types";
   import { createLinearActionKeys } from "$lib/linear-action-keys.js";
   import { recoverProviderReconciliation } from "$lib/workspace-catalog.js";
   import { createPlaygroundRequest, parsePlaygroundArguments, playgroundConnectionReady,
-    playgroundError, resumablePlaygroundApproval, schemaHints, type PlaygroundApproval, type PlaygroundCatalog,
+    playgroundError, PlaygroundRequestError, resumablePlaygroundApproval, schemaHints, type AssistedPlaygroundResult,
+    type PlaygroundApproval, type PlaygroundCatalog,
     type PlaygroundConnection, type PlaygroundOverview, type PlaygroundReceipt } from "$lib/direct-playground.js";
   import type { ToolManifest } from "@oh-my-router/tools";
 
+  export let data: PageData = { assistedEnabled: false };
+
   const request = createPlaygroundRequest(fetch, () =>
     location.assign(`/login?returnTo=${encodeURIComponent(location.pathname)}`));
-  const actionKeys = createLinearActionKeys(() => crypto.randomUUID(), () => sessionStorage, "connected tool");
+  const actionKeys = createLinearActionKeys(() => crypto.randomUUID(), () => sessionStorage,
+    "connected tool", (key) => [key, `assisted_${key}`]);
   let overview: PlaygroundOverview | null = null;
   let catalog: PlaygroundCatalog | null = null;
   let workspaceId = "";
@@ -25,11 +30,19 @@
   let loading = true;
   let busy = "";
   let generation = 0;
+  let assistedPrompt = "";
+  let assistedModel = "";
+  let assistedResult: AssistedPlaygroundResult | null = null;
+  let assistedIntent: { workspaceId: string; connectionId: string; model: string;
+    prompt: string; requestId: string } | null = null;
+  let assistedController: AbortController | null = null;
+  let selectedAccount: PlaygroundConnection | undefined;
+  $: selectedAccount = overview?.connections.find((item) => item.id === connectionId &&
+    item.selected && playgroundConnectionReady(item, workspaceId));
 
   /** Return only the server-confirmed, selectable account. */
   function currentConnection(): PlaygroundConnection | undefined {
-    return overview?.connections.find((item) => item.id === connectionId &&
-      item.selected && playgroundConnectionReady(item, workspaceId));
+    return selectedAccount;
   }
 
   /** Clear the visible action while retaining session-backed write identity. */
@@ -42,6 +55,103 @@
     receipt = null;
     error = "";
     notice = "";
+    assistedController?.abort();
+    assistedController = null;
+    assistedResult = null;
+    assistedIntent = null;
+  }
+
+  /** Keep the model request bound to the currently selected workspace and account. */
+  async function askAssistant() {
+    const account = currentConnection();
+    if (!account || busy || loading || approval || !assistedPrompt.trim() || !assistedModel.trim()) return;
+    const turn = generation;
+    const controller = new AbortController();
+    assistedController = controller;
+    assistedResult = null;
+    assistedIntent = null;
+    receipt = null;
+    error = "";
+    notice = "";
+    busy = "Asking model…";
+    try {
+      const model = assistedModel.trim();
+      const prompt = assistedPrompt.trim();
+      const requestId = await actionKeys.key("assisted", workspaceId, account.id, { model, prompt });
+      if (turn !== generation || controller.signal.aborted) return;
+      const result = await request<AssistedPlaygroundResult>("/api/playground/assisted", {
+        workspaceId, connectionId: account.id, model, prompt, requestId,
+      }, controller.signal);
+      if (turn !== generation || controller.signal.aborted) return;
+      assistedResult = result;
+      assistedIntent = { workspaceId, connectionId: account.id, model, prompt, requestId };
+      if (result.receipt) {
+        // Assisted receipts use a bounded string preview; never render an unexpected full result.
+        const preview = result.receipt.result;
+        receipt = preview === null || (typeof preview === "string" && preview.length <= 8000)
+          ? result.receipt : { ...result.receipt, result: null, resultTruncated: true };
+      }
+      if (result.approval) {
+        showApproval(result.approval);
+        await actionKeys.bindApproval(result.approval.id, "assisted", workspaceId, account.id,
+          { model, prompt });
+      }
+      if ((result.status === "answered" && !result.terminalWrite) || result.status === "model_error" ||
+          (result.status === "tool_error" && result.terminalFailure)) {
+        await actionKeys.reset("assisted", workspaceId, account.id, { model, prompt });
+      }
+      if (result.status === "action_pending") await refreshAssistedApprovals(turn);
+    } catch (caught) {
+      if (turn === generation && !controller.signal.aborted) {
+        error = playgroundError(caught);
+        if (caught instanceof PlaygroundRequestError && caught.usage) {
+          assistedResult = { status: "model_error", answer: error, errorCode: caught.code,
+            model: assistedModel.trim(), servedModels: caught.model ? [caught.model] : [],
+            usage: caught.usage };
+          error = "";
+        }
+        await refreshAssistedApprovals(turn);
+      }
+    } finally {
+      if (turn === generation && assistedController === controller) {
+        busy = "";
+        assistedController = null;
+      }
+    }
+  }
+
+  function cancelAssistant() {
+    assistedController?.abort();
+    assistedController = null;
+    busy = "";
+    notice = "Request cancelled. If a tool already started, check its receipt or approval before retrying.";
+    void refreshAssistedApprovals(generation);
+  }
+
+  /** Reconcile approvals after a lost or cancelled response without clearing retry identity. */
+  async function refreshAssistedApprovals(turn: number) {
+    try {
+      const account = currentConnection();
+      const requestId = account ? await actionKeys.existingKey("assisted", workspaceId, account.id,
+        { model: assistedModel.trim(), prompt: assistedPrompt.trim() }) : undefined;
+      if (requestId && turn === generation) {
+        const status = await request<{ approval: { id: string; status: string } | null;
+          receipt: { id: string; status: string } | null }>(
+          `/api/playground/assisted/status?${new URLSearchParams({ workspaceId, requestId })}`);
+        if (turn !== generation) return;
+        if (status.approval) {
+          const recovered = await request<PlaygroundApproval>(
+            `/api/approvals/status?${new URLSearchParams({ approvalId: status.approval.id, workspaceId })}`);
+          if (turn === generation) showApproval(recovered);
+        }
+        if (status.receipt && turn === generation) {
+          notice = `Action receipt ${status.receipt.id} is ${status.receipt.status}. Retry the same request to recover its saved action and usage.`;
+        }
+      }
+      const fresh = await request<PlaygroundOverview>(
+        `/api/control-plane?workspaceId=${encodeURIComponent(workspaceId)}`);
+      if (turn === generation && overview) overview = { ...overview, approvals: fresh.approvals };
+    } catch { /* The retained request identity still fences a retry. */ }
   }
 
   /** Keep the current approval and resumable list in sync. */
@@ -215,12 +325,22 @@
     try {
       if (operation === "execute") {
         const value = await request<PlaygroundReceipt>("/api/approvals/execute", { approvalId });
-        if (turn === generation) receipt = value;
+        if (turn === generation) {
+          receipt = value;
+          if (assistedResult?.approval?.id === approvalId) assistedResult = { ...assistedResult,
+            answer: value.status === "succeeded" ? "Approved change completed. Review the receipt."
+              : "The approved action is not confirmed. Check the receipt before retrying." };
+        }
       } else {
         const value = await request<PlaygroundApproval>(operation === "status"
           ? `/api/approvals/status?${new URLSearchParams({ approvalId, workspaceId })}`
           : `/api/approvals/${operation}`, operation === "status" ? undefined : { approvalId });
-        if (turn === generation) showApproval(value);
+        if (turn === generation) {
+          showApproval(value);
+          if (operation === "reject" && value.status === "rejected" &&
+              assistedResult?.approval?.id === approvalId) assistedResult = { ...assistedResult,
+                answer: "Change rejected. No provider change ran." };
+        }
       }
       if (turn === generation && operation !== "status") {
         await refreshApproval(approvalId, turn);
@@ -326,6 +446,40 @@
     }
   }
 
+  /** A write whose approval row is gone still needs a fresh, confirmed user intent. */
+  async function newAssistedWrite() {
+    const result = assistedResult;
+    const intent = assistedIntent;
+    const account = currentConnection();
+    if (!result?.terminalWrite || !result.receiptId || !intent || approval || !account || busy || loading ||
+        intent.workspaceId !== workspaceId || intent.connectionId !== account.id) return;
+    const turn = generation;
+    busy = "Checking settlement…";
+    error = "";
+    try {
+      const requestId = await actionKeys.existingKey("assisted", intent.workspaceId,
+        intent.connectionId, { model: intent.model, prompt: intent.prompt });
+      if (requestId !== intent.requestId) throw new Error("The saved action changed. Reload and check its receipt.");
+      const state = await request<{ approval: { id: string; status: string } | null;
+        receipt: { id: string; status: string } | null }>(
+          `/api/playground/assisted/status?${new URLSearchParams({ workspaceId: intent.workspaceId, requestId })}`);
+      if (state.approval || state.receipt?.id !== result.receiptId ||
+          !["succeeded", "failed"].includes(state.receipt.status)) {
+        throw new Error("Write settlement is not confirmed. Check its approval and receipt before another action.");
+      }
+      if (turn !== generation || assistedResult !== result || assistedIntent !== intent ||
+          currentConnection()?.id !== account.id) return;
+      await actionKeys.reset("assisted", intent.workspaceId, intent.connectionId,
+        { model: intent.model, prompt: intent.prompt });
+      resetAction();
+      notice = "Ready for a new action. Review the account and request before sending it.";
+    } catch (caught) {
+      if (turn === generation) error = playgroundError(caught);
+    } finally {
+      if (turn === generation) busy = "";
+    }
+  }
+
   onMount(() => { void load(); });
 </script>
 
@@ -361,23 +515,23 @@
         {/if}
       {/each}
     </select>
-    {#if currentConnection()}
-      <p role="status">{currentConnection()?.label} is ready · Provider catalog:
-        {catalog?.providers.find((item) => item.provider === currentConnection()?.provider)?.state ?? "loading"}</p>
+    {#if selectedAccount}
+      <p role="status">{selectedAccount.label} is ready · Provider catalog:
+        {catalog?.providers.find((item) => item.provider === selectedAccount?.provider)?.state ?? "loading"}</p>
     {/if}
     {#if overview && !overview.connections.some((item) => playgroundConnectionReady(item, workspaceId))}
       <p>No ready account in this workspace. <a href="/app">Connect or check an account</a>.</p>
     {/if}
 
     <label for="playground-tool">Tool</label>
-    <select id="playground-tool" value={toolId} disabled={loading || !!busy || !currentConnection()}
+    <select id="playground-tool" value={toolId} disabled={loading || !!busy || !selectedAccount}
       onchange={(event) => void selectTool(event.currentTarget.value)}>
       <option value="">Choose a tool</option>
-      {#each catalog?.tools.filter((item) => item.provider === currentConnection()?.provider) ?? [] as tool}
+      {#each catalog?.tools.filter((item) => item.provider === selectedAccount?.provider) ?? [] as tool}
         <option value={tool.id}>{tool.displayName} · {tool.contract.effect}</option>
       {/each}
     </select>
-    {#if currentConnection() && catalog && !catalog.tools.some((item) => item.provider === currentConnection()?.provider)}
+    {#if selectedAccount && catalog && !catalog.tools.some((item) => item.provider === selectedAccount?.provider)}
       <p>No tools are ready for this account. Check its scopes and health in the <a href="/app">control plane</a>.</p>
     {/if}
 
@@ -402,6 +556,47 @@
     {/if}
   </form>
   {#if busy}<p role="status">{busy}</p>{/if}
+
+  {#if data?.assistedEnabled}
+    <section aria-label="Assisted tool test">
+      <h2>Ask for one tool action</h2>
+      <p>Uses your personal OpenRouter key. Choose a model that supports tool calls. One request can choose one tool; writes still wait for your approval.</p>
+      <form onsubmit={(event) => { event.preventDefault(); void askAssistant(); }}>
+        <label for="assisted-model">OpenRouter model</label>
+        <input id="assisted-model" bind:value={assistedModel} maxlength="100" placeholder="provider/model" disabled={!!busy || loading || !!approval} />
+        <label for="assisted-prompt">Request</label>
+        <textarea id="assisted-prompt" bind:value={assistedPrompt} maxlength="2000" rows="4"
+          disabled={!!busy || loading || !!approval}></textarea>
+        <button type="submit" disabled={!!busy || loading || !!approval || !selectedAccount || !assistedPrompt.trim() || !assistedModel.trim()}>Ask model</button>
+      </form>
+      {#if assistedController}
+        <button type="button" onclick={cancelAssistant}>Cancel request</button>
+      {/if}
+      {#if assistedResult}
+        <p role="status">{assistedResult.answer}</p>
+        <p>Selected model: {assistedResult.model} · Served by: {assistedResult.servedModels.join(", ")}</p>
+        <p>Tokens{assistedResult.usageIncomplete ? " reported so far" : ""}: {assistedResult.usage.totalTokens ?? "unavailable"}
+          (input {assistedResult.usage.promptTokens ?? "unavailable"},
+          output {assistedResult.usage.completionTokens ?? "unavailable"})
+          · Cost{assistedResult.usageIncomplete ? " reported so far" : ""}: {assistedResult.usage.costUsd === null ? "unavailable" : `$${assistedResult.usage.costUsd.toFixed(6)}`}</p>
+        {#if assistedResult.toolId}<p>Selected tool: <code>{assistedResult.toolId}</code></p>{/if}
+        {#if assistedResult.receiptId && !assistedResult.receipt}
+          <p>Receipt: <code>{assistedResult.receiptId}</code></p>
+          {#if assistedResult.terminalFailure && assistedIntent}
+            <a href={`/api/playground/assisted/receipt?${new URLSearchParams({
+              workspaceId: assistedIntent.workspaceId, requestId: assistedIntent.requestId,
+              receiptId: assistedResult.receiptId,
+            })}`} download="assisted-receipt.json">Download full authorized receipt</a>
+          {/if}
+        {/if}
+        {#if assistedResult.errorCode}<p role="alert">Tool error: <code>{assistedResult.errorCode}</code>
+          {#if assistedResult.receiptId} · Receipt: <code>{assistedResult.receiptId}</code>{/if}</p>{/if}
+        {#if assistedResult.terminalWrite && !approval}
+          <button type="button" disabled={!!busy || loading} onclick={() => void newAssistedWrite()}>Start a new action</button>
+        {/if}
+      {/if}
+    </section>
+  {/if}
 
   {#if overview?.approvals?.some((item) => resumablePlaygroundApproval(item, workspaceId))}
     <section aria-label="Open approvals">
@@ -481,11 +676,20 @@
     <section aria-label="Execution result">
       <h2>Result · {receipt.status}</h2>
       <p>Receipt: <code>{receipt.id}</code></p>
+      {#if assistedResult?.receipt?.id === receipt.id && assistedIntent &&
+          ["succeeded", "failed"].includes(receipt.status)}
+        <a href={`/api/playground/assisted/receipt?${new URLSearchParams({
+          workspaceId: assistedIntent.workspaceId, requestId: assistedIntent.requestId,
+          receiptId: receipt.id,
+        })}`} download="assisted-receipt.json">Download full authorized receipt</a>
+      {/if}
       {#if receipt.errorCode}<p>Error code: <code>{receipt.errorCode}</code></p>{/if}
       {#if receipt.status === "failed" || receipt.status === "uncertain" || receipt.errorCode}
         <p role="alert">Check this receipt and account health in the <a href="/app">control plane</a>. Verify the provider outcome before retrying a write.</p>
       {/if}
-      {#if receipt.result !== null}<pre>{JSON.stringify(receipt.result, null, 2)}</pre>{/if}
+      {#if receipt.resultWithheld}<p>Result preview withheld. Download the full authorized receipt to inspect it.</p>{/if}
+      {#if receipt.resultTruncated}<p>Result preview truncated. Download the full authorized receipt to inspect it.</p>{/if}
+      {#if receipt.result !== null}<pre>{typeof receipt.result === "string" ? receipt.result : JSON.stringify(receipt.result, null, 2)}</pre>{/if}
     </section>
   {/if}
 </main>
@@ -497,7 +701,7 @@
   h1 { font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1.1; }
   form, section { display: grid; gap: .7rem; margin-top: 1.5rem; padding: 1.25rem; border: 1px solid #353a30; border-radius: .8rem; background: #191b17; }
   label { font-weight: 700; }
-  select, textarea { width: 100%; box-sizing: border-box; padding: .7rem; color: #eeeee7; background: #10110f; border: 1px solid #575f4d; border-radius: .5rem; font: inherit; }
+  select, textarea, input { width: 100%; box-sizing: border-box; padding: .7rem; color: #eeeee7; background: #10110f; border: 1px solid #575f4d; border-radius: .5rem; font: inherit; }
   textarea, pre, code { font-family: ui-monospace, monospace; }
   pre { overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: .8rem; background: #10110f; }
   button { width: fit-content; padding: .65rem 1rem; color: #10110f; background: #b7d76a; border: 0; border-radius: .5rem; font: inherit; font-weight: 700; cursor: pointer; }

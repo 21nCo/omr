@@ -155,7 +155,7 @@ export interface ExecutionApproval {
 }
 
 export interface ExecutionApprovalStore {
-  create(approval: ExecutionApproval): Promise<ExecutionApproval>;
+  create(approval: ExecutionApproval, deadlineAt?: number): Promise<ExecutionApproval>;
   /** Use the service's epoch-millisecond clock for expiry in every store. */
   getForActor(approvalId: string, actorUserId: string, deadlineAt?: number,
     now?: number): Promise<ExecutionApproval>;
@@ -450,6 +450,18 @@ export class ApprovalUnavailableError extends Error {
 
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,199}$/;
 
+function executionDeadline(deadlineMs: number | undefined): number {
+  if (deadlineMs !== undefined && (!Number.isSafeInteger(deadlineMs) || deadlineMs <= 0))
+    throw new ExecutionInputError("Invalid execution deadline");
+  return Date.now() + Math.min(deadlineMs ?? EXECUTION_INVOCATION_DEADLINE_MS,
+    EXECUTION_INVOCATION_DEADLINE_MS);
+}
+
+function assertOptionalIdempotencyKey(key: string | undefined): void {
+  if (key !== undefined && (typeof key !== "string" || !IDEMPOTENCY_KEY.test(key)))
+    throw new ExecutionInputError("Invalid idempotency key");
+}
+
 export class ExecutionService {
   private readonly fingerprintKey: Uint8Array<ArrayBuffer>;
 
@@ -471,6 +483,43 @@ export class ExecutionService {
     this.fingerprintKey = fingerprintKey;
   }
 
+  /** Inspect an exact read receipt without replaying or dispatching a provider action. */
+  async readReceipt(input: { principal: ExecutionPrincipal; toolId: string; params: JsonValue;
+    connectionId: string; idempotencyKey: string; receiptId: string }): Promise<ExecutionReceipt | null> {
+    const deadlineAt = Date.now() + EXECUTION_INVOCATION_DEADLINE_MS;
+    const manifest = this.catalog.get(input.toolId);
+    if (manifest?.contract.effect !== "read" ||
+        !validToolInput(manifest, input.params) || !IDEMPOTENCY_KEY.test(input.idempotencyKey)) {
+      throw new ExecutionInputError("Read receipt request is invalid");
+    }
+    this.authorizeEffect(input.principal, manifest);
+    const connection = await withinInvocationDeadline(deadlineAt, () => this.connections.resolve({
+      actorUserId: input.principal.userId, workspaceId: input.principal.workspaceId,
+      provider: manifest.provider, connectionId: input.connectionId,
+    }));
+    await withinInvocationDeadline(deadlineAt, () => this.assertScopes(manifest, connection, input.principal));
+    const expectedHash = await hashJson({ manifestHash: manifest.hash,
+      connectionId: connection.id, params: input.params }, this.fingerprintKey);
+    const inspect = async (assertAuthorized: () => void) => {
+      assertAuthorized();
+      const receipt = await this.receipts.findByIdempotency({
+        workspaceId: input.principal.workspaceId, principalKey: principalKey(input.principal),
+        idempotencyKey: input.idempotencyKey, deadlineAt,
+      });
+      assertAuthorized();
+      return receipt?.id === input.receiptId && receipt.actorUserId === input.principal.userId &&
+        receipt.toolId === manifest.id && receipt.manifestHash === manifest.hash &&
+        receipt.connectionId === connection.id &&
+        receipt.providerConnectionId === connection.providerConnectionId &&
+        receipt.requestHash === expectedHash && !receipt.approvalId &&
+        (receipt.status === "succeeded" || receipt.status === "failed") ? receipt : null;
+    };
+    return this.invocationGuard
+      ? this.invocationGuard.run({ principal: input.principal, connection,
+        capability: "tools:read", deadlineAt }, inspect)
+      : withinInvocationDeadline(deadlineAt, () => inspect(() => undefined));
+  }
+
   /** Validate parameters, selected workspace account, and grants before read dispatch; writes require approval. */
   async execute(input: {
     principal: ExecutionPrincipal;
@@ -478,17 +527,16 @@ export class ExecutionService {
     params: JsonValue;
     connectionId?: string;
     idempotencyKey?: string;
+    /** Assisted Worker calls use a shorter deadline to finish durable cleanup. */
+    deadlineMs?: number;
   }): Promise<ExecutionReceipt> {
-    const deadlineAt = Date.now() + EXECUTION_INVOCATION_DEADLINE_MS;
+    const deadlineAt = executionDeadline(input.deadlineMs);
     const manifest = this.catalog.get(input.toolId);
     if (!manifest) throw new ExecutionInputError("Unknown tool identifier");
     this.authorizeEffect(input.principal, manifest);
     assertJson(input.params);
     if (!validToolInput(manifest, input.params)) throw new ExecutionInputError("Invalid tool parameters");
-    if (input.idempotencyKey !== undefined &&
-      (typeof input.idempotencyKey !== "string" || !IDEMPOTENCY_KEY.test(input.idempotencyKey))) {
-      throw new ExecutionInputError("Invalid idempotency key");
-    }
+    assertOptionalIdempotencyKey(input.idempotencyKey);
     const params = structuredClone(input.params);
 
     if (input.idempotencyKey) {
@@ -539,7 +587,15 @@ export class ExecutionService {
     connectionId?: string;
     idempotencyKey: string;
     ttlMs?: number;
+    deadlineMs?: number;
   }): Promise<ExecutionApproval> {
+    if (input.deadlineMs !== undefined &&
+        (!Number.isSafeInteger(input.deadlineMs) || input.deadlineMs <= 0))
+      throw new ExecutionInputError("Invalid approval deadline");
+    const deadlineAt = input.deadlineMs === undefined ? undefined : Date.now() +
+      Math.min(input.deadlineMs, EXECUTION_INVOCATION_DEADLINE_MS);
+    const withinApproval = <T>(operation: () => Promise<T>) => deadlineAt === undefined
+      ? operation() : withinInvocationDeadline(deadlineAt, operation);
     const approvals = this.requiredApprovals();
     const manifest = this.catalog.get(input.toolId);
     if (!manifest) throw new ExecutionInputError("Unknown tool identifier");
@@ -569,13 +625,14 @@ export class ExecutionService {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 60_000 || ttlMs > 60 * 60_000) {
       throw new ExecutionInputError("Approval lifetime must be between one minute and one hour");
     }
-    const connection = await this.connections.resolve({
+    const connection = await withinApproval(() => this.connections.resolve({
       actorUserId: input.principal.userId,
       workspaceId: input.principal.workspaceId,
       provider: manifest.provider,
       ...(input.connectionId ? { connectionId: input.connectionId } : {}),
-    });
-    await this.assertScopes(manifest, connection, input.principal);
+    }));
+    await withinApproval(
+      () => this.assertScopes(manifest, connection, input.principal));
     const timestamp = this.now();
     const idempotencyKey = input.idempotencyKey;
     return approvals.create({
@@ -607,7 +664,7 @@ export class ExecutionService {
       executionReceiptId: null,
       createdAt: timestamp,
       updatedAt: timestamp,
-    });
+    }, deadlineAt);
   }
 
   /** Revalidate the manifest and redacted preview before recording consent. */

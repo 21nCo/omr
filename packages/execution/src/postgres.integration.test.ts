@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { EXECUTION_STALE_AFTER_MS, type ExecutionReceipt } from "./execution.js";
 import type { ExecutionApproval } from "./execution.js";
 import {
-  connectPostgresExecutionReceipts,
+  connectPostgresExecutionReceipts, lookupPostgresAssistedAction,
   type PostgresExecutionReceiptRuntime,
 } from "./postgres.js";
 import { PostgresOwnedQueries } from "./postgres-owned-query.js";
@@ -482,9 +482,17 @@ describePostgres("execution receipts/PostgreSQL integration", () => {
     const first = approvalFixture(now, { toolId: "linear.issues.update", intentHash,
       providerConnectionId: "remote_linear_one" });
     const retry = approvalFixture(now + 1, { toolId: first.toolId, intentHash,
-      providerConnectionId: first.providerConnectionId });
+      providerConnectionId: first.providerConnectionId,
+      idempotencyKey: `assisted_${crypto.randomUUID()}` });
     const initial = await runtime.approvals.create(first);
     expect((await runtime.approvals.create(retry)).id).toBe(initial.id);
+    const statusInput = { connectionString: connectionString!, workspaceId,
+      requestId: retry.idempotencyKey.slice("assisted_".length) };
+    expect(await lookupPostgresAssistedAction({ ...statusInput,
+      userId: first.actorUserId })).toMatchObject({
+      approval: { id: initial.id, status: "pending" }, receipt: null });
+    expect(await lookupPostgresAssistedAction({ ...statusInput,
+      userId: "different_actor" })).toEqual({ approval: null, receipt: null });
     const client = new Client({ connectionString: connectionString! });
     await client.connect();
     try {

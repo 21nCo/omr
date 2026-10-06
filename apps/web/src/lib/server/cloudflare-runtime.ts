@@ -12,8 +12,12 @@ import {
 } from "@oh-my-router/connections";
 import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
 import { ApprovalUnavailableError, decodeExecutionWrappingKey, deriveExecutionFingerprintKey, ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
-import { connectPostgresExecutionReceipts } from "@oh-my-router/execution/postgres";
-import { connectPostgresIdentityRuntime, connectPostgresOpenRouterVault } from "@oh-my-router/identity/postgres";
+import { abandonPostgresAssistedTurn, bindPostgresAssistedTurn,
+  claimPostgresAssistedTurn, startPostgresAssistedModel, connectPostgresExecutionReceipts,
+  lookupPostgresAssistedAction, lookupPostgresAssistedTurn } from "@oh-my-router/execution/postgres";
+import { AssistedTurnQuotaExceededError, connectPostgresIdentityRuntime,
+  connectPostgresOpenRouterVault, reservePostgresAssistedRecovery,
+  reservePostgresAssistedTurn } from "@oh-my-router/identity/postgres";
 import { OpenRouterVaultError } from "@oh-my-router/identity";
 import { connectPostgresPlugFn, verifiedGithubScopes, verifiedLinearScopes, verifiedNotionScopes, verifiedSlackScopes } from "@oh-my-router/plugfn-runtime";
 import {
@@ -26,6 +30,8 @@ import {
   type ProviderStatus,
 } from "@oh-my-router/tools";
 import type { IntegrationConfig } from "plugfn";
+import { AssistedPlaygroundError, type AssistedPlaygroundServices } from "./assisted-playground.js";
+import { assistedPlaygroundEnabled } from "./direct-playground-rollout.js";
 
 import {
   RuntimeUnavailableError,
@@ -49,11 +55,24 @@ type OMRBindings = Cloudflare.Env & {
   OPENROUTER_VAULT_DATABASE_URL?: string;
   OMR_OPENROUTER_VAULT_ENABLED?: string;
   OMR_OPENROUTER_VAULT_CACHE_DISABLED_CONFIRMED?: string;
+  OMR_ASSISTED_PLAYGROUND_ENABLED?: string;
   DEVICE_CREDENTIAL_WRAPPING_KEY?: string;
   EXECUTION_RESULT_WRAPPING_KEY?: string;
   PLUGFN_ENCRYPTION_KEY?: string;
   [key: string]: unknown;
 };
+
+// An assisted action must settle within the 30-second Worker retention window.
+// Execution's own deadline includes durable uncertain-outcome cleanup; a
+// detached Promise.race here would close its receipt store too early.
+const ASSISTED_ACTION_DEADLINE_MS = 20_000;
+
+/** Register settlement with the actual Worker lifecycle before returning a response. */
+export function retainWorkerAction(ctx: { waitUntil(promise: Promise<unknown>): void } | undefined,
+  settlement: Promise<void>): void {
+  if (!ctx) throw new RuntimeUnavailableError("Worker action retention is unavailable");
+  ctx.waitUntil(settlement);
+}
 
 export interface CloudflareRouteServices {
   device: DeviceRouteServices;
@@ -62,6 +81,7 @@ export interface CloudflareRouteServices {
   execution: ExecutionRouteServices;
   controlPlane: ControlPlaneRouteServices;
   openRouterVault: OpenRouterVaultRouteServices;
+  assistedPlayground: AssistedPlaygroundServices;
 }
 
 /** Require Worker bindings before constructing any server-side runtime. */
@@ -983,7 +1003,155 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
     }),
   });
 
-  return { device, connections, tools, execution, controlPlane, openRouterVault };
+  const assistedActor = async (request: Request, workspaceId: string) => {
+    const origin = new URL(event.request.url).origin;
+    const identity = await connectPostgresIdentityRuntime({
+      connectionString: databaseConnectionString(event),
+      environment: { resolve: () => ({ issuer: origin, baseUrl: origin }) },
+    });
+    try {
+      const session = await identity.requireSession(request);
+      await identity.workspaces.requireMembership(workspaceId, session.actorId);
+      return session.actorId;
+    } finally { await identity.close(); }
+  };
+
+  const assistedPlayground: AssistedPlaygroundServices = {
+    enabled: () => assistedPlaygroundEnabled(environment(event)),
+    authenticate: (request) => requireWebUser(event, request),
+    retainAction(settlement) {
+      retainWorkerAction(event.platform?.ctx, settlement);
+    },
+    assertActionRetention() {
+      if (!event.platform?.ctx) throw new RuntimeUnavailableError("Worker action retention is unavailable");
+    },
+    async fingerprint(input, prompt) {
+      const bytes = await deriveExecutionFingerprintKey(executionWrappingKey(event));
+      const key = await crypto.subtle.importKey("raw", bytes,
+        { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+      const data = new TextEncoder().encode(JSON.stringify([
+        "omr-assisted-turn-v1", input.workspaceId, input.connectionId, input.model, prompt]));
+      const digest = await crypto.subtle.sign("HMAC", key, data);
+      return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0"))
+        .join("");
+    },
+    async reserveTurn(userId) {
+      try { return await reservePostgresAssistedTurn(databaseConnectionString(event), userId); }
+      catch (error) {
+        if (error instanceof AssistedTurnQuotaExceededError) {
+          throw new AssistedPlaygroundError("ASSISTED_RATE_LIMITED", 429);
+        }
+        throw error;
+      }
+    },
+    async reserveRecovery(userId) {
+      try { return await reservePostgresAssistedRecovery(databaseConnectionString(event), userId); }
+      catch (error) {
+        if (error instanceof AssistedTurnQuotaExceededError)
+          throw new AssistedPlaygroundError("ASSISTED_RATE_LIMITED", 429);
+        throw error;
+      }
+    },
+    async withKey(userId, callback) {
+      const runtime = await connectPostgresOpenRouterVault({
+        connectionString: openRouterVaultConnectionString(event),
+        keys: requiredSecret(event, "OPENROUTER_VAULT_KEYS"),
+        activeKeyId: requiredSecret(event, "OPENROUTER_VAULT_ACTIVE_KEY_ID"),
+      });
+      try { return await runtime.vault.withKey(userId, callback); }
+      finally { await runtime.close(); }
+    },
+    async connections(request, workspaceId) {
+      const overview = await controlPlane.overview(request, workspaceId) as {
+        connections: Awaited<ReturnType<AssistedPlaygroundServices["connections"]>> };
+      return overview.connections;
+    },
+    async discover(request, workspaceId, provider) {
+      const found = await tools.discover(request, { workspaceId, providers: [provider], limit: 100 }) as {
+        tools: Awaited<ReturnType<AssistedPlaygroundServices["discover"]>> };
+      return found.tools;
+    },
+    async execute(request, input) {
+      const deadlineAt = Date.now() + ASSISTED_ACTION_DEADLINE_MS;
+      requireExecutionOrigin(request);
+      const principal = await authenticate(event, request, input.workspaceId, undefined, false);
+      return withExecution(async (service) => {
+        const remaining = deadlineAt - Date.now();
+        if (remaining <= 0) throw new AssistedPlaygroundError("ASSISTED_ACTION_TIMEOUT", 504);
+        return publicReceipt(await service.execute({ principal, ...input,
+          params: input.params as JsonValue, deadlineMs: remaining }));
+      });
+    },
+    async readReceipt(request, input) {
+      // This cookie GET has no Origin header. Authenticate the session and let the
+      // execution service recheck the selected account and current read policy.
+      const principal = await authenticate(event, request, input.workspaceId, undefined, false);
+      if (principal.kind !== "web") throw new ConnectionAccessDeniedError();
+      return withExecution(async (service) => {
+        const receipt = await service.readReceipt({ principal, toolId: input.toolId,
+          params: input.params as JsonValue, connectionId: input.connectionId,
+          idempotencyKey: input.idempotencyKey, receiptId: input.receiptId });
+        return receipt ? publicReceipt(receipt) : null;
+      });
+    },
+    async requestApproval(request, input) {
+      const deadlineAt = Date.now() + ASSISTED_ACTION_DEADLINE_MS;
+      requireExecutionOrigin(request);
+      const principal = await authenticate(event, request, input.workspaceId, undefined, false);
+      return withExecution(async (service, catalog) => {
+        const remaining = deadlineAt - Date.now();
+        if (remaining <= 0) throw new AssistedPlaygroundError("ASSISTED_ACTION_TIMEOUT", 504);
+        const approval = await service.requestApproval({
+          principal, ...input, params: input.params as JsonValue,
+          deadlineMs: remaining,
+        });
+        return publicApproval(approval, catalog.get(approval.toolId));
+      });
+    },
+    async lookupAction(request, input) {
+      const userId = await assistedActor(request, input.workspaceId);
+      return lookupPostgresAssistedAction({ connectionString: databaseConnectionString(event),
+        userId, workspaceId: input.workspaceId, requestId: input.requestId });
+    },
+    async loadTurn(request, input) {
+      const userId = await assistedActor(request, input.workspaceId);
+      const binding = await lookupPostgresAssistedTurn({
+        connectionString: databaseConnectionString(event), userId,
+        workspaceId: input.workspaceId, requestId: input.requestId,
+        wrappingKey: decodeExecutionWrappingKey(requiredSecret(event,
+          "EXECUTION_RESULT_WRAPPING_KEY")),
+      });
+      return binding as Awaited<ReturnType<AssistedPlaygroundServices["loadTurn"]>>;
+    },
+    async claimTurn(userId, input) {
+      const result = await claimPostgresAssistedTurn({
+        connectionString: databaseConnectionString(event), userId, ...input,
+        wrappingKey: decodeExecutionWrappingKey(requiredSecret(event,
+          "EXECUTION_RESULT_WRAPPING_KEY")),
+      });
+      return result as Awaited<ReturnType<AssistedPlaygroundServices["claimTurn"]>>;
+    },
+    async abandonTurn(userId, input) {
+      await abandonPostgresAssistedTurn({
+        connectionString: databaseConnectionString(event), userId, ...input,
+      });
+    },
+    startModel(userId, input) {
+      return Promise.resolve().then(() => startPostgresAssistedModel({
+        connectionString: databaseConnectionString(event), userId, ...input,
+      }));
+    },
+    async bindTurn(userId, input) {
+      const result = await bindPostgresAssistedTurn({
+        connectionString: databaseConnectionString(event), userId, ...input,
+        wrappingKey: decodeExecutionWrappingKey(requiredSecret(event,
+          "EXECUTION_RESULT_WRAPPING_KEY")),
+      });
+      return result as Awaited<ReturnType<AssistedPlaygroundServices["bindTurn"]>>;
+    },
+  };
+
+  return { device, connections, tools, execution, controlPlane, openRouterVault, assistedPlayground };
 }
 
 /** Public /api routes accept remote MCP grants only for self-revocation. */

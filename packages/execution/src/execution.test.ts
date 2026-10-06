@@ -730,6 +730,32 @@ describe("execution service", () => {
     expect(actionCall).toHaveBeenCalledTimes(1);
   });
 
+  it("reads only the exact authorized saved read receipt without provider redispatch", async () => {
+    const { actionCall, service, workspace, firstBinding, receipts, setScopes } = await fixture();
+    const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
+    const action = { principal, toolId: "linear.get_issue", params: { id: "issue_1" },
+      connectionId: firstBinding.id, idempotencyKey: "assisted_fixture" };
+    const saved = await service.execute(action);
+    const lookup = { ...action, receiptId: saved.id };
+    await expect(service.readReceipt(lookup)).resolves.toMatchObject({ id: saved.id,
+      status: "succeeded", result: { id: "issue_1" } });
+    await expect(service.readReceipt({ ...lookup, receiptId: "another" })).resolves.toBeNull();
+    await expect(service.readReceipt({ ...lookup, params: { id: "different" } })).resolves.toBeNull();
+    await expect(service.readReceipt({ ...lookup, toolId: "linear.create_issue" }))
+      .rejects.toBeInstanceOf(ExecutionInputError);
+    await expect(service.readReceipt({ ...lookup, principal: { ...principal, userId: "other" } }))
+      .rejects.toBeInstanceOf(ConnectionAccessDeniedError);
+    const failed = receipts.receipts.get(saved.id)!;
+    failed.status = "failed";
+    failed.result = null;
+    failed.errorCode = "READ_FAILED";
+    await expect(service.readReceipt(lookup)).resolves.toMatchObject({ id: saved.id,
+      status: "failed", errorCode: "READ_FAILED" });
+    setScopes([]);
+    await expect(service.readReceipt(lookup)).rejects.toBeInstanceOf(ExecutionInputError);
+    expect(actionCall).toHaveBeenCalledOnce();
+  });
+
   it("reuses one pending approval for a retry and rejects changed parameters", async () => {
     const { actionCall, approvals, service, workspace } = await fixture();
     const principal = { kind: "web" as const, userId: "user_1", workspaceId: workspace.id };
@@ -1160,6 +1186,24 @@ describe("execution service", () => {
     expect(JSON.stringify([...receipts.receipts.values()])).not.toContain("provider secret detail");
     await expect(service.execute(request)).rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN" });
     expect(actionCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists an uncertain assisted read before releasing a shortened execution lifetime", async () => {
+    const { actionCall, receipts, service, workspace } = await fixture();
+    let finish!: (value: unknown) => void;
+    actionCall.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const request = {
+      principal: { kind: "web" as const, userId: "user_1", workspaceId: workspace.id },
+      toolId: "linear.get_issue", params: {}, idempotencyKey: "assisted-timeout",
+      deadlineMs: 500,
+    };
+    const execution = service.execute(request);
+    await vi.waitFor(() => expect(actionCall).toHaveBeenCalledOnce());
+    await expect(execution).rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN" });
+    expect([...receipts.receipts.values()][0]).toMatchObject({ status: "uncertain" });
+    finish({ id: "late-provider-result" });
+    await expect(service.execute(request)).rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN" });
+    expect(actionCall).toHaveBeenCalledOnce();
   });
 
   it("keeps a successful provider effect non-replayable if result persistence fails", async () => {

@@ -57,6 +57,27 @@ function overview(connections = [{ id: "connection_one", workspaceId: "workspace
       { workspace: { id: "workspace_two", name: "Other" } }], connections, approvals };
 }
 
+/** Common browser fixtures for assisted turn UI cases. */
+function assistedFixtureResponse(path: string): Response | undefined {
+  if (path.startsWith("/api/control-plane")) return Response.json(overview());
+  if (path.startsWith("/api/tools?")) return Response.json({ tools,
+    providers: [{ provider: "demo", state: "ready" }] });
+  return undefined;
+}
+
+/** Fill the explicit model and prompt through the same DOM events as a user. */
+async function enterAssistedPrompt(prompt: string): Promise<void> {
+  await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value)
+    .toBe("connection_one"));
+  for (const [id, value] of [["assisted-model", "fixture/model"],
+    ["assisted-prompt", prompt]]) {
+    const field = document.getElementById(id) as HTMLInputElement;
+    field.value = value;
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+}
+
 afterEach(() => { vi.unstubAllGlobals(); sessionStorage.clear(); document.body.replaceChildren(); });
 
 describe("direct playground form", () => {
@@ -106,7 +127,7 @@ describe("direct playground form", () => {
       expect(selected).toBe("connection_two");
       expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value)
         .toBe("connection_two");
-      expect(document.body.textContent).toContain("Account two is ready");
+      await vi.waitFor(() => expect(document.body.textContent).toContain("Account two is ready"));
     } finally { await unmount(app); }
   });
 
@@ -138,7 +159,8 @@ describe("direct playground form", () => {
         await vi.waitFor(() => expect(document.querySelector("[role=alert]")?.textContent)
           .toContain(failure === "rejected" ? "select it again" : "no longer ready"));
         expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value).toBe("");
-        expect(document.querySelector<HTMLSelectElement>("#playground-tool")?.disabled).toBe(true);
+        await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#playground-tool")?.disabled)
+          .toBe(true));
         expect(document.body.textContent).not.toContain("Account two is ready");
         expect(selectionPosts).toBe(failure === "rejected" ? 1 : 0);
       } finally { await unmount(app); }
@@ -782,6 +804,453 @@ describe("direct playground form", () => {
         .toContain("receipt_write"));
       expect(writes).toBe(1);
       expect(calls).not.toContain("/api/settings/openrouter");
+    } finally { await unmount(app); }
+  });
+
+  it("shows a bounded assisted answer, model usage and the direct receipt without a key field", async () => {
+    const requestIds: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const fixtureResponse = assistedFixtureResponse(path);
+      if (fixtureResponse) return fixtureResponse;
+      if (path === "/api/playground/assisted") {
+        const sent = JSON.parse(String(init?.body));
+        requestIds.push(sent.requestId);
+        expect(sent).toMatchObject({ workspaceId: "workspace_one",
+          connectionId: "connection_one", model: "fixture/model", prompt: "Find fixture" });
+        expect(sent.requestId).toMatch(/^[0-9a-f-]{36}$/);
+        return Response.json({ status: "answered", answer: "Fixture found.", model: "fixture/model",
+          servedModels: ["fixture/served"], toolId: "demo.read",
+          usage: { promptTokens: 10, completionTokens: 4, totalTokens: 14, costUsd: 0.00002 },
+          receipt: { id: "receipt_assisted", status: "succeeded", result: "oversized private item ".repeat(5000),
+            errorCode: null } });
+      }
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body,
+      props: { data: { assistedEnabled: true } as never } });
+    try {
+      await vi.waitFor(() => expect(button("Ask model").disabled).toBe(true));
+      await enterAssistedPrompt("Find fixture");
+      button("Ask model").click();
+      await vi.waitFor(() => expect(document.body.textContent).toContain("Fixture found."));
+      expect(document.body.textContent).toContain("Tokens: 14");
+      expect(document.body.textContent).toContain("$0.000020");
+      expect(document.body.textContent).toContain("receipt_assisted");
+      expect(document.querySelector("[aria-label='Execution result']")?.textContent)
+        .toContain("Result preview truncated");
+      expect(document.body.textContent).not.toContain("oversized private item");
+      expect(document.querySelector<HTMLAnchorElement>("a[download='assisted-receipt.json']")?.href)
+        .toContain("receiptId=receipt_assisted");
+      expect(document.querySelector("input[type=password]")).toBeNull();
+      await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+      button("Ask model").click();
+      await vi.waitFor(() => expect(requestIds).toHaveLength(2));
+      expect(requestIds[1]).not.toBe(requestIds[0]);
+    } finally { await unmount(app); }
+  });
+
+  it("labels partial model usage and cost without implying a complete charge", async () => {
+    const fetchMock = vi.fn(async (value: RequestInfo | URL) => {
+      const fixtureResponse = assistedFixtureResponse(String(value));
+      if (fixtureResponse) return fixtureResponse;
+      if (String(value) === "/api/playground/assisted") return Response.json({
+        status: "model_error", answer: "The model request failed.",
+        model: "fixture/model", servedModels: ["fixture/served"],
+        usageIncomplete: true, usage: { promptTokens: 10, completionTokens: null,
+          totalTokens: null, costUsd: null },
+      });
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body,
+      props: { data: { assistedEnabled: true } as never } });
+    try {
+      await enterAssistedPrompt("Find fixture");
+      button("Ask model").click();
+      await vi.waitFor(() => expect(document.body.textContent).toContain("The model request failed."));
+      expect(document.body.textContent).toContain("Tokens reported so far: unavailable");
+      expect(document.body.textContent).toContain("Cost reported so far: unavailable");
+      expect(document.body.textContent).toContain("input 10");
+    } finally { await unmount(app); }
+  });
+
+  it.each([
+    { status: "tool_error", terminalFailure: true, fresh: true },
+    { status: "tool_error", terminalFailure: false, fresh: false },
+    { status: "action_pending", terminalFailure: false, fresh: false },
+  ])("uses a fresh ID only after a confirmed failed read ($status, terminal: $terminalFailure)",
+    async ({ status, terminalFailure, fresh }) => {
+      const requestIds: string[] = [];
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = String(input);
+        const fixtureResponse = assistedFixtureResponse(path);
+        if (fixtureResponse) return fixtureResponse;
+        if (path === "/api/playground/assisted") {
+          requestIds.push(JSON.parse(String(init?.body)).requestId);
+          return Response.json({ status, terminalFailure,
+            answer: "Check read receipt", model: "fixture/model", servedModels: ["fixture/served"],
+            usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2, costUsd: 0.00001 },
+            receipt: { id: "receipt_read", status: terminalFailure ? "failed" : "running",
+              result: null, errorCode: terminalFailure ? "READ_FAILED" : null } });
+        }
+        return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const app = mount(Playground, { target: document.body,
+        props: { data: { assistedEnabled: true } as never } });
+      try {
+        await enterAssistedPrompt("Find fixture");
+        button("Ask model").click();
+        await vi.waitFor(() => expect(document.body.textContent).toContain("Check read receipt"));
+        const receiptLink = document.querySelector<HTMLAnchorElement>("a[download='assisted-receipt.json']");
+        expect(receiptLink?.href?.includes("receiptId=receipt_read") ?? false).toBe(terminalFailure);
+        await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+        button("Ask model").click();
+        await vi.waitFor(() => expect(requestIds).toHaveLength(2));
+        expect(requestIds[1] === requestIds[0]).toBe(!fresh);
+      } finally { await unmount(app); }
+    });
+
+  it("keeps a lost failed-read identity until retry confirms the terminal receipt", async () => {
+    const requestIds: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const fixtureResponse = assistedFixtureResponse(path);
+      if (fixtureResponse) return fixtureResponse;
+      if (path === "/api/playground/assisted") {
+        requestIds.push(JSON.parse(String(init?.body)).requestId);
+        if (requestIds.length === 1) throw new TypeError("lost response");
+        return Response.json({ status: "tool_error", terminalFailure: true,
+          answer: "The previous read failed", receiptId: "receipt_failed",
+          model: "fixture/model", servedModels: ["fixture/served"],
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2, costUsd: 0.00001 } });
+      }
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body,
+      props: { data: { assistedEnabled: true } as never } });
+    try {
+      await enterAssistedPrompt("Find fixture");
+      button("Ask model").click();
+      await vi.waitFor(() => expect(requestIds).toHaveLength(1));
+      await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+      button("Ask model").click();
+      await vi.waitFor(() => expect(requestIds).toHaveLength(2));
+      expect(requestIds[1]).toBe(requestIds[0]);
+      await vi.waitFor(() => expect(document.body.textContent).toContain("The previous read failed"));
+      const receiptLink = document.querySelector<HTMLAnchorElement>("a[download='assisted-receipt.json']");
+      expect(receiptLink?.href).toContain(`requestId=${requestIds[1]}`);
+      expect(receiptLink?.href).toContain("receiptId=receipt_failed");
+      button("Ask model").click();
+      await vi.waitFor(() => expect(requestIds).toHaveLength(3));
+      expect(requestIds[2]).not.toBe(requestIds[1]);
+    } finally { await unmount(app); }
+  });
+
+  it.each(["succeeded", "failed", "running", "uncertain"])(
+    "keeps a recovered %s write identity until explicit receipt settlement", async (receiptStatus) => {
+      const requestIds: string[] = [];
+      const terminal = receiptStatus === "succeeded" || receiptStatus === "failed";
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = String(input);
+        const fixtureResponse = assistedFixtureResponse(path);
+        if (fixtureResponse) return fixtureResponse;
+        if (path.startsWith("/api/playground/assisted/status")) return Response.json({
+          approval: null, receipt: { id: "receipt_write", status: receiptStatus } });
+        if (path === "/api/playground/assisted") {
+          requestIds.push(JSON.parse(String(init?.body)).requestId);
+          return Response.json({ status: receiptStatus === "failed" ? "tool_error"
+            : terminal ? "answered" : "action_pending", terminalWrite: terminal,
+            answer: `The previous write is ${receiptStatus}`, receiptId: "receipt_write",
+            model: "fixture/model", servedModels: ["fixture/served"], toolId: "demo.write",
+            usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2, costUsd: 0.00001 } });
+        }
+        return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const app = mount(Playground, { target: document.body,
+        props: { data: { assistedEnabled: true } as never } });
+      try {
+        await enterAssistedPrompt("Write fixture");
+        button("Ask model").click();
+        await vi.waitFor(() => expect(document.body.textContent).toContain(`The previous write is ${receiptStatus}`));
+        button("Ask model").click();
+        await vi.waitFor(() => expect(requestIds).toHaveLength(2));
+        expect(requestIds[1]).toBe(requestIds[0]);
+        expect(document.querySelector("a[download='assisted-receipt.json']")).toBeNull();
+        const start = [...document.querySelectorAll("button")].find((item) =>
+          item.textContent?.trim() === "Start a new action");
+        expect(!!start).toBe(terminal);
+        if (terminal) {
+          if (receiptStatus === "succeeded") {
+            const prompt = document.getElementById("assisted-prompt") as HTMLTextAreaElement;
+            prompt.value = "A different draft";
+            prompt.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+          start!.click();
+          await vi.waitFor(() => expect(document.body.textContent).toContain("Ready for a new action"));
+          if (receiptStatus === "succeeded") {
+            const prompt = document.getElementById("assisted-prompt") as HTMLTextAreaElement;
+            prompt.value = "Write fixture";
+            prompt.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+          button("Ask model").click();
+          await vi.waitFor(() => expect(requestIds).toHaveLength(3));
+          expect(requestIds[2]).not.toBe(requestIds[1]);
+        }
+      } finally { await unmount(app); }
+    });
+
+  it("refuses a fresh write identity when the receipt settlement probe disagrees", async () => {
+    const requestIds: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const fixtureResponse = assistedFixtureResponse(path);
+      if (fixtureResponse) return fixtureResponse;
+      if (path.startsWith("/api/playground/assisted/status")) return Response.json({
+        approval: null, receipt: { id: "receipt_write", status: "uncertain" } });
+      if (path === "/api/playground/assisted") {
+        requestIds.push(JSON.parse(String(init?.body)).requestId);
+        return Response.json({ status: "answered", terminalWrite: true,
+          answer: "The previous write completed", receiptId: "receipt_write",
+          model: "fixture/model", servedModels: ["fixture/served"], toolId: "demo.write",
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2, costUsd: 0.00001 } });
+      }
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body,
+      props: { data: { assistedEnabled: true } as never } });
+    try {
+      await enterAssistedPrompt("Write fixture");
+      button("Ask model").click();
+      await vi.waitFor(() => expect(button("Start a new action").disabled).toBe(false));
+      button("Start a new action").click();
+      await vi.waitFor(() => expect(document.querySelector("[role=alert]")?.textContent)
+        .toContain("not confirmed"));
+      button("Ask model").click();
+      await vi.waitFor(() => expect(requestIds).toHaveLength(2));
+      expect(requestIds[1]).toBe(requestIds[0]);
+    } finally { await unmount(app); }
+  });
+
+  it("cancels an in-flight assisted request and does not render its late result", async () => {
+    let release: ((response: Response) => void) | undefined;
+    let assistedSignal: AbortSignal | undefined;
+    const requestIds: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const fixtureResponse = assistedFixtureResponse(path);
+      if (fixtureResponse) return fixtureResponse;
+      if (path === "/api/playground/assisted") {
+        assistedSignal = init?.signal ?? undefined;
+        requestIds.push(JSON.parse(String(init?.body)).requestId);
+        return requestIds.length === 1 ? new Promise<Response>((resolve) => { release = resolve; })
+          : Response.json({ status: "answered",
+            answer: "The read completed. Its result is shown in the receipt below.",
+            receiptId: "receipt_recovered",
+            receipt: { id: "receipt_recovered", status: "succeeded",
+              result: '{"title":"Recovered private item"}', errorCode: null },
+            model: "fixture/model",
+            servedModels: ["fixture/served"], usage: { promptTokens: 1,
+              completionTokens: 1, totalTokens: 2, costUsd: 0.00001 } });
+      }
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body,
+      props: { data: { assistedEnabled: true } as never } });
+    try {
+      await enterAssistedPrompt("Find fixture");
+      button("Ask model").click();
+      await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+      button("Cancel request").click();
+      expect(assistedSignal?.aborted).toBe(true);
+      release!(Response.json({ status: "answered", answer: "Late answer", model: "fixture/model",
+        servedModels: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2,
+          costUsd: null } }));
+      await vi.waitFor(() => expect(document.body.textContent).toContain("Request cancelled"));
+      expect(document.body.textContent).not.toContain("Late answer");
+      button("Ask model").click();
+      await vi.waitFor(() => expect(document.body.textContent)
+        .toContain("Recovered private item"));
+      expect(document.querySelector("[aria-label='Execution result']")?.textContent)
+        .toContain("receipt_recovered");
+      expect(document.querySelector<HTMLAnchorElement>("a[download='assisted-receipt.json']")?.href)
+        .toContain("receiptId=receipt_recovered");
+      expect(requestIds).toHaveLength(2);
+      expect(requestIds[1]).toBe(requestIds[0]);
+    } finally { await unmount(app); }
+  });
+
+  it("recovers a committed assisted approval after its response is lost", async () => {
+    let release: ((response: Response) => void) | undefined;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      const fixtureResponse = assistedFixtureResponse(path);
+      if (fixtureResponse) return fixtureResponse;
+      if (path === "/api/playground/assisted") return new Promise<Response>((resolve) => { release = resolve; });
+      if (path.startsWith("/api/playground/assisted/status")) return Response.json({
+        approval: { id: "approval_one", status: "pending" }, receipt: null });
+      if (path.startsWith("/api/approvals/status")) return Response.json(approval("pending"));
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body,
+      props: { data: { assistedEnabled: true } as never } });
+    try {
+      await enterAssistedPrompt("Write fixture");
+      button("Ask model").click();
+      await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+      button("Cancel request").click();
+      release!(Response.json({ status: "approval_required", answer: "Late approval",
+        model: "fixture/model", servedModels: [], usage: { promptTokens: 1,
+          completionTokens: 1, totalTokens: 2, costUsd: null }, approval: approval("pending") }));
+      await vi.waitFor(() => expect(document.querySelector("[aria-label='Approval']")?.textContent)
+        .toContain("pending"));
+      expect(document.body.textContent).not.toContain("Late approval");
+      expect(fetchMock.mock.calls.filter(([path]) => String(path) === "/api/playground/assisted"))
+        .toHaveLength(1);
+    } finally { await unmount(app); }
+  });
+
+  it.each([
+    { settlement: "consumed", lostResponse: false },
+    { settlement: "rejected", lostResponse: false },
+    { settlement: "consumed", lostResponse: true },
+  ])("starts a fresh identical assisted request after $settlement (lost response: $lostResponse)",
+    async ({ settlement, lostResponse }) => {
+      const requestIds: string[] = [];
+      const approvals = new Map<string, PlaygroundApproval>();
+      let writes = 0;
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = String(input);
+        const body = init?.body ? JSON.parse(String(init.body)) as Record<string, string> : {};
+        if (path.startsWith("/api/control-plane")) return Response.json(overview(undefined,
+          [...approvals.values()].filter((item) => item.status === "pending")));
+        if (path.startsWith("/api/tools?")) return Response.json({ tools,
+          providers: [{ provider: "demo", state: "ready" }] });
+        if (path.startsWith("/api/playground/assisted/status")) return Response.json({
+          approval: approvals.get("approval_1") ?? null, receipt: null });
+        if (path === "/api/playground/assisted") {
+          const id = body.requestId;
+          requestIds.push(id);
+          const approvalId = `approval_${approvals.size + 1}`;
+          approvals.set(approvalId, { ...approval("pending"), id: approvalId });
+          if (lostResponse && requestIds.length === 1) throw new TypeError("response lost after commit");
+          return Response.json({ status: "approval_required", answer: "Review the action.",
+            model: "fixture/model", servedModels: ["fixture/served"], toolId: "demo.write",
+            usage: { promptTokens: 2, completionTokens: 1, totalTokens: 3, costUsd: 0.00001 },
+            approval: approvals.get(approvalId) });
+        }
+        if (path.startsWith("/api/approvals/status")) {
+          const id = new URL(`https://omr.invalid${path}`).searchParams.get("approvalId") ?? "";
+          const key = `assisted_${requestIds[Number(id.slice(-1)) - 1]}`;
+          const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
+          return Response.json({ ...approvals.get(id), actionKeyDigest: [...new Uint8Array(bytes)]
+            .map((byte) => byte.toString(16).padStart(2, "0")).join("") });
+        }
+        if (path === "/api/approvals/approve" || path === "/api/approvals/reject") {
+          const current = approvals.get(body.approvalId)!;
+          const next = { ...current, status: path.endsWith("reject") ? "rejected" : "approved" };
+          approvals.set(current.id, next);
+          return Response.json(next);
+        }
+        if (path === "/api/approvals/execute") {
+          writes += 1;
+          const current = approvals.get(body.approvalId)!;
+          approvals.set(current.id, { ...current, status: "consumed",
+            executionReceiptId: `receipt_${writes}` });
+          return Response.json({ id: `receipt_${writes}`, status: "succeeded", result: {},
+            errorCode: null });
+        }
+        return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      let app = mount(Playground, { target: document.body,
+        props: { data: { assistedEnabled: true } as never } });
+      try {
+        await vi.waitFor(() => expect(button("Ask model").disabled).toBe(true));
+        await enterAssistedPrompt("Repeat this exact change");
+        button("Ask model").click();
+        await vi.waitFor(() => expect(requestIds).toHaveLength(1));
+        if (lostResponse) {
+          await vi.waitFor(() => expect(button("Review approval").disabled).toBe(false));
+          await unmount(app);
+          document.body.replaceChildren();
+          app = mount(Playground, { target: document.body,
+            props: { data: { assistedEnabled: true } as never } });
+          await vi.waitFor(() => expect(button("Review approval").disabled).toBe(false));
+          button("Review approval").click();
+        }
+        await vi.waitFor(() => expect(button(settlement === "rejected" ? "Reject" : "Approve")
+          .disabled).toBe(false));
+        button(settlement === "rejected" ? "Reject" : "Approve").click();
+        if (settlement === "consumed") {
+          await vi.waitFor(() => expect(button("Execute approved change").disabled).toBe(false));
+          button("Execute approved change").click();
+          await vi.waitFor(() => expect(writes).toBe(1));
+        }
+        await vi.waitFor(() => expect(button("Start a new action").disabled).toBe(false));
+        button("Start a new action").click();
+        await vi.waitFor(() => expect(document.body.textContent).toContain("Ready for a new action"));
+        expect(approvals.get("approval_1")?.status).toBe(settlement);
+        expect(writes).toBe(settlement === "consumed" ? 1 : 0);
+        if (lostResponse) {
+          await enterAssistedPrompt("Repeat this exact change");
+        }
+        button("Ask model").click();
+        await vi.waitFor(() => expect(requestIds).toHaveLength(2));
+        expect(requestIds[1]).not.toBe(requestIds[0]);
+      } finally { await unmount(app); }
+    });
+
+  it("routes an assisted write through the visible approval before execution", async () => {
+    let status = "pending";
+    let writes = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      const fixtureResponse = assistedFixtureResponse(path);
+      if (fixtureResponse) return fixtureResponse;
+      if (path === "/api/playground/assisted") return Response.json({
+        status: "approval_required", answer: "Review before approving. No change has run.",
+        model: "fixture/model", servedModels: ["fixture/served"], toolId: "demo.write",
+        usage: { promptTokens: 10, completionTokens: 4, totalTokens: 14, costUsd: 0.00002 },
+        approval: approval("pending"),
+      });
+      if (path.startsWith("/api/approvals/status")) return Response.json(approval(status));
+      if (path === "/api/approvals/approve") {
+        status = "approved";
+        return Response.json(approval(status));
+      }
+      if (path === "/api/approvals/execute") {
+        writes += 1;
+        status = "consumed";
+        return Response.json({ id: "receipt_assisted_write", status: "succeeded",
+          result: { title: "fixture" }, errorCode: null });
+      }
+      return Response.json({ error: "NOT_FOUND" }, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const app = mount(Playground, { target: document.body,
+      props: { data: { assistedEnabled: true } as never } });
+    try {
+      await enterAssistedPrompt("Change fixture");
+      button("Ask model").click();
+      await vi.waitFor(() => expect(document.querySelector("[aria-label='Approval']")?.textContent)
+        .toContain("pending"));
+      expect(writes).toBe(0);
+      button("Approve").click();
+      await vi.waitFor(() => expect(document.querySelector("[aria-label='Approval']")?.textContent)
+        .toContain("approved"));
+      expect(writes).toBe(0);
+      button("Execute approved change").click();
+      await vi.waitFor(() => expect(document.body.textContent).toContain("Approved change completed"));
+      expect(writes).toBe(1);
+      expect(document.body.textContent).toContain("receipt_assisted_write");
     } finally { await unmount(app); }
   });
 });

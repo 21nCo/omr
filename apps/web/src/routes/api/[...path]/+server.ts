@@ -12,6 +12,7 @@ export const { GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD } = toSvelteKitHandl
       services.execution,
       services.controlPlane,
       services.openRouterVault,
+      services.assistedPlayground,
     );
   },
 );

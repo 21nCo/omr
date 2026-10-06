@@ -16,7 +16,7 @@ export function linearApprovalNotice(status: string): string {
 export function createLinearActionKeys(makeKey: () => string,
   storage?: () => Pick<Storage, "getItem" | "setItem" | "removeItem"> &
     Partial<Pick<Storage, "key" | "length">>,
-  provider = "Linear") {
+  provider = "Linear", approvalKeyCandidates: (key: string) => string[] = (key) => [key]) {
   const current = new Map<string, string>();
   const approvalIdentities = new Map<string, string>();
   /** Name one approval's storage record without persisting its arguments. */
@@ -50,10 +50,12 @@ export function createLinearActionKeys(makeKey: () => string,
   const identityForKeyDigest = async (digest: string): Promise<string | undefined> => {
     if (!/^[0-9a-f]{64}$/.test(digest)) return undefined;
     for (const [identity, key] of candidateActionKeys()) {
-      const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
-      const actual = [...new Uint8Array(bytes)]
-        .map((byte) => byte.toString(16).padStart(2, "0")).join("");
-      if (actual === digest) return identity;
+      for (const candidate of approvalKeyCandidates(key)) {
+        const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(candidate));
+        const actual = [...new Uint8Array(bytes)]
+          .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+        if (actual === digest) return identity;
+      }
     }
     return undefined;
   };
