@@ -1136,10 +1136,10 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
         connectionString: databaseConnectionString(event), userId, ...input,
       });
     },
-    async startModel(userId, input) {
-      return startPostgresAssistedModel({
+    startModel(userId, input) {
+      return Promise.resolve().then(() => startPostgresAssistedModel({
         connectionString: databaseConnectionString(event), userId, ...input,
-      });
+      }));
     },
     async bindTurn(userId, input) {
       const result = await bindPostgresAssistedTurn({

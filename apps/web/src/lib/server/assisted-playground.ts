@@ -160,7 +160,7 @@ function untilAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
 const unavailableUsage: Usage = { promptTokens: null, completionTokens: null,
   totalTokens: null, costUsd: null };
 function usageIncomplete(usage: Usage): boolean {
-  return Object.values(usage).some((value) => value === null);
+  return Object.values(usage).includes(null);
 }
 
 type ActionOutcome = Extract<TurnOutcome, { kind: "action" }>;
@@ -807,8 +807,7 @@ async function runPaidAction(context: PaidContext,
 
 /** Execute one durable claim under its personal quota lease. */
 async function runClaimedTurn(context: ClaimedContext) {
-  const { request, input, services, signal, userId, fingerprint, claimId, prompt,
-    onModelStart } = context;
+  const { request, input, services, signal, userId, fingerprint } = context;
   const reservation = services.reserveTurn(userId);
   const release = await untilAbort(reservation, signal).catch((error: unknown) => {
     const cleanup = releaseLateReservation(reservation);
