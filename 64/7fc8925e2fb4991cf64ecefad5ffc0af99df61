@@ -1,0 +1,24 @@
+apps/web/src/lib/server/assisted-playground.ts
+  h_a39f9495f9ec1d 21,39-44,167-169,288-291,657-677,711,714,719-735
+apps/web/src/lib/server/cloudflare-runtime.ts
+  h_a39f9495f9ec1d 15-16,1126-1138
+packages/execution/src/assisted-turn-binding-postgres.integration.test.ts
+  h_a39f9495f9ec1d 4-5,36-62
+packages/execution/src/assisted-turn-binding-postgres.ts
+  h_a39f9495f9ec1d 18-19,76-113,134-146
+packages/execution/src/postgres.ts
+  h_a39f9495f9ec1d 3-4
+tests/acceptance/assisted-playground-contract.test.ts
+  h_a39f9495f9ec1d 51-65,76,88-182,291-296
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "647fc8925e2fb4991cf64ecefad5ffc0af99df61",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
