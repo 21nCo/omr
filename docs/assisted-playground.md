@@ -38,9 +38,10 @@ OpenRouter and connected-provider sandbox behavior, Cloudflare Preview deadline 
 limits, and authenticated Aside Browser recovery with a personal test key. No live
 acceptance is implied by the local fixtures.
 
-After a read, a bounded projection of short, plain prose and nonsensitive structured
-fields can appear in the local answer. Encoded, serialized, credential-labeled, or
-oversized text is withheld from that preview. No tool result is sent to OpenRouter.
+After a read, a bounded projection of fixed public status and navigation phrases in
+known nonsensitive fields can appear in the local answer. Unknown fields and their
+values are redacted; other prose, including possible credential assertions or requests
+to supply a value, is withheld from the preview. No tool result is sent to OpenRouter.
 The assisted response and recovery path include only a bounded, redacted receipt preview
 and its identifier. A separate download fetches the full receipt by its saved request ID
 through current authenticated execution policy. The browser never renders an unexpected

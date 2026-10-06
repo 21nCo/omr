@@ -337,7 +337,7 @@ async function modelCall(fetcher: typeof fetch, key: string, model: string,
 const withheldResult = "[WITHHELD_UNSAFE_TOOL_RESULT]";
 const sensitiveOutputKey = /(?:token|secret|password|key|authorization|credential|private|passphrase|cookie|session|verification|passcode|code|pin|otp|security|recovery|backup|challenge|response|answer|memorable|maiden|question|hint)/i;
 // Provider object keys are untrusted content too. Only fixed, ordinary field
-// labels enter a preview; every other label gets a position-based replacement.
+// labels enter a preview; unknown labels and their values are not interpretable.
 const previewFieldNames = new Set(["pages", "content", "text", "title", "body",
   "description", "metadata", "note", "slack", "notion", "github", "summary",
   "name", "message", "status", "id", "items", "results"]);
@@ -358,9 +358,18 @@ const ordinaryUppercaseWord = new Set(["A", "I"]);
 // An instruction to supply a value makes even an otherwise ordinary word
 // ambiguous (for example, "Enter FAQ to proceed"). Withhold the whole result.
 const codeInstruction = /\b(?:enter|type|input|submit|paste|use|copy|provide|send|quote|apply)\b/i;
+// A provider can invent a new name for a credential or a new verb asking the
+// user to supply it. Preview only the small set of sentence *shapes* used for
+// status and navigation; a plausible-looking sequence of lowercase words is
+// not by itself evidence that a value is safe to repeat.
+const previewLabels = new Set(["Public summary", "public metadata", "Safe title",
+  "Review complete"]);
+const publicStatus = /^(?:Release|Roadmap|The milestone)(?: (?:19|20)\d{2})? (?:is|are) (?:ready|complete|completed|available|published|updated)$/u;
+const readableUpdate = /^(?:(?:A )?readable update\s*)+$/i;
 /**
  * Provider text can contain arbitrary serialized or encoded credentials. Do not try to
- * enumerate their formats: admit only short ordinary prose to the local preview.
+ * enumerate their formats: admit only short ordinary status/label prose to the
+ * local preview. Other prose remains available through the authorized receipt.
  * No part of the tool result is sent to the model, even after this projection.
  */
 function safeProse(value: string): boolean {
@@ -377,11 +386,14 @@ function safeProse(value: string): boolean {
     (/^(?:19|20)\d{2}$/.test(word) &&
       /^(?:release|roadmap|year|in|during|since|for|by)$/i.test(words[index - 1] ?? "")));
   // A standalone number has no context to distinguish a year from a code.
-  return words.length > 0 && !(words.length === 1 && /^[\p{Lu}\p{N}]+$/u.test(words[0]!)) &&
+  if (!(words.length > 0 && !(words.length === 1 && /^[\p{Lu}\p{N}]+$/u.test(words[0]!)) &&
     numericSafe && words.every((word) => plainWord.test(word) ||
       ordinaryUppercaseWord.has(word) || (word === "FAQ" && safeFaq)) &&
     !/[^\p{L}\p{M}\p{N} \t\n.,!?;:'"()]/u.test(value) &&
-    !/[.]{2,}/u.test(value);
+    !/[.]{2,}/u.test(value))) return false;
+  const phrase = value.trim().replace(/[.!?]$/u, "");
+  return safeFaq || previewLabels.has(phrase) || publicStatus.test(phrase) ||
+    readableUpdate.test(phrase);
 }
 export function safeResult(value: unknown, inputSensitiveKeys: readonly string[]): string {
   const sensitive = new Set(inputSensitiveKeys.map((key) => key.split(/[.\[\]]/).filter(Boolean).at(-1)?.toLowerCase()));
@@ -422,7 +434,8 @@ export function safeResult(value: unknown, inputSensitiveKeys: readonly string[]
       if (!Object.hasOwn(record, key)) continue;
       if (index >= 80 || truncated) { truncated = true; break; }
       const label = previewFieldNames.has(key) ? key : `field_${index + 1}`;
-      result[label] = sensitiveOutputKey.test(key) || sensitive.has(key.toLowerCase())
+      result[label] = !previewFieldNames.has(key) || sensitiveOutputKey.test(key) ||
+        sensitive.has(key.toLowerCase())
         ? "[REDACTED]" : redact(record[key], depth + 1);
       index += 1;
     }
