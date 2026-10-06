@@ -31,6 +31,7 @@ function choose(name = "tool_0", args = '{"title":"fixture"}') {
 }
 function fixture(overrides: Partial<AssistedPlaygroundServices> = {}) {
   const bindings = new Map<string, Awaited<ReturnType<AssistedPlaygroundServices["loadTurn"]>>>();
+  const claimIds = new Map<string, string>();
   const authenticate = overrides.authenticate ?? (async () => "alice");
   const fetcher = vi.fn<typeof fetch>();
   fetcher.mockResolvedValueOnce(choose());
@@ -53,15 +54,26 @@ function fixture(overrides: Partial<AssistedPlaygroundServices> = {}) {
       const prior = bindings.get(key);
       if (prior) return { binding: prior, created: false };
       const binding = { requestFingerprint: value.requestFingerprint,
-        outcome: { kind: "pending" as const } };
+        outcome: { kind: "claimed" as const } };
       bindings.set(key, binding);
+      claimIds.set(key, value.claimId);
       return { binding, created: true };
+    },
+    startModel: async (userId, value) => {
+      const key = `${userId}:${value.workspaceId}:${value.requestId}`;
+      const prior = bindings.get(key);
+      if (claimIds.get(key) !== value.claimId || prior?.outcome.kind !== "claimed") return false;
+      bindings.set(key, { ...prior, outcome: { kind: "pending" } });
+      return true;
     },
     abandonTurn: async (userId, value) => {
       const key = `${userId}:${value.workspaceId}:${value.requestId}`;
       const prior = bindings.get(key);
       if (prior?.requestFingerprint === value.requestFingerprint &&
-          prior.outcome.kind === "pending") bindings.delete(key);
+          prior.outcome.kind === "claimed" && claimIds.get(key) === value.claimId) {
+        bindings.delete(key);
+        claimIds.delete(key);
+      }
     },
     withKey: async (_user, callback) => callback("synthetic-openrouter-alice-key"),
     connections: async () => [{ id: "account_one", workspaceId: "mine", provider: "demo",
@@ -177,6 +189,68 @@ describe("assisted-playground-contract", () => {
     expect(retry).toMatchObject({ status: "model_error",
       errorCode: "ASSISTED_KEY_REJECTED" });
     expect(JSON.stringify(retry)).not.toContain("synthetic private detail");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["read", "write", "model"] as const)(
+    "finalizes an uncertain %s network failure without another paid call", async (kind) => {
+      const { services, fetcher, execute, requestApproval } = fixture({
+        discover: async () => [kind === "write" ? writeManifest : manifest],
+      });
+      fetcher.mockReset().mockRejectedValue(new Error("synthetic upstream secret"));
+      await expect(runAssistedTurn(request(), input, services)).rejects.toMatchObject({
+        code: "ASSISTED_MODEL_UNAVAILABLE",
+      });
+      const retry = await runAssistedTurn(request(), input, services);
+      expect(retry).toMatchObject({ status: "model_error", usageIncomplete: true,
+        errorCode: "ASSISTED_MODEL_UNAVAILABLE", usage: { totalTokens: null } });
+      expect(JSON.stringify(retry)).not.toContain("synthetic upstream secret");
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(execute).not.toHaveBeenCalled();
+      expect(requestApproval).not.toHaveBeenCalled();
+    });
+
+  it("returns promptly on a delayed claim and abandons its late unpaid owner", async () => {
+    const controller = new AbortController();
+    const { services, fetcher } = fixture();
+    const originalClaim = services.claimTurn;
+    let finishClaim!: () => void;
+    services.claimTurn = async (userId, value) => {
+      await new Promise<void>((resolve) => { finishClaim = resolve; });
+      return originalClaim(userId, value);
+    };
+    const first = runAssistedTurn(request(undefined, controller.signal), input, services);
+    await vi.waitFor(() => expect(finishClaim).toBeTypeOf("function"));
+    controller.abort();
+    await expect(first).rejects.toMatchObject({ code: "ASSISTED_CANCELLED" });
+    finishClaim();
+    await vi.waitFor(async () => expect(await services.loadTurn(request(), input)).toBeNull());
+    services.claimTurn = originalClaim;
+    await runAssistedTurn(request(), input, services);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns promptly while unpaid cancellation cleanup is delayed", async () => {
+    const controller = new AbortController();
+    let finishAbandon!: () => void;
+    const { services, fetcher } = fixture({ discover: async () => {
+      controller.abort();
+      return [manifest];
+    } });
+    const originalAbandon = services.abandonTurn;
+    services.abandonTurn = async (userId, value) => {
+      await new Promise<void>((resolve) => { finishAbandon = resolve; });
+      return originalAbandon(userId, value);
+    };
+    await expect(runAssistedTurn(request(undefined, controller.signal), input, services))
+      .rejects.toMatchObject({ code: "ASSISTED_CANCELLED" });
+    expect(finishAbandon).toBeTypeOf("function");
+    expect(fetcher).not.toHaveBeenCalled();
+    finishAbandon();
+    await vi.waitFor(async () => expect(await services.loadTurn(request(), input)).toBeNull());
+    services.abandonTurn = originalAbandon;
+    services.discover = async () => [manifest];
+    await runAssistedTurn(request(), input, services);
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 

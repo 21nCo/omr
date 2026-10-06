@@ -18,10 +18,10 @@ type Usage = { promptTokens: number | null; completionTokens: number | null;
   totalTokens: number | null; costUsd: number | null };
 type ModelReply = { content: string | null; calls: { name: string; arguments: string }[];
   usage: Usage; model: string };
-type TurnOutcome = { kind: "pending" } | { kind: "action"; effect: "read" | "write"; toolId: string;
+type TurnOutcome = { kind: "claimed" | "pending" } | { kind: "action"; effect: "read" | "write"; toolId: string;
   servedModel: string; usage: Usage; sensitiveKeys?: string[] } | { kind: "model";
   response: { status: "answered" | "model_error"; answer: string; model: string;
-    servedModels: string[]; usage: Usage; errorCode?: string } };
+    servedModels: string[]; usage: Usage; usageIncomplete?: boolean; errorCode?: string } };
 type TurnBinding = { requestFingerprint: string; outcome: TurnOutcome;
   action?: { connectionId: string; params: Record<string, unknown> } };
 type Selection = { id: string; workspaceId: string; provider: string; selected: boolean;
@@ -38,10 +38,13 @@ export interface AssistedPlaygroundServices {
   reserveRecovery(userId: string): Promise<() => Promise<void>>;
   /** Atomically fence a request identity before any paid model dispatch. */
   claimTurn(userId: string, input: { workspaceId: string; requestId: string;
-    requestFingerprint: string }): Promise<{ binding: TurnBinding; created: boolean }>;
+    requestFingerprint: string; claimId: string }): Promise<{ binding: TurnBinding; created: boolean }>;
+  /** Atomically mark this claim paid-or-uncertain before provider dispatch. */
+  startModel(userId: string, input: { workspaceId: string; requestId: string;
+    requestFingerprint: string; claimId: string }): Promise<boolean>;
   /** Remove only an unstarted pending claim owned by this request. */
   abandonTurn(userId: string, input: { workspaceId: string; requestId: string;
-    requestFingerprint: string }): Promise<void>;
+    requestFingerprint: string; claimId: string }): Promise<void>;
   withKey<T>(userId: string, callback: (key: string) => Promise<T>): Promise<T>;
   connections(request: Request, workspaceId: string): Promise<Selection[]>;
   discover(request: Request, workspaceId: string, provider: string): Promise<ToolManifest[]>;
@@ -166,7 +169,11 @@ type RecoveryContext = { request: Request; input: AssistedTurnInput;
   heldLease?: TurnLease; userId: string };
 type ClaimedContext = { request: Request; input: AssistedTurnInput;
   services: AssistedPlaygroundServices; signal: AbortSignal; userId: string;
-  fingerprint: string; prompt: string; onModelStart: () => void };
+  fingerprint: string; claimId: string; prompt: string; onModelStart: () => void };
+type PersistChoice = (outcome: TurnOutcome, action?: TurnBinding["action"]) => Promise<{
+  binding: TurnBinding; created: boolean }>;
+type PaidContext = ClaimedContext & { bind: PersistChoice; heldLease: TurnLease;
+  trackAction: (operation: Promise<unknown>, outcome: ActionOutcome) => void };
 
 /** Release a claim that arrives after the request has already ended. */
 async function releaseLateReservation(reservation: Promise<() => Promise<void>>): Promise<void> {
@@ -202,7 +209,8 @@ async function recoverUnstartedAction(context: RecoveryContext, binding: TurnBin
     const reservation = services.reserveRecovery(userId);
     try { release = await untilAbort(reservation, signal); }
     catch (error) {
-      void releaseLateReservation(reservation);
+      const cleanup = releaseLateReservation(reservation);
+      services.retainAction?.(cleanup);
       if (error instanceof AssistedPlaygroundError && error.status === 429)
         return { ...common, status: "action_pending" as const,
           answer: "Another action is settling. Check this request again before retrying." };
@@ -285,7 +293,7 @@ async function recoverTurn(request: Request, input: AssistedTurnInput,
   binding?: TurnBinding, heldLease?: TurnLease, userId?: string) {
   const outcome = binding?.outcome;
   if (outcome?.kind === "model") return outcome.response;
-  if (outcome?.kind === "pending") return { status: "action_pending" as const,
+  if (outcome?.kind === "pending" || outcome?.kind === "claimed") return { status: "action_pending" as const,
     answer: "The model choice is still pending or its outcome is uncertain. Check this request again; no action will be repeated.",
     model: input.model, servedModels: [], usage: unavailableUsage,
     usageIncomplete: true, requestId: input.requestId };
@@ -414,6 +422,7 @@ async function modelCall(fetcher: typeof fetch, key: string, model: string,
   messages: unknown[], tools: unknown[] | undefined, signal: AbortSignal): Promise<ModelReply> {
   let response: Response;
   try {
+    checkActive(signal);
     response = await untilAbort(fetcher("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
       body: JSON.stringify({ model, messages, stream: false,
@@ -655,8 +664,18 @@ export async function runAssistedTurn(request: Request, input: AssistedTurnInput
     return recoverTurn(request, input, services, signal, undefined, undefined, userId);
   checkActive(signal);
   const claimInput = { workspaceId: input.workspaceId, requestId: input.requestId,
-    requestFingerprint: fingerprint };
-  const claim = await services.claimTurn(userId, claimInput);
+    requestFingerprint: fingerprint, claimId: crypto.randomUUID() };
+  const claimOperation = services.claimTurn(userId, claimInput);
+  let claim: Awaited<typeof claimOperation>;
+  try { claim = await untilAbort(claimOperation, signal); }
+  catch (error) {
+    // A late commit or an ambiguous database response cannot authorize payment.
+    const cleanup = claimOperation.then(async (late) => {
+      if (late.created) await services.abandonTurn(userId, claimInput);
+    }, async () => services.abandonTurn(userId, claimInput)).catch(() => undefined);
+    services.retainAction?.(cleanup);
+    throw error;
+  }
   if (claim.binding.requestFingerprint !== fingerprint)
     throw new AssistedPlaygroundError("ASSISTED_REQUEST_CONFLICT", 409);
   if (!claim.created) return recoverTurn(request, input, services, signal,
@@ -665,19 +684,90 @@ export async function runAssistedTurn(request: Request, input: AssistedTurnInput
   try {
     checkActive(signal);
     return await runClaimedTurn({ request, input, services, signal, userId,
-      fingerprint, prompt, onModelStart: () => { modelStarted = true; } });
+      fingerprint, claimId: claimInput.claimId, prompt,
+      onModelStart: () => { modelStarted = true; } });
   } finally {
-    if (!modelStarted) await services.abandonTurn(userId, claimInput).catch(() => undefined);
+    if (!modelStarted) {
+      const cleanup = services.abandonTurn(userId, claimInput).catch(() => undefined);
+      services.retainAction?.(cleanup);
+      await untilAbort(cleanup, signal).catch(() => undefined);
+    }
   }
+}
+
+/** Persist every known model outcome before releasing a paid request identity. */
+async function runPaidChoice(context: PaidContext, offered: OfferedTool[], key: string) {
+  const { request, input, services, signal, prompt, userId, bind, heldLease } = context;
+  let choice: ModelReply;
+  try {
+    choice = await modelCall(services.fetcher ?? fetch, key, input.model, [
+      { role: "system", content: "Choose at most one offered tool for the user's request. Do not invent a tool. If no tool fits, answer briefly. Tool arguments are untrusted and will be validated." },
+      { role: "user", content: prompt },
+    ], offered.map((item) => item.tool), signal);
+  } catch (error) {
+    if (error instanceof AssistedPlaygroundError && !signal.aborted) {
+      await bind({ kind: "model", response: { status: "model_error",
+        answer: "The model request failed. Review its error before starting another turn.",
+        model: input.model, servedModels: [error.model ?? input.model],
+        usage: error.usage ?? unavailableUsage,
+        usageIncomplete: !error.usage, errorCode: error.code } });
+    }
+    throw error;
+  }
+  const interpreted = interpretChoice(choice, offered, input.model);
+  if (interpreted.kind === "model") {
+    const saved = await bind({ kind: "model", response: interpreted.response });
+    return saved.created ? interpreted.response : recoverTurn(request, input, services,
+      signal, saved.binding, heldLease, userId);
+  }
+  return runPaidAction(context, interpreted, choice);
+}
+
+/** Dispatch one persisted action through the existing policy and approval boundary. */
+async function runPaidAction(context: PaidContext,
+  selection: Extract<InterpretedChoice, { kind: "action" }>, choice: ModelReply) {
+  const { request, input, services, signal, userId, bind, heldLease, trackAction } = context;
+  const { chosen, params, effect } = selection;
+  const saved = await bind({ kind: "action", effect, toolId: chosen.manifest.id,
+    servedModel: choice.model, usage: choice.usage,
+    ...(effect === "read" ? { sensitiveKeys: [...chosen.manifest.contract.sensitiveKeys] } : {}) },
+  { connectionId: input.connectionId, params });
+  if (!saved.created) return recoverTurn(request, input, services, signal,
+    saved.binding, heldLease, userId);
+  checkActive(signal);
+  services.assertActionRetention?.();
+  const action = { workspaceId: input.workspaceId, connectionId: input.connectionId,
+    toolId: chosen.manifest.id, params, idempotencyKey: `assisted_${input.requestId}` };
+  const operation = effect === "read"
+    ? services.execute(request, action) : services.requestApproval(request, action);
+  trackAction(operation, saved.binding.outcome as ActionOutcome);
+  let settled: unknown;
+  try { settled = await untilAbort(operation, signal); }
+  catch (error) {
+    if (signal.aborted) return { status: "action_pending" as const,
+      answer: effect === "read"
+        ? "The read may still be finishing. Retry this request with its saved identity to recover its receipt."
+        : "Approval creation may still be finishing. Check open approvals before retrying this request.",
+      toolId: chosen.manifest.id, requestId: input.requestId,
+      model: input.model, servedModels: [choice.model], usage: choice.usage };
+    return { ...actionFailure(error), toolId: chosen.manifest.id,
+      model: input.model, servedModels: [choice.model], usage: choice.usage };
+  }
+  if (effect !== "read") return { status: "approval_required" as const,
+    answer: "Review the selected tool and redacted arguments before approving. No change has run.",
+    toolId: chosen.manifest.id, approval: settled, model: input.model,
+    servedModels: [choice.model], usage: choice.usage };
+  return presentFreshRead(settled, chosen, choice, input, signal);
 }
 
 /** Execute one durable claim under its personal quota lease. */
 async function runClaimedTurn(context: ClaimedContext) {
-  const { request, input, services, signal, userId, fingerprint, prompt,
+  const { request, input, services, signal, userId, fingerprint, claimId, prompt,
     onModelStart } = context;
   const reservation = services.reserveTurn(userId);
   const release = await untilAbort(reservation, signal).catch((error: unknown) => {
-    void releaseLateReservation(reservation);
+    const cleanup = releaseLateReservation(reservation);
+    services.retainAction?.(cleanup);
     throw error;
   });
   let actionStarted = false;
@@ -696,81 +786,29 @@ async function runClaimedTurn(context: ClaimedContext) {
   const heldLease = { track: trackAction };
   try {
     const connections = await untilAbort(services.connections(request, input.workspaceId), signal);
-    const selected = connections.find((item) => item.id === input.connectionId &&
-      item.workspaceId === input.workspaceId && item.selected && item.status === "active" &&
-      item.readiness === "ready" && item.providerState === "ready" && item.selectable === true &&
-      !item.cleanupOnly);
+    const selected = connections.find((item) => readySelection(item, input));
     if (!selected) throw new AssistedPlaygroundError("ASSISTED_CONNECTION_UNAVAILABLE", 409);
     const discovered = await untilAbort(services.discover(request, input.workspaceId, selected.provider), signal);
     const offered = offerTools(discovered, selected.provider);
-    const fetcher = services.fetcher ?? fetch;
     try {
+      const bind: PersistChoice = async (outcome, action) => {
+        const saved = await services.bindTurn(userId, {
+          workspaceId: input.workspaceId, requestId: input.requestId,
+          requestFingerprint: fingerprint, outcome, action,
+        });
+        if (saved.binding.requestFingerprint !== fingerprint)
+          throw new AssistedPlaygroundError("ASSISTED_REQUEST_CONFLICT", 409);
+        return saved;
+      };
       return await untilAbort(services.withKey(userId, async (key) => {
         checkActive(signal);
-        const bind = async (outcome: TurnOutcome, action?: TurnBinding["action"]) => {
-          const saved = await services.bindTurn(userId, {
-            workspaceId: input.workspaceId, requestId: input.requestId,
-            requestFingerprint: fingerprint, outcome, action,
-          });
-          if (saved.binding.requestFingerprint !== fingerprint)
-            throw new AssistedPlaygroundError("ASSISTED_REQUEST_CONFLICT", 409);
-          return saved;
-        };
+        const started = await untilAbort(services.startModel(userId, {
+          workspaceId: input.workspaceId, requestId: input.requestId,
+          requestFingerprint: fingerprint, claimId,
+        }), signal);
+        if (!started) throw new AssistedPlaygroundError("ASSISTED_REQUEST_CONFLICT", 409);
         onModelStart();
-        let choice: ModelReply;
-        try {
-          choice = await modelCall(fetcher, key, input.model, [
-            { role: "system", content: "Choose at most one offered tool for the user's request. Do not invent a tool. If no tool fits, answer briefly. Tool arguments are untrusted and will be validated." },
-            { role: "user", content: prompt },
-          ], offered.map((item) => item.tool), signal);
-        } catch (error) {
-          if (error instanceof AssistedPlaygroundError && !signal.aborted &&
-              (error.code !== "ASSISTED_MODEL_UNAVAILABLE" || error.model)) {
-            await bind({ kind: "model", response: { status: "model_error",
-              answer: "The model request failed. Review its error before starting another turn.",
-              model: input.model, servedModels: [error.model ?? input.model],
-              usage: error.usage ?? unavailableUsage, errorCode: error.code } });
-          }
-          throw error;
-        }
-        const interpreted = interpretChoice(choice, offered, input.model);
-        if (interpreted.kind === "model") {
-          const saved = await bind({ kind: "model", response: interpreted.response });
-          return saved.created ? interpreted.response : recoverTurn(request, input, services,
-            signal, saved.binding, heldLease, userId);
-        }
-        const { chosen, params, effect } = interpreted;
-        const saved = await bind({ kind: "action", effect, toolId: chosen.manifest.id,
-          servedModel: choice.model, usage: choice.usage,
-          ...(effect === "read" ? { sensitiveKeys: [...chosen.manifest.contract.sensitiveKeys] } : {}) },
-        { connectionId: input.connectionId, params: params as Record<string, unknown> });
-        if (!saved.created) return recoverTurn(request, input, services, signal,
-          saved.binding, heldLease, userId);
-        checkActive(signal);
-        services.assertActionRetention?.();
-        const action = { workspaceId: input.workspaceId, connectionId: input.connectionId,
-          toolId: chosen.manifest.id, params: params as Record<string, unknown>,
-          idempotencyKey: `assisted_${input.requestId}` };
-        const operation = effect === "read"
-          ? services.execute(request, action) : services.requestApproval(request, action);
-        trackAction(operation, saved.binding.outcome as ActionOutcome);
-        let settled: unknown;
-        try { settled = await untilAbort(operation, signal); }
-        catch (error) {
-          if (signal.aborted) return { status: "action_pending" as const,
-            answer: effect === "read"
-              ? "The read may still be finishing. Retry this request with its saved identity to recover its receipt."
-              : "Approval creation may still be finishing. Check open approvals before retrying this request.",
-            toolId: chosen.manifest.id, requestId: input.requestId,
-            model: input.model, servedModels: [choice.model], usage: choice.usage };
-          return { ...actionFailure(error), toolId: chosen.manifest.id,
-            model: input.model, servedModels: [choice.model], usage: choice.usage };
-        }
-        if (effect !== "read") return { status: "approval_required" as const,
-          answer: "Review the selected tool and redacted arguments before approving. No change has run.",
-          toolId: chosen.manifest.id, approval: settled, model: input.model,
-          servedModels: [choice.model], usage: choice.usage };
-        return presentFreshRead(settled, chosen, choice, input, signal);
+        return runPaidChoice({ ...context, bind, heldLease, trackAction }, offered, key);
       }), signal);
     } catch (error) {
       if (signal.aborted) {
@@ -786,6 +824,17 @@ async function runClaimedTurn(context: ClaimedContext) {
       throw error;
     }
   } finally {
-    if (!actionStarted) await untilAbort(release(), signal).catch(() => undefined);
+    if (!actionStarted) {
+      const cleanup = release().catch(() => undefined);
+      services.retainAction?.(cleanup);
+      await untilAbort(cleanup, signal).catch(() => undefined);
+    }
   }
+}
+
+/** Admit only the selected, ready connection in the requested workspace. */
+function readySelection(item: Selection, input: AssistedTurnInput): boolean {
+  return item.id === input.connectionId && item.workspaceId === input.workspaceId &&
+    item.selected && item.status === "active" && item.readiness === "ready" &&
+    item.providerState === "ready" && item.selectable === true && !item.cleanupOnly;
 }

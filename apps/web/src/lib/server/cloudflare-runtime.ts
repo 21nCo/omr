@@ -13,7 +13,7 @@ import {
 import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
 import { ApprovalUnavailableError, decodeExecutionWrappingKey, deriveExecutionFingerprintKey, ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
 import { abandonPostgresAssistedTurn, bindPostgresAssistedTurn,
-  claimPostgresAssistedTurn, connectPostgresExecutionReceipts,
+  claimPostgresAssistedTurn, startPostgresAssistedModel, connectPostgresExecutionReceipts,
   lookupPostgresAssistedAction, lookupPostgresAssistedTurn } from "@oh-my-router/execution/postgres";
 import { AssistedTurnQuotaExceededError, connectPostgresIdentityRuntime,
   connectPostgresOpenRouterVault, reservePostgresAssistedRecovery,
@@ -1133,6 +1133,11 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
     },
     async abandonTurn(userId, input) {
       await abandonPostgresAssistedTurn({
+        connectionString: databaseConnectionString(event), userId, ...input,
+      });
+    },
+    async startModel(userId, input) {
+      return startPostgresAssistedModel({
         connectionString: databaseConnectionString(event), userId, ...input,
       });
     },

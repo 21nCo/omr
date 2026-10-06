@@ -9,10 +9,13 @@ connected-provider acceptance. The direct playground also requires
 Apply `packages/identity/migrations/0021_assisted_turn_quota.sql` and
 `packages/execution/migrations/0022_assisted_turn_bindings.sql` in numeric order before
 enabling assisted turns. The primary Worker database role needs `SELECT, INSERT, UPDATE`
-on the quota table and `SELECT, INSERT, DELETE` on the binding table; the dedicated
+on the quota table and `SELECT, INSERT, UPDATE, DELETE` on the binding table; the dedicated
 vault role must not receive access. The binding table
 stores only the first selected action metadata, an HMAC request fingerprint, encrypted
 model-only responses, and encrypted action arguments under the execution wrapping key.
+The binding role needs `UPDATE` to fence model dispatch and finalize an outcome.
+An unpaid claim can be reclaimed after its 110-second quota lease; a claim marked
+paid or uncertain is never replayed and remains recoverable under the same request ID.
 Bindings expire after 24 hours and are purged in bounded batches on later binding access; execution receipts
 and approvals continue to fence prior actions. A database claim allows one active turn and ten starts per user
 hour across Worker instances. A 110-second lease is a backstop for interrupted Workers.

@@ -1,7 +1,8 @@
 import pg from "pg";
 export { lookupPostgresAssistedAction } from "./assisted-status-postgres.js";
 export { lookupPostgresAssistedTurn, bindPostgresAssistedTurn,
-  claimPostgresAssistedTurn, abandonPostgresAssistedTurn } from "./assisted-turn-binding-postgres.js";
+  claimPostgresAssistedTurn, startPostgresAssistedModel,
+  abandonPostgresAssistedTurn } from "./assisted-turn-binding-postgres.js";
 
 import { PostgresExecutionReceiptStore } from "./postgres-store.js";
 import { PostgresExecutionApprovalStore } from "./postgres-approval-store.js";

@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ASSISTED_TURN_RETENTION_MS, abandonPostgresAssistedTurn,
-  bindPostgresAssistedTurn, claimPostgresAssistedTurn, lookupPostgresAssistedTurn } from
+  bindPostgresAssistedTurn, claimPostgresAssistedTurn, lookupPostgresAssistedTurn,
+  startPostgresAssistedModel } from
   "./assisted-turn-binding-postgres.js";
 
 const { Client } = pg;
@@ -37,27 +38,109 @@ describeDatabase("assisted turn PostgreSQL binding", () => {
     const common = { connectionString: connectionString!, workspaceId,
       requestId: crypto.randomUUID(), wrappingKey, userId: "claim_alice",
       requestFingerprint: "same-request" };
+    const firstId = crypto.randomUUID();
+    const secondId = crypto.randomUUID();
     const [a, b] = await Promise.all([
-      claimPostgresAssistedTurn(common), claimPostgresAssistedTurn(common),
+      claimPostgresAssistedTurn({ ...common, claimId: firstId }),
+      claimPostgresAssistedTurn({ ...common, claimId: secondId }),
     ]);
     expect([a.created, b.created].filter(Boolean)).toHaveLength(1);
-    expect(a.binding.outcome).toEqual({ kind: "pending" });
-    expect(b.binding.outcome).toEqual({ kind: "pending" });
+    expect(a.binding.outcome).toEqual({ kind: "claimed" });
+    expect(b.binding.outcome).toEqual({ kind: "claimed" });
+    const winner = a.created ? firstId : secondId;
+    const loser = a.created ? secondId : firstId;
+    expect(await startPostgresAssistedModel({ ...common, claimId: loser })).toBe(false);
+    expect(await startPostgresAssistedModel({ ...common, claimId: winner })).toBe(true);
+    expect(await startPostgresAssistedModel({ ...common, claimId: winner })).toBe(false);
     const outcome = { kind: "model", response: { status: "answered",
       answer: "Review complete", usage: { totalTokens: 14, costUsd: 0.00002 } } };
     const saved = await bindPostgresAssistedTurn({ ...common, outcome });
     expect(saved.created).toBe(true);
     expect(saved.binding.outcome).toEqual(outcome);
-    await abandonPostgresAssistedTurn(common);
-    const retry = await claimPostgresAssistedTurn(common);
+    await abandonPostgresAssistedTurn({ ...common, claimId: winner });
+    const retry = await claimPostgresAssistedTurn({ ...common, claimId: crypto.randomUUID() });
     expect(retry.created).toBe(false);
     expect(retry.binding.outcome).toEqual(outcome);
     const changed = await claimPostgresAssistedTurn({ ...common,
-      requestFingerprint: "changed" });
+      requestFingerprint: "changed", claimId: crypto.randomUUID() });
     expect(changed.created).toBe(false);
     expect(changed.binding.requestFingerprint).toBe("same-request");
-    expect((await claimPostgresAssistedTurn({ ...common, userId: "claim_bob" })).created)
+    expect((await claimPostgresAssistedTurn({ ...common, userId: "claim_bob",
+      claimId: crypto.randomUUID() })).created)
       .toBe(true);
+  });
+
+  it("reclaims only an expired unpaid claim and fences the former owner", async () => {
+    const common = { connectionString: connectionString!, workspaceId,
+      requestId: crypto.randomUUID(), wrappingKey, userId: "lease_alice",
+      requestFingerprint: "same-request" };
+    const firstId = crypto.randomUUID();
+    const secondId = crypto.randomUUID();
+    expect((await claimPostgresAssistedTurn({ ...common, claimId: firstId })).created).toBe(true);
+    expect((await claimPostgresAssistedTurn({ ...common, claimId: secondId })).created).toBe(false);
+    await client.query(`UPDATE omr_control.assisted_turn_bindings SET claim_started_at = $1
+      WHERE workspace_id = $2 AND actor_user_id = $3 AND request_id = $4`,
+    [Date.now() - 111_000, workspaceId, common.userId, common.requestId]);
+    expect((await claimPostgresAssistedTurn({ ...common, claimId: secondId })).created).toBe(true);
+    await abandonPostgresAssistedTurn({ ...common, claimId: firstId });
+    expect(await startPostgresAssistedModel({ ...common, claimId: firstId })).toBe(false);
+    expect(await startPostgresAssistedModel({ ...common, claimId: secondId })).toBe(true);
+    await abandonPostgresAssistedTurn({ ...common, claimId: secondId });
+    expect((await lookupPostgresAssistedTurn(common))?.outcome).toEqual({ kind: "pending" });
+  });
+
+  it("rolls back a claim when decoding its post-insert row fails", async () => {
+    const requestId = `decode_failure_${crypto.randomUUID()}`;
+    await client.query(`CREATE FUNCTION omr_control.corrupt_assisted_claim_fixture()
+      RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        IF NEW.request_id LIKE 'decode_failure_%' THEN
+          NEW.outcome_ciphertext := decode('00', 'hex');
+          NEW.outcome_iv := decode('000000000000000000000000', 'hex');
+        END IF;
+        RETURN NEW;
+      END $$`);
+    await client.query(`CREATE TRIGGER corrupt_assisted_claim_fixture
+      BEFORE INSERT ON omr_control.assisted_turn_bindings
+      FOR EACH ROW EXECUTE FUNCTION omr_control.corrupt_assisted_claim_fixture()`);
+    try {
+      const common = { connectionString: connectionString!, workspaceId,
+        requestId, wrappingKey, userId: "decode_alice",
+        requestFingerprint: "same-request", claimId: crypto.randomUUID() };
+      await expect(claimPostgresAssistedTurn(common)).rejects.toThrow();
+      const row = await client.query(`SELECT 1 FROM omr_control.assisted_turn_bindings
+        WHERE workspace_id = $1 AND actor_user_id = $2 AND request_id = $3`,
+      [workspaceId, common.userId, requestId]);
+      expect(row.rowCount).toBe(0);
+    } finally {
+      await client.query(`DROP TRIGGER corrupt_assisted_claim_fixture
+        ON omr_control.assisted_turn_bindings`);
+      await client.query("DROP FUNCTION omr_control.corrupt_assisted_claim_fixture()");
+    }
+  });
+
+  it("claims and finalizes with the documented binding privileges", async () => {
+    const role = `omr_assisted_worker_${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`;
+    await client.query(`CREATE ROLE ${role} LOGIN`);
+    try {
+      await client.query(`GRANT USAGE ON SCHEMA omr_control TO ${role}`);
+      await client.query(`GRANT SELECT, INSERT, UPDATE, DELETE
+        ON omr_control.assisted_turn_bindings TO ${role}`);
+      const workerUrl = new URL(connectionString!);
+      workerUrl.username = role;
+      workerUrl.password = "";
+      const common = { connectionString: workerUrl.toString(), workspaceId,
+        requestId: crypto.randomUUID(), wrappingKey, userId: "worker_alice",
+        requestFingerprint: "same-request", claimId: crypto.randomUUID() };
+      expect((await claimPostgresAssistedTurn(common)).created).toBe(true);
+      expect(await startPostgresAssistedModel(common)).toBe(true);
+      const outcome = { kind: "model", response: { status: "answered",
+        answer: "Review complete", usage: { totalTokens: 14, costUsd: 0.00002 } } };
+      expect((await bindPostgresAssistedTurn({ ...common, outcome })).binding.outcome)
+        .toEqual(outcome);
+    } finally {
+      await client.query(`DROP OWNED BY ${role}`);
+      await client.query(`DROP ROLE ${role}`);
+    }
   });
 
   it("keeps first action and arguments isolated by user with encrypted storage", async () => {
@@ -134,7 +217,7 @@ describeDatabase("assisted turn PostgreSQL binding", () => {
       (workspace_id, actor_user_id, request_id, request_fingerprint, outcome,
         created_at, expires_at)
       SELECT $1, 'backlog', 'expired_' || series::text, 'old', '{"kind":"model"}'::jsonb,
-        $2, CASE WHEN series = 250 THEN $3 ELSE $4 END
+        $2, CASE WHEN series = 250 THEN $3::bigint ELSE $4::bigint END
       FROM generate_series(1, 250) AS series`,
     [workspaceId, now - 2000, now - 1, now - 1000]);
     const common = { connectionString: connectionString!, workspaceId, userId: "backlog",

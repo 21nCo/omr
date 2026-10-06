@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS omr_control.assisted_turn_bindings (
   actor_user_id text NOT NULL,
   request_id text NOT NULL,
   request_fingerprint text NOT NULL,
+  claim_id text,
+  claim_started_at bigint,
   outcome jsonb NOT NULL,
   outcome_ciphertext bytea,
   outcome_iv bytea,
@@ -19,6 +21,10 @@ CREATE TABLE IF NOT EXISTS omr_control.assisted_turn_bindings (
   CHECK ((action_ciphertext IS NULL AND action_iv IS NULL)
     OR (action_ciphertext IS NOT NULL AND action_iv IS NOT NULL))
 );
+
+ALTER TABLE omr_control.assisted_turn_bindings
+  ADD COLUMN IF NOT EXISTS claim_id text,
+  ADD COLUMN IF NOT EXISTS claim_started_at bigint;
 
 CREATE INDEX IF NOT EXISTS assisted_turn_bindings_expiry_idx
   ON omr_control.assisted_turn_bindings (expires_at);
