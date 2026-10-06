@@ -61,5 +61,5 @@ export async function connectPostgresIdentityRuntime(
 
 export { PostgresWorkspaceStore } from "./postgres-store.js";
 export { connectPostgresOpenRouterVault, PostgresOpenRouterVaultStore } from "./openrouter-vault-postgres.js";
-export { reservePostgresAssistedTurn, AssistedTurnQuotaExceededError,
+export { reservePostgresAssistedTurn, reservePostgresAssistedRecovery, AssistedTurnQuotaExceededError,
   ASSISTED_TURN_REQUESTS_PER_HOUR } from "./assisted-turn-quota-postgres.js";

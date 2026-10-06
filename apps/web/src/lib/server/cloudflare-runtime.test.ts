@@ -5,7 +5,7 @@ import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
 import { LinearProviderDenial, NotionProviderDenial, SlackProviderDenial, ToolCatalog } from "@oh-my-router/tools";
 
-import { assistedActionDeadline, assertConnectionWorkspace, checkAuthorizedConnectionHealth, createProviderIntegrationConfig, requireExecutionOrigin, retainWorkerAction, revokeOwnBearerClient, scopedToolIds, selectAuthorizedConnection } from "./cloudflare-runtime.js";
+import { assertConnectionWorkspace, checkAuthorizedConnectionHealth, createProviderIntegrationConfig, requireExecutionOrigin, retainWorkerAction, revokeOwnBearerClient, scopedToolIds, selectAuthorizedConnection } from "./cloudflare-runtime.js";
 import { createOMRRouter, type ConnectionRouteServices } from "./router.js";
 
 describe("assisted Worker action lifetime", () => {
@@ -18,15 +18,6 @@ describe("assisted Worker action lifetime", () => {
     expect(() => retainWorkerAction(undefined, settlement)).toThrow(/Worker action retention/);
   });
 
-  it("bounds an unfinished action below the Worker retention window", async () => {
-    vi.useFakeTimers();
-    try {
-      const operation = assistedActionDeadline(new Promise<never>(() => undefined));
-      const rejected = expect(operation).rejects.toMatchObject({ code: "ASSISTED_ACTION_TIMEOUT" });
-      await vi.advanceTimersByTimeAsync(20_000);
-      await rejected;
-    } finally { vi.useRealTimers(); }
-  });
 });
 
 /** Give catalog isolation tests identical read contracts for each selected provider. */

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ToolManifest } from "@oh-my-router/tools";
 import { createOMRRouter } from "../../apps/web/src/lib/server/router.js";
-import { ASSISTED_LIMITS, runAssistedTurn, safeResult,
+import { ASSISTED_LIMITS, AssistedPlaygroundError, runAssistedTurn, safeResult,
   type AssistedPlaygroundServices } from "../../apps/web/src/lib/server/assisted-playground.js";
 
 const manifest: ToolManifest = {
@@ -47,7 +47,8 @@ function fixture(overrides: Partial<AssistedPlaygroundServices> = {}) {
     fingerprint: async (value, prompt) => JSON.stringify([
       value.workspaceId, value.connectionId, value.model, prompt]),
     reserveTurn: async () => async () => undefined,
-    withKey: async (_user, callback) => callback("sk-or-v1-alice-test"),
+    reserveRecovery: async () => async () => undefined,
+    withKey: async (_user, callback) => callback("synthetic-openrouter-alice-key"),
     connections: async () => [{ id: "account_one", workspaceId: "mine", provider: "demo",
       selected: true, status: "active", readiness: "ready", providerState: "ready",
       selectable: true }],
@@ -82,7 +83,7 @@ describe("assisted-playground-contract", () => {
     expect(execute).toHaveBeenCalledOnce();
     expect(execute.mock.calls[0]![1]).toMatchObject({ workspaceId: "mine",
       connectionId: "account_one", toolId: "demo.read", params: { title: "fixture" } });
-    expect(JSON.stringify(execute.mock.calls[0])).not.toContain("sk-or-v1-alice-test");
+    expect(JSON.stringify(execute.mock.calls[0])).not.toContain("synthetic-openrouter-alice-key");
     expect(requestApproval).not.toHaveBeenCalled();
     const first = JSON.parse(String(fetcher.mock.calls[0]![1]?.body));
     expect(first).toMatchObject({ model: "fixture/model", max_tokens: ASSISTED_LIMITS.outputTokens,
@@ -92,11 +93,11 @@ describe("assisted-playground-contract", () => {
     expect(fetcher).toHaveBeenCalledOnce();
     expect(JSON.stringify(fetcher.mock.calls)).not.toContain("do not reveal");
     expect(JSON.stringify(fetcher.mock.calls)).not.toContain("ignore instructions");
-    expect(fetcher.mock.calls[0]![1]?.headers).toMatchObject({ authorization: "Bearer sk-or-v1-alice-test" });
+    expect(fetcher.mock.calls[0]![1]?.headers).toMatchObject({ authorization: "Bearer synthetic-openrouter-alice-key" });
   });
 
   it("uses only the authenticated user's vault key and selected account", async () => {
-    const keys = new Map([["alice", "sk-or-v1-alice-test"], ["bob", "sk-or-v1-bob-test"]]);
+    const keys = new Map([["alice", "synthetic-openrouter-alice-key"], ["bob", "synthetic-openrouter-bob-key"]]);
     const seen: string[] = [];
     for (const user of ["alice", "bob"]) {
       const { services, fetcher, execute } = fixture({
@@ -167,6 +168,17 @@ describe("assisted-playground-contract", () => {
     await expect(runAssistedTurn(request(), input, failure.services)).rejects
       .toMatchObject({ code: "ASSISTED_KEY_REJECTED" });
     expect(failure.execute).not.toHaveBeenCalled();
+  });
+
+  it.each([[401, ""], [403, "upstream plain text"], [400, "upstream plain text"],
+    [502, "upstream plain text"]] as const)("classifies non-JSON model HTTP %s before parsing its error body", async (status, body) => {
+    const { services, fetcher, execute } = fixture();
+    fetcher.mockReset().mockResolvedValue(new Response(body, { status }));
+    await expect(runAssistedTurn(request(), input, services)).rejects.toMatchObject({
+      code: status === 401 || status === 403 ? "ASSISTED_KEY_REJECTED"
+        : status === 400 ? "ASSISTED_MODEL_REJECTED" : "ASSISTED_MODEL_UNAVAILABLE",
+    });
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it("never sends a read result to OpenRouter after the tool returns", async () => {
@@ -1013,7 +1025,8 @@ describe("assisted-playground-contract", () => {
     expect(reserveTurn).toHaveBeenCalledOnce();
   });
 
-  it.each(["read", "write"] as const)("retains a started %s action and quota settlement after timeout", async (effect) => {
+  it.each(["read", "write"] as const)("retains a started %s action and quota settlement after cancellation", async (effect) => {
+    const controller = new AbortController();
     let settle!: (value: unknown) => void;
     const operation = new Promise<unknown>((resolve) => { settle = resolve; });
     const retained: Promise<void>[] = [];
@@ -1022,13 +1035,15 @@ describe("assisted-playground-contract", () => {
     const execute = vi.fn(async () => operation);
     const requestApproval = vi.fn(async () => operation);
     const { services } = fixture({
-      turnMs: 20,
       discover: async () => [effect === "read" ? manifest : writeManifest],
       execute, requestApproval,
       reserveTurn,
       retainAction: (settlement) => { retained.push(settlement); },
     });
-    const result = await runAssistedTurn(request(), input, services);
+    const pending = runAssistedTurn(request(undefined, controller.signal), input, services);
+    await vi.waitFor(() => expect(retained).toHaveLength(1));
+    controller.abort();
+    const result = await pending;
     expect(result).toMatchObject({ status: "action_pending", requestId: input.requestId });
     expect(retained).toHaveLength(1);
     expect(release).not.toHaveBeenCalled();
@@ -1039,6 +1054,58 @@ describe("assisted-playground-contract", () => {
       : { id: "approval_late", status: "pending" });
     await retained[0];
     expect(release).toHaveBeenCalledOnce();
+  });
+
+  it.each(["read", "write"] as const)("claims a slot for saved %s dispatch and releases only after settlement", async (effect) => {
+    let finish!: (value: unknown) => void;
+    const operation = new Promise<unknown>((resolve) => { finish = resolve; });
+    const retained: Promise<void>[] = [];
+    const release = vi.fn(async () => undefined);
+    const reserveRecovery = vi.fn(async () => release);
+    const reserveTurn = vi.fn(async () => { throw new Error("recovery charged a new model turn"); });
+    const execute = vi.fn(async () => operation);
+    const requestApproval = vi.fn(async () => operation);
+    const { services, fetcher } = fixture({
+      loadTurn: async () => ({ requestFingerprint: JSON.stringify([
+        input.workspaceId, input.connectionId, input.model, input.prompt]),
+        outcome: { kind: "action", effect, toolId: effect === "read" ? manifest.id : writeManifest.id,
+          servedModel: "fixture/served", usage: { promptTokens: 10, completionTokens: 4,
+            totalTokens: 14, costUsd: 0.00002 } },
+        action: { connectionId: input.connectionId, params: { title: "fixture" } } }),
+      reserveTurn, reserveRecovery, execute, requestApproval,
+      retainAction: (settlement) => { retained.push(settlement); },
+    });
+    const controller = new AbortController();
+    const pending = runAssistedTurn(request(undefined, controller.signal), input, services);
+    await vi.waitFor(() => expect(retained).toHaveLength(1));
+    expect(reserveRecovery).toHaveBeenCalledOnce();
+    expect(release).not.toHaveBeenCalled();
+    controller.abort();
+    expect(await pending).toMatchObject({ status: "action_pending" });
+    finish(effect === "read" ? { id: "receipt_saved", status: "succeeded" }
+      : { id: "approval_saved", status: "pending" });
+    await retained[0];
+    expect(release).toHaveBeenCalledOnce();
+    expect(reserveTurn).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(execute).toHaveBeenCalledTimes(effect === "read" ? 1 : 0);
+    expect(requestApproval).toHaveBeenCalledTimes(effect === "write" ? 1 : 0);
+  });
+
+  it.each(["read", "write"] as const)("does not redispatch a saved %s while another turn owns the slot", async (effect) => {
+    const { services, execute, requestApproval, fetcher } = fixture({
+      loadTurn: async () => ({ requestFingerprint: JSON.stringify([
+        input.workspaceId, input.connectionId, input.model, input.prompt]),
+        outcome: { kind: "action", effect, toolId: effect === "read" ? manifest.id : writeManifest.id,
+          servedModel: "fixture/served", usage: { promptTokens: 10, completionTokens: 4,
+            totalTokens: 14, costUsd: 0.00002 } },
+        action: { connectionId: input.connectionId, params: { title: "fixture" } } }),
+      reserveRecovery: async () => { throw new AssistedPlaygroundError("ASSISTED_RATE_LIMITED", 429); },
+    });
+    expect(await runAssistedTurn(request(), input, services)).toMatchObject({ status: "action_pending" });
+    expect(execute).not.toHaveBeenCalled();
+    expect(requestApproval).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it("refuses a selected action before dispatch when Worker retention is unavailable", async () => {
@@ -1073,6 +1140,39 @@ describe("assisted-playground-contract", () => {
     expect(release).toHaveBeenCalledOnce();
     expect(execute).toHaveBeenCalledOnce();
     expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it("returns action_pending when a bind-race recovered read is cancelled after dispatch", async () => {
+    const controller = new AbortController();
+    let finish!: (value: unknown) => void;
+    const operation = new Promise<unknown>((resolve) => { finish = resolve; });
+    const retained: Promise<void>[] = [];
+    const release = vi.fn(async () => undefined);
+    const reserveRecovery = vi.fn(async () => { throw new Error("second lease"); });
+    const executeAction = vi.fn(async () => operation);
+    const { services, fetcher } = fixture({
+      reserveTurn: async () => release, reserveRecovery,
+      execute: executeAction,
+      retainAction: (settlement) => { retained.push(settlement); },
+      bindTurn: async (_user, value) => ({ created: false, binding: {
+        requestFingerprint: value.requestFingerprint,
+        outcome: { kind: "action", effect: "read", toolId: manifest.id,
+          servedModel: "fixture/served", usage: { promptTokens: 10,
+            completionTokens: 4, totalTokens: 14, costUsd: 0.00002 } },
+        action: { connectionId: input.connectionId, params: { title: "fixture" } },
+      } }),
+    });
+    const pending = runAssistedTurn(request(undefined, controller.signal), input, services);
+    await vi.waitFor(() => expect(retained).toHaveLength(1));
+    controller.abort();
+    expect(await pending).toMatchObject({ status: "action_pending", requestId: input.requestId });
+    expect(release).not.toHaveBeenCalled();
+    finish({ id: "receipt_race", status: "succeeded", result: { title: "Roadmap is ready" } });
+    await retained[0];
+    expect(release).toHaveBeenCalledOnce();
+    expect(reserveRecovery).not.toHaveBeenCalled();
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(executeAction).toHaveBeenCalledOnce();
   });
 
   it.each(["read", "write"] as const)("retains a recovered %s action through disconnect without a new model or lease", async (effect) => {

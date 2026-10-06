@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { reservePostgresAssistedTurn, AssistedTurnQuotaExceededError,
+import { reservePostgresAssistedRecovery, reservePostgresAssistedTurn,
+  AssistedTurnQuotaExceededError,
   ASSISTED_TURN_REQUESTS_PER_HOUR } from "./assisted-turn-quota-postgres.js";
 
 const { Client } = pg;
@@ -44,5 +45,27 @@ describeDatabase("assisted PostgreSQL quota", () => {
       .rejects.toBeInstanceOf(AssistedTurnQuotaExceededError);
     const nextHour = await reservePostgresAssistedTurn(connectionString!, alice, now + 3_600_001);
     await nextHour();
+  });
+
+  it("recovery claims the same user slot without increasing hourly starts", async () => {
+    const user = `assisted-recovery-${crypto.randomUUID()}`;
+    await client.query(`INSERT INTO omr_identity.users (id, created_at, updated_at)
+      VALUES ($1, now(), now())`, [user]);
+    try {
+      const now = Date.now();
+      const first = await reservePostgresAssistedTurn(connectionString!, user, now);
+      await expect(reservePostgresAssistedRecovery(connectionString!, user, now + 1))
+        .rejects.toBeInstanceOf(AssistedTurnQuotaExceededError);
+      await first();
+      const recovery = await reservePostgresAssistedRecovery(connectionString!, user, now + 2);
+      await expect(reservePostgresAssistedTurn(connectionString!, user, now + 3))
+        .rejects.toBeInstanceOf(AssistedTurnQuotaExceededError);
+      await recovery();
+      const count = await client.query<{ request_count: number }>(
+        `SELECT request_count FROM omr_identity.assisted_turn_quota WHERE user_id = $1`, [user]);
+      expect(count.rows[0]?.request_count).toBe(1);
+    } finally {
+      await client.query("DELETE FROM omr_identity.users WHERE id = $1", [user]);
+    }
   });
 });

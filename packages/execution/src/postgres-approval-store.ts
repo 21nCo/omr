@@ -95,13 +95,13 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
       : this.client!.query<R>(sql, values);
   }
 
-  async create(approval: ExecutionApproval): Promise<ExecutionApproval> {
+  async create(approval: ExecutionApproval,
+    deadlineAt = Date.now() + EXECUTION_INVOCATION_DEADLINE_MS): Promise<ExecutionApproval> {
     if (approval.intentHash && !approval.requestHash) throw new ExecutionIdempotencyConflictError();
     if (approval.intentHash && !this.runOwnedClient) {
       throw new LinearIntentTransactionRequiredError();
     }
     if (!this.runOwnedClient) return this.createWithQuery(approval, (sql, values) => this.query(sql, values));
-    const deadlineAt = Date.now() + EXECUTION_INVOCATION_DEADLINE_MS;
     return this.runOwnedClient(deadlineAt, async (client) => {
       const query: ApprovalQuery = (sql, values) =>
         withinInvocationDeadline(deadlineAt, () => client.query(sql, values));

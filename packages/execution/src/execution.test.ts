@@ -1188,6 +1188,24 @@ describe("execution service", () => {
     expect(actionCall).toHaveBeenCalledTimes(1);
   });
 
+  it("persists an uncertain assisted read before releasing a shortened execution lifetime", async () => {
+    const { actionCall, receipts, service, workspace } = await fixture();
+    let finish!: (value: unknown) => void;
+    actionCall.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const request = {
+      principal: { kind: "web" as const, userId: "user_1", workspaceId: workspace.id },
+      toolId: "linear.get_issue", params: {}, idempotencyKey: "assisted-timeout",
+      deadlineMs: 500,
+    };
+    const execution = service.execute(request);
+    await vi.waitFor(() => expect(actionCall).toHaveBeenCalledOnce());
+    await expect(execution).rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN" });
+    expect([...receipts.receipts.values()][0]).toMatchObject({ status: "uncertain" });
+    finish({ id: "late-provider-result" });
+    await expect(service.execute(request)).rejects.toMatchObject({ code: "EXECUTION_OUTCOME_UNKNOWN" });
+    expect(actionCall).toHaveBeenCalledOnce();
+  });
+
   it("keeps a successful provider effect non-replayable if result persistence fails", async () => {
     const { actionCall, receipts, service, workspace } = await fixture();
     vi.spyOn(receipts, "succeed").mockRejectedValueOnce(new Error("database write failed"));

@@ -12,6 +12,20 @@ export class AssistedTurnQuotaExceededError extends Error {
   constructor() { super("Personal assisted-turn limit reached"); }
 }
 
+/** Release only the lease held by this request, even if a later request replaced it. */
+function releaseClaim(connectionString: string, userId: string, activeId: string) {
+  return async () => {
+    const release = new Client({ connectionString, connectionTimeoutMillis: 3000,
+      statement_timeout: 5000 });
+    try {
+      await release.connect();
+      await release.query(`UPDATE omr_identity.assisted_turn_quota
+        SET active_id = NULL, active_until_ms = 0
+        WHERE user_id = $1 AND active_id = $2`, [userId, activeId]);
+    } finally { await release.end().catch(() => undefined); }
+  };
+}
+
 /** A database claim arbitrates requests across Worker isolates before either model call. */
 export async function reservePostgresAssistedTurn(connectionString: string, userId: string,
   now = Date.now()): Promise<() => Promise<void>> {
@@ -36,14 +50,22 @@ export async function reservePostgresAssistedTurn(connectionString: string, user
     [userId, now, activeId, now + LEASE_MS, WINDOW_MS, ASSISTED_TURN_REQUESTS_PER_HOUR]);
     if (claimed.rowCount !== 1) throw new AssistedTurnQuotaExceededError();
   } finally { await client.end().catch(() => undefined); }
-  return async () => {
-    const release = new Client({ connectionString, connectionTimeoutMillis: 3000,
-      statement_timeout: 5000 });
-    try {
-      await release.connect();
-      await release.query(`UPDATE omr_identity.assisted_turn_quota
-        SET active_id = NULL, active_until_ms = 0
-        WHERE user_id = $1 AND active_id = $2`, [userId, activeId]);
-    } finally { await release.end().catch(() => undefined); }
-  };
+  return releaseClaim(connectionString, userId, activeId);
+}
+
+/** Claim a saved action's slot without charging a second model turn. */
+export async function reservePostgresAssistedRecovery(connectionString: string, userId: string,
+  now = Date.now()): Promise<() => Promise<void>> {
+  const activeId = crypto.randomUUID();
+  const client = new Client({ connectionString, connectionTimeoutMillis: 3000,
+    statement_timeout: 5000 });
+  try {
+    await client.connect();
+    const claimed = await client.query(`UPDATE omr_identity.assisted_turn_quota
+      SET active_id = $2, active_until_ms = $3
+      WHERE user_id = $1 AND active_until_ms <= $4
+      RETURNING user_id`, [userId, activeId, now + LEASE_MS, now]);
+    if (claimed.rowCount !== 1) throw new AssistedTurnQuotaExceededError();
+  } finally { await client.end().catch(() => undefined); }
+  return releaseClaim(connectionString, userId, activeId);
 }

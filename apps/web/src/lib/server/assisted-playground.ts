@@ -34,6 +34,8 @@ export interface AssistedPlaygroundServices {
   authenticate(request: Request): Promise<string>;
   fingerprint(input: AssistedTurnInput, prompt: string): Promise<string>;
   reserveTurn(userId: string): Promise<() => Promise<void>>;
+  /** Reserve a slot for a saved action without charging another model turn. */
+  reserveRecovery(userId: string): Promise<() => Promise<void>>;
   withKey<T>(userId: string, callback: (key: string) => Promise<T>): Promise<T>;
   connections(request: Request, workspaceId: string): Promise<Selection[]>;
   discover(request: Request, workspaceId: string, provider: string): Promise<ToolManifest[]>;
@@ -149,7 +151,8 @@ function untilAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
 const unavailableUsage: Usage = { promptTokens: null, completionTokens: null,
   totalTokens: null, costUsd: null };
 
-type TurnLease = { track: (operation: Promise<unknown>) => void };
+type ActionOutcome = Extract<TurnOutcome, { kind: "action" }>;
+type TurnLease = { track: (operation: Promise<unknown>, outcome: ActionOutcome) => void };
 type RecoveredCommon = { model: string; servedModels: string[]; usage: Usage;
   usageIncomplete: boolean; requestId: string; toolId?: string };
 
@@ -171,13 +174,27 @@ function recoveredReadActionResult(common: RecoveredCommon, receipt: unknown,
 /** Resume the saved action under its original key, retaining any new settlement. */
 async function recoverUnstartedAction(request: Request, input: AssistedTurnInput,
   services: AssistedPlaygroundServices, signal: AbortSignal, binding: TurnBinding,
-  heldLease: TurnLease | undefined, common: RecoveredCommon) {
+  heldLease: TurnLease | undefined, common: RecoveredCommon, userId: string) {
   const outcome = binding.outcome;
   if (outcome.kind !== "action" || !binding.action)
     throw new AssistedPlaygroundError("ASSISTED_REQUEST_CONFLICT", 409);
+  let release: (() => Promise<void>) | undefined;
+  if (!heldLease) {
+    const reservation = services.reserveRecovery(userId);
+    try { release = await untilAbort(reservation, signal); }
+    catch (error) {
+      reservation.then((lateRelease) => lateRelease()).catch(() => undefined);
+      if (error instanceof AssistedPlaygroundError && error.status === 429)
+        return { ...common, status: "action_pending" as const,
+          answer: "Another action is settling. Check this request again before retrying." };
+      throw error;
+    }
+  }
+  let started = false;
   const track = (operation: Promise<unknown>) => {
-    if (heldLease) heldLease.track(operation);
-    else services.retainAction?.(operation.then(() => undefined, () => undefined));
+    started = true;
+    if (heldLease) heldLease.track(operation, outcome);
+    else retainActionSettlement(services, operation, release!);
   };
   const original = { workspaceId: input.workspaceId, connectionId: binding.action.connectionId,
     toolId: outcome.toolId, params: binding.action.params,
@@ -200,38 +217,34 @@ async function recoverUnstartedAction(request: Request, input: AssistedTurnInput
     if (signal.aborted) return { ...common, status: "action_pending" as const,
       answer: "The selected action may still be finishing. Check its receipt or approval." };
     return { ...common, ...actionFailure(error) };
+  } finally {
+    if (!started && release) await release();
   }
 }
 
-/** Recover a persisted selection before considering another paid model choice. */
-async function recoverTurn(request: Request, input: AssistedTurnInput,
+/** A saved write receipt is evidence to inspect, never a new approval. */
+function renderStoredWrite(common: RecoveredCommon, receipt: { id: string; status: string }) {
+  const { id, status } = receipt;
+  if (status === "succeeded") return { ...common, status: "answered" as const,
+    terminalWrite: true, receiptId: id,
+    answer: `The previous write completed. Review receipt ${id} before starting another action.` };
+  if (status === "failed") return { ...common, status: "tool_error" as const,
+    terminalWrite: true, receiptId: id,
+    answer: `The previous write failed. Review receipt ${id} and verify the provider outcome before starting another action.` };
+  return { ...common, status: "action_pending" as const, receiptId: id,
+    answer: `The previous write receipt ${id} is ${status}. Verify its outcome before another action.` };
+}
+
+/** Render an existing approval or receipt without starting another action. */
+async function renderStoredAction(request: Request, input: AssistedTurnInput,
   services: AssistedPlaygroundServices, signal: AbortSignal,
-  binding?: TurnBinding,
-  heldLease?: TurnLease) {
+  binding: TurnBinding | undefined, common: RecoveredCommon,
+  action: Awaited<ReturnType<AssistedPlaygroundServices["lookupAction"]>>) {
   const outcome = binding?.outcome;
-  if (outcome?.kind === "model") return outcome.response;
-  const action = await untilAbort(services.lookupAction(request, input), signal);
-  const usage = outcome?.kind === "action" ? outcome.usage : unavailableUsage;
-  const servedModels = outcome?.kind === "action" ? [outcome.servedModel] : [];
-  const common = { model: input.model, servedModels, usage,
-    usageIncomplete: outcome?.kind !== "action" || outcome.effect === "read",
-    requestId: input.requestId, ...(outcome?.kind === "action" ? { toolId: outcome.toolId } : {}) };
-  if (!action.approval && !action.receipt && outcome?.kind === "action" && binding?.action)
-    return recoverUnstartedAction(request, input, services, signal, binding,
-      heldLease, common);
   if (action.approval) return { ...common, status: "action_pending" as const,
     answer: `The previous approval ${action.approval.id} is ${action.approval.status}. Review its status before another action.` };
-  if (action.receipt && outcome?.kind === "action" && outcome.effect === "write") {
-    const { id, status } = action.receipt;
-    if (status === "succeeded" || status === "failed") return { ...common,
-      status: status === "succeeded" ? "answered" as const : "tool_error" as const,
-      terminalWrite: true, receiptId: id,
-      answer: status === "succeeded"
-        ? `The previous write completed. Review receipt ${id} before starting another action.`
-        : `The previous write failed. Review receipt ${id} and verify the provider outcome before starting another action.` };
-    return { ...common, status: "action_pending" as const, receiptId: id,
-      answer: `The previous write receipt ${id} is ${status}. Verify its outcome before another action.` };
-  }
+  if (action.receipt && outcome?.kind === "action" && outcome.effect === "write")
+    return renderStoredWrite(common, action.receipt);
   if (action.receipt && outcome?.kind !== "action") return { ...common,
     status: "action_pending" as const, receiptId: action.receipt.id,
     answer: `The previous action receipt ${action.receipt.id} is ${action.receipt.status}. Its saved kind is unavailable; review the receipt before another action.` };
@@ -247,10 +260,33 @@ async function recoverTurn(request: Request, input: AssistedTurnInput,
     answer: "The previous action may still be starting. Check its receipt or approval before retrying." };
 }
 
+/** Recover a persisted selection before considering another paid model choice. */
+async function recoverTurn(request: Request, input: AssistedTurnInput,
+  services: AssistedPlaygroundServices, signal: AbortSignal,
+  binding?: TurnBinding, heldLease?: TurnLease, userId?: string) {
+  const outcome = binding?.outcome;
+  if (outcome?.kind === "model") return outcome.response;
+  const action = await untilAbort(services.lookupAction(request, input), signal);
+  const common = { model: input.model,
+    servedModels: outcome?.kind === "action" ? [outcome.servedModel] : [],
+    usage: outcome?.kind === "action" ? outcome.usage : unavailableUsage,
+    usageIncomplete: outcome?.kind !== "action" || outcome.effect === "read",
+    requestId: input.requestId, ...(outcome?.kind === "action" ? { toolId: outcome.toolId } : {}) };
+  if (!action.approval && !action.receipt && outcome?.kind === "action" && binding?.action)
+    return recoverUnstartedAction(request, input, services, signal, binding,
+      heldLease, common, userId!);
+  return renderStoredAction(request, input, services, signal, binding, common, action);
+}
+
 /** Register completion before the response can be sent, including quota release. */
+async function settleAction(operation: Promise<unknown>, release: () => Promise<void>) {
+  try { await operation; } catch { /* The request path reports the action failure. */ }
+  await release();
+}
+
 function retainActionSettlement(services: AssistedPlaygroundServices,
   operation: Promise<unknown>, release: () => Promise<void>): void {
-  const settlement = operation.then(release, release);
+  const settlement = settleAction(operation, release);
   services.retainAction?.(settlement);
   settlement.catch(() => undefined);
 }
@@ -357,7 +393,13 @@ async function modelCall(fetcher: typeof fetch, key: string, model: string,
     checkActive(signal);
     throw new AssistedPlaygroundError("ASSISTED_MODEL_UNAVAILABLE", 502);
   }
-  const data = object(await untilAbort(boundedJson(response, signal), signal));
+  let data: Record<string, unknown> | null;
+  try { data = object(await untilAbort(boundedJson(response, signal), signal)); }
+  catch (error) {
+    if (response.ok) throw error;
+    checkActive(signal);
+    rejectedModel(response, unavailableUsage, model);
+  }
   const usage = object(data?.usage);
   const reported: Usage = { promptTokens: finiteNonnegative(usage?.prompt_tokens),
     completionTokens: finiteNonnegative(usage?.completion_tokens),
@@ -369,7 +411,8 @@ async function modelCall(fetcher: typeof fetch, key: string, model: string,
 
 /** Only a small, plain-text projection of an untrusted result may enter the answer. */
 const withheldResult = "[WITHHELD_UNSAFE_TOOL_RESULT]";
-const sensitiveOutputKey = /(?:token|secret|password|key|authorization|credential|private|passphrase|cookie|session|verification|passcode|code|pin|otp|security|recovery|backup|challenge|response|answer|memorable|maiden|question|hint)/i;
+const sensitiveOutputKey = /token|secret|password|key|authorization|credential|private|passphrase|cookie|session|verification|passcode|code|pin|otp/i;
+const sensitiveChallengeKey = /security|recovery|backup|challenge|response|answer|memorable|maiden|question|hint/i;
 // Provider object keys are untrusted content too. Only fixed, ordinary field
 // labels enter a preview; unknown labels and their values are not interpretable.
 const previewFieldNames = new Set(["pages", "content", "text", "title", "body",
@@ -413,6 +456,7 @@ function previewRecord(record: Record<string, unknown>, depth: number,
     if (index >= 80 || state.truncated) { state.truncated = true; break; }
     const labelKnown = previewFieldNames.has(key);
     const admitted = labelKnown && !sensitiveOutputKey.test(key) &&
+      !sensitiveChallengeKey.test(key) &&
       !state.sensitive.has(key.toLowerCase());
     result[labelKnown ? key : `field_${index + 1}`] = admitted
       ? previewValue(record[key], depth + 1, state) : "[REDACTED]";
@@ -542,19 +586,26 @@ function presentFreshRead(receipt: unknown, chosen: OfferedTool, choice: ModelRe
       : `The read completed. Result preview: ${result.slice(0, 1600)}. Review the receipt for the full result.` };
 }
 
-/** One user turn: one model tool choice and one policy checked tool action. */
-export async function runAssistedTurn(request: Request, input: AssistedTurnInput,
-  services: AssistedPlaygroundServices) {
+/** Validate the browser request before quota, vault, or model use. */
+function assistedPrompt(request: Request, input: AssistedTurnInput,
+  services: AssistedPlaygroundServices): string {
   if (!services.enabled()) throw new AssistedPlaygroundError("ASSISTED_DISABLED", 404);
   if (request.headers.get("origin") !== new URL(request.url).origin ||
       request.headers.has("authorization")) throw new AssistedPlaygroundError("ASSISTED_ORIGIN_DENIED", 403);
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{2,99}$/.test(input.model))
     throw new AssistedPlaygroundError("ASSISTED_MODEL_INVALID", 400);
   const prompt = input.prompt.trim();
-  if (!prompt || prompt.length > ASSISTED_LIMITS.promptChars || /sk-or-[A-Za-z0-9-]+/i.test(prompt))
+  if (!prompt || prompt.length > ASSISTED_LIMITS.promptChars || /sk-or-[a-z0-9-]+/i.test(prompt))
     throw new AssistedPlaygroundError("ASSISTED_PROMPT_INVALID", 400);
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.requestId))
     throw new AssistedPlaygroundError("ASSISTED_REQUEST_ID_INVALID", 400);
+  return prompt;
+}
+
+/** One user turn: one model tool choice and one policy checked tool action. */
+export async function runAssistedTurn(request: Request, input: AssistedTurnInput,
+  services: AssistedPlaygroundServices) {
+  const prompt = assistedPrompt(request, input, services);
   const deadlineMs = Math.max(1, Math.min(services.turnMs ?? ASSISTED_LIMITS.turnMs,
     ASSISTED_LIMITS.turnMs));
   const signal = AbortSignal.any([request.signal, AbortSignal.timeout(deadlineMs)]);
@@ -564,12 +615,12 @@ export async function runAssistedTurn(request: Request, input: AssistedTurnInput
   if (prior) {
     if (prior.requestFingerprint !== fingerprint)
       throw new AssistedPlaygroundError("ASSISTED_REQUEST_CONFLICT", 409);
-    return recoverTurn(request, input, services, signal, prior);
+    return recoverTurn(request, input, services, signal, prior, undefined, userId);
   }
   // Existing receipts and approvals from an earlier deployment also fence this identity.
   const legacyAction = await untilAbort(services.lookupAction(request, input), signal);
   if (legacyAction.approval || legacyAction.receipt)
-    return recoverTurn(request, input, services, signal);
+    return recoverTurn(request, input, services, signal, undefined, undefined, userId);
   checkActive(signal);
   const reservation = services.reserveTurn(userId);
   const release = await untilAbort(reservation, signal).catch((error: unknown) => {
@@ -581,9 +632,12 @@ export async function runAssistedTurn(request: Request, input: AssistedTurnInput
     started: { toolId: string; servedModel: string; usage: Usage } | null } = {
       inFlight: null, started: null,
     };
-  const trackAction = (operation: Promise<unknown>) => {
+  const trackAction = (operation: Promise<unknown>, outcome: ActionOutcome) => {
     if (actionStarted) return;
     actionStarted = true;
+    actionState.inFlight = operation;
+    actionState.started = { toolId: outcome.toolId, servedModel: outcome.servedModel,
+      usage: outcome.usage };
     retainActionSettlement(services, operation, release);
   };
   const heldLease = { track: trackAction };
@@ -618,7 +672,7 @@ export async function runAssistedTurn(request: Request, input: AssistedTurnInput
         if (interpreted.kind === "model") {
           const saved = await bind({ kind: "model", response: interpreted.response });
           return saved.created ? interpreted.response : recoverTurn(request, input, services,
-            signal, saved.binding, heldLease);
+            signal, saved.binding, heldLease, userId);
         }
         const { chosen, params, effect } = interpreted;
         const saved = await bind({ kind: "action", effect, toolId: chosen.manifest.id,
@@ -626,7 +680,7 @@ export async function runAssistedTurn(request: Request, input: AssistedTurnInput
           ...(effect === "read" ? { sensitiveKeys: [...chosen.manifest.contract.sensitiveKeys] } : {}) },
         { connectionId: input.connectionId, params: params as Record<string, unknown> });
         if (!saved.created) return recoverTurn(request, input, services, signal,
-          saved.binding, heldLease);
+          saved.binding, heldLease, userId);
         checkActive(signal);
         services.assertActionRetention?.();
         const action = { workspaceId: input.workspaceId, connectionId: input.connectionId,
@@ -634,10 +688,7 @@ export async function runAssistedTurn(request: Request, input: AssistedTurnInput
           idempotencyKey: `assisted_${input.requestId}` };
         const operation = effect === "read"
           ? services.execute(request, action) : services.requestApproval(request, action);
-        trackAction(operation);
-        actionState.inFlight = operation;
-        actionState.started = { toolId: chosen.manifest.id, servedModel: choice.model,
-          usage: choice.usage };
+        trackAction(operation, saved.binding.outcome as ActionOutcome);
         let settled: unknown;
         try { settled = await untilAbort(operation, signal); }
         catch (error) {

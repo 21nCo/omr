@@ -155,7 +155,7 @@ export interface ExecutionApproval {
 }
 
 export interface ExecutionApprovalStore {
-  create(approval: ExecutionApproval): Promise<ExecutionApproval>;
+  create(approval: ExecutionApproval, deadlineAt?: number): Promise<ExecutionApproval>;
   /** Use the service's epoch-millisecond clock for expiry in every store. */
   getForActor(approvalId: string, actorUserId: string, deadlineAt?: number,
     now?: number): Promise<ExecutionApproval>;
@@ -515,8 +515,14 @@ export class ExecutionService {
     params: JsonValue;
     connectionId?: string;
     idempotencyKey?: string;
+    /** Assisted Worker calls use a shorter deadline to finish durable cleanup. */
+    deadlineMs?: number;
   }): Promise<ExecutionReceipt> {
-    const deadlineAt = Date.now() + EXECUTION_INVOCATION_DEADLINE_MS;
+    if (input.deadlineMs !== undefined &&
+        (!Number.isSafeInteger(input.deadlineMs) || input.deadlineMs <= 0))
+      throw new ExecutionInputError("Invalid execution deadline");
+    const deadlineAt = Date.now() + Math.min(input.deadlineMs ?? EXECUTION_INVOCATION_DEADLINE_MS,
+      EXECUTION_INVOCATION_DEADLINE_MS);
     const manifest = this.catalog.get(input.toolId);
     if (!manifest) throw new ExecutionInputError("Unknown tool identifier");
     this.authorizeEffect(input.principal, manifest);
@@ -576,7 +582,15 @@ export class ExecutionService {
     connectionId?: string;
     idempotencyKey: string;
     ttlMs?: number;
+    deadlineMs?: number;
   }): Promise<ExecutionApproval> {
+    if (input.deadlineMs !== undefined &&
+        (!Number.isSafeInteger(input.deadlineMs) || input.deadlineMs <= 0))
+      throw new ExecutionInputError("Invalid approval deadline");
+    const deadlineAt = input.deadlineMs === undefined ? undefined : Date.now() +
+      Math.min(input.deadlineMs, EXECUTION_INVOCATION_DEADLINE_MS);
+    const withinApproval = <T>(operation: () => Promise<T>) => deadlineAt === undefined
+      ? operation() : withinInvocationDeadline(deadlineAt, operation);
     const approvals = this.requiredApprovals();
     const manifest = this.catalog.get(input.toolId);
     if (!manifest) throw new ExecutionInputError("Unknown tool identifier");
@@ -606,13 +620,14 @@ export class ExecutionService {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 60_000 || ttlMs > 60 * 60_000) {
       throw new ExecutionInputError("Approval lifetime must be between one minute and one hour");
     }
-    const connection = await this.connections.resolve({
+    const connection = await withinApproval(() => this.connections.resolve({
       actorUserId: input.principal.userId,
       workspaceId: input.principal.workspaceId,
       provider: manifest.provider,
       ...(input.connectionId ? { connectionId: input.connectionId } : {}),
-    });
-    await this.assertScopes(manifest, connection, input.principal);
+    }));
+    await withinApproval(
+      () => this.assertScopes(manifest, connection, input.principal));
     const timestamp = this.now();
     const idempotencyKey = input.idempotencyKey;
     return approvals.create({
@@ -644,7 +659,7 @@ export class ExecutionService {
       executionReceiptId: null,
       createdAt: timestamp,
       updatedAt: timestamp,
-    });
+    }, deadlineAt);
   }
 
   /** Revalidate the manifest and redacted preview before recording consent. */

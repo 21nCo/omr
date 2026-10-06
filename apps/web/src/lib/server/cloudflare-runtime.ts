@@ -15,7 +15,8 @@ import { ApprovalUnavailableError, decodeExecutionWrappingKey, deriveExecutionFi
 import { bindPostgresAssistedTurn, connectPostgresExecutionReceipts,
   lookupPostgresAssistedAction, lookupPostgresAssistedTurn } from "@oh-my-router/execution/postgres";
 import { AssistedTurnQuotaExceededError, connectPostgresIdentityRuntime,
-  connectPostgresOpenRouterVault, reservePostgresAssistedTurn } from "@oh-my-router/identity/postgres";
+  connectPostgresOpenRouterVault, reservePostgresAssistedRecovery,
+  reservePostgresAssistedTurn } from "@oh-my-router/identity/postgres";
 import { OpenRouterVaultError } from "@oh-my-router/identity";
 import { connectPostgresPlugFn, verifiedGithubScopes, verifiedLinearScopes, verifiedNotionScopes, verifiedSlackScopes } from "@oh-my-router/plugfn-runtime";
 import {
@@ -60,19 +61,10 @@ type OMRBindings = Cloudflare.Env & {
   [key: string]: unknown;
 };
 
-// A Worker may retain work for only 30 seconds after response or disconnect.
-// Leave ten seconds for the execution runtime to cancel/close and release quota.
+// An assisted action must settle within the 30-second Worker retention window.
+// Execution's own deadline includes durable uncertain-outcome cleanup; a
+// detached Promise.race here would close its receipt store too early.
 const ASSISTED_ACTION_DEADLINE_MS = 20_000;
-
-export async function assistedActionDeadline<T>(operation: Promise<T>): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([operation, new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new AssistedPlaygroundError("ASSISTED_ACTION_TIMEOUT", 504)),
-        ASSISTED_ACTION_DEADLINE_MS);
-    })]);
-  } finally { if (timer) clearTimeout(timer); }
-}
 
 /** Register settlement with the actual Worker lifecycle before returning a response. */
 export function retainWorkerAction(ctx: { waitUntil(promise: Promise<unknown>): void } | undefined,
@@ -1051,6 +1043,14 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
         throw error;
       }
     },
+    async reserveRecovery(userId) {
+      try { return await reservePostgresAssistedRecovery(databaseConnectionString(event), userId); }
+      catch (error) {
+        if (error instanceof AssistedTurnQuotaExceededError)
+          throw new AssistedPlaygroundError("ASSISTED_RATE_LIMITED", 429);
+        throw error;
+      }
+    },
     async withKey(userId, callback) {
       const runtime = await connectPostgresOpenRouterVault({
         connectionString: openRouterVaultConnectionString(event),
@@ -1071,10 +1071,15 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
       return found.tools;
     },
     async execute(request, input) {
+      const deadlineAt = Date.now() + ASSISTED_ACTION_DEADLINE_MS;
       requireExecutionOrigin(request);
       const principal = await authenticate(event, request, input.workspaceId, undefined, false);
-      return withExecution(async (service) => publicReceipt(await assistedActionDeadline(
-        service.execute({ principal, ...input, params: input.params as JsonValue }))));
+      return withExecution(async (service) => {
+        const remaining = deadlineAt - Date.now();
+        if (remaining <= 0) throw new AssistedPlaygroundError("ASSISTED_ACTION_TIMEOUT", 504);
+        return publicReceipt(await service.execute({ principal, ...input,
+          params: input.params as JsonValue, deadlineMs: remaining }));
+      });
     },
     async readReceipt(request, input) {
       // This cookie GET has no Origin header. Authenticate the session and let the
@@ -1089,12 +1094,16 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
       });
     },
     async requestApproval(request, input) {
+      const deadlineAt = Date.now() + ASSISTED_ACTION_DEADLINE_MS;
       requireExecutionOrigin(request);
       const principal = await authenticate(event, request, input.workspaceId, undefined, false);
       return withExecution(async (service, catalog) => {
-        const approval = await assistedActionDeadline(service.requestApproval({
+        const remaining = deadlineAt - Date.now();
+        if (remaining <= 0) throw new AssistedPlaygroundError("ASSISTED_ACTION_TIMEOUT", 504);
+        const approval = await service.requestApproval({
           principal, ...input, params: input.params as JsonValue,
-        }));
+          deadlineMs: remaining,
+        });
         return publicApproval(approval, catalog.get(approval.toolId));
       });
     },
