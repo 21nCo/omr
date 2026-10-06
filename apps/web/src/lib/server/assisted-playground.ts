@@ -155,6 +155,17 @@ type ActionOutcome = Extract<TurnOutcome, { kind: "action" }>;
 type TurnLease = { track: (operation: Promise<unknown>, outcome: ActionOutcome) => void };
 type RecoveredCommon = { model: string; servedModels: string[]; usage: Usage;
   usageIncomplete: boolean; requestId: string; toolId?: string };
+type RecoveryContext = { request: Request; input: AssistedTurnInput;
+  services: AssistedPlaygroundServices; signal: AbortSignal; common: RecoveredCommon;
+  heldLease?: TurnLease; userId: string };
+
+/** Release a claim that arrives after the request has already ended. */
+async function releaseLateReservation(reservation: Promise<() => Promise<void>>): Promise<void> {
+  try {
+    const release = await reservation;
+    await release();
+  } catch { /* A failed cleanup must not replace the request outcome. */ }
+}
 
 /** Render a saved read's terminal state without admitting raw provider text. */
 function recoveredReadActionResult(common: RecoveredCommon, receipt: unknown,
@@ -172,9 +183,8 @@ function recoveredReadActionResult(common: RecoveredCommon, receipt: unknown,
 }
 
 /** Resume the saved action under its original key, retaining any new settlement. */
-async function recoverUnstartedAction(request: Request, input: AssistedTurnInput,
-  services: AssistedPlaygroundServices, signal: AbortSignal, binding: TurnBinding,
-  heldLease: TurnLease | undefined, common: RecoveredCommon, userId: string) {
+async function recoverUnstartedAction(context: RecoveryContext, binding: TurnBinding) {
+  const { request, input, services, signal, heldLease, common, userId } = context;
   const outcome = binding.outcome;
   if (outcome.kind !== "action" || !binding.action)
     throw new AssistedPlaygroundError("ASSISTED_REQUEST_CONFLICT", 409);
@@ -183,7 +193,7 @@ async function recoverUnstartedAction(request: Request, input: AssistedTurnInput
     const reservation = services.reserveRecovery(userId);
     try { release = await untilAbort(reservation, signal); }
     catch (error) {
-      reservation.then((lateRelease) => lateRelease()).catch(() => undefined);
+      void releaseLateReservation(reservation);
       if (error instanceof AssistedPlaygroundError && error.status === 429)
         return { ...common, status: "action_pending" as const,
           answer: "Another action is settling. Check this request again before retrying." };
@@ -218,7 +228,7 @@ async function recoverUnstartedAction(request: Request, input: AssistedTurnInput
       answer: "The selected action may still be finishing. Check its receipt or approval." };
     return { ...common, ...actionFailure(error) };
   } finally {
-    if (!started && release) await release();
+    if (!started && release) await release().catch(() => undefined);
   }
 }
 
@@ -273,8 +283,8 @@ async function recoverTurn(request: Request, input: AssistedTurnInput,
     usageIncomplete: outcome?.kind !== "action" || outcome.effect === "read",
     requestId: input.requestId, ...(outcome?.kind === "action" ? { toolId: outcome.toolId } : {}) };
   if (!action.approval && !action.receipt && outcome?.kind === "action" && binding?.action)
-    return recoverUnstartedAction(request, input, services, signal, binding,
-      heldLease, common, userId!);
+    return recoverUnstartedAction({ request, input, services, signal, heldLease,
+      common, userId: userId! }, binding);
   return renderStoredAction(request, input, services, signal, binding, common, action);
 }
 
@@ -328,6 +338,10 @@ async function boundedJson(response: Response, signal: AbortSignal): Promise<unk
   if (!reader) throw new AssistedPlaygroundError("ASSISTED_MODEL_UNAVAILABLE", 502);
   const chunks: Uint8Array[] = [];
   let length = 0;
+  let complete = false;
+  let cancellation: Promise<void> | undefined;
+  const cancel = () => { cancellation ??= reader.cancel().catch(() => undefined); };
+  signal.addEventListener("abort", cancel, { once: true });
   try {
     while (true) {
       checkActive(signal);
@@ -336,13 +350,18 @@ async function boundedJson(response: Response, signal: AbortSignal): Promise<unk
       const part = await reader.read();
       if (part.done) break;
       length += part.value.byteLength;
-      if (length > ASSISTED_LIMITS.responseBytes) {
-        await reader.cancel();
-        throw new AssistedPlaygroundError("ASSISTED_MODEL_RESPONSE_TOO_LARGE", 502);
-      }
+      if (length > ASSISTED_LIMITS.responseBytes) break;
       chunks.push(part.value);
     }
-  } finally { reader.releaseLock(); }
+    complete = length <= ASSISTED_LIMITS.responseBytes;
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    if (!complete) { cancel(); await cancellation; }
+    reader.releaseLock();
+  }
+  checkActive(signal);
+  if (length > ASSISTED_LIMITS.responseBytes)
+    throw new AssistedPlaygroundError("ASSISTED_MODEL_RESPONSE_TOO_LARGE", 502);
   const bytes = new Uint8Array(length);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
@@ -624,7 +643,7 @@ export async function runAssistedTurn(request: Request, input: AssistedTurnInput
   checkActive(signal);
   const reservation = services.reserveTurn(userId);
   const release = await untilAbort(reservation, signal).catch((error: unknown) => {
-    reservation.then((lateRelease) => lateRelease()).catch(() => undefined);
+    void releaseLateReservation(reservation);
     throw error;
   });
   let actionStarted = false;

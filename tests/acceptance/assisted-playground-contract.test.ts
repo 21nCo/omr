@@ -211,6 +211,32 @@ describe("assisted-playground-contract", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it("cancels oversized and aborted model streams without dispatching an action", async () => {
+    const overflowCancel = vi.fn();
+    const oversized = fixture({ fetcher: vi.fn(async () => new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new Uint8Array(ASSISTED_LIMITS.responseBytes + 1)); },
+      cancel: overflowCancel,
+    }))) });
+    await expect(runAssistedTurn(request(), input, oversized.services)).rejects
+      .toMatchObject({ code: "ASSISTED_MODEL_RESPONSE_TOO_LARGE" });
+    expect(overflowCancel).toHaveBeenCalledOnce();
+    expect(oversized.execute).not.toHaveBeenCalled();
+
+    const controller = new AbortController();
+    const abortCancel = vi.fn();
+    const readStarted = vi.fn();
+    const aborted = fixture({ fetcher: vi.fn(async () => new Response(new ReadableStream({
+      pull: readStarted,
+      cancel: abortCancel,
+    }))) });
+    const pending = runAssistedTurn(request(undefined, controller.signal), input, aborted.services);
+    await vi.waitFor(() => expect(readStarted).toHaveBeenCalled());
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: "ASSISTED_CANCELLED" });
+    await vi.waitFor(() => expect(abortCancel).toHaveBeenCalledOnce());
+    expect(aborted.execute).not.toHaveBeenCalled();
+  });
+
   it("caps offered tools before payment and preserves readable nested content without credentials", async () => {
     const { services, fetcher } = fixture({ discover: async () => Array.from({ length: 15 }, (_, index) =>
       ({ ...manifest, id: `demo.read_${index}` })) });
@@ -1106,6 +1132,48 @@ describe("assisted-playground-contract", () => {
     expect(execute).not.toHaveBeenCalled();
     expect(requestApproval).not.toHaveBeenCalled();
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each(["read", "write"] as const)("preserves saved %s failure when quota release rejects before dispatch", async (effect) => {
+    const release = vi.fn(async () => { throw new Error("quota release unavailable"); });
+    const { services, execute, requestApproval, fetcher } = fixture({
+      loadTurn: async () => ({ requestFingerprint: JSON.stringify([
+        input.workspaceId, input.connectionId, input.model, input.prompt]),
+        outcome: { kind: "action", effect, toolId: effect === "read" ? manifest.id : writeManifest.id,
+          servedModel: "fixture/served", usage: { promptTokens: 10, completionTokens: 4,
+            totalTokens: 14, costUsd: 0.00002 } },
+        action: { connectionId: input.connectionId, params: { title: "fixture" } } }),
+      reserveRecovery: async () => release,
+      assertActionRetention: () => { throw new Error("retention unavailable"); },
+    });
+    expect(await runAssistedTurn(request(), input, services)).toMatchObject({
+      status: "tool_error", errorCode: "ASSISTED_TOOL_FAILED", toolId: effect === "read" ? manifest.id : writeManifest.id,
+    });
+    expect(release).toHaveBeenCalledOnce();
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+    expect(requestApproval).not.toHaveBeenCalled();
+  });
+
+  it.each(["read", "write"] as const)("preserves saved %s cancellation when quota release rejects before dispatch", async (effect) => {
+    const controller = new AbortController();
+    const release = vi.fn(async () => { throw new Error("quota release unavailable"); });
+    const { services, execute, requestApproval } = fixture({
+      loadTurn: async () => ({ requestFingerprint: JSON.stringify([
+        input.workspaceId, input.connectionId, input.model, input.prompt]),
+        outcome: { kind: "action", effect, toolId: effect === "read" ? manifest.id : writeManifest.id,
+          servedModel: "fixture/served", usage: { promptTokens: 10, completionTokens: 4,
+            totalTokens: 14, costUsd: 0.00002 } },
+        action: { connectionId: input.connectionId, params: { title: "fixture" } } }),
+      reserveRecovery: async () => release,
+      assertActionRetention: () => { controller.abort(); throw new Error("retention unavailable"); },
+    });
+    expect(await runAssistedTurn(request(undefined, controller.signal), input, services)).toMatchObject({
+      status: "action_pending", toolId: effect === "read" ? manifest.id : writeManifest.id,
+    });
+    expect(release).toHaveBeenCalledOnce();
+    expect(execute).not.toHaveBeenCalled();
+    expect(requestApproval).not.toHaveBeenCalled();
   });
 
   it("refuses a selected action before dispatch when Worker retention is unavailable", async () => {

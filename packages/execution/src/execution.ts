@@ -450,6 +450,18 @@ export class ApprovalUnavailableError extends Error {
 
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,199}$/;
 
+function executionDeadline(deadlineMs: number | undefined): number {
+  if (deadlineMs !== undefined && (!Number.isSafeInteger(deadlineMs) || deadlineMs <= 0))
+    throw new ExecutionInputError("Invalid execution deadline");
+  return Date.now() + Math.min(deadlineMs ?? EXECUTION_INVOCATION_DEADLINE_MS,
+    EXECUTION_INVOCATION_DEADLINE_MS);
+}
+
+function assertOptionalIdempotencyKey(key: string | undefined): void {
+  if (key !== undefined && (typeof key !== "string" || !IDEMPOTENCY_KEY.test(key)))
+    throw new ExecutionInputError("Invalid idempotency key");
+}
+
 export class ExecutionService {
   private readonly fingerprintKey: Uint8Array<ArrayBuffer>;
 
@@ -518,20 +530,13 @@ export class ExecutionService {
     /** Assisted Worker calls use a shorter deadline to finish durable cleanup. */
     deadlineMs?: number;
   }): Promise<ExecutionReceipt> {
-    if (input.deadlineMs !== undefined &&
-        (!Number.isSafeInteger(input.deadlineMs) || input.deadlineMs <= 0))
-      throw new ExecutionInputError("Invalid execution deadline");
-    const deadlineAt = Date.now() + Math.min(input.deadlineMs ?? EXECUTION_INVOCATION_DEADLINE_MS,
-      EXECUTION_INVOCATION_DEADLINE_MS);
+    const deadlineAt = executionDeadline(input.deadlineMs);
     const manifest = this.catalog.get(input.toolId);
     if (!manifest) throw new ExecutionInputError("Unknown tool identifier");
     this.authorizeEffect(input.principal, manifest);
     assertJson(input.params);
     if (!validToolInput(manifest, input.params)) throw new ExecutionInputError("Invalid tool parameters");
-    if (input.idempotencyKey !== undefined &&
-      (typeof input.idempotencyKey !== "string" || !IDEMPOTENCY_KEY.test(input.idempotencyKey))) {
-      throw new ExecutionInputError("Invalid idempotency key");
-    }
+    assertOptionalIdempotencyKey(input.idempotencyKey);
     const params = structuredClone(input.params);
 
     if (input.idempotencyKey) {
