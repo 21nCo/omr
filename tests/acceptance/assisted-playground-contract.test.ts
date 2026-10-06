@@ -48,6 +48,21 @@ function fixture(overrides: Partial<AssistedPlaygroundServices> = {}) {
       value.workspaceId, value.connectionId, value.model, prompt]),
     reserveTurn: async () => async () => undefined,
     reserveRecovery: async () => async () => undefined,
+    claimTurn: async (userId, value) => {
+      const key = `${userId}:${value.workspaceId}:${value.requestId}`;
+      const prior = bindings.get(key);
+      if (prior) return { binding: prior, created: false };
+      const binding = { requestFingerprint: value.requestFingerprint,
+        outcome: { kind: "pending" as const } };
+      bindings.set(key, binding);
+      return { binding, created: true };
+    },
+    abandonTurn: async (userId, value) => {
+      const key = `${userId}:${value.workspaceId}:${value.requestId}`;
+      const prior = bindings.get(key);
+      if (prior?.requestFingerprint === value.requestFingerprint &&
+          prior.outcome.kind === "pending") bindings.delete(key);
+    },
     withKey: async (_user, callback) => callback("synthetic-openrouter-alice-key"),
     connections: async () => [{ id: "account_one", workspaceId: "mine", provider: "demo",
       selected: true, status: "active", readiness: "ready", providerState: "ready",
@@ -58,7 +73,7 @@ function fixture(overrides: Partial<AssistedPlaygroundServices> = {}) {
     bindTurn: async (userId, value) => {
       const key = `${userId}:${value.workspaceId}:${value.requestId}`;
       const prior = bindings.get(key);
-      if (prior) return { binding: prior, created: false };
+      if (prior && prior.outcome.kind !== "pending") return { binding: prior, created: false };
       const binding = { requestFingerprint: value.requestFingerprint, outcome: value.outcome,
         ...(value.action ? { action: value.action } : {}) };
       bindings.set(key, binding);
@@ -70,6 +85,101 @@ function fixture(overrides: Partial<AssistedPlaygroundServices> = {}) {
 }
 
 describe("assisted-playground-contract", () => {
+  it.each(["read", "write", "model"] as const)(
+    "claims a %s request before payment and recovers its first outcome", async (kind) => {
+      let finishModel!: (value: Response) => void;
+      const reserveTurn = vi.fn(async () => async () => undefined);
+      const { services, fetcher, execute, requestApproval } = fixture({
+        discover: async () => [kind === "write" ? writeManifest : manifest],
+        reserveTurn,
+      });
+      fetcher.mockReset().mockImplementation(async () => new Promise<Response>((resolve) => {
+        finishModel = resolve;
+      }));
+      const first = runAssistedTurn(request(), input, services);
+      await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+      const pending = await runAssistedTurn(request(), input, services);
+      expect(pending).toMatchObject({ status: "action_pending", requestId: input.requestId });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(reserveTurn).toHaveBeenCalledTimes(1);
+      expect(execute).not.toHaveBeenCalled();
+      expect(requestApproval).not.toHaveBeenCalled();
+      finishModel(kind === "model" ? reply({ content: "Review complete" }) : choose());
+      const original = await first;
+      if (kind === "read") services.lookupAction = async () => ({ approval: null,
+        receipt: { id: "receipt_one", status: "succeeded" } });
+      if (kind === "write") services.lookupAction = async () => ({
+        approval: { id: "approval_one", status: "pending" }, receipt: null });
+      const recovered = await runAssistedTurn(request(), input, services);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      if (kind === "model") {
+        expect(recovered).toEqual(original);
+        expect(recovered).toMatchObject({ usage: { totalTokens: 14, costUsd: 0.00002 } });
+      } else {
+        expect(original).toMatchObject({ toolId: kind === "read" ? "demo.read" : "demo.write" });
+        expect(execute).toHaveBeenCalledTimes(kind === "read" ? 2 : 0);
+        if (kind === "read") expect(execute.mock.calls[1]![1].idempotencyKey)
+          .toBe(execute.mock.calls[0]![1].idempotencyKey);
+        expect(requestApproval).toHaveBeenCalledTimes(kind === "write" ? 1 : 0);
+      }
+    });
+
+  it("retains an uncertain paid claim after cancellation without a second model call", async () => {
+    const controller = new AbortController();
+    const { services, fetcher } = fixture();
+    fetcher.mockReset().mockImplementation(async () => new Promise<Response>(() => undefined));
+    const first = runAssistedTurn(request(undefined, controller.signal), input, services);
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+    controller.abort();
+    await expect(first).rejects.toMatchObject({ code: "ASSISTED_CANCELLED" });
+    const retry = await runAssistedTurn(request(), input, services);
+    expect(retry).toMatchObject({ status: "action_pending", usageIncomplete: true });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("abandons a claim after prepayment failure so the request can retry", async () => {
+    let discoveries = 0;
+    const { services, fetcher } = fixture({ discover: async () => {
+      discoveries += 1;
+      if (discoveries === 1) throw new Error("fixture discovery unavailable");
+      return [manifest];
+    } });
+    await expect(runAssistedTurn(request(), input, services)).rejects
+      .toThrow("fixture discovery unavailable");
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(await runAssistedTurn(request(), input, services)).toMatchObject({
+      status: "answered", toolId: manifest.id });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases a claim when cancellation precedes model dispatch", async () => {
+    const controller = new AbortController();
+    const { services, fetcher } = fixture({ discover: async () => {
+      controller.abort();
+      return [manifest];
+    } });
+    await expect(runAssistedTurn(request(undefined, controller.signal), input, services))
+      .rejects.toMatchObject({ code: "ASSISTED_CANCELLED" });
+    expect(fetcher).not.toHaveBeenCalled();
+    services.discover = async () => [manifest];
+    expect(await runAssistedTurn(request(), input, services)).toMatchObject({
+      status: "answered", toolId: manifest.id });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("saves a terminal model rejection without retrying the paid request", async () => {
+    const { services, fetcher } = fixture();
+    fetcher.mockReset().mockResolvedValue(Response.json({ error: "synthetic private detail" },
+      { status: 401 }));
+    await expect(runAssistedTurn(request(), input, services)).rejects
+      .toMatchObject({ code: "ASSISTED_KEY_REJECTED" });
+    const retry = await runAssistedTurn(request(), input, services);
+    expect(retry).toMatchObject({ status: "model_error",
+      errorCode: "ASSISTED_KEY_REJECTED" });
+    expect(JSON.stringify(retry)).not.toContain("synthetic private detail");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it("uses one scoped read, one bounded model choice, local preview and reported usage", async () => {
     const { services, fetcher, execute, requestApproval } = fixture();
     const result = await runAssistedTurn(request(), input, services);
@@ -178,6 +288,12 @@ describe("assisted-playground-contract", () => {
       code: status === 401 || status === 403 ? "ASSISTED_KEY_REJECTED"
         : status === 400 ? "ASSISTED_MODEL_REJECTED" : "ASSISTED_MODEL_UNAVAILABLE",
     });
+    expect(await runAssistedTurn(request(), input, services)).toMatchObject({
+      status: "model_error", errorCode: status === 401 || status === 403
+        ? "ASSISTED_KEY_REJECTED" : status === 400
+          ? "ASSISTED_MODEL_REJECTED" : "ASSISTED_MODEL_UNAVAILABLE",
+    });
+    expect(fetcher).toHaveBeenCalledOnce();
     expect(execute).not.toHaveBeenCalled();
   });
 

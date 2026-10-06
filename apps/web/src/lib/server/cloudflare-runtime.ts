@@ -12,7 +12,8 @@ import {
 } from "@oh-my-router/connections";
 import { connectPostgresConnections } from "@oh-my-router/connections/postgres";
 import { ApprovalUnavailableError, decodeExecutionWrappingKey, deriveExecutionFingerprintKey, ExecutionService, publicApproval, publicReceipt, type ExecutionPrincipal } from "@oh-my-router/execution";
-import { bindPostgresAssistedTurn, connectPostgresExecutionReceipts,
+import { abandonPostgresAssistedTurn, bindPostgresAssistedTurn,
+  claimPostgresAssistedTurn, connectPostgresExecutionReceipts,
   lookupPostgresAssistedAction, lookupPostgresAssistedTurn } from "@oh-my-router/execution/postgres";
 import { AssistedTurnQuotaExceededError, connectPostgresIdentityRuntime,
   connectPostgresOpenRouterVault, reservePostgresAssistedRecovery,
@@ -1121,6 +1122,19 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
           "EXECUTION_RESULT_WRAPPING_KEY")),
       });
       return binding as Awaited<ReturnType<AssistedPlaygroundServices["loadTurn"]>>;
+    },
+    async claimTurn(userId, input) {
+      const result = await claimPostgresAssistedTurn({
+        connectionString: databaseConnectionString(event), userId, ...input,
+        wrappingKey: decodeExecutionWrappingKey(requiredSecret(event,
+          "EXECUTION_RESULT_WRAPPING_KEY")),
+      });
+      return result as Awaited<ReturnType<AssistedPlaygroundServices["claimTurn"]>>;
+    },
+    async abandonTurn(userId, input) {
+      await abandonPostgresAssistedTurn({
+        connectionString: databaseConnectionString(event), userId, ...input,
+      });
     },
     async bindTurn(userId, input) {
       const result = await bindPostgresAssistedTurn({

@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { ASSISTED_TURN_RETENTION_MS, bindPostgresAssistedTurn, lookupPostgresAssistedTurn } from
+import { ASSISTED_TURN_RETENTION_MS, abandonPostgresAssistedTurn,
+  bindPostgresAssistedTurn, claimPostgresAssistedTurn, lookupPostgresAssistedTurn } from
   "./assisted-turn-binding-postgres.js";
 
 const { Client } = pg;
@@ -30,6 +31,33 @@ describeDatabase("assisted turn PostgreSQL binding", () => {
     if (!client) return;
     await client.query("DELETE FROM omr_control.workspaces WHERE id = $1", [workspaceId]);
     await client.end();
+  });
+
+  it("atomically claims one paid identity, finalizes it and isolates users", async () => {
+    const common = { connectionString: connectionString!, workspaceId,
+      requestId: crypto.randomUUID(), wrappingKey, userId: "claim_alice",
+      requestFingerprint: "same-request" };
+    const [a, b] = await Promise.all([
+      claimPostgresAssistedTurn(common), claimPostgresAssistedTurn(common),
+    ]);
+    expect([a.created, b.created].filter(Boolean)).toHaveLength(1);
+    expect(a.binding.outcome).toEqual({ kind: "pending" });
+    expect(b.binding.outcome).toEqual({ kind: "pending" });
+    const outcome = { kind: "model", response: { status: "answered",
+      answer: "Review complete", usage: { totalTokens: 14, costUsd: 0.00002 } } };
+    const saved = await bindPostgresAssistedTurn({ ...common, outcome });
+    expect(saved.created).toBe(true);
+    expect(saved.binding.outcome).toEqual(outcome);
+    await abandonPostgresAssistedTurn(common);
+    const retry = await claimPostgresAssistedTurn(common);
+    expect(retry.created).toBe(false);
+    expect(retry.binding.outcome).toEqual(outcome);
+    const changed = await claimPostgresAssistedTurn({ ...common,
+      requestFingerprint: "changed" });
+    expect(changed.created).toBe(false);
+    expect(changed.binding.requestFingerprint).toBe("same-request");
+    expect((await claimPostgresAssistedTurn({ ...common, userId: "claim_bob" })).created)
+      .toBe(true);
   });
 
   it("keeps first action and arguments isolated by user with encrypted storage", async () => {
