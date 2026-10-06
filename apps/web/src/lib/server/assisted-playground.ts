@@ -27,6 +27,7 @@ type TurnBinding = { requestFingerprint: string; outcome: TurnOutcome;
 type Selection = { id: string; workspaceId: string; provider: string; selected: boolean;
   status: string; readiness: string; providerState?: string; selectable?: boolean;
   cleanupOnly?: boolean };
+type OfferedTool = { manifest: ToolManifest; name: string; tool: unknown };
 
 export interface AssistedPlaygroundServices {
   enabled(): boolean;
@@ -48,8 +49,12 @@ export interface AssistedPlaygroundServices {
     receipt: { id: string; status: string } | null }>;
   loadTurn(request: Request, input: { workspaceId: string; requestId: string }): Promise<TurnBinding | null>;
   bindTurn(userId: string, input: { workspaceId: string; requestId: string;
-    requestFingerprint: string; outcome: TurnOutcome; action?: TurnBinding["action"] }):
+    requestFingerprint: string; outcome: TurnOutcome; action?: NonNullable<TurnBinding["action"]> }):
     Promise<{ binding: TurnBinding; created: boolean }>;
+  /** Keep a started action and quota settlement alive after a Worker response. */
+  retainAction?(settlement: Promise<void>): void;
+  /** Fail before dispatch when the Worker cannot retain a started action. */
+  assertActionRetention?(): void;
   fetcher?: typeof fetch;
   /** Internal test seam; production always uses the fixed maximum. */
   turnMs?: number;
@@ -98,6 +103,7 @@ export async function assistedFullReadReceipt(request: Request, input: {
   return receipt;
 }
 
+/** Return a public code and receipt identity without echoing provider errors. */
 function actionFailure(error: unknown) {
   const record = object(error);
   const code = typeof record?.code === "string" && /^[A-Z][A-Z0-9_]{1,79}$/.test(record.code)
@@ -108,18 +114,22 @@ function actionFailure(error: unknown) {
     answer: "The tool could not complete. Check the account and receipt before retrying.",
     errorCode: code, ...(receiptId ? { receiptId } : {}) };
 }
+/** Preserve only finite usage and cost values supplied by the model. */
 function finiteNonnegative(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
+/** Narrow untrusted JSON values to records without arrays. */
 function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown> : null;
 }
+/** Distinguish the turn deadline from an explicit browser cancellation. */
 function abortFailure(signal: AbortSignal): AssistedPlaygroundError {
   return signal.reason instanceof DOMException && signal.reason.name === "TimeoutError"
     ? new AssistedPlaygroundError("ASSISTED_TIMEOUT", 504)
     : new AssistedPlaygroundError("ASSISTED_CANCELLED", 499);
 }
+/** Stop before any new model or tool dispatch after cancellation. */
 function checkActive(signal: AbortSignal): void {
   if (signal.aborted) throw abortFailure(signal);
 }
@@ -128,20 +138,76 @@ function checkActive(signal: AbortSignal): void {
 function untilAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(abortFailure(signal));
   return new Promise<T>((resolve, reject) => {
-    const abort = () => reject(abortFailure(signal));
+    const abort = () => { signal.removeEventListener("abort", abort); reject(abortFailure(signal)); };
     signal.addEventListener("abort", abort, { once: true });
     if (signal.aborted) abort();
-    operation.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort))
-      .catch(() => undefined);
+    operation.then((value) => { signal.removeEventListener("abort", abort); resolve(value); },
+      (error) => { signal.removeEventListener("abort", abort); reject(error); });
   });
 }
 
 const unavailableUsage: Usage = { promptTokens: null, completionTokens: null,
   totalTokens: null, costUsd: null };
 
+type TurnLease = { track: (operation: Promise<unknown>) => void };
+type RecoveredCommon = { model: string; servedModels: string[]; usage: Usage;
+  usageIncomplete: boolean; requestId: string; toolId?: string };
+
+/** Render a saved read's terminal state without admitting raw provider text. */
+function recoveredReadActionResult(common: RecoveredCommon, receipt: unknown,
+  sensitiveKeys: readonly string[] | undefined) {
+  const status = object(receipt)?.status;
+  const projected = projectReadReceipt(receipt, sensitiveKeys);
+  if (status === "succeeded") return { ...common, status: "answered" as const,
+    receipt: projected,
+    answer: "The selected read completed. Review its receipt; final answer generation was interrupted." };
+  if (status === "failed") return { ...common, status: "tool_error" as const,
+    terminalFailure: true, receipt: projected,
+    answer: "The selected read did not complete. Review its receipt before another action." };
+  return { ...common, status: "action_pending" as const, receipt: projected,
+    answer: "The selected read is still pending. Check its receipt before another action." };
+}
+
+/** Resume the saved action under its original key, retaining any new settlement. */
+async function recoverUnstartedAction(request: Request, input: AssistedTurnInput,
+  services: AssistedPlaygroundServices, signal: AbortSignal, binding: TurnBinding,
+  heldLease: TurnLease | undefined, common: RecoveredCommon) {
+  const outcome = binding.outcome;
+  if (outcome.kind !== "action" || !binding.action)
+    throw new AssistedPlaygroundError("ASSISTED_REQUEST_CONFLICT", 409);
+  const track = (operation: Promise<unknown>) => {
+    if (heldLease) heldLease.track(operation);
+    else services.retainAction?.(operation.then(() => undefined, () => undefined));
+  };
+  const original = { workspaceId: input.workspaceId, connectionId: binding.action.connectionId,
+    toolId: outcome.toolId, params: binding.action.params,
+    idempotencyKey: `assisted_${input.requestId}` };
+  try {
+    checkActive(signal);
+    services.assertActionRetention?.();
+    if (outcome.effect === "write") {
+      const operation = services.requestApproval(request, original);
+      track(operation);
+      const approval = await untilAbort(operation, signal);
+      return { ...common, status: "approval_required" as const, approval,
+        answer: "Review the recovered approval before executing. No change has run." };
+    }
+    const operation = services.execute(request, original);
+    track(operation);
+    const receipt = await untilAbort(operation, signal);
+    return recoveredReadActionResult(common, receipt, outcome.sensitiveKeys);
+  } catch (error) {
+    if (signal.aborted) return { ...common, status: "action_pending" as const,
+      answer: "The selected action may still be finishing. Check its receipt or approval." };
+    return { ...common, ...actionFailure(error) };
+  }
+}
+
+/** Recover a persisted selection before considering another paid model choice. */
 async function recoverTurn(request: Request, input: AssistedTurnInput,
   services: AssistedPlaygroundServices, signal: AbortSignal,
-  binding?: TurnBinding, userId?: string) {
+  binding?: TurnBinding,
+  heldLease?: TurnLease) {
   const outcome = binding?.outcome;
   if (outcome?.kind === "model") return outcome.response;
   const action = await untilAbort(services.lookupAction(request, input), signal);
@@ -150,58 +216,9 @@ async function recoverTurn(request: Request, input: AssistedTurnInput,
   const common = { model: input.model, servedModels, usage,
     usageIncomplete: outcome?.kind !== "action" || outcome.effect === "read",
     requestId: input.requestId, ...(outcome?.kind === "action" ? { toolId: outcome.toolId } : {}) };
-  if (!action.approval && !action.receipt && outcome?.kind === "action" && binding?.action) {
-    if (!userId) throw new AssistedPlaygroundError("ASSISTED_REQUEST_CONFLICT", 409);
-    const reservation = services.reserveTurn(userId);
-    const release = await untilAbort(reservation, signal).catch((error: unknown) => {
-      reservation.then((lateRelease) => lateRelease()).catch(() => undefined);
-      throw error;
-    });
-    let actionPending = false;
-    const original = { workspaceId: input.workspaceId, connectionId: binding.action.connectionId,
-      toolId: outcome.toolId, params: binding.action.params,
-      idempotencyKey: `assisted_${input.requestId}` };
-    try {
-      checkActive(signal);
-      if (outcome.effect === "write") {
-        const operation = services.requestApproval(request, original);
-        let approval: unknown;
-        try { approval = await untilAbort(operation, signal); }
-        catch (error) {
-          if (!signal.aborted) throw error;
-          actionPending = true;
-          operation.then(() => release(), () => release()).catch(() => undefined);
-          throw error;
-        }
-        return { ...common, status: "approval_required" as const, approval,
-          answer: "Review the recovered approval before executing. No change has run." };
-      }
-      const operation = services.execute(request, original);
-      let receipt: unknown;
-      try { receipt = await untilAbort(operation, signal); }
-      catch (error) {
-        if (!signal.aborted) throw error;
-        actionPending = true;
-        operation.then(() => release(), () => release()).catch(() => undefined);
-        throw error;
-      }
-      const succeeded = object(receipt)?.status === "succeeded";
-      const failed = object(receipt)?.status === "failed";
-      return { ...common, status: succeeded ? "answered" as const
-        : failed ? "tool_error" as const : "action_pending" as const,
-        ...(failed ? { terminalFailure: true } : {}), receipt: projectReadReceipt(receipt,
-          outcome.sensitiveKeys), answer: succeeded
-          ? "The selected read completed. Review its receipt; final answer generation was interrupted."
-          : failed ? "The selected read did not complete. Review its receipt before another action."
-            : "The selected read is still pending. Check its receipt before another action." };
-    } catch (error) {
-      if (signal.aborted) return { ...common, status: "action_pending" as const,
-        answer: "The selected action may still be finishing. Check its receipt or approval." };
-      return { ...common, ...actionFailure(error) };
-    } finally {
-      if (!actionPending) await untilAbort(release(), signal).catch(() => undefined);
-    }
-  }
+  if (!action.approval && !action.receipt && outcome?.kind === "action" && binding?.action)
+    return recoverUnstartedAction(request, input, services, signal, binding,
+      heldLease, common);
   if (action.approval) return { ...common, status: "action_pending" as const,
     answer: `The previous approval ${action.approval.id} is ${action.approval.status}. Review its status before another action.` };
   if (action.receipt && outcome?.kind === "action" && outcome.effect === "write") {
@@ -230,6 +247,15 @@ async function recoverTurn(request: Request, input: AssistedTurnInput,
     answer: "The previous action may still be starting. Check its receipt or approval before retrying." };
 }
 
+/** Register completion before the response can be sent, including quota release. */
+function retainActionSettlement(services: AssistedPlaygroundServices,
+  operation: Promise<unknown>, release: () => Promise<void>): void {
+  const settlement = operation.then(release, release);
+  services.retainAction?.(settlement);
+  settlement.catch(() => undefined);
+}
+
+/** Replay a committed read through current authorization and the saved action key. */
 async function recoverReadResult(request: Request, input: AssistedTurnInput,
   services: AssistedPlaygroundServices, signal: AbortSignal,
   binding: TurnBinding | undefined, expectedReceiptId: string) {
@@ -244,6 +270,7 @@ async function recoverReadResult(request: Request, input: AssistedTurnInput,
       toolId: binding.outcome.toolId, params: binding.action.params,
       idempotencyKey: `assisted_${input.requestId}`,
     });
+    services.retainAction?.(operation.then(() => undefined, () => undefined));
     const receipt = await untilAbort(operation, signal);
     const record = object(receipt);
     if (record?.status !== "succeeded" || record.id !== expectedReceiptId)
@@ -268,6 +295,8 @@ async function boundedJson(response: Response, signal: AbortSignal): Promise<unk
   try {
     while (true) {
       checkActive(signal);
+      // A ReadableStream reader permits one pending read at a time; each chunk
+      // must be measured before requesting the next one.
       const part = await reader.read();
       if (part.done) break;
       length += part.value.byteLength;
@@ -285,6 +314,34 @@ async function boundedJson(response: Response, signal: AbortSignal): Promise<unk
   catch { throw new AssistedPlaygroundError("ASSISTED_MODEL_RESPONSE_INVALID", 502); }
 }
 
+/** Keep provider HTTP diagnostics out of the browser while retaining usage. */
+function rejectedModel(response: Response, usage: Usage, model: string): never {
+  let code = "ASSISTED_MODEL_UNAVAILABLE";
+  if (response.status === 401 || response.status === 403) code = "ASSISTED_KEY_REJECTED";
+  else if ([400, 404, 422].includes(response.status)) code = "ASSISTED_MODEL_REJECTED";
+  throw new AssistedPlaygroundError(code, response.status < 500 ? 422 : 502, usage, model);
+}
+
+/** Validate the one bounded tool choice returned by OpenRouter. */
+function parseModelReply(data: Record<string, unknown> | null, model: string,
+  reported: Usage): ModelReply {
+  const choice = Array.isArray(data?.choices) ? object(data.choices[0]) : null;
+  const message = object(choice?.message);
+  if (!message || choice?.finish_reason === "length")
+    throw new AssistedPlaygroundError("ASSISTED_MODEL_RESPONSE_INVALID", 502, reported, model);
+  const rawCalls = message.tool_calls;
+  const calls = Array.isArray(rawCalls) ? rawCalls.map((call) => {
+    const fn = object(object(call)?.function);
+    return { name: fn?.name, arguments: fn?.arguments };
+  }) : [];
+  if (calls.some((call) => typeof call.name !== "string" || typeof call.arguments !== "string"))
+    throw new AssistedPlaygroundError("ASSISTED_MODEL_RESPONSE_INVALID", 502, reported, model);
+  return { content: typeof message.content === "string" ? message.content : null,
+    calls: calls as ModelReply["calls"], model: typeof data?.model === "string" ? data.model : model,
+    usage: reported };
+}
+
+/** Make one bounded OpenRouter choice using the requesting user's vault key. */
 async function modelCall(fetcher: typeof fetch, key: string, model: string,
   messages: unknown[], tools: unknown[] | undefined, signal: AbortSignal): Promise<ModelReply> {
   let response: Response;
@@ -306,31 +363,8 @@ async function modelCall(fetcher: typeof fetch, key: string, model: string,
     completionTokens: finiteNonnegative(usage?.completion_tokens),
     totalTokens: finiteNonnegative(usage?.total_tokens),
     costUsd: finiteNonnegative(usage?.cost) };
-  if (!response.ok) {
-    const code = response.status === 401 || response.status === 403 ? "ASSISTED_KEY_REJECTED"
-      : [400, 404, 422].includes(response.status) ? "ASSISTED_MODEL_REJECTED"
-        : "ASSISTED_MODEL_UNAVAILABLE";
-    throw new AssistedPlaygroundError(code, response.status < 500 ? 422 : 502,
-      reported, model);
-  }
-  const choice = Array.isArray(data?.choices) ? object(data.choices[0]) : null;
-  const message = object(choice?.message);
-  if (!message) throw new AssistedPlaygroundError("ASSISTED_MODEL_RESPONSE_INVALID", 502,
-    reported, model);
-  if (choice?.finish_reason === "length") {
-    throw new AssistedPlaygroundError("ASSISTED_MODEL_RESPONSE_INVALID", 502, reported, model);
-  }
-  const rawCalls = message.tool_calls;
-  const calls = Array.isArray(rawCalls) ? rawCalls.map((call) => {
-    const fn = object(object(call)?.function);
-    return { name: fn?.name, arguments: fn?.arguments };
-  }) : [];
-  if (calls.some((call) => typeof call.name !== "string" || typeof call.arguments !== "string")) {
-    throw new AssistedPlaygroundError("ASSISTED_MODEL_RESPONSE_INVALID", 502, reported, model);
-  }
-  return { content: typeof message.content === "string" ? message.content : null,
-    calls: calls as ModelReply["calls"], model: typeof data?.model === "string" ? data.model : model,
-    usage: reported };
+  if (!response.ok) rejectedModel(response, reported, model);
+  return parseModelReply(data, model, reported);
 }
 
 /** Only a small, plain-text projection of an untrusted result may enter the answer. */
@@ -341,110 +375,80 @@ const sensitiveOutputKey = /(?:token|secret|password|key|authorization|credentia
 const previewFieldNames = new Set(["pages", "content", "text", "title", "body",
   "description", "metadata", "note", "slack", "notion", "github", "summary",
   "name", "message", "status", "id", "items", "results"]);
-// Long credential markers are unsafe even when a provider glues them to other
-// letters or digits (for example, "hunter2password" or "token4321"). Short,
-// common words still need word boundaries to preserve ordinary prose.
-const credentialMarker = /(?:password|passphrase|credential|authorization|bearer|cookie|session|private|secret|token|security|recovery|backup|challenge|memorable|maiden)/i;
-// Natural-language answers to account challenges are credentials even when the
-// answer itself looks like an ordinary lowercase word. Check the context before
-// admitting any of that prose into an assisted preview.
-const sensitiveWord = /\b(?:api|access|refresh|client|auth|key|verification|verify|passcode|code|otp|pin|cvv|cvc|login|unlock|security|recovery|recover|backup|challenge|response|answer|memorable|maiden|question|hint|mother|father|birthplace|birthdate)\b|\b(?:sign|log)\s+in\b/i;
-// A mixed letter/number word can be a credential with no separator. A bare
-// number of any length can be a security code; only labeled years are admitted.
-// Arbitrary uppercase words are indistinguishable from short letter-only
-// security codes. Admit only the few uppercase words needed by ordinary prose.
-const plainWord = /^(?:\p{Lu}?\p{Ll}[\p{Ll}\p{M}]{0,18}|\p{N}{1,4})$/u;
-const ordinaryUppercaseWord = new Set(["A", "I"]);
-// An instruction to supply a value makes even an otherwise ordinary word
-// ambiguous (for example, "Enter FAQ to proceed"). Withhold the whole result.
-const codeInstruction = /\b(?:enter|type|input|submit|paste|use|copy|provide|send|quote|apply)\b/i;
-// A provider can invent a new name for a credential or a new verb asking the
-// user to supply it. Preview only the small set of sentence *shapes* used for
-// status and navigation; a plausible-looking sequence of lowercase words is
-// not by itself evidence that a value is safe to repeat.
+// Admit only public sentence shapes whose entire content is fixed by this policy.
+// Unknown prose and values remain available through the separately authorized receipt.
 const previewLabels = new Set(["Public summary", "public metadata", "Safe title",
-  "Review complete"]);
+  "Review complete", "Review FAQ for details"]);
 const publicStatus = /^(?:Release|Roadmap|The milestone)(?: (?:19|20)\d{2})? (?:is|are) (?:ready|complete|completed|available|published|updated)$/u;
 const readableUpdate = /^(?:(?:A )?readable update\s*)+$/i;
-/**
- * Provider text can contain arbitrary serialized or encoded credentials. Do not try to
- * enumerate their formats: admit only short ordinary status/label prose to the
- * local preview. Other prose remains available through the authorized receipt.
- * No part of the tool result is sent to the model, even after this projection.
- */
+
+/** Admit only complete, fixed public phrases from an untrusted provider result. */
 function safeProse(value: string): boolean {
-  if (value.length > 512 || credentialMarker.test(value) || sensitiveWord.test(value) ||
-      codeInstruction.test(value)) return false;
-  const words = value.split(/[ \t\n.,!?;:'"()]+/u).filter(Boolean);
-  // FAQ is admitted only as part of this ordinary navigation phrase, never as
-  // a bare value. Other all-capital words remain ambiguous and are withheld.
-  const safeFaq = words.length === 4 && words[0] === "Review" &&
-    words[1] === "FAQ" && words[2] === "for" && words[3] === "details";
-  // Short numbers are security codes just as often as long numbers. Admit a
-  // four-digit year only when its neighboring prose identifies it as a year.
-  const numericSafe = words.every((word, index) => !/^\p{N}+$/u.test(word) ||
-    (/^(?:19|20)\d{2}$/.test(word) &&
-      /^(?:release|roadmap|year|in|during|since|for|by)$/i.test(words[index - 1] ?? "")));
-  // A standalone number has no context to distinguish a year from a code.
-  if (!(words.length > 0 && !(words.length === 1 && /^[\p{Lu}\p{N}]+$/u.test(words[0]!)) &&
-    numericSafe && words.every((word) => plainWord.test(word) ||
-      ordinaryUppercaseWord.has(word) || (word === "FAQ" && safeFaq)) &&
-    !/[^\p{L}\p{M}\p{N} \t\n.,!?;:'"()]/u.test(value) &&
-    !/[.]{2,}/u.test(value))) return false;
+  if (value.length > 512) return false;
   const phrase = value.trim().replace(/[.!?]$/u, "");
-  return safeFaq || previewLabels.has(phrase) || publicStatus.test(phrase) ||
+  return previewLabels.has(phrase) || publicStatus.test(phrase) ||
     readableUpdate.test(phrase);
 }
+type PreviewState = { sensitive: Set<string | undefined>; unsafeContent: boolean;
+  truncated: boolean; visited: number; textCharsLeft: number };
+
+/** Project an array under the shared tree budget. */
+function previewArray(items: unknown[], depth: number, state: PreviewState): unknown[] {
+  const result: unknown[] = [];
+  for (let index = 0; index < items.length && index < 40; index += 1) {
+    if (state.truncated) break;
+    result.push(previewValue(items[index], depth + 1, state));
+  }
+  if (items.length > result.length) state.truncated = true;
+  return result;
+}
+
+/** Unknown provider keys and their values never become preview labels. */
+function previewRecord(record: Record<string, unknown>, depth: number,
+  state: PreviewState): Record<string, unknown> {
+  const result: Record<string, unknown> = Object.create(null);
+  let index = 0;
+  for (const key in record) {
+    if (!Object.hasOwn(record, key)) continue;
+    if (index >= 80 || state.truncated) { state.truncated = true; break; }
+    const labelKnown = previewFieldNames.has(key);
+    const admitted = labelKnown && !sensitiveOutputKey.test(key) &&
+      !state.sensitive.has(key.toLowerCase());
+    result[labelKnown ? key : `field_${index + 1}`] = admitted
+      ? previewValue(record[key], depth + 1, state) : "[REDACTED]";
+    index += 1;
+  }
+  return result;
+}
+
+/** One traversal budget is shared by all nested result branches. */
+function previewValue(item: unknown, depth: number, state: PreviewState): unknown {
+  if (depth > 8 || state.visited >= 160) { state.truncated = true; return "[TRUNCATED]"; }
+  state.visited += 1;
+  if (typeof item === "string") {
+    if (!safeProse(item)) { state.unsafeContent = true; return "[REDACTED]"; }
+    if (item.length > state.textCharsLeft) { state.truncated = true; return "[TRUNCATED]"; }
+    state.textCharsLeft -= item.length;
+    return item;
+  }
+  if (typeof item === "number" || typeof item === "bigint") {
+    state.unsafeContent = true;
+    return "[REDACTED]";
+  }
+  if (Array.isArray(item)) return previewArray(item, depth, state);
+  const record = object(item);
+  return record ? previewRecord(record, depth, state) : item;
+}
+
+/** Only a bounded projection of fixed public phrases may enter assisted answers. */
 export function safeResult(value: unknown, inputSensitiveKeys: readonly string[]): string {
-  const sensitive = new Set(inputSensitiveKeys.map((key) => key.split(/[.\[\]]/).filter(Boolean).at(-1)?.toLowerCase()));
-  let unsafeContent = false;
-  let truncated = false;
-  let visited = 0;
-  let textCharsLeft = 6000;
-  // These shared budgets bound work across the whole tree, not once per level.
-  // A provider can return very wide or deeply nested objects on any read path.
-  const redact = (item: unknown, depth: number): unknown => {
-    if (depth > 8 || visited >= 160) { truncated = true; return "[TRUNCATED]"; }
-    visited += 1;
-    if (typeof item === "string") {
-      if (!safeProse(item)) { unsafeContent = true; return "[REDACTED]"; }
-      if (item.length > textCharsLeft) { truncated = true; return "[TRUNCATED]"; }
-      textCharsLeft -= item.length;
-      return item;
-    }
-    // A bare provider number has no prose context and may be a code or token.
-    if (typeof item === "number" || typeof item === "bigint") {
-      unsafeContent = true;
-      return "[REDACTED]";
-    }
-    if (Array.isArray(item)) {
-      const result: unknown[] = [];
-      for (let index = 0; index < item.length && index < 40; index += 1) {
-        if (truncated) break;
-        result.push(redact(item[index], depth + 1));
-      }
-      if (item.length > result.length) truncated = true;
-      return result;
-    }
-    const record = object(item);
-    if (!record) return item;
-    const result: Record<string, unknown> = Object.create(null);
-    let index = 0;
-    for (const key in record) {
-      if (!Object.hasOwn(record, key)) continue;
-      if (index >= 80 || truncated) { truncated = true; break; }
-      const label = previewFieldNames.has(key) ? key : `field_${index + 1}`;
-      result[label] = !previewFieldNames.has(key) || sensitiveOutputKey.test(key) ||
-        sensitive.has(key.toLowerCase())
-        ? "[REDACTED]" : redact(record[key], depth + 1);
-      index += 1;
-    }
-    return result;
-  };
-  const encoded = JSON.stringify(redact(value, 0)) ?? "null";
-  if (unsafeContent) return withheldResult;
+  const state: PreviewState = { sensitive: new Set(inputSensitiveKeys.map((key) =>
+    key.replaceAll("[", ".").replaceAll("]", ".").split(".").findLast(Boolean)?.toLowerCase())),
+    unsafeContent: false, truncated: false, visited: 0, textCharsLeft: 6000 };
+  const encoded = JSON.stringify(previewValue(value, 0, state)) ?? "null";
+  if (state.unsafeContent) return withheldResult;
   const marker = "\n[TRUNCATED]";
-  return !truncated && encoded.length <= ASSISTED_LIMITS.resultChars ? encoded
+  return !state.truncated && encoded.length <= ASSISTED_LIMITS.resultChars ? encoded
     : `${encoded.slice(0, ASSISTED_LIMITS.resultChars - marker.length)}${marker}`;
 }
 
@@ -464,6 +468,78 @@ function projectReadReceipt(receipt: unknown, sensitiveKeys?: readonly string[])
     resultWithheld: preview === withheldResult,
     resultTruncated: preview.endsWith("\n[TRUNCATED]"),
   };
+}
+
+/** Bound the provider schema before it reaches the one model choice. */
+function offerTools(discovered: ToolManifest[], provider: string): OfferedTool[] {
+  const offered: OfferedTool[] = [];
+  let schemaLength = 0;
+  for (const manifest of discovered) {
+    if (manifest.provider !== provider || offered.length >= ASSISTED_LIMITS.tools) continue;
+    const name = `tool_${offered.length}`;
+    const tool = { type: "function", function: { name,
+      description: `${manifest.displayName}: ${manifest.description}`.slice(0, 300),
+      parameters: manifest.inputSchema } };
+    const size = JSON.stringify(tool).length;
+    if (size > 3000 || schemaLength + size > ASSISTED_LIMITS.schemaChars) continue;
+    schemaLength += size;
+    offered.push({ manifest, name, tool });
+  }
+  if (!offered.length) throw new AssistedPlaygroundError("ASSISTED_NO_TOOLS", 409);
+  return offered;
+}
+
+type ModelResponse = Extract<TurnOutcome, { kind: "model" }>["response"];
+type InterpretedChoice = { kind: "model"; response: ModelResponse } | {
+  kind: "action"; chosen: OfferedTool; params: Record<string, unknown>;
+  effect: "read" | "write" };
+
+/** Reject invented tools and malformed arguments before binding an action. */
+function interpretChoice(choice: ModelReply, offered: OfferedTool[], model: string): InterpretedChoice {
+  const modelError = (code: string): InterpretedChoice => ({ kind: "model", response: {
+    status: "model_error", answer: "The model did not select one valid offered action. No tool ran.",
+    errorCode: code, model, servedModels: [choice.model], usage: choice.usage } });
+  if (choice.calls.length === 0) return { kind: "model", response: choice.content
+    ? { status: "answered", answer: choice.content.slice(0, 2000), model,
+      servedModels: [choice.model], usage: choice.usage }
+    : { status: "model_error", answer: "The model returned no usable answer. Choose another tool-capable model.",
+      errorCode: "ASSISTED_MODEL_RESPONSE_INVALID", model,
+      servedModels: [choice.model], usage: choice.usage } };
+  if (choice.calls.length !== 1) return modelError("ASSISTED_MULTIPLE_TOOLS");
+  const chosen = offered.find((item) => item.name === choice.calls[0]!.name);
+  if (!chosen) return modelError("ASSISTED_TOOL_DENIED");
+  const raw = choice.calls[0]!.arguments;
+  if (raw.length > ASSISTED_LIMITS.argumentsChars) return modelError("ASSISTED_ARGUMENTS_INVALID");
+  let params: unknown;
+  try { params = JSON.parse(raw); }
+  catch { return modelError("ASSISTED_ARGUMENTS_INVALID"); }
+  const parsed = object(params);
+  if (!parsed) return modelError("ASSISTED_ARGUMENTS_INVALID");
+  return { kind: "action", chosen, params: parsed,
+    effect: chosen.manifest.contract.effect === "read" ? "read" : "write" };
+}
+
+/** Present a read using only the bounded local preview and receipt identity. */
+function presentFreshRead(receipt: unknown, chosen: OfferedTool, choice: ModelReply,
+  input: AssistedTurnInput, signal: AbortSignal) {
+  const record = object(receipt);
+  const common = { toolId: chosen.manifest.id,
+    receipt: projectReadReceipt(receipt, chosen.manifest.contract.sensitiveKeys),
+    model: input.model, servedModels: [choice.model], usage: choice.usage };
+  if (record?.status === "failed") return { ...common, status: "tool_error" as const,
+    terminalFailure: true,
+    answer: "The tool did not complete. Check its receipt before retrying." };
+  if (record?.status !== "succeeded") return { ...common, status: "action_pending" as const,
+    requestId: input.requestId,
+    answer: "The read may still be finishing. Check its receipt before retrying this request." };
+  if (signal.aborted) return { ...common, status: "answered" as const,
+    usageIncomplete: true,
+    answer: "The tool completed, but preview generation was interrupted. Review the receipt." };
+  const result = safeResult(record.result, chosen.manifest.contract.sensitiveKeys);
+  return { ...common, status: "answered" as const,
+    answer: result === withheldResult
+      ? "The tool completed, but its result could not be safely previewed. Review the receipt."
+      : `The read completed. Result preview: ${result.slice(0, 1600)}. Review the receipt for the full result.` };
 }
 
 /** One user turn: one model tool choice and one policy checked tool action. */
@@ -488,7 +564,7 @@ export async function runAssistedTurn(request: Request, input: AssistedTurnInput
   if (prior) {
     if (prior.requestFingerprint !== fingerprint)
       throw new AssistedPlaygroundError("ASSISTED_REQUEST_CONFLICT", 409);
-    return recoverTurn(request, input, services, signal, prior, userId);
+    return recoverTurn(request, input, services, signal, prior);
   }
   // Existing receipts and approvals from an earlier deployment also fence this identity.
   const legacyAction = await untilAbort(services.lookupAction(request, input), signal);
@@ -500,16 +576,17 @@ export async function runAssistedTurn(request: Request, input: AssistedTurnInput
     reservation.then((lateRelease) => lateRelease()).catch(() => undefined);
     throw error;
   });
-  let actionPending = false;
+  let actionStarted = false;
   const actionState: { inFlight: Promise<unknown> | null;
     started: { toolId: string; servedModel: string; usage: Usage } | null } = {
       inFlight: null, started: null,
     };
-  const retainPending = (operation: Promise<unknown>) => {
-    if (actionPending) return;
-    actionPending = true;
-    operation.then(() => release(), () => release()).catch(() => undefined);
+  const trackAction = (operation: Promise<unknown>) => {
+    if (actionStarted) return;
+    actionStarted = true;
+    retainActionSettlement(services, operation, release);
   };
+  const heldLease = { track: trackAction };
   try {
     const connections = await untilAbort(services.connections(request, input.workspaceId), signal);
     const selected = connections.find((item) => item.id === input.connectionId &&
@@ -518,20 +595,7 @@ export async function runAssistedTurn(request: Request, input: AssistedTurnInput
       !item.cleanupOnly);
     if (!selected) throw new AssistedPlaygroundError("ASSISTED_CONNECTION_UNAVAILABLE", 409);
     const discovered = await untilAbort(services.discover(request, input.workspaceId, selected.provider), signal);
-    const offered: { manifest: ToolManifest; name: string; tool: unknown }[] = [];
-    let schemaLength = 0;
-    for (const manifest of discovered) {
-      if (manifest.provider !== selected.provider || offered.length >= ASSISTED_LIMITS.tools) continue;
-      const name = `tool_${offered.length}`;
-      const tool = { type: "function", function: { name,
-        description: `${manifest.displayName}: ${manifest.description}`.slice(0, 300),
-        parameters: manifest.inputSchema } };
-      const size = JSON.stringify(tool).length;
-      if (size > 3000 || schemaLength + size > ASSISTED_LIMITS.schemaChars) continue;
-      schemaLength += size;
-      offered.push({ manifest, name, tool });
-    }
-    if (!offered.length) throw new AssistedPlaygroundError("ASSISTED_NO_TOOLS", 409);
+    const offered = offerTools(discovered, selected.provider);
     const fetcher = services.fetcher ?? fetch;
     try {
       return await untilAbort(services.withKey(userId, async (key) => {
@@ -550,117 +614,51 @@ export async function runAssistedTurn(request: Request, input: AssistedTurnInput
             throw new AssistedPlaygroundError("ASSISTED_REQUEST_CONFLICT", 409);
           return saved;
         };
-        const modelOnly = async (response: {
-          status: "answered" | "model_error"; answer: string; model: string;
-          servedModels: string[]; usage: Usage; errorCode?: string }) => {
-          const saved = await bind({ kind: "model", response });
-          return saved.created ? response : recoverTurn(request, input, services, signal,
-            saved.binding, userId);
-        };
-        if (choice.calls.length === 0) {
-          if (!choice.content) return modelOnly({ status: "model_error" as const,
-            answer: "The model returned no usable answer. Choose another tool-capable model.",
-            errorCode: "ASSISTED_MODEL_RESPONSE_INVALID", model: input.model,
-            servedModels: [choice.model], usage: choice.usage });
-          return modelOnly({ status: "answered" as const, answer: choice.content.slice(0, 2000),
-            model: input.model, servedModels: [choice.model], usage: choice.usage });
+        const interpreted = interpretChoice(choice, offered, input.model);
+        if (interpreted.kind === "model") {
+          const saved = await bind({ kind: "model", response: interpreted.response });
+          return saved.created ? interpreted.response : recoverTurn(request, input, services,
+            signal, saved.binding, heldLease);
         }
-        const modelError = (code: string) => ({ status: "model_error" as const,
-          answer: "The model did not select one valid offered action. No tool ran.",
-          errorCode: code, model: input.model, servedModels: [choice.model], usage: choice.usage });
-        if (choice.calls.length !== 1) return modelOnly(modelError("ASSISTED_MULTIPLE_TOOLS"));
-        const chosen = offered.find((item) => item.name === choice.calls[0]!.name);
-        if (!chosen) return modelOnly(modelError("ASSISTED_TOOL_DENIED"));
-        const raw = choice.calls[0]!.arguments;
-        if (raw.length > ASSISTED_LIMITS.argumentsChars)
-          return modelOnly(modelError("ASSISTED_ARGUMENTS_INVALID"));
-        let params: unknown;
-        try { params = JSON.parse(raw); }
-        catch { return modelOnly(modelError("ASSISTED_ARGUMENTS_INVALID")); }
-        if (!object(params)) return modelOnly(modelError("ASSISTED_ARGUMENTS_INVALID"));
-        const effect = chosen.manifest.contract.effect === "read" ? "read" : "write";
+        const { chosen, params, effect } = interpreted;
         const saved = await bind({ kind: "action", effect, toolId: chosen.manifest.id,
           servedModel: choice.model, usage: choice.usage,
           ...(effect === "read" ? { sensitiveKeys: [...chosen.manifest.contract.sensitiveKeys] } : {}) },
         { connectionId: input.connectionId, params: params as Record<string, unknown> });
         if (!saved.created) return recoverTurn(request, input, services, signal,
-          saved.binding, userId);
+          saved.binding, heldLease);
         checkActive(signal);
+        services.assertActionRetention?.();
         const action = { workspaceId: input.workspaceId, connectionId: input.connectionId,
           toolId: chosen.manifest.id, params: params as Record<string, unknown>,
           idempotencyKey: `assisted_${input.requestId}` };
-        if (effect !== "read") {
-          const operation = services.requestApproval(request, action);
-          actionState.inFlight = operation;
-          actionState.started = { toolId: chosen.manifest.id, servedModel: choice.model,
-            usage: choice.usage };
-          let approval: unknown;
-          try { approval = await untilAbort(operation, signal); }
-          catch (error) {
-            if (signal.aborted) {
-              retainPending(operation);
-              return { status: "action_pending" as const,
-                answer: "Approval creation may still be finishing. Check open approvals before retrying this request.",
-                toolId: chosen.manifest.id, requestId: input.requestId,
-                model: input.model, servedModels: [choice.model], usage: choice.usage };
-            }
-            return { ...actionFailure(error), toolId: chosen.manifest.id,
-              model: input.model, servedModels: [choice.model], usage: choice.usage };
-          }
-          return { status: "approval_required" as const,
-            answer: "Review the selected tool and redacted arguments before approving. No change has run.",
-            toolId: chosen.manifest.id, approval, model: input.model,
-            servedModels: [choice.model], usage: choice.usage };
-        }
-        const operation = services.execute(request, action);
+        const operation = effect === "read"
+          ? services.execute(request, action) : services.requestApproval(request, action);
+        trackAction(operation);
         actionState.inFlight = operation;
         actionState.started = { toolId: chosen.manifest.id, servedModel: choice.model,
           usage: choice.usage };
-        let receipt: unknown;
-        try { receipt = await untilAbort(operation, signal); }
+        let settled: unknown;
+        try { settled = await untilAbort(operation, signal); }
         catch (error) {
-          if (signal.aborted) {
-            retainPending(operation);
-            return { status: "action_pending" as const,
-              answer: "The read may still be finishing. Retry this request with its saved identity to recover its receipt.",
-              toolId: chosen.manifest.id, requestId: input.requestId,
-              model: input.model, servedModels: [choice.model], usage: choice.usage };
-          }
+          if (signal.aborted) return { status: "action_pending" as const,
+            answer: effect === "read"
+              ? "The read may still be finishing. Retry this request with its saved identity to recover its receipt."
+              : "Approval creation may still be finishing. Check open approvals before retrying this request.",
+            toolId: chosen.manifest.id, requestId: input.requestId,
+            model: input.model, servedModels: [choice.model], usage: choice.usage };
           return { ...actionFailure(error), toolId: chosen.manifest.id,
             model: input.model, servedModels: [choice.model], usage: choice.usage };
         }
-        const publicResult = object(receipt);
-        if (publicResult?.status !== "succeeded") {
-          const failed = publicResult?.status === "failed";
-          return { status: failed ? "tool_error" as const : "action_pending" as const,
-            answer: failed ? "The tool did not complete. Check its receipt before retrying."
-              : "The read may still be finishing. Check its receipt before retrying this request.",
-            ...(failed ? { terminalFailure: true } : { requestId: input.requestId }),
-            toolId: chosen.manifest.id, receipt: projectReadReceipt(receipt,
-              chosen.manifest.contract.sensitiveKeys), model: input.model,
-            servedModels: [choice.model], usage: choice.usage };
-        }
-        if (signal.aborted) return { status: "answered" as const,
-          answer: "The tool completed, but preview generation was interrupted. Review the receipt.",
-          toolId: chosen.manifest.id, receipt: projectReadReceipt(receipt,
-            chosen.manifest.contract.sensitiveKeys), model: input.model,
-          servedModels: [choice.model], usage: choice.usage, usageIncomplete: true };
-        const result = safeResult(publicResult.result, chosen.manifest.contract.sensitiveKeys);
-        if (result === withheldResult) return { status: "answered" as const,
-          answer: "The tool completed, but its result could not be safely previewed. Review the receipt.",
-          toolId: chosen.manifest.id, receipt: projectReadReceipt(receipt,
-            chosen.manifest.contract.sensitiveKeys), model: input.model,
+        if (effect !== "read") return { status: "approval_required" as const,
+          answer: "Review the selected tool and redacted arguments before approving. No change has run.",
+          toolId: chosen.manifest.id, approval: settled, model: input.model,
           servedModels: [choice.model], usage: choice.usage };
-        return { status: "answered" as const,
-          answer: `The read completed. Result preview: ${result.slice(0, 1600)}. Review the receipt for the full result.`,
-          toolId: chosen.manifest.id, receipt: projectReadReceipt(receipt,
-            chosen.manifest.contract.sensitiveKeys), model: input.model,
-          servedModels: [choice.model], usage: choice.usage };
+        return presentFreshRead(settled, chosen, choice, input, signal);
       }), signal);
     } catch (error) {
       if (signal.aborted) {
         if (actionState.started && actionState.inFlight) {
-          retainPending(actionState.inFlight);
           return { status: "action_pending" as const,
             answer: "The selected action may still be finishing. Check its receipt or approval before retrying.",
             toolId: actionState.started.toolId, requestId: input.requestId,
@@ -672,6 +670,6 @@ export async function runAssistedTurn(request: Request, input: AssistedTurnInput
       throw error;
     }
   } finally {
-    if (!actionPending) await untilAbort(release(), signal).catch(() => undefined);
+    if (!actionStarted) await untilAbort(release(), signal).catch(() => undefined);
   }
 }

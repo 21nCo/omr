@@ -57,6 +57,27 @@ function overview(connections = [{ id: "connection_one", workspaceId: "workspace
       { workspace: { id: "workspace_two", name: "Other" } }], connections, approvals };
 }
 
+/** Common browser fixtures for assisted turn UI cases. */
+function assistedFixtureResponse(path: string): Response | undefined {
+  if (path.startsWith("/api/control-plane")) return Response.json(overview());
+  if (path.startsWith("/api/tools?")) return Response.json({ tools,
+    providers: [{ provider: "demo", state: "ready" }] });
+  return undefined;
+}
+
+/** Fill the explicit model and prompt through the same DOM events as a user. */
+async function enterAssistedPrompt(prompt: string): Promise<void> {
+  await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value)
+    .toBe("connection_one"));
+  for (const [id, value] of [["assisted-model", "fixture/model"],
+    ["assisted-prompt", prompt]]) {
+    const field = document.getElementById(id) as HTMLInputElement;
+    field.value = value;
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+}
+
 afterEach(() => { vi.unstubAllGlobals(); sessionStorage.clear(); document.body.replaceChildren(); });
 
 describe("direct playground form", () => {
@@ -790,9 +811,8 @@ describe("direct playground form", () => {
     const requestIds: string[] = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
-      if (path.startsWith("/api/control-plane")) return Response.json(overview());
-      if (path.startsWith("/api/tools?")) return Response.json({ tools,
-        providers: [{ provider: "demo", state: "ready" }] });
+      const fixtureResponse = assistedFixtureResponse(path);
+      if (fixtureResponse) return fixtureResponse;
       if (path === "/api/playground/assisted") {
         const sent = JSON.parse(String(init?.body));
         requestIds.push(sent.requestId);
@@ -812,13 +832,7 @@ describe("direct playground form", () => {
       props: { data: { assistedEnabled: true } as never } });
     try {
       await vi.waitFor(() => expect(button("Ask model").disabled).toBe(true));
-      for (const [id, value] of [["assisted-model", "fixture/model"],
-        ["assisted-prompt", "Find fixture"]]) {
-        const field = document.getElementById(id) as HTMLInputElement;
-        field.value = value;
-        field.dispatchEvent(new Event("input", { bubbles: true }));
-      }
-      await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+      await enterAssistedPrompt("Find fixture");
       button("Ask model").click();
       await vi.waitFor(() => expect(document.body.textContent).toContain("Fixture found."));
       expect(document.body.textContent).toContain("Tokens: 14");
@@ -846,9 +860,8 @@ describe("direct playground form", () => {
       const requestIds: string[] = [];
       const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const path = String(input);
-        if (path.startsWith("/api/control-plane")) return Response.json(overview());
-        if (path.startsWith("/api/tools?")) return Response.json({ tools,
-          providers: [{ provider: "demo", state: "ready" }] });
+        const fixtureResponse = assistedFixtureResponse(path);
+        if (fixtureResponse) return fixtureResponse;
         if (path === "/api/playground/assisted") {
           requestIds.push(JSON.parse(String(init?.body)).requestId);
           return Response.json({ status, terminalFailure,
@@ -863,15 +876,7 @@ describe("direct playground form", () => {
       const app = mount(Playground, { target: document.body,
         props: { data: { assistedEnabled: true } as never } });
       try {
-        await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value)
-          .toBe("connection_one"));
-        for (const [id, value] of [["assisted-model", "fixture/model"],
-          ["assisted-prompt", "Find fixture"]]) {
-          const field = document.getElementById(id) as HTMLInputElement;
-          field.value = value;
-          field.dispatchEvent(new Event("input", { bubbles: true }));
-        }
-        await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+        await enterAssistedPrompt("Find fixture");
         button("Ask model").click();
         await vi.waitFor(() => expect(document.body.textContent).toContain("Check read receipt"));
         const receiptLink = document.querySelector<HTMLAnchorElement>("a[download='assisted-receipt.json']");
@@ -887,9 +892,8 @@ describe("direct playground form", () => {
     const requestIds: string[] = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
-      if (path.startsWith("/api/control-plane")) return Response.json(overview());
-      if (path.startsWith("/api/tools?")) return Response.json({ tools,
-        providers: [{ provider: "demo", state: "ready" }] });
+      const fixtureResponse = assistedFixtureResponse(path);
+      if (fixtureResponse) return fixtureResponse;
       if (path === "/api/playground/assisted") {
         requestIds.push(JSON.parse(String(init?.body)).requestId);
         if (requestIds.length === 1) throw new TypeError("lost response");
@@ -904,15 +908,7 @@ describe("direct playground form", () => {
     const app = mount(Playground, { target: document.body,
       props: { data: { assistedEnabled: true } as never } });
     try {
-      await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value)
-        .toBe("connection_one"));
-      for (const [id, value] of [["assisted-model", "fixture/model"],
-        ["assisted-prompt", "Find fixture"]]) {
-        const field = document.getElementById(id) as HTMLInputElement;
-        field.value = value;
-        field.dispatchEvent(new Event("input", { bubbles: true }));
-      }
-      await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+      await enterAssistedPrompt("Find fixture");
       button("Ask model").click();
       await vi.waitFor(() => expect(requestIds).toHaveLength(1));
       await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
@@ -935,9 +931,8 @@ describe("direct playground form", () => {
       const terminal = receiptStatus === "succeeded" || receiptStatus === "failed";
       const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const path = String(input);
-        if (path.startsWith("/api/control-plane")) return Response.json(overview());
-        if (path.startsWith("/api/tools?")) return Response.json({ tools,
-          providers: [{ provider: "demo", state: "ready" }] });
+        const fixtureResponse = assistedFixtureResponse(path);
+        if (fixtureResponse) return fixtureResponse;
         if (path.startsWith("/api/playground/assisted/status")) return Response.json({
           approval: null, receipt: { id: "receipt_write", status: receiptStatus } });
         if (path === "/api/playground/assisted") {
@@ -954,15 +949,7 @@ describe("direct playground form", () => {
       const app = mount(Playground, { target: document.body,
         props: { data: { assistedEnabled: true } as never } });
       try {
-        await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value)
-          .toBe("connection_one"));
-        for (const [id, value] of [["assisted-model", "fixture/model"],
-          ["assisted-prompt", "Write fixture"]]) {
-          const field = document.getElementById(id) as HTMLInputElement;
-          field.value = value;
-          field.dispatchEvent(new Event("input", { bubbles: true }));
-        }
-        await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+        await enterAssistedPrompt("Write fixture");
         button("Ask model").click();
         await vi.waitFor(() => expect(document.body.textContent).toContain(`The previous write is ${receiptStatus}`));
         button("Ask model").click();
@@ -996,9 +983,8 @@ describe("direct playground form", () => {
     const requestIds: string[] = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
-      if (path.startsWith("/api/control-plane")) return Response.json(overview());
-      if (path.startsWith("/api/tools?")) return Response.json({ tools,
-        providers: [{ provider: "demo", state: "ready" }] });
+      const fixtureResponse = assistedFixtureResponse(path);
+      if (fixtureResponse) return fixtureResponse;
       if (path.startsWith("/api/playground/assisted/status")) return Response.json({
         approval: null, receipt: { id: "receipt_write", status: "uncertain" } });
       if (path === "/api/playground/assisted") {
@@ -1014,15 +1000,7 @@ describe("direct playground form", () => {
     const app = mount(Playground, { target: document.body,
       props: { data: { assistedEnabled: true } as never } });
     try {
-      await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value)
-        .toBe("connection_one"));
-      for (const [id, value] of [["assisted-model", "fixture/model"],
-        ["assisted-prompt", "Write fixture"]]) {
-        const field = document.getElementById(id) as HTMLInputElement;
-        field.value = value;
-        field.dispatchEvent(new Event("input", { bubbles: true }));
-      }
-      await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+      await enterAssistedPrompt("Write fixture");
       button("Ask model").click();
       await vi.waitFor(() => expect(button("Start a new action").disabled).toBe(false));
       button("Start a new action").click();
@@ -1036,13 +1014,14 @@ describe("direct playground form", () => {
 
   it("cancels an in-flight assisted request and does not render its late result", async () => {
     let release: ((response: Response) => void) | undefined;
+    let assistedSignal: AbortSignal | undefined;
     const requestIds: string[] = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
-      if (path.startsWith("/api/control-plane")) return Response.json(overview());
-      if (path.startsWith("/api/tools?")) return Response.json({ tools,
-        providers: [{ provider: "demo", state: "ready" }] });
+      const fixtureResponse = assistedFixtureResponse(path);
+      if (fixtureResponse) return fixtureResponse;
       if (path === "/api/playground/assisted") {
+        assistedSignal = init?.signal ?? undefined;
         requestIds.push(JSON.parse(String(init?.body)).requestId);
         return requestIds.length === 1 ? new Promise<Response>((resolve) => { release = resolve; })
           : Response.json({ status: "answered",
@@ -1060,18 +1039,11 @@ describe("direct playground form", () => {
     const app = mount(Playground, { target: document.body,
       props: { data: { assistedEnabled: true } as never } });
     try {
-      await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value)
-        .toBe("connection_one"));
-      for (const [id, value] of [["assisted-model", "fixture/model"],
-        ["assisted-prompt", "Find fixture"]]) {
-        const field = document.getElementById(id) as HTMLInputElement;
-        field.value = value;
-        field.dispatchEvent(new Event("input", { bubbles: true }));
-      }
-      await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+      await enterAssistedPrompt("Find fixture");
       button("Ask model").click();
       await vi.waitFor(() => expect(release).toBeTypeOf("function"));
       button("Cancel request").click();
+      expect(assistedSignal?.aborted).toBe(true);
       release!(Response.json({ status: "answered", answer: "Late answer", model: "fixture/model",
         servedModels: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2,
           costUsd: null } }));
@@ -1093,9 +1065,8 @@ describe("direct playground form", () => {
     let release: ((response: Response) => void) | undefined;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
-      if (path.startsWith("/api/control-plane")) return Response.json(overview());
-      if (path.startsWith("/api/tools?")) return Response.json({ tools,
-        providers: [{ provider: "demo", state: "ready" }] });
+      const fixtureResponse = assistedFixtureResponse(path);
+      if (fixtureResponse) return fixtureResponse;
       if (path === "/api/playground/assisted") return new Promise<Response>((resolve) => { release = resolve; });
       if (path.startsWith("/api/playground/assisted/status")) return Response.json({
         approval: { id: "approval_one", status: "pending" }, receipt: null });
@@ -1106,15 +1077,7 @@ describe("direct playground form", () => {
     const app = mount(Playground, { target: document.body,
       props: { data: { assistedEnabled: true } as never } });
     try {
-      await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value)
-        .toBe("connection_one"));
-      for (const [id, value] of [["assisted-model", "fixture/model"],
-        ["assisted-prompt", "Write fixture"]]) {
-        const field = document.getElementById(id) as HTMLInputElement;
-        field.value = value;
-        field.dispatchEvent(new Event("input", { bubbles: true }));
-      }
-      await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+      await enterAssistedPrompt("Write fixture");
       button("Ask model").click();
       await vi.waitFor(() => expect(release).toBeTypeOf("function"));
       button("Cancel request").click();
@@ -1186,13 +1149,7 @@ describe("direct playground form", () => {
         props: { data: { assistedEnabled: true } as never } });
       try {
         await vi.waitFor(() => expect(button("Ask model").disabled).toBe(true));
-        for (const [id, value] of [["assisted-model", "fixture/model"],
-          ["assisted-prompt", "Repeat this exact change"]]) {
-          const field = document.getElementById(id) as HTMLInputElement;
-          field.value = value;
-          field.dispatchEvent(new Event("input", { bubbles: true }));
-        }
-        await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+        await enterAssistedPrompt("Repeat this exact change");
         button("Ask model").click();
         await vi.waitFor(() => expect(requestIds).toHaveLength(1));
         if (lostResponse) {
@@ -1218,13 +1175,7 @@ describe("direct playground form", () => {
         expect(approvals.get("approval_1")?.status).toBe(settlement);
         expect(writes).toBe(settlement === "consumed" ? 1 : 0);
         if (lostResponse) {
-          for (const [id, value] of [["assisted-model", "fixture/model"],
-            ["assisted-prompt", "Repeat this exact change"]]) {
-            const field = document.getElementById(id) as HTMLInputElement;
-            field.value = value;
-            field.dispatchEvent(new Event("input", { bubbles: true }));
-          }
-          await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+          await enterAssistedPrompt("Repeat this exact change");
         }
         button("Ask model").click();
         await vi.waitFor(() => expect(requestIds).toHaveLength(2));
@@ -1237,9 +1188,8 @@ describe("direct playground form", () => {
     let writes = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
-      if (path.startsWith("/api/control-plane")) return Response.json(overview());
-      if (path.startsWith("/api/tools?")) return Response.json({ tools,
-        providers: [{ provider: "demo", state: "ready" }] });
+      const fixtureResponse = assistedFixtureResponse(path);
+      if (fixtureResponse) return fixtureResponse;
       if (path === "/api/playground/assisted") return Response.json({
         status: "approval_required", answer: "Review before approving. No change has run.",
         model: "fixture/model", servedModels: ["fixture/served"], toolId: "demo.write",
@@ -1263,15 +1213,7 @@ describe("direct playground form", () => {
     const app = mount(Playground, { target: document.body,
       props: { data: { assistedEnabled: true } as never } });
     try {
-      await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#playground-connection")?.value)
-        .toBe("connection_one"));
-      for (const [id, value] of [["assisted-model", "fixture/model"],
-        ["assisted-prompt", "Change fixture"]]) {
-        const field = document.getElementById(id) as HTMLInputElement;
-        field.value = value;
-        field.dispatchEvent(new Event("input", { bubbles: true }));
-      }
-      await vi.waitFor(() => expect(button("Ask model").disabled).toBe(false));
+      await enterAssistedPrompt("Change fixture");
       button("Ask model").click();
       await vi.waitFor(() => expect(document.querySelector("[aria-label='Approval']")?.textContent)
         .toContain("pending"));

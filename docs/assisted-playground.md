@@ -3,7 +3,8 @@
 OMR-14 adds a single OpenRouter tool choice and, after one read, a local result preview.
 Writes stop at the existing approval; execution still uses the direct approval UI.
 `OMR_ASSISTED_PLAYGROUND_ENABLED` remains off until OMR-15's staged personal-key and
-connected-provider acceptance. Direct playground use has a separate flag.
+connected-provider acceptance. The direct playground also requires
+`OMR_DIRECT_PLAYGROUND_ENABLED=true`.
 
 Apply `packages/identity/migrations/0021_assisted_turn_quota.sql` and
 `packages/execution/migrations/0022_assisted_turn_bindings.sql` in numeric order before
@@ -12,12 +13,12 @@ on the quota table and `SELECT, INSERT, DELETE` on the binding table; the dedica
 vault role must not receive access. The binding table
 stores only the first selected action metadata, an HMAC request fingerprint, encrypted
 model-only responses, and encrypted action arguments under the execution wrapping key.
-Bindings expire after 24 hours and are purged on later binding access; execution receipts
+Bindings expire after 24 hours and are purged in bounded batches on later binding access; execution receipts
 and approvals continue to fence prior actions. A database claim allows one active turn and ten starts per user
-hour across Worker instances. A 110-second lease covers a started shared execution and
-recovers from interrupted Workers.
-Turn processing has a 35-second response deadline. The claim is retained until a started
-execution or approval call settles, or the lease expires.
+hour across Worker instances. A 110-second lease is a backstop for interrupted Workers.
+Turn processing has a 35-second response deadline. Started execution and approval
+calls have a 20-second assisted deadline; the Worker retains their settlement and
+quota release through `waitUntil`, within its 30-second post-response window.
 
 The browser keeps a random request ID against a hash of the current workspace, account,
 model and prompt in session storage. It sends that ID again for a retry after cancellation

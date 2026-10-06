@@ -99,4 +99,33 @@ describeDatabase("assisted turn PostgreSQL binding", () => {
     [workspaceId, "alice", requestId]);
     expect(gone.rowCount).toBe(0);
   });
+
+  it("serves a request while purging a large expired backlog in bounded batches", async () => {
+    const now = Date.now();
+    await client.query(`INSERT INTO omr_control.assisted_turn_bindings
+      (workspace_id, actor_user_id, request_id, request_fingerprint, outcome,
+        created_at, expires_at)
+      SELECT $1, 'backlog', 'expired_' || series::text, 'old', '{"kind":"model"}'::jsonb,
+        $2, CASE WHEN series = 250 THEN $3 ELSE $4 END
+      FROM generate_series(1, 250) AS series`,
+    [workspaceId, now - 2000, now - 1, now - 1000]);
+    const common = { connectionString: connectionString!, workspaceId, userId: "backlog",
+      wrappingKey };
+    expect(await lookupPostgresAssistedTurn({ ...common, requestId: "absent" })).toBeNull();
+    const afterLookup = await client.query<{ count: string }>(`
+      SELECT count(*) FROM omr_control.assisted_turn_bindings
+      WHERE workspace_id = $1 AND actor_user_id = 'backlog'`, [workspaceId]);
+    expect(Number(afterLookup.rows[0]!.count)).toBe(150);
+
+    const rebound = await bindPostgresAssistedTurn({ ...common,
+      requestId: "expired_250", requestFingerprint: "new",
+      outcome: { kind: "model", response: { answer: "new" } } });
+    expect(rebound.created).toBe(true);
+    expect(rebound.binding.requestFingerprint).toBe("new");
+    const remaining = await client.query<{ count: string }>(`
+      SELECT count(*) FROM omr_control.assisted_turn_bindings
+      WHERE workspace_id = $1 AND actor_user_id = 'backlog' AND expires_at <= $2`,
+    [workspaceId, Date.now()]);
+    expect(Number(remaining.rows[0]!.count)).toBe(49);
+  });
 });

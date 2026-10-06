@@ -989,7 +989,9 @@ describe("assisted-playground-contract", () => {
   it("replays saved parameters if cancellation lands before dispatch", async () => {
     const controller = new AbortController();
     let persisted: Awaited<ReturnType<AssistedPlaygroundServices["loadTurn"]>> = null;
+    const reserveTurn = vi.fn(async () => async () => undefined);
     const { services, fetcher, execute } = fixture({
+      reserveTurn,
       loadTurn: async () => persisted,
       bindTurn: async (_user, value) => {
         persisted = { requestFingerprint: value.requestFingerprint, outcome: value.outcome,
@@ -1008,6 +1010,100 @@ describe("assisted-playground-contract", () => {
     expect(execute).toHaveBeenCalledOnce();
     expect(execute.mock.calls[0]![1].params).toEqual({ title: "fixture" });
     expect(fetcher).not.toHaveBeenCalled();
+    expect(reserveTurn).toHaveBeenCalledOnce();
+  });
+
+  it.each(["read", "write"] as const)("retains a started %s action and quota settlement after timeout", async (effect) => {
+    let settle!: (value: unknown) => void;
+    const operation = new Promise<unknown>((resolve) => { settle = resolve; });
+    const retained: Promise<void>[] = [];
+    const release = vi.fn(async () => undefined);
+    const reserveTurn = vi.fn(async () => release);
+    const execute = vi.fn(async () => operation);
+    const requestApproval = vi.fn(async () => operation);
+    const { services } = fixture({
+      turnMs: 20,
+      discover: async () => [effect === "read" ? manifest : writeManifest],
+      execute, requestApproval,
+      reserveTurn,
+      retainAction: (settlement) => { retained.push(settlement); },
+    });
+    const result = await runAssistedTurn(request(), input, services);
+    expect(result).toMatchObject({ status: "action_pending", requestId: input.requestId });
+    expect(retained).toHaveLength(1);
+    expect(release).not.toHaveBeenCalled();
+    expect(reserveTurn).toHaveBeenCalledOnce();
+    if (effect === "read") expect(execute).toHaveBeenCalledOnce();
+    else expect(requestApproval).toHaveBeenCalledOnce();
+    settle(effect === "read" ? { id: "receipt_late", status: "succeeded" }
+      : { id: "approval_late", status: "pending" });
+    await retained[0];
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("refuses a selected action before dispatch when Worker retention is unavailable", async () => {
+    const release = vi.fn(async () => undefined);
+    const { services, execute, requestApproval } = fixture({
+      reserveTurn: async () => release,
+      assertActionRetention: () => { throw new Error("Worker action retention is unavailable"); },
+    });
+    await expect(runAssistedTurn(request(), input, services)).rejects
+      .toThrow("Worker action retention is unavailable");
+    expect(execute).not.toHaveBeenCalled();
+    expect(requestApproval).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("reuses a held quota lease when a bind race recovers the same action", async () => {
+    const release = vi.fn(async () => undefined);
+    const reserveTurn = vi.fn(async () => release);
+    const { services, fetcher, execute } = fixture({
+      reserveTurn,
+      bindTurn: async (_user, value) => ({ created: false, binding: {
+        requestFingerprint: value.requestFingerprint,
+        outcome: { kind: "action", effect: "read", toolId: manifest.id,
+          servedModel: "fixture/served", usage: { promptTokens: 10,
+            completionTokens: 4, totalTokens: 14, costUsd: 0.00002 } },
+        action: { connectionId: "account_one", params: { title: "fixture" } },
+      } }),
+    });
+    const result = await runAssistedTurn(request(), input, services);
+    expect(result).toMatchObject({ status: "answered", toolId: manifest.id });
+    expect(reserveTurn).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it.each(["read", "write"] as const)("retains a recovered %s action through disconnect without a new model or lease", async (effect) => {
+    const controller = new AbortController();
+    let settle!: (value: unknown) => void;
+    const operation = new Promise<unknown>((resolve) => { settle = resolve; });
+    const retained: Promise<void>[] = [];
+    const reserveTurn = vi.fn(async () => async () => undefined);
+    const execute = vi.fn(async () => operation);
+    const requestApproval = vi.fn(async () => operation);
+    const { services, fetcher } = fixture({
+      loadTurn: async () => ({ requestFingerprint: JSON.stringify([
+        input.workspaceId, input.connectionId, input.model, input.prompt]),
+      outcome: { kind: "action", effect, toolId: effect === "read" ? manifest.id : writeManifest.id,
+        servedModel: "fixture/served", usage: { promptTokens: 10, completionTokens: 4,
+          totalTokens: 14, costUsd: 0.00002 } },
+      action: { connectionId: input.connectionId, params: { title: "fixture" } } }),
+      reserveTurn, execute, requestApproval,
+      retainAction: (settlement) => { retained.push(settlement); },
+    });
+    const pending = runAssistedTurn(request(undefined, controller.signal), input, services);
+    await vi.waitFor(() => expect(retained).toHaveLength(1));
+    controller.abort();
+    expect(await pending).toMatchObject({ status: "action_pending" });
+    expect(reserveTurn).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(execute).toHaveBeenCalledTimes(effect === "read" ? 1 : 0);
+    expect(requestApproval).toHaveBeenCalledTimes(effect === "write" ? 1 : 0);
+    settle(effect === "read" ? { id: "receipt_recovered", status: "succeeded" }
+      : { id: "approval_recovered", status: "pending" });
+    await retained[0];
   });
 
   it("rejects reuse of a request ID with changed model, prompt, or connection", async () => {

@@ -81,7 +81,7 @@ Optional single-turn assistance on that page uses only the signed-in user's save
 OpenRouter key. `OMR_ASSISTED_PLAYGROUND_ENABLED=true` also requires the vault
 rollout and its verified cache-disabled binding; leave it off until OMR-15's live
 acceptance. The user chooses a model. Each request offers at most 12 scoped tools,
-limits prompt/schema/result and model output sizes, makes at most two model calls,
+limits prompt/schema/result and model output sizes, makes at most one model call,
 and selects at most one action.
 Reads return a receipt and a bounded answer; writes stop at the existing approval
 review. The page reports provider token counts and cost when available and allows

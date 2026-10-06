@@ -16,6 +16,7 @@ type BindingRow = { request_fingerprint: string; outcome: Record<string, unknown
   outcome_ciphertext: Buffer | null; outcome_iv: Buffer | null;
   action_ciphertext: Buffer | null; action_iv: Buffer | null };
 
+/** Decrypt only the selected actor's saved action and model-only response. */
 async function decodeRow(row: BindingRow, workspaceId: string, userId: string, requestId: string,
   wrappingKey: Uint8Array<ArrayBuffer>): Promise<AssistedTurnBinding> {
   const decoded = row.action_ciphertext && row.action_iv
@@ -32,6 +33,7 @@ async function decodeRow(row: BindingRow, workspaceId: string, userId: string, r
     ...(action ? { action } : {}) };
 }
 
+/** Bound a single binding operation to one short-lived PostgreSQL client. */
 async function withClient<T>(connectionString: string,
   callback: (client: pg.Client) => Promise<T>): Promise<T> {
   const client = new Client({ connectionString, connectionTimeoutMillis: 3000,
@@ -42,13 +44,20 @@ async function withClient<T>(connectionString: string,
   } finally { await client.end().catch(() => undefined); }
 }
 
+/** Keep request cleanup bounded even when many old bindings have accumulated. */
+async function purgeExpired(client: pg.Client, now: number): Promise<void> {
+  await client.query(`DELETE FROM omr_control.assisted_turn_bindings
+    WHERE ctid IN (SELECT ctid FROM omr_control.assisted_turn_bindings
+      WHERE expires_at <= $1 ORDER BY expires_at LIMIT 100)`, [now]);
+}
+
+/** Return the unexpired binding for one user, workspace and request identity. */
 export async function lookupPostgresAssistedTurn(input: {
   connectionString: string; userId: string; workspaceId: string; requestId: string;
   wrappingKey: Uint8Array<ArrayBuffer>;
 }): Promise<AssistedTurnBinding | null> {
   return withClient(input.connectionString, async (client) => {
-    await client.query("DELETE FROM omr_control.assisted_turn_bindings WHERE expires_at <= $1",
-      [Date.now()]);
+    await purgeExpired(client, Date.now());
     const result = await client.query<BindingRow>(`
       SELECT request_fingerprint, outcome, outcome_ciphertext, outcome_iv,
         action_ciphertext, action_iv
@@ -71,8 +80,10 @@ export async function bindPostgresAssistedTurn(input: {
 }): Promise<{ binding: AssistedTurnBinding; created: boolean }> {
   return withClient(input.connectionString, async (client) => {
     const key = [input.workspaceId, input.userId, input.requestId];
-    await client.query("DELETE FROM omr_control.assisted_turn_bindings WHERE expires_at <= $1",
-      [Date.now()]);
+    await purgeExpired(client, Date.now());
+    await client.query(`DELETE FROM omr_control.assisted_turn_bindings
+      WHERE workspace_id = $1 AND actor_user_id = $2 AND request_id = $3
+        AND expires_at <= $4`, [...key, Date.now()]);
     const encrypted = input.action ? await encryptJson(input.action as JsonValue,
       input.wrappingKey, { kind: "assisted-action", workspaceId: input.workspaceId,
         id: `${input.userId}:${input.requestId}` }) : null;

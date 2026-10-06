@@ -60,6 +60,27 @@ type OMRBindings = Cloudflare.Env & {
   [key: string]: unknown;
 };
 
+// A Worker may retain work for only 30 seconds after response or disconnect.
+// Leave ten seconds for the execution runtime to cancel/close and release quota.
+const ASSISTED_ACTION_DEADLINE_MS = 20_000;
+
+export async function assistedActionDeadline<T>(operation: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([operation, new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new AssistedPlaygroundError("ASSISTED_ACTION_TIMEOUT", 504)),
+        ASSISTED_ACTION_DEADLINE_MS);
+    })]);
+  } finally { if (timer) clearTimeout(timer); }
+}
+
+/** Register settlement with the actual Worker lifecycle before returning a response. */
+export function retainWorkerAction(ctx: { waitUntil(promise: Promise<unknown>): void } | undefined,
+  settlement: Promise<void>): void {
+  if (!ctx) throw new RuntimeUnavailableError("Worker action retention is unavailable");
+  ctx.waitUntil(settlement);
+}
+
 export interface CloudflareRouteServices {
   device: DeviceRouteServices;
   connections: ConnectionRouteServices;
@@ -1005,6 +1026,12 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
   const assistedPlayground: AssistedPlaygroundServices = {
     enabled: () => assistedPlaygroundEnabled(environment(event)),
     authenticate: (request) => requireWebUser(event, request),
+    retainAction(settlement) {
+      retainWorkerAction(event.platform?.ctx, settlement);
+    },
+    assertActionRetention() {
+      if (!event.platform?.ctx) throw new RuntimeUnavailableError("Worker action retention is unavailable");
+    },
     async fingerprint(input, prompt) {
       const bytes = await deriveExecutionFingerprintKey(executionWrappingKey(event));
       const key = await crypto.subtle.importKey("raw", bytes,
@@ -1030,10 +1057,8 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
         keys: requiredSecret(event, "OPENROUTER_VAULT_KEYS"),
         activeKeyId: requiredSecret(event, "OPENROUTER_VAULT_ACTIVE_KEY_ID"),
       });
-      let key: string;
-      try { key = await runtime.vault.withKey(userId, async (value) => value); }
+      try { return await runtime.vault.withKey(userId, callback); }
       finally { await runtime.close(); }
-      return callback(key);
     },
     async connections(request, workspaceId) {
       const overview = await controlPlane.overview(request, workspaceId) as {
@@ -1045,7 +1070,12 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
         tools: Awaited<ReturnType<AssistedPlaygroundServices["discover"]>> };
       return found.tools;
     },
-    execute: (request, input) => execution.execute(request, input),
+    async execute(request, input) {
+      requireExecutionOrigin(request);
+      const principal = await authenticate(event, request, input.workspaceId, undefined, false);
+      return withExecution(async (service) => publicReceipt(await assistedActionDeadline(
+        service.execute({ principal, ...input, params: input.params as JsonValue }))));
+    },
     async readReceipt(request, input) {
       // This cookie GET has no Origin header. Authenticate the session and let the
       // execution service recheck the selected account and current read policy.
@@ -1058,7 +1088,16 @@ function createRouteServices(event: RequestEvent, allowRemoteMcp: boolean): Clou
         return receipt ? publicReceipt(receipt) : null;
       });
     },
-    requestApproval: (request, input) => execution.requestApproval(request, input),
+    async requestApproval(request, input) {
+      requireExecutionOrigin(request);
+      const principal = await authenticate(event, request, input.workspaceId, undefined, false);
+      return withExecution(async (service, catalog) => {
+        const approval = await assistedActionDeadline(service.requestApproval({
+          principal, ...input, params: input.params as JsonValue,
+        }));
+        return publicApproval(approval, catalog.get(approval.toolId));
+      });
+    },
     async lookupAction(request, input) {
       const userId = await assistedActor(request, input.workspaceId);
       return lookupPostgresAssistedAction({ connectionString: databaseConnectionString(event),

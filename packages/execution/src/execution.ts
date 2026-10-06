@@ -476,7 +476,7 @@ export class ExecutionService {
     connectionId: string; idempotencyKey: string; receiptId: string }): Promise<ExecutionReceipt | null> {
     const deadlineAt = Date.now() + EXECUTION_INVOCATION_DEADLINE_MS;
     const manifest = this.catalog.get(input.toolId);
-    if (!manifest || manifest.contract.effect !== "read" ||
+    if (manifest?.contract.effect !== "read" ||
         !validToolInput(manifest, input.params) || !IDEMPOTENCY_KEY.test(input.idempotencyKey)) {
       throw new ExecutionInputError("Read receipt request is invalid");
     }
