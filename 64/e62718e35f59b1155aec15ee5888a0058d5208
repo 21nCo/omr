@@ -1,0 +1,18 @@
+apps/web/src/lib/server/assisted-playground.ts
+  h_a39f9495f9ec1d 340,361-368,371-372,389,393-396,437-438
+docs/assisted-playground.md
+  h_a39f9495f9ec1d 41-44
+tests/acceptance/assisted-playground-contract.test.ts
+  h_a39f9495f9ec1d 38-39,41,79-80,208,287-295,320-321,326,334-336,416-419,490-502,652,659,683,694,1041,1047-1050
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "64e62718e35f59b1155aec15ee5888a0058d5208",
+  "prompts": {},
+  "humans": {
+    "h_a39f9495f9ec1d": {
+      "author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
