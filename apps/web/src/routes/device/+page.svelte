@@ -122,6 +122,8 @@
   }
   main {
     display: grid;
+    /* A zero track minimum keeps long workspace names inside narrow screens. */
+    grid-template-columns: minmax(0, 1fr);
     min-height: 100vh;
     place-items: center;
     padding: 2rem;
@@ -136,7 +138,7 @@
   }
   h1 { margin: 0.4rem 0 0.8rem; font-size: clamp(2.4rem, 8vw, 4.5rem); letter-spacing: -0.05em; }
   .lede { color: #b9bcb2; line-height: 1.5; }
-  form { display: grid; gap: 0.65rem; margin-top: 2rem; }
+  form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.65rem; margin-top: 2rem; }
   label { margin-top: 0.7rem; font-size: 0.9rem; font-weight: 700; }
   input, select, button {
     border: 1px solid #41443d;

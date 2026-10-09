@@ -108,7 +108,8 @@ export async function validateOpenRouterKey(key: string, fetcher: typeof fetch =
     response = await fetcher("https://openrouter.ai/api/v1/key", {
       method: "GET",
       headers: { authorization: `Bearer ${key}` },
-      redirect: "error",
+      // Workers reject redirect: "error"; a manual 3xx is not ok and is never followed.
+      redirect: "manual",
       cache: "no-store",
       signal: AbortSignal.timeout(8000),
     });

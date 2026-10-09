@@ -54,7 +54,7 @@ describe("personal OpenRouter key vault", () => {
     expect(await vault.delete("alice")).toEqual({ configured: false });
     await expect(vault.withKey("alice", async () => "used")).rejects.toMatchObject({ code: "OPENROUTER_KEY_MISSING" });
     expect(fetcher).toHaveBeenCalledWith("https://openrouter.ai/api/v1/key",
-      expect.objectContaining({ redirect: "error", cache: "no-store" }));
+      expect.objectContaining({ redirect: "manual", cache: "no-store" }));
   });
 
   it("rejects invalid replacement without losing the current key and masks provider failures", async () => {
@@ -176,5 +176,21 @@ describe("OpenRouter validation", () => {
       .toMatchObject({ code: "OPENROUTER_VALIDATION_UNAVAILABLE" });
     expect(() => decodeOpenRouterVaultKeys('{"v1":"short"}', "v1"))
       .toThrowError("OPENROUTER_VAULT_UNAVAILABLE");
+  });
+
+  it("uses a redirect mode Workers accept and never follows a provider redirect", async () => {
+    // workerd throws for redirect: "error" before sending the request.
+    const workersFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      if (init?.redirect !== "follow" && init?.redirect !== "manual") {
+        throw new TypeError('Invalid redirect value, must be one of "follow" or "manual"');
+      }
+      return fixtureResponse(200);
+    });
+    await expect(validateOpenRouterKey(first, workersFetch as typeof fetch)).resolves.toBeUndefined();
+    const redirected = vi.fn(async () => new Response(null,
+      { status: 302, headers: { location: "https://example.invalid/key" } }));
+    await expect(validateOpenRouterKey(first, redirected as typeof fetch)).rejects
+      .toMatchObject({ code: "OPENROUTER_VALIDATION_UNAVAILABLE" });
+    expect(redirected).toHaveBeenCalledOnce();
   });
 });
