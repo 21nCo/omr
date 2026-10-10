@@ -1,0 +1,25 @@
+apps/web/src/lib/server/mcp-oauth.ts
+  s_1900bb15a7199a::t_88eaae11ca7c06 43
+docs/decisions/dependencies.md
+  s_1900bb15a7199a::t_d7054c9e505ba1 12
+scripts/superfunctions-origin.mjs
+  s_1900bb15a7199a::t_39f54538d42613 4-5,8-13,25,27,31-34,36-42
+scripts/superfunctions.test.mjs
+  s_1900bb15a7199a::t_3bc892e7e870e2 17-20,32-46,87-92,94
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0ba3e3f56b868502f074df194dff1c3cc45cbff9",
+  "prompts": {},
+  "sessions": {
+    "s_1900bb15a7199a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5e049926-ee38-44b5-a734-8c7117ee5ff7",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
