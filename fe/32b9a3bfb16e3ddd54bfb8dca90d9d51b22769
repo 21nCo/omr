@@ -1,0 +1,25 @@
+apps/web/src/lib/server/mcp-oauth.ts
+  s_ce12272281eb3b::t_5384084798f1e8 51
+apps/web/src/lib/server/remote-mcp-contract.test.ts
+  s_ce12272281eb3b::t_0116a5e285079b 662-672
+docs/v1-live-acceptance.md
+  s_ce12272281eb3b::t_e5159d1ceb6531 6-8,48,50-51,98-120,127,129,131,138-154,170-177
+superfunctions.lock.json
+  s_ce12272281eb3b::t_ba8e4023162931 7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fe32b9a3bfb16e3ddd54bfb8dca90d9d51b22769",
+  "prompts": {},
+  "sessions": {
+    "s_ce12272281eb3b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1d2376f8-4af3-4920-96da-dff6a042ab4c",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
