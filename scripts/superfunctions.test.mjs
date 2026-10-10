@@ -4,38 +4,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { isSuperFunctionsOrigin } from "./superfunctions-origin.mjs";
+import { superFunctionsOriginTransport } from "./superfunctions-origin.mjs";
 
 const script = fileURLToPath(new URL("./superfunctions.mjs", import.meta.url));
-// Stands in for `ssh -G`: github-21n is an alias for github.com; other names resolve to themselves.
-const sshConfig = {
-  "github-21n": { hostname: "github.com", port: "22" },
-  "github.com-work": { hostname: "GitHub.com", port: "22" },
-  "github-port": { hostname: "github.com", port: "2222" },
-  "github-elsewhere": { hostname: "attacker.example", port: "22" },
-};
-const resolved = [];
-function resolveSsh(destination) {
-  resolved.push(destination);
-  const host = destination.replace(/^git@/, "");
-  return sshConfig[host] ?? { hostname: host, port: "22" };
-}
 const accepted = [
-  "https://github.com/21nCo/superfunctions.git",
-  "https://github.com/21nCo/superfunctions",
-  "https://github.com/21nco/SuperFunctions/",
-  "https://github.com:443/21nCo/superfunctions.git",
-  "git@github.com:21nCo/superfunctions.git",
-  "git@github-21n:21nCo/superfunctions.git",
-  "ssh://git@github.com/21nCo/superfunctions.git",
-  "ssh://github.com/21nCo/superfunctions.git",
-  "ssh://git@github.com:22/21nCo/superfunctions.git",
-  "ssh://git@github-21n/21nCo/superfunctions.git",
-  "https://x-access-token:token@github.com/21nCo/superfunctions.git",
-  "github.com:21nCo/superfunctions.git",
-  "git@github.com-work:21nCo/superfunctions.git",
-  "https://github.com/21nCo/super-functions.git",
-  "git@github.com:21nCo/super-functions.git",
+  ["https://github.com/21nCo/superfunctions.git", "https"],
+  ["https://github.com/21nCo/superfunctions", "https"],
+  ["https://github.com/21nco/SuperFunctions/", "https"],
+  ["https://GitHub.com/21nCo/super-functions", "https"],
+  ["https://github.com:443/21nCo/superfunctions.git", "https"],
+  ["https://x-access-token@github.com/21nCo/superfunctions.git", "https"],
+  ["https://github.com/21nCo/super-functions.git", "https"],
+  ["git@github.com:21nCo/superfunctions.git", "ssh"],
+  ["git@GitHub.com:21nCo/superfunctions.git", "ssh"],
+  ["github.com:21nCo/super-functions", "ssh"],
+  ["git@github.com:21nCo/super-functions.git", "ssh"],
+  ["ssh://git@github.com/21nCo/superfunctions.git", "ssh"],
+  ["ssh://github.com/21nCo/superfunctions.git", "ssh"],
+  ["ssh://git@github.com:22/21nCo/superfunctions.git", "ssh"],
 ];
 const rejected = [
   "https://github.com/someone/superfunctions.git",
@@ -50,56 +36,41 @@ const rejected = [
   "https://gitlab.com/21nCo/superfunctions.git",
   "https://github.com.attacker.example/21nCo/superfunctions.git",
   "https://github.com@attacker.example/21nCo/superfunctions.git",
+  "https://x-access-token:token@github.com/21nCo/superfunctions.git",
+  "https://github.com/21nCo/superfunctions.git?ref=main",
   "http://github.com/21nCo/superfunctions.git",
   "git://github.com/21nCo/superfunctions.git",
   "ftp://github.com/21nCo/super-functions",
   "ftp://attacker.example/21nCo/superfunctions.git",
+  "https://github.com:8443/21nCo/superfunctions.git",
+  "https://github.com:22/21nCo/superfunctions.git",
   "ssh://git@evil.example/21nCo/superfunctions.git",
   "ssh://attacker@github.com/21nCo/superfunctions.git",
+  "ssh://git@github.com:2222/21nCo/superfunctions.git",
+  "ssh://git@github.com:443/21nCo/superfunctions.git",
   "git+ssh://git@github.com/21nCo/superfunctions.git",
   "git@evil.example:21nCo/superfunctions.git",
   "git@gitlab.com:21nCo/superfunctions.git",
   "attacker@github.com:21nCo/superfunctions.git",
-  "https://github.com:8443/21nCo/superfunctions.git",
-  "ssh://git@github.com:2222/21nCo/superfunctions.git",
+  "GIT@github.com:21nCo/superfunctions.git",
+  "git@github.com.attacker.example:21nCo/superfunctions.git",
+  // SSH aliases are rejected even when the user's SSH config maps them to github.com.
+  "git@github-21n:21nCo/superfunctions.git",
+  "github.com-work:21nCo/superfunctions.git",
+  "ssh://git@github-port:22/21nCo/superfunctions.git",
   "git@github-attacker.example:21nCo/superfunctions.git",
-  "github.com-evil.net:21nCo/superfunctions.git",
-  "git@github-port:21nCo/superfunctions.git",
-  "git@github-elsewhere:21nCo/superfunctions.git",
-  "ssh://git@github-elsewhere/21nCo/superfunctions.git",
   "git@-oProxyCommand=id:21nCo/superfunctions.git",
-  "-oProxyCommand=id:21nCo/superfunctions.git",
+  "ssh://-oProxyCommand=id/21nCo/superfunctions.git",
   "",
 ];
 
 describe("Super Functions origin guard", () => {
-  it.each(accepted)("accepts %s", (url) => {
-    expect(isSuperFunctionsOrigin(url, { resolveSsh })).toBe(true);
+  it.each(accepted)("accepts %s over %s", (url, transport) => {
+    expect(superFunctionsOriginTransport(url)).toBe(transport);
   });
 
   it.each(rejected)("rejects %j", (url) => {
-    expect(isSuperFunctionsOrigin(url, { resolveSsh })).toBe(false);
-  });
-
-  it("resolves the SSH destination git would use", () => {
-    resolved.length = 0;
-    isSuperFunctionsOrigin("git@github-21n:21nCo/superfunctions.git", { resolveSsh });
-    isSuperFunctionsOrigin("ssh://github.com/21nCo/superfunctions.git", { resolveSsh });
-    expect(resolved).toEqual(["git@github-21n", "github.com"]);
-  });
-
-  it("rejects an SSH remote when its destination cannot be resolved", () => {
-    const unavailable = () => {
-      throw new Error("spawnSync ssh ENOENT");
-    };
-    expect(isSuperFunctionsOrigin("git@github.com:21nCo/superfunctions.git", { resolveSsh: unavailable })).toBe(false);
-  });
-
-  it("never resolves a host that ssh would parse as an option", () => {
-    resolved.length = 0;
-    isSuperFunctionsOrigin("git@-oProxyCommand=id:21nCo/superfunctions.git", { resolveSsh });
-    isSuperFunctionsOrigin("ssh://-oProxyCommand=id/21nCo/superfunctions.git", { resolveSsh });
-    expect(resolved).toEqual([]);
+    expect(superFunctionsOriginTransport(url)).toBeNull();
   });
 
   describe("sf:status", () => {
@@ -108,27 +79,41 @@ describe("Super Functions origin guard", () => {
       for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 5 });
     });
 
-    function status(origin, config = []) {
+    // Hermetic: no user or system git config and no inherited git SSH overrides.
+    function status(origin, { config = [], env = {} } = {}) {
       const root = mkdtempSync(join(tmpdir(), "omr-sf-origin-"));
       roots.push(root);
-      execFileSync("git", ["init", "--quiet", root]);
-      execFileSync("git", ["-C", root, "remote", "add", "origin", origin]);
-      for (const [key, value] of config) execFileSync("git", ["-C", root, "config", key, value]);
+      const base = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+      delete base.GIT_SSH_COMMAND;
+      delete base.GIT_SSH;
+      execFileSync("git", ["init", "--quiet", root], { env: base });
+      execFileSync("git", ["-C", root, "remote", "add", "origin", origin], { env: base });
+      for (const [key, value] of config) execFileSync("git", ["-C", root, "config", key, value], { env: base });
       return spawnSync(process.execPath, [script, "status"], {
         encoding: "utf8",
-        env: { ...process.env, OMR_SUPERFUNCTIONS_WORKTREE: root },
+        env: { ...base, ...env, OMR_SUPERFUNCTIONS_WORKTREE: root },
       });
     }
 
-    // An empty checkout fails at the first package manifest only after its origin passes.
+    function expectOriginPassed(result) {
+      expect(result.status).not.toBe(0);
+      // An empty checkout fails at the first package manifest only after its origin passes.
+      expect(result.stderr).toContain("Missing linked package manifest");
+      expect(result.stderr).not.toContain("Unexpected Super Functions");
+    }
+
+    function expectRefused(result, message) {
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(message);
+      expect(result.stderr).not.toContain("Missing linked package manifest");
+    }
+
     it.each([
       "https://github.com/21nCo/superfunctions.git",
       "https://github.com/21nCo/super-functions.git",
+      "git@github.com:21nCo/superfunctions.git",
     ])("passes the origin check for %s", (origin) => {
-      const result = status(origin);
-      expect(result.status).not.toBe(0);
-      expect(result.stderr).toContain("Missing linked package manifest");
-      expect(result.stderr).not.toContain("Unexpected Super Functions origin");
+      expectOriginPassed(status(origin));
     });
 
     it.each([
@@ -136,22 +121,36 @@ describe("Super Functions origin guard", () => {
       "https://attacker.example/21nCo/superfunctions.git",
       "file:///21nCo/superfunctions.git",
       "https://github.com:8443/21nCo/superfunctions.git",
-      // Uses the real `ssh -G`, which resolves an unconfigured alias to itself.
       "git@github-attacker.example:21nCo/superfunctions.git",
     ])("refuses %s before reading packages", (origin) => {
-      const result = status(origin);
-      expect(result.status).not.toBe(0);
-      expect(result.stderr).toContain(`Unexpected Super Functions origin: ${origin}`);
-      expect(result.stderr).not.toContain("Missing linked package manifest");
+      expectRefused(status(origin), `Unexpected Super Functions origin: ${origin}`);
     });
 
     it("checks the URL after insteadOf rewriting", () => {
-      const result = status("https://github.com/21nCo/superfunctions.git", [
-        ["url.https://attacker.example/.insteadOf", "https://github.com/"],
-      ]);
-      expect(result.status).not.toBe(0);
-      expect(result.stderr).toContain("Unexpected Super Functions origin: https://attacker.example/21nCo/superfunctions.git");
-      expect(result.stderr).not.toContain("Missing linked package manifest");
+      const result = status("https://github.com/21nCo/superfunctions.git", {
+        config: [["url.https://attacker.example/.insteadOf", "https://github.com/"]],
+      });
+      expectRefused(result, "Unexpected Super Functions origin: https://attacker.example/21nCo/superfunctions.git");
+    });
+
+    it.each([
+      ["GIT_SSH_COMMAND", { env: { GIT_SSH_COMMAND: "ssh -o HostName=attacker.example" } }],
+      ["GIT_SSH", { env: { GIT_SSH: "/tmp/attacker-ssh" } }],
+      ["core.sshCommand", { config: [["core.sshCommand", "ssh -o HostName=attacker.example"]] }],
+    ])("refuses an SSH origin when %s selects a custom SSH program", (source, options) => {
+      expectRefused(
+        status("git@github.com:21nCo/superfunctions.git", options),
+        `Unexpected Super Functions SSH command: ${source}=`,
+      );
+    });
+
+    it("ignores git SSH settings for an HTTPS origin", () => {
+      expectOriginPassed(
+        status("https://github.com/21nCo/superfunctions.git", {
+          config: [["core.sshCommand", "ssh -o HostName=attacker.example"]],
+          env: { GIT_SSH_COMMAND: "ssh -o HostName=attacker.example" },
+        }),
+      );
     });
   });
 });

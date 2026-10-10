@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isSuperFunctionsOrigin } from "./superfunctions-origin.mjs";
+import { superFunctionsOriginTransport } from "./superfunctions-origin.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const lockPath = join(repositoryRoot, "superfunctions.lock.json");
@@ -25,6 +25,21 @@ function capture(program, args, cwd = superfunctionsRoot) {
   return run(program, args, { cwd, capture: true }).trim();
 }
 
+/** The SSH program git would select over plain `ssh`, or "" when none is configured. */
+function configuredSshCommand() {
+  for (const variable of ["GIT_SSH_COMMAND", "GIT_SSH"]) {
+    if (process.env[variable]) return `${variable}=${process.env[variable]}`;
+  }
+  try {
+    const value = capture("git", ["config", "--get", "core.sshCommand"]);
+    return value === "" ? "" : `core.sshCommand=${value}`;
+  } catch (error) {
+    // `git config --get` exits 1 when the key is unset.
+    if (error.status === 1) return "";
+    throw error;
+  }
+}
+
 function assertWorktree() {
   if (!existsSync(join(superfunctionsRoot, ".git"))) {
     throw new Error(
@@ -32,10 +47,18 @@ function assertWorktree() {
     );
   }
 
-  // get-url applies url.<base>.insteadOf, so this is the endpoint git actually fetches from.
+  // get-url applies url.<base>.insteadOf, so this is the URL git actually fetches from.
   const repository = capture("git", ["remote", "get-url", "origin"]);
-  if (!isSuperFunctionsOrigin(repository)) {
+  const transport = superFunctionsOriginTransport(repository);
+  if (transport === null) {
     throw new Error(`Unexpected Super Functions origin: ${repository} (expected ${lock.repository})`);
+  }
+  // A custom SSH program can send an SSH origin anywhere, so only the default ssh is allowed.
+  const sshCommand = transport === "ssh" ? configuredSshCommand() : "";
+  if (sshCommand !== "") {
+    throw new Error(
+      `Unexpected Super Functions SSH command: ${sshCommand} (use the HTTPS origin ${lock.repository} instead)`,
+    );
   }
 
   for (const dependency of lock.packages) {
