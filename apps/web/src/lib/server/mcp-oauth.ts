@@ -48,7 +48,7 @@ function page(content: string, status = 200, cookie?: string): Response {
     "x-content-type-options": "nosniff",
   });
   if (cookie) headers.set("set-cookie", cookie);
-  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize OMR MCP</title><style>body{font:16px system-ui;max-width:42rem;margin:4rem auto;padding:0 1rem;line-height:1.5}button,select{font:inherit;padding:.5rem}select{max-width:100%}code{overflow-wrap:anywhere}fieldset{margin:1rem 0;min-width:0}button{cursor:pointer}</style><main>${content}</main></html>`, {
+  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize OMR MCP</title><style>body{font:16px system-ui;max-width:42rem;margin:4rem auto;padding:0 1rem;line-height:1.5}button,select{font:inherit;padding:.5rem}select{max-width:100%}main{overflow-wrap:anywhere}fieldset{margin:1rem 0;min-width:0}button{cursor:pointer}</style><main>${content}</main></html>`, {
     status,
     headers,
   });
