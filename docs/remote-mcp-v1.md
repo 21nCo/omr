@@ -1,9 +1,14 @@
 # Remote MCP host setup (nonproduction)
 
 The configured canonical endpoint is
-`https://omr-web-staging.21n.workers.dev/mcp`. It is a Streamable HTTP endpoint.
+`https://omr-staging.21n.dev/mcp`. It is a Streamable HTTP endpoint.
 Use that complete URL, including `/mcp`, for each host. This configuration is
 for staging only; it does not enable a production OAuth deployment.
+Staging runs in the `21n-dev` Cloudflare account and is deployed by CI on
+pushes to `dev`. The Worker also answers on
+`https://omr-web-staging.21n-dev.workers.dev`, but OAuth issuer, consent, and
+management origin checks are pinned to `OMR_PUBLIC_ORIGIN`, so hosts should use
+the custom domain above.
 
 OMR's OAuth server advertises its authorization and token endpoints through
 `/.well-known/oauth-authorization-server`. A host starting from `/mcp` receives
@@ -37,7 +42,7 @@ access token, which expires after one hour.
     "servers": {
       "omr-staging": {
         "type": "http",
-        "url": "https://omr-web-staging.21n.workers.dev/mcp"
+        "url": "https://omr-staging.21n.dev/mcp"
       }
     }
   }
@@ -52,7 +57,7 @@ access token, which expires after one hour.
   {
     "mcpServers": {
       "omr-staging": {
-        "url": "https://omr-web-staging.21n.workers.dev/mcp"
+        "url": "https://omr-staging.21n.dev/mcp"
       }
     }
   }
@@ -72,7 +77,7 @@ For hosts that can attach a private `Authorization` header but cannot perform
 OAuth discovery, create a separate `mcp_remote` device grant:
 
 ```sh
-omr login --url https://omr-web-staging.21n.workers.dev --kind mcp_remote \
+omr login --url https://omr-staging.21n.dev --kind mcp_remote \
   --capabilities tools:discover,tools:read --profile host
 ```
 
@@ -115,7 +120,8 @@ To withdraw staging host access, revoke affected OMR clients in the two
 management pages, including any manual bearer grants. For an OAuth deployment
 rollback, remove the staging `OAUTH_KV` binding and `OMR_PUBLIC_ORIGIN` variable
 from `apps/web/wrangler.jsonc`, build, and deploy that configuration with the
-project-local `wrangler deploy --env staging`. Removing bindings from a local
+project-local `wrangler deploy --env staging` (authenticated to the `21n-dev`
+account), or merge it to `dev` so the staging workflow deploys it. Removing bindings from a local
 file alone does not change the deployed Worker. The previous `origin/dev`
 Worker already has both settings, so redeploying it does not disable OAuth.
 Confirm OAuth metadata and token routes return 503 and `/mcp` no longer

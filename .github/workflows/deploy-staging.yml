@@ -1,0 +1,56 @@
+name: Deploy staging
+
+# Deploys the nonproduction `omr-web-staging` Worker to the 21n-dev Cloudflare
+# account. Pull requests are already built and type-checked by vault-contract.yml.
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  deploy-staging:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: omr
+    env:
+      OMR_SUPERFUNCTIONS_WORKTREE: ${{ github.workspace }}/super-functions
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEV_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_DEV_ACCOUNT_ID }}
+    steps:
+      - name: Check out OMR
+        uses: actions/checkout@v4
+        with:
+          path: omr
+          persist-credentials: false
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: omr/package-lock.json
+      - name: Check out locked Super Functions revision
+        run: |
+          locked_sha="$(node -p "require('./superfunctions.lock.json').baseSha")"
+          git clone https://github.com/21nCo/super-functions.git "$OMR_SUPERFUNCTIONS_WORKTREE"
+          git -C "$OMR_SUPERFUNCTIONS_WORKTREE" switch -c omr/upstream "$locked_sha"
+          test "$(git -C "$OMR_SUPERFUNCTIONS_WORKTREE" rev-parse HEAD)" = "$locked_sha"
+      - name: Install and link locked dependencies
+        run: |
+          npm ci --ignore-scripts
+          npm run sf:install
+          npm run sf:build
+          npm run sf:link
+          npm run sf:smoke
+      - name: Build
+        run: npm run build
+      - name: Deploy omr-web-staging to 21n-dev
+        working-directory: omr/apps/web
+        run: npx wrangler deploy --env staging
