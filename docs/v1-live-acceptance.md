@@ -100,7 +100,7 @@ readable.
 Environment: the task branch rebased onto `origin/dev`
 `6a43e8f5b6a663f299b8b13fe0d69eb974f940ca` (staging moved to the `21n-dev`
 Cloudflare account), Super Functions `omr/upstream` fast-forwarded to
-`faa3042940e76d0775d38fd0d1cf712927cf6234` (21nCo/super-functions#237) and
+`faa3042940e76d0775d38fd0d1cf712927cf6234` (21nCo/superfunctions#237) and
 `superfunctions.lock.json` updated to it. Node 22.22.1 on macOS, Wrangler
 4.136.2 with local workerd, Docker PostgreSQL 16.15, and Aside CLI
 1.26.1010.1739 driving the personal `u0` profile. All local resources were
@@ -124,7 +124,7 @@ provider resource was created.
 | --- | --- |
 | The vault validator passed `redirect: "error"` to `fetch`. Workers reject that mode, so every save and check returned `OPENROUTER_VALIDATION_UNAVAILABLE` and no key could be saved. | Fixed here: `redirect: "manual"`; a 3xx is unavailable and never followed. The regression test models the workerd rejection. |
 | `/device` overflowed a 375 px viewport: workspace names widened the grid track and clipped all three controls. | Fixed here with zero-minimum grid tracks; the redeployed Preview measured 375 px with no clipped controls. |
-| PlugFn `HttpClient` forwards `redirect` to `fetch`. `plugfn/providers/src/shared/rest-action.ts` and Slack actions send `redirect: "error"`, so GitHub, Notion and Slack actions throw on Workers. | Fixed upstream in `faa3042940e76d0775d38fd0d1cf712927cf6234` (21nCo/super-functions#237); `superfunctions.lock.json` now pins it. Verified in local workerd. Deployed provider journeys are still unrun. |
+| PlugFn `HttpClient` forwards `redirect` to `fetch`. `plugfn/providers/src/shared/rest-action.ts` and Slack actions send `redirect: "error"`, so GitHub, Notion and Slack actions throw on Workers. | Fixed upstream in `faa3042940e76d0775d38fd0d1cf712927cf6234` (21nCo/superfunctions#237); `superfunctions.lock.json` now pins it. Verified in local workerd. Deployed provider journeys are still unrun. |
 | A deployed Preview reaching Railway directly (`DATABASE_URL` or `OPENROUTER_VAULT_DATABASE_URL`) failed or returned 500 intermittently. The same code via Hyperdrive, and via local workerd, was reliable. | Deployment checklist: bind `HYPERDRIVE` and `OPENROUTER_VAULT_HYPERDRIVE` and leave both direct URLs unset on deployed Workers. The runtime prefers Hyperdrive but still accepts a direct URL, which local workerd needs. |
 | The 21n Cloudflare account is at its 25-Hyperdrive limit. A Preview cannot hold both the primary binding and the dedicated cache-disabled vault binding. | Superseded. The owner clarified that `21n` is the production account. OMR nonproduction resources belong in `21n-dev`, which has capacity, but this host's Wrangler identity cannot reach `21n-dev` (`code: 10000`). `--caching-disabled` read back `caching.disabled=true` with the vault login on the single disposable configuration on 2026-10-09. |
 | Five PostgreSQL fixtures assume sub-100 ms database deadlines. | Test-only; they pass locally. Run them near the database or adjust the fixture budgets. |

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "mode": "local-worktree",
-  "repository": "https://github.com/21nCo/super-functions.git",
+  "repository": "https://github.com/21nCo/superfunctions.git",
   "branch": "omr/upstream",
   "baseRef": "origin/omr/upstream",
   "baseSha": "faa3042940e76d0775d38fd0d1cf712927cf6234",

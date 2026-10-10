@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isSuperFunctionsOrigin } from "./superfunctions-origin.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const lockPath = join(repositoryRoot, "superfunctions.lock.json");
@@ -32,8 +33,8 @@ function assertWorktree() {
   }
 
   const repository = capture("git", ["config", "--get", "remote.origin.url"]);
-  if (!repository.endsWith("/21nCo/super-functions.git")) {
-    throw new Error(`Unexpected Super Functions origin: ${repository}`);
+  if (!isSuperFunctionsOrigin(repository)) {
+    throw new Error(`Unexpected Super Functions origin: ${repository} (expected ${lock.repository})`);
   }
 
   for (const dependency of lock.packages) {
