@@ -659,6 +659,17 @@ describe("remote-mcp-contract", () => {
     expect(fixture.apiRequests).toHaveLength(0);
   });
 
+  it("wraps long OAuth identifiers so consent and management pages fit a 375px screen", async () => {
+    const manage = await handleMcpOAuth(event(new Request(`${origin}/oauth/manage`), kvFixture()));
+    expect(manage.status).toBe(200);
+    const body = await manage.text();
+    expect(body).toMatch(/Workspace: <code>workspace_[^<]+<\/code>/);
+    expect(body).toMatch(/<style>[^<]*code\{overflow-wrap:anywhere\}/);
+    // A fieldset defaults to min-content width, which would let the workspace select overflow.
+    expect(body).toMatch(/<style>[^<]*select\{max-width:100%\}/);
+    expect(body).toMatch(/<style>[^<]*fieldset\{[^}]*min-width:0/);
+  });
+
   it("requires a same-origin CSRF form to revoke an OAuth client", async () => {
     const kv = kvFixture();
     const manage = await handleMcpOAuth(event(new Request(`${origin}/oauth/manage`), kv));

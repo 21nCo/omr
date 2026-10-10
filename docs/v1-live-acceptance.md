@@ -3,7 +3,9 @@
 **Decision: HOLD. Do not release or roll forward to production.** This record
 covers the integrated `origin/dev` baseline
 `c83378bac63a7b7195b3956128befff980a13260` (runs on 2026-10-06 and
-2026-10-09) plus the two OMR-15 fixes below. It does not authorize production
+2026-10-09), then `6a43e8f5b6a663f299b8b13fe0d69eb974f940ca` with Super
+Functions `omr/upstream` `faa3042940e76d0775d38fd0d1cf712927cf6234` (run on
+2026-10-10), plus the OMR-15 fixes below. It does not authorize production
 deployment or v1-ready provider exposure. OMR-1 remains In Progress. Keep the
 GitHub, Linear, Slack, Notion, vault, direct playground, and assisted
 playground rollout switches disabled in staging and production. The rollback
@@ -43,10 +45,10 @@ environment described below; none is inferred from earlier merges.
 | OMR-5 | [#7](https://github.com/21nCo/omr/pull/7) `ced728124307a177982777029365fda2b9b44083` | macOS and Linux archive install, device login, profiles, workspace denial, reinstall, logout with remote revocation and uninstall passed. | Windows not run. |
 | OMR-6 | [#8](https://github.com/21nCo/omr/pull/8) `c6f3bf4fa586eaa3bdadc5be68d4163479977cb7` | Preview `/mcp` bearer, Origin, OAuth 2.1/PKCE, refresh and revocation passed; Codex CLI and Claude Code connected. | Tool calls against connected providers unrun. |
 | OMR-7 | [#9](https://github.com/21nCo/omr/pull/9) `e2d89acabccb5b31bd2c4dc5315fbadd485d9395` | `omr-mcp` stdio passed in Codex CLI and Claude Code (macOS) and initialized on Linux. | Windows not run. |
-| OMR-8 | [#10](https://github.com/21nCo/omr/pull/10) `07dba8a9c294d1246f37044ff3488811ca222805` | Not exercised: no Preview-registered GitHub OAuth application. | PlugFn `redirect: "error"` defect blocks actions on Workers. |
+| OMR-8 | [#10](https://github.com/21nCo/omr/pull/10) `07dba8a9c294d1246f37044ff3488811ca222805` | Not exercised: no Preview-registered GitHub OAuth application. 2026-10-10: the PlugFn REST action dispatches in local workerd after the lock update. | Connected journeys unrun. |
 | OMR-9 | [#11](https://github.com/21nCo/omr/pull/11) `05353c58a5eaa711b00774d0a39ebf1cb6e24a82` | Not exercised: no Linear OAuth application. | Sandbox write, intent fence and reconciliation unrun. |
-| OMR-10 | [#12](https://github.com/21nCo/omr/pull/12) `068dd99fb526814ae0b4f733fd2d95a800a9d845` | Not exercised: no Slack OAuth application. | PlugFn `redirect: "error"` defect blocks actions on Workers. |
-| OMR-11 | [#13](https://github.com/21nCo/omr/pull/13) `a4023b6f54d95e3bf6587c42f78c50ffc80f1f5a` | Not exercised: no Notion OAuth application. | PlugFn `redirect: "error"` defect blocks actions on Workers. |
+| OMR-10 | [#12](https://github.com/21nCo/omr/pull/12) `068dd99fb526814ae0b4f733fd2d95a800a9d845` | Not exercised: no Slack OAuth application. 2026-10-10: `files.upload` dispatches in local workerd after the lock update. | Connected journeys unrun. |
+| OMR-11 | [#13](https://github.com/21nCo/omr/pull/13) `a4023b6f54d95e3bf6587c42f78c50ffc80f1f5a` | Not exercised: no Notion OAuth application. 2026-10-10: Notion REST actions dispatch in local workerd after the lock update. | No Notion integration exists. |
 | OMR-12 | [#14](https://github.com/21nCo/omr/pull/14) `7367b542b0b36d12c63709a4fcbe6bb142455657` | Defect found and fixed (vault validation). Restricted grants, live-key journey and staged rotation passed; disabled rollout observed on the Preview. | Deployed journey through the dedicated vault Hyperdrive unrun (account limit). |
 | OMR-13 | [#15](https://github.com/21nCo/omr/pull/15) `c07514cfed00ce83f6cbc0498059633aef68e5d4` | Preview playground showed the truthful empty state with the tool selector disabled. | Read/write and approval journeys need a connected provider. |
 | OMR-14 | [#16](https://github.com/21nCo/omr/pull/16) `c83378bac63a7b7195b3956128befff980a13260` | Assisted quota and binding PostgreSQL suites passed. | Deployed assisted turn needs the vault binding and a connected provider. |
@@ -93,35 +95,63 @@ Rolling the active ID back to v1 still decrypted the v2 row. Removing v2 failed
 closed with 503 `OPENROUTER_VAULT_UNAVAILABLE`, while masked status remained
 readable.
 
+## 2026-10-10 run
+
+Environment: the task branch rebased onto `origin/dev`
+`6a43e8f5b6a663f299b8b13fe0d69eb974f940ca` (staging moved to the `21n-dev`
+Cloudflare account), Super Functions `omr/upstream` fast-forwarded to
+`faa3042940e76d0775d38fd0d1cf712927cf6234` (21nCo/super-functions#237) and
+`superfunctions.lock.json` updated to it. Node 22.22.1 on macOS, Wrangler
+4.136.2 with local workerd, Docker PostgreSQL 16.15, and Aside CLI
+1.26.1010.1739 driving the personal `u0` profile. All local resources were
+named `omr15-20261010` and removed afterwards. No Railway, Cloudflare or
+provider resource was created.
+
+| Gate | Result | Observation |
+| --- | --- | --- |
+| `local-validation` | Passed | `npm test` passed 6 Node checks and 945 Vitest tests, with the 88 PostgreSQL tests skipped. `npm run typecheck`, `npm run build` and `npm run sf:smoke` passed. The PlugFn redirect tests passed in Super Functions (10/10). |
+| `plugfn-workerd` | Passed in local workerd, not deployed | A standalone Worker bundling the linked PlugFn ran in workerd. As a control, a raw `fetch` with `redirect: "error"` threw the workerd `Invalid redirect value` TypeError. Through `FetchHttpClient`, GitHub `pulls.get` returned a public pull request. Notion `dataSources.list` and `search` reached Notion and returned HTTP 401 without a token. Slack `files.upload` reached Slack and failed its `ok: true` schema check without a token. A GitHub 302 was rejected as `Redirect blocked` and was not followed. |
+| `live-database` | Local only | All 22 migrations applied in order to a fresh PostgreSQL 16.15 container and then re-applied without error. All 15 PostgreSQL suites passed (122/122). Railway was not repeated, because no database code changed since 2026-10-09. The final exact-head run still needs Railway. |
+| `remote-mcp-oauth` | Passed in local workerd, not deployed | The 2026-10-09 PKCE script ran against the built Worker in local workerd over HTTPS and passed. Authorization without PKCE, or with `plain`, was refused; an unknown scope returned 400; and an unauthenticated user was sent to login. Cross-origin and foreign-workspace consent returned 403, and a wrong verifier returned `invalid_grant`. The rest passed: exchange, `tools/list`, refresh, `tools/list` again, cross-origin revoke denial, revoke, then 401 on `/mcp` and `invalid_grant` on refresh. Code replay and consent denial returned their OAuth errors. |
+| `authenticated-browser` | Passed for narrow screens, local only | Aside `u0` (`aside repl`) on `https://localhost:8788`, with the self-signed certificate accepted for `localhost` only. A UI sign-out then a keyboard sign-in (type email, Tab, type password, Enter) reached `/app`. Measured in same-origin 375 px frames: `/login` signed out and after a wrong password (`role="alert"` "Invalid email or password"), `/app`, `/app/clients`, `/app/settings`, `/app/playground` and `/device` all had `scrollWidth` equal to the frame width and no clipped controls. `/oauth/manage` sends `frame-ancestors 'none'`, so the management and consent pages were measured from their served markup in a 375 px `srcdoc` frame. With one active grant, management measured 815 px wide. Consent with a long redirect URI measured 434 px, with its workspace select clipped. Both are fixed below and re-measured at 375 px. |
+| `cloudflare-preview` | Blocked | The local Wrangler OAuth login reaches only the `21n` account. Listing secrets for `omr-web-staging` on `21n-dev` returned `Authentication error [code: 10000]`. Per owner direction, no OMR resource was created on the `21n` production account. |
+| `provider-sandboxes` | Blocked | Linear and Slack nonproduction OAuth apps exist, but their client secrets are not available on this host. Their callbacks only match the staging origins, which need `21n-dev` access. The GitHub OAuth app only allows `omr-web-staging.21n.workers.dev` on the production account. No Notion integration exists. |
+| `external-host-platform` | Not repeated | No host or packaging change since 2026-10-09. Windows remains an explicit platform gap. |
+
 ## Defects and follow-ups
 
 | Finding | Status |
 | --- | --- |
 | The vault validator passed `redirect: "error"` to `fetch`. Workers reject that mode, so every save and check returned `OPENROUTER_VALIDATION_UNAVAILABLE` and no key could be saved. | Fixed here: `redirect: "manual"`; a 3xx is unavailable and never followed. The regression test models the workerd rejection. |
 | `/device` overflowed a 375 px viewport: workspace names widened the grid track and clipped all three controls. | Fixed here with zero-minimum grid tracks; the redeployed Preview measured 375 px with no clipped controls. |
-| PlugFn `HttpClient` forwards `redirect` to `fetch`. `plugfn/providers/src/shared/rest-action.ts` and Slack actions send `redirect: "error"`, so GitHub, Notion and Slack actions throw on Workers. | Open. Needs a reviewed `omr/upstream` fix and lock update before provider journeys. |
+| PlugFn `HttpClient` forwards `redirect` to `fetch`. `plugfn/providers/src/shared/rest-action.ts` and Slack actions send `redirect: "error"`, so GitHub, Notion and Slack actions throw on Workers. | Fixed upstream in `faa3042940e76d0775d38fd0d1cf712927cf6234` (21nCo/super-functions#237); `superfunctions.lock.json` now pins it. Verified in local workerd. Deployed provider journeys are still unrun. |
 | A deployed Preview reaching Railway directly (`DATABASE_URL` or `OPENROUTER_VAULT_DATABASE_URL`) failed or returned 500 intermittently. The same code via Hyperdrive, and via local workerd, was reliable. | Deployed Workers must use `HYPERDRIVE` and `OPENROUTER_VAULT_HYPERDRIVE`; direct URLs are for local workerd only. |
-| The 21n Cloudflare account is at its 25-Hyperdrive limit. A Preview cannot hold both the primary binding and the dedicated cache-disabled vault binding. | Open. An owner must free capacity or raise the limit. `--caching-disabled` read back `caching.disabled=true` with the vault login on the single disposable configuration. |
+| The 21n Cloudflare account is at its 25-Hyperdrive limit. A Preview cannot hold both the primary binding and the dedicated cache-disabled vault binding. | Superseded. The owner clarified that `21n` is the production account. OMR nonproduction resources belong in `21n-dev`, which has capacity, but this host's Wrangler identity cannot reach `21n-dev` (`code: 10000`). `--caching-disabled` read back `caching.disabled=true` with the vault login on the single disposable configuration on 2026-10-09. |
 | Five PostgreSQL fixtures assume sub-100 ms database deadlines. | Test-only; they pass locally. Run them near the database or adjust the fixture budgets. |
+| `/oauth/manage` and `/oauth/authorize` overflowed a 375 px screen. An unbroken workspace ID widened management to 815 px. On consent, a long redirect URI and the workspace select widened the page to 434 px, because a `<fieldset>` defaults to min-content width. | Fixed here: `<code>` values wrap anywhere, the select is limited to its container, and the fieldset has a zero minimum width. Both pages re-measured at 375 px with no clipped controls. A contract test covers the served stylesheet. |
 | After team creation, focus moves to `<body>`. | Minor accessibility follow-up. |
 
 ## Remaining gates and next run
 
 OMR-15 stays open until these pass at one exact head with cleanup readback:
 
-1. Owner actions: register nonproduction GitHub, Linear, Slack and Notion OAuth
-   applications whose redirect URI can target the disposable Preview origin.
-   Provide their client secrets privately. Free two Hyperdrive slots or raise
-   the account limit. Obtain a Windows host. Grant the Wrangler token
-   observability read access, or provide another way to read Preview logs.
-2. Land the PlugFn redirect fix on `omr/upstream` through its own review, then
-   update `superfunctions.lock.json`.
-3. Repeat the database, Preview, browser, host and recovery matrix. Add each
-   provider's scoped connect/select/refresh/reconnect/disconnect, one read and
-   one approved write, denial, revocation and uncertain-effect journeys. Also
-   run the deployed vault and assisted journeys through dedicated Hyperdrive
-   bindings, Windows install/upgrade/uninstall, and `/login` and
-   `/oauth/manage` at 375 px.
+1. Owner actions: give this host's project-local Wrangler access to the
+   `21n-dev` account, for example by adding the Wrangler user to `21n-dev`
+   or providing a scoped `21n-dev` API token. Make the Linear and Slack
+   nonproduction client secrets, and a GitHub OAuth app whose callback
+   matches a `21n-dev` origin, available to the acceptance Worker. Create a
+   Notion nonproduction integration. Grant observability read access on
+   `21n-dev`, or provide another way to read Preview logs.
+2. Agree how acceptance may use the exact-match staging callbacks without
+   overwriting shared staging, or register a callback for a dedicated
+   acceptance Preview origin on `21n-dev`.
+3. Repeat the Railway database, Preview, browser, host and recovery matrix at
+   that head. Add each provider's scoped connect/select/refresh/reconnect/
+   disconnect, one read and one approved write, denial, revocation and
+   uncertain-effect journeys. Also run the deployed vault and assisted
+   journeys through dedicated Hyperdrive bindings, and repeat the 375 px
+   checks on the deployed origin. Windows install/upgrade/uninstall stays an
+   explicit platform gap unless a Windows host is provided.
 
 Use Composio CLI and Railway first, project-local Wrangler second, and Aside
 Browser third. Delete every disposable Railway and Cloudflare resource and read
@@ -137,3 +167,11 @@ returned `2006`. The CA certificate and KV namespace are absent from their
 listings. The local Docker PostgreSQL and Linux containers were removed, the
 macOS prefix holds no `omr` or `omr-mcp`, and every test grant was revoked
 before the database was deleted.
+
+## Cleanup readback (2026-10-10)
+
+The `omr15-20261010-pg` container was removed and `docker ps -a` lists no
+`omr15` container. Both local workerd processes were stopped, and the local
+KV/cache state and generated secrets were deleted. The OAuth grant left
+active for the narrow-screen check was deleted with the database. No
+Railway, Cloudflare or provider resource was created in this run.
