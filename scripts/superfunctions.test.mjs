@@ -14,6 +14,10 @@ const accepted = [
   "git@github.com:21nCo/superfunctions.git",
   "git@github-21n:21nCo/superfunctions.git",
   "ssh://git@github.com/21nCo/superfunctions.git",
+  "ssh://github.com/21nCo/superfunctions.git",
+  "https://x-access-token:token@github.com/21nCo/superfunctions.git",
+  "github.com:21nCo/superfunctions.git",
+  "git@github.com-work:21nCo/superfunctions.git",
   "https://github.com/21nCo/super-functions.git",
   "git@github.com:21nCo/super-functions.git",
 ];
@@ -25,6 +29,21 @@ const rejected = [
   "git@github.com:someone/super-functions.git",
   "/srv/mirrors/21nCo/superfunctions.git",
   "file:///srv/mirrors/21nCo/superfunctions.git",
+  "file:///21nCo/superfunctions.git",
+  "https://attacker.example/21nCo/superfunctions.git",
+  "https://gitlab.com/21nCo/superfunctions.git",
+  "https://github.com.attacker.example/21nCo/superfunctions.git",
+  "https://github.com@attacker.example/21nCo/superfunctions.git",
+  "http://github.com/21nCo/superfunctions.git",
+  "git://github.com/21nCo/superfunctions.git",
+  "ftp://github.com/21nCo/super-functions",
+  "ftp://attacker.example/21nCo/superfunctions.git",
+  "ssh://git@evil.example/21nCo/superfunctions.git",
+  "ssh://attacker@github.com/21nCo/superfunctions.git",
+  "git+ssh://git@github.com/21nCo/superfunctions.git",
+  "git@evil.example:21nCo/superfunctions.git",
+  "git@gitlab.com:21nCo/superfunctions.git",
+  "attacker@github.com:21nCo/superfunctions.git",
   "",
 ];
 
@@ -65,12 +84,14 @@ describe("Super Functions origin guard", () => {
       expect(result.stderr).not.toContain("Unexpected Super Functions origin");
     });
 
-    it("refuses a foreign repository before reading packages", () => {
-      const result = status("https://github.com/someone/superfunctions.git");
+    it.each([
+      "https://github.com/someone/superfunctions.git",
+      "https://attacker.example/21nCo/superfunctions.git",
+      "file:///21nCo/superfunctions.git",
+    ])("refuses %s before reading packages", (origin) => {
+      const result = status(origin);
       expect(result.status).not.toBe(0);
-      expect(result.stderr).toContain(
-        "Unexpected Super Functions origin: https://github.com/someone/superfunctions.git",
-      );
+      expect(result.stderr).toContain(`Unexpected Super Functions origin: ${origin}`);
       expect(result.stderr).not.toContain("Missing linked package manifest");
     });
   });

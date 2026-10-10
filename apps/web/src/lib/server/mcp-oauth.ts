@@ -40,6 +40,7 @@ function html(value: string): string {
   })[character]!);
 }
 
+/** Render an OAuth HTML page with no-store caching, a strict CSP and an optional CSRF cookie. */
 function page(content: string, status = 200, cookie?: string): Response {
   const headers = new Headers({
     "content-type": "text/html; charset=utf-8",

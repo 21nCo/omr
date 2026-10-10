@@ -9,7 +9,7 @@ OMR develops against a dedicated local worktree of `21nCo/superfunctions` instea
 
 Generic fixes discovered while building OMR belong in the Super Functions worktree. OMR-specific authorization, product state, UI, and policy remain in this repository.
 
-The committed lock records the expected repository, minimum required upstream commit, and package-to-path mapping. The worktree's `origin` must be `21nCo/superfunctions` over HTTPS or SSH; clones that still use the pre-rename `21nCo/super-functions` remote are also accepted, and any other repository is rejected. Check out that commit (or a descendant on `omr/upstream`) in the separate worktree. `.superfunctions.local.json` is generated locally and records the currently linked worktree state; it is intentionally ignored.
+The committed lock records the expected repository, minimum required upstream commit, and package-to-path mapping. The worktree's `origin` must be `21nCo/superfunctions` on GitHub: `https://github.com/`, `ssh://[git@]github.com/`, or scp-style `[git@]github.com:` and `[git@]github-<name>:` / `[git@]github.com-<name>:` SSH aliases (your SSH config must map an alias to github.com). Clones that still use the pre-rename `21nCo/super-functions` remote are also accepted. Any other host, scheme (`http`, `git`, `file`, `ftp`, ...), local path, or repository is rejected before packages are read or built. Check out that commit (or a descendant on `omr/upstream`) in the separate worktree. `.superfunctions.local.json` is generated locally and records the currently linked worktree state; it is intentionally ignored.
 
 Use:
 
