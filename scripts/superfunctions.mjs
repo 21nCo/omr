@@ -32,7 +32,8 @@ function assertWorktree() {
     );
   }
 
-  const repository = capture("git", ["config", "--get", "remote.origin.url"]);
+  // get-url applies url.<base>.insteadOf, so this is the endpoint git actually fetches from.
+  const repository = capture("git", ["remote", "get-url", "origin"]);
   if (!isSuperFunctionsOrigin(repository)) {
     throw new Error(`Unexpected Super Functions origin: ${repository} (expected ${lock.repository})`);
   }

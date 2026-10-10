@@ -1,26 +1,55 @@
+import { execFileSync } from "node:child_process";
+
 const owner = "21nco";
 // GitHub renamed super-functions to superfunctions; existing clones keep the legacy remote.
 const repositories = new Set(["superfunctions", "super-functions"]);
-// Multi-account SSH setups alias github.com in ~/.ssh/config, e.g. `github-21n` or `github.com-work`.
-const sshAlias = /^github(?:\.com)?-[a-z0-9][a-z0-9._-]*$/i;
+// Plain host names or ~/.ssh/config aliases only; this also keeps `ssh -G` from parsing options.
+const sshHost = /^[a-z0-9][a-z0-9._-]*$/i;
 
 /**
- * Accept a `21nCo/superfunctions` remote under its canonical or legacy name. Allowed
- * transports are `https://github.com/`, `ssh://[git@]github.com/` and scp-style
- * `[git@]github.com:` or a `github-*` / `github.com-*` SSH alias, which the user's SSH
- * configuration must map to github.com. Every other scheme (http, git, file, ftp, ...),
- * host and local path is rejected, and the path must be exactly owner/repository, so
- * forks and other repositories are rejected too.
+ * Accept a `21nCo/superfunctions` remote under its canonical or legacy name, but only when
+ * its effective endpoint is GitHub. HTTPS must target `github.com` on the default port. SSH
+ * remotes (`ssh://[git@]host[:22]/` or scp-style `[git@]host:`) are trusted only after
+ * `resolveSsh` reports that the destination, after the user's SSH configuration, is
+ * `github.com` on port 22, so aliases such as `github-21n` work while the name alone is never
+ * trusted. A resolver failure, every other scheme (http, git, file, ftp, ...), port, host and
+ * local path is rejected, and the path must be exactly owner/repository.
+ *
+ * @param {string} url Remote URL after `insteadOf` rewriting (`git remote get-url origin`).
+ * @param {{ resolveSsh?: (destination: string) => { hostname: string, port: string } }} [options]
  */
-export function isSuperFunctionsOrigin(url) {
-  const path = originPath(url.trim());
-  const match = path === null ? null : /^\/?([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(path);
-  return match !== null &&
-    match[1].toLowerCase() === owner &&
-    repositories.has(match[2].toLowerCase());
+export function isSuperFunctionsOrigin(url, { resolveSsh = resolveSshDestination } = {}) {
+  const remote = parseRemote(url.trim());
+  if (remote === null) return false;
+  const match = /^\/?([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(remote.path);
+  if (match === null || match[1].toLowerCase() !== owner || !repositories.has(match[2].toLowerCase())) {
+    return false;
+  }
+  if (remote.ssh === undefined) return true;
+  try {
+    const destination = resolveSsh(remote.ssh);
+    return destination.hostname.toLowerCase() === "github.com" && destination.port === "22";
+  } catch {
+    return false;
+  }
 }
 
-function originPath(url) {
+/**
+ * Report where OpenSSH would connect for `destination` (`[user@]host`), using `ssh -G`.
+ *
+ * @param {string} destination
+ */
+export function resolveSshDestination(destination) {
+  const config = execFileSync("ssh", ["-G", destination], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    timeout: 10_000,
+  });
+  const value = (key) => new RegExp(`^${key} (\\S+)$`, "m").exec(config)?.[1] ?? "";
+  return { hostname: value("hostname"), port: value("port") };
+}
+
+function parseRemote(url) {
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
     let parsed;
     try {
@@ -28,16 +57,18 @@ function originPath(url) {
     } catch {
       return null;
     }
-    if (parsed.hostname.toLowerCase() !== "github.com" || parsed.search || parsed.hash) return null;
-    if (parsed.protocol === "https:") return parsed.pathname;
-    if (parsed.protocol === "ssh:" && sshUser(parsed.username) && !parsed.password) return parsed.pathname;
-    return null;
+    if (parsed.search || parsed.hash) return null;
+    const host = parsed.hostname.toLowerCase();
+    // WHATWG URL drops a default port, so an explicit :443 parses as "".
+    if (parsed.protocol === "https:") return host === "github.com" && parsed.port === "" ? { path: parsed.pathname } : null;
+    if (parsed.protocol !== "ssh:" || parsed.password || !["", "22"].includes(parsed.port)) return null;
+    return sshRemote(parsed.username, host, parsed.pathname);
   }
   const scp = /^(?:([^@/:]+)@)?([^@/:]+):(?!\/)(.+)$/.exec(url);
-  if (scp === null || !sshUser(scp[1] ?? "")) return null;
-  return scp[2].toLowerCase() === "github.com" || sshAlias.test(scp[2]) ? scp[3] : null;
+  return scp === null ? null : sshRemote(scp[1] ?? "", scp[2], scp[3]);
 }
 
-function sshUser(user) {
-  return user === "" || user === "git";
+function sshRemote(user, host, path) {
+  if ((user !== "" && user !== "git") || !sshHost.test(host)) return null;
+  return { path, ssh: user === "" ? host : `${user}@${host}` };
 }
