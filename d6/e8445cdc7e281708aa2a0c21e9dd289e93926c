@@ -1,0 +1,35 @@
+.github/workflows/deploy-staging.yml
+  s_1900bb15a7199a::t_86f897df7b46d6 40
+.github/workflows/vault-contract.yml
+  s_1900bb15a7199a::t_bef2d1aa95c173 34,48-49
+docs/decisions/dependencies.md
+  s_1900bb15a7199a::t_322e47bdcafc58 3,12,26
+docs/v1-live-acceptance.md
+  s_1900bb15a7199a::t_3ba431a9a034be 103,127
+scripts/superfunctions-origin.mjs
+  s_1900bb15a7199a::t_0b9ae7188b9dd4 1-27
+scripts/superfunctions.mjs
+  s_1900bb15a7199a::t_ced6c0dc10d9db 5,36-37
+scripts/superfunctions.test.mjs
+  s_1900bb15a7199a::t_3276dc19aafe94 1-77
+superfunctions.lock.json
+  s_1900bb15a7199a::t_c56f5eb250b40d 4
+tests/acceptance/phase-00.test.ts
+  s_1900bb15a7199a::t_0d575c850f3683 28
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d6e8445cdc7e281708aa2a0c21e9dd289e93926c",
+  "prompts": {},
+  "sessions": {
+    "s_1900bb15a7199a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5e049926-ee38-44b5-a734-8c7117ee5ff7",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
