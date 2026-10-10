@@ -1,0 +1,34 @@
+docs/decisions/dependencies.md
+  s_1900bb15a7199a::t_c31a52cf6c157c 12
+scripts/superfunctions.test.mjs
+  s_1900bb15a7199a::t_db37d7e4d4c892 8,11-14,44,81-111,118,122-129,139,147,168-179,187
+  s_1900bb15a7199a::t_cb244cc042db03 180-182,184-186
+  s_1900bb15a7199a::t_ec7fff413732f4 2,183,198-204
+scripts/superfunctions.mjs
+  s_1900bb15a7199a::t_8eba02f5b1bec5 5,16,25,30-33,36,40,48,60-62,68,86,91,122,133,184,189,195,205
+scripts/superfunctions-origin.mjs
+  s_1900bb15a7199a::t_4d5fc6bd1a28ae 15-17,30-51,54-55,57,61,63,65
+  s_1900bb15a7199a::t_cf1d8bab069c66 52-53
+  s_1900bb15a7199a::t_184431d3b2d34f 56
+  s_1900bb15a7199a::t_8d768fac1dcc8d 58-60
+  s_1900bb15a7199a::t_028bc805063909 62
+  s_1900bb15a7199a::t_eed5bc2d40bb0a 64
+  s_1900bb15a7199a::t_d00911cda0fa8c 66-67
+  s_1900bb15a7199a::t_17f64b79956de5 4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "025465dceef0a1dfdd3120d130a58291208040c3",
+  "prompts": {},
+  "sessions": {
+    "s_1900bb15a7199a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5e049926-ee38-44b5-a734-8c7117ee5ff7",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
