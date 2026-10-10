@@ -11,8 +11,9 @@ const repositories = new Set(["superfunctions", "super-functions"]);
  * passwords and local paths are rejected.
  *
  * This is a static misconfiguration guard, not an attestation of the endpoint git contacts:
- * local SSH config, `PATH` and git config are trusted, and package content provenance comes
- * from the locked `baseSha` ancestry check in `superfunctions.mjs`.
+ * local SSH config, `PATH` and git config are trusted. It does not prove package content
+ * either: the developer chooses the checked-out revision, and `sf:status` only reports
+ * whether it descends from the locked `baseSha` (`baseIsAncestor`); no command enforces it.
  *
  * @param {string} url Remote URL after `insteadOf` rewriting (`git remote get-url origin`).
  * @returns {"https" | "ssh" | null}
@@ -23,6 +24,28 @@ export function superFunctionsOriginTransport(url) {
   const match = /^\/?([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(remote.path);
   if (match?.[1].toLowerCase() !== owner || !repositories.has(match[2].toLowerCase())) return null;
   return remote.transport;
+}
+
+/**
+ * Describe an origin for diagnostics without credentials: URL forms keep only scheme, host,
+ * port and path (dropping userinfo, query and fragment), scp-style forms drop the user, and
+ * an unparseable URL is not echoed.
+ *
+ * @param {string} url
+ * @returns {string}
+ */
+export function describeOrigin(url) {
+  const value = url.trim();
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) {
+    try {
+      const parsed = new URL(value);
+      return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+    } catch {
+      return "<unparseable URL>";
+    }
+  }
+  // The user of `[user@]host:path` can carry a token; strip through the last `@` before any `/`.
+  return value.replace(/^[^/]*@/, "");
 }
 
 /**

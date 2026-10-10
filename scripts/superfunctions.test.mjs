@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { superFunctionsOriginTransport } from "./superfunctions-origin.mjs";
+import { describeOrigin, superFunctionsOriginTransport } from "./superfunctions-origin.mjs";
 
 const script = fileURLToPath(new URL("./superfunctions.mjs", import.meta.url));
 const accepted = [
@@ -73,19 +73,36 @@ describe("Super Functions origin guard", () => {
     expect(superFunctionsOriginTransport(url)).toBeNull();
   });
 
+  it.each([
+    ["https://x-access-token:SECRET@github.com/21nCo/superfunctions.git", "https://github.com/21nCo/superfunctions.git"],
+    ["https://SECRET@attacker.example:8443/a.git?token=SECRET#SECRET", "https://attacker.example:8443/a.git"],
+    ["ssh://git:SECRET@github.com:2222/21nCo/superfunctions.git", "ssh://github.com:2222/21nCo/superfunctions.git"],
+    ["https://SECRET@[bad/21nCo/superfunctions.git", "<unparseable URL>"],
+    ["SECRET:SECRET@github.com:21nCo/superfunctions.git", "github.com:21nCo/superfunctions.git"],
+    ["git@github-attacker.example:21nCo/superfunctions.git", "github-attacker.example:21nCo/superfunctions.git"],
+    ["/srv/mirrors/21nCo/superfunctions.git", "/srv/mirrors/21nCo/superfunctions.git"],
+  ])("describes %s without credentials", (url, description) => {
+    expect(describeOrigin(url)).toBe(description);
+  });
+
   describe("sf:status", () => {
     const roots = [];
     afterEach(() => {
       for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 5 });
     });
 
-    // Hermetic: no user or system git config and no inherited git SSH overrides.
+    /** Run sf:status against a fresh repo whose origin is `origin`. */
     function status(origin, { config = [], env = {} } = {}) {
       const root = mkdtempSync(join(tmpdir(), "omr-sf-origin-"));
       roots.push(root);
-      const base = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
-      delete base.GIT_SSH_COMMAND;
-      delete base.GIT_SSH;
+      // Hermetic: no inherited GIT_CONFIG_* overrides, user or system git config, or git SSH overrides.
+      const base = Object.fromEntries(
+        Object.entries(process.env).filter(
+          ([key]) => !key.startsWith("GIT_CONFIG_") && key !== "GIT_SSH_COMMAND" && key !== "GIT_SSH",
+        ),
+      );
+      base.GIT_CONFIG_GLOBAL = "/dev/null";
+      base.GIT_CONFIG_NOSYSTEM = "1";
       execFileSync("git", ["init", "--quiet", root], { env: base });
       execFileSync("git", ["-C", root, "remote", "add", "origin", origin], { env: base });
       for (const [key, value] of config) execFileSync("git", ["-C", root, "config", key, value], { env: base });
@@ -95,6 +112,7 @@ describe("Super Functions origin guard", () => {
       });
     }
 
+    /** Assert the origin check passed and the run then failed on the empty checkout. */
     function expectOriginPassed(result) {
       expect(result.status).not.toBe(0);
       // An empty checkout fails at the first package manifest only after its origin passes.
@@ -102,6 +120,7 @@ describe("Super Functions origin guard", () => {
       expect(result.stderr).not.toContain("Unexpected Super Functions");
     }
 
+    /** Assert the run was refused with `message` before any package manifest was read. */
     function expectRefused(result, message) {
       expect(result.status).not.toBe(0);
       expect(result.stderr).toContain(message);
@@ -121,9 +140,25 @@ describe("Super Functions origin guard", () => {
       "https://attacker.example/21nCo/superfunctions.git",
       "file:///21nCo/superfunctions.git",
       "https://github.com:8443/21nCo/superfunctions.git",
-      "git@github-attacker.example:21nCo/superfunctions.git",
     ])("refuses %s before reading packages", (origin) => {
-      expectRefused(status(origin), `Unexpected Super Functions origin: ${origin}`);
+      expectRefused(status(origin), `Unexpected Super Functions origin: ${origin} (`);
+    });
+
+    it("refuses an SSH alias before reading packages, without its user", () => {
+      expectRefused(
+        status("git@github-attacker.example:21nCo/superfunctions.git"),
+        "Unexpected Super Functions origin: github-attacker.example:21nCo/superfunctions.git (",
+      );
+    });
+
+    it.each([
+      "https://x-access-token:SYNTHETIC_ORIGIN_SECRET@github.com/21nCo/superfunctions.git",
+      "https://github.com/21nCo/superfunctions.git?token=SYNTHETIC_ORIGIN_SECRET",
+      "SYNTHETIC_ORIGIN_SECRET@github.com:21nCo/superfunctions.git",
+    ])("refuses %s without printing its credentials", (origin) => {
+      const result = status(origin);
+      expectRefused(result, "Unexpected Super Functions origin: ");
+      expect(result.stdout + result.stderr).not.toContain("SYNTHETIC_ORIGIN_SECRET");
     });
 
     it("checks the URL after insteadOf rewriting", () => {
@@ -134,14 +169,13 @@ describe("Super Functions origin guard", () => {
     });
 
     it.each([
-      ["GIT_SSH_COMMAND", { env: { GIT_SSH_COMMAND: "ssh -o HostName=attacker.example" } }],
-      ["GIT_SSH", { env: { GIT_SSH: "/tmp/attacker-ssh" } }],
-      ["core.sshCommand", { config: [["core.sshCommand", "ssh -o HostName=attacker.example"]] }],
-    ])("refuses an SSH origin when %s selects a custom SSH program", (source, options) => {
-      expectRefused(
-        status("git@github.com:21nCo/superfunctions.git", options),
-        `Unexpected Super Functions SSH command: ${source}=`,
-      );
+      ["GIT_SSH_COMMAND", { env: { GIT_SSH_COMMAND: "ssh -o ProxyCommand='curl -H token:SYNTHETIC_SSH_SECRET x'" } }],
+      ["GIT_SSH", { env: { GIT_SSH: "/tmp/SYNTHETIC_SSH_SECRET/ssh" } }],
+      ["core.sshCommand", { config: [["core.sshCommand", "ssh -i /tmp/SYNTHETIC_SSH_SECRET"]] }],
+    ])("refuses an SSH origin when %s selects a custom SSH program, naming only the setting", (source, options) => {
+      const result = status("git@github.com:21nCo/superfunctions.git", options);
+      expectRefused(result, `Unexpected Super Functions SSH command set by ${source} (`);
+      expect(result.stdout + result.stderr).not.toContain("SYNTHETIC_SSH_SECRET");
     });
 
     it("ignores git SSH settings for an HTTPS origin", () => {
