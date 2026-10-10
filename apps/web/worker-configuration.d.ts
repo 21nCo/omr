@@ -3,7 +3,7 @@
 interface __BaseEnv_Env {
 	OAUTH_KV: KVNamespace;
 	HYPERDRIVE: Hyperdrive;
-	OMR_PUBLIC_ORIGIN: "https://omr-web-staging.21n.workers.dev";
+	OMR_PUBLIC_ORIGIN: "https://omr-staging.21n.dev";
 	DEVICE_CREDENTIAL_WRAPPING_KEY: string;
 	EXECUTION_RESULT_WRAPPING_KEY: string;
 	PLUGFN_ENCRYPTION_KEY: string;

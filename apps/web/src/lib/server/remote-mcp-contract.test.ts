@@ -694,7 +694,7 @@ describe("remote-mcp-contract", () => {
       kv_namespaces?: unknown;
     };
     expect(config.kv_namespaces).toBeUndefined();
-    expect(config.env.staging.vars.OMR_PUBLIC_ORIGIN).toBe("https://omr-web-staging.21n.workers.dev");
+    expect(config.env.staging.vars.OMR_PUBLIC_ORIGIN).toBe("https://omr-staging.21n.dev");
     expect(config.env.staging.vars.OMR_MCP_BROWSER_ORIGINS.split(",")).toContain("https://chatgpt.com");
     expect(config.env.staging.kv_namespaces.map((binding) => binding.binding)).toContain("OAUTH_KV");
     expect(config.env.staging.hyperdrive.map((binding) => binding.binding)).toContain("HYPERDRIVE");

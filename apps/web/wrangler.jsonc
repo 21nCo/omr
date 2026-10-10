@@ -29,21 +29,29 @@
   "env": {
     "staging": {
       "name": "omr-web-staging",
+      "account_id": "c801efc2879825babdb9b2534199c4dd",
+      "workers_dev": true,
+      "routes": [
+        {
+          "pattern": "omr-staging.21n.dev",
+          "custom_domain": true
+        }
+      ],
       "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
       "vars": {
-        "OMR_PUBLIC_ORIGIN": "https://omr-web-staging.21n.workers.dev",
+        "OMR_PUBLIC_ORIGIN": "https://omr-staging.21n.dev",
         "OMR_MCP_BROWSER_ORIGINS": "https://chatgpt.com,https://claude.ai,https://vscode.dev"
       },
       "kv_namespaces": [
         {
           "binding": "OAUTH_KV",
-          "id": "4ec5a09da50c4a7594830407c1fd2199"
+          "id": "666d8b07eb9b4ac382c61fd7e483107e"
         }
       ],
       "hyperdrive": [
         {
           "binding": "HYPERDRIVE",
-          "id": "35547f903fed4e35b73e78ddf65921ec"
+          "id": "7a0710de99e543cfbc5b509003301352"
         }
       ],
       "secrets": {

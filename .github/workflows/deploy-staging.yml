@@ -1,0 +1,72 @@
+name: Deploy staging
+
+# Deploys the nonproduction `omr-web-staging` Worker to the 21n-dev Cloudflare
+# account. Pull requests are already built and type-checked by vault-contract.yml.
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  deploy-staging:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: omr
+    env:
+      OMR_SUPERFUNCTIONS_WORKTREE: ${{ github.workspace }}/super-functions
+    steps:
+      - name: Check out OMR
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: omr
+          persist-credentials: false
+      - name: Use Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: omr/package-lock.json
+      - name: Check out locked Super Functions revision
+        run: |
+          locked_sha="$(node -p "require('./superfunctions.lock.json').baseSha")"
+          git clone https://github.com/21nCo/super-functions.git "$OMR_SUPERFUNCTIONS_WORKTREE"
+          git -C "$OMR_SUPERFUNCTIONS_WORKTREE" switch -c omr/upstream "$locked_sha"
+          test "$(git -C "$OMR_SUPERFUNCTIONS_WORKTREE" rev-parse HEAD)" = "$locked_sha"
+      - name: Install and link locked dependencies
+        run: |
+          npm ci --ignore-scripts
+          npm run sf:install
+          npm run sf:build
+          npm run sf:link
+          npm run sf:smoke
+      - name: Build
+        run: npm run build
+      # Cloudflare credentials are scoped to this step only so dependency
+      # installs, Super Functions scripts and the build cannot read them.
+      - name: Deploy omr-web-staging to 21n-dev
+        working-directory: omr/apps/web
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEV_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_DEV_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error::CLOUDFLARE_DEV_API_TOKEN secret and CLOUDFLARE_DEV_ACCOUNT_ID variable must both be set" >&2
+            exit 1
+          fi
+          # wrangler.jsonc pins the staging account_id (the only account_id in
+          # the file); CLOUDFLARE_ACCOUNT_ID would override it, so refuse to
+          # deploy if the two ever drift apart.
+          if ! grep -Eq "\"account_id\": *\"${CLOUDFLARE_ACCOUNT_ID}\"" wrangler.jsonc; then
+            echo "::error::CLOUDFLARE_DEV_ACCOUNT_ID does not match the staging account_id in apps/web/wrangler.jsonc" >&2
+            exit 1
+          fi
+          # Uses the lockfile-pinned wrangler installed by npm ci (no npx download).
+          npm run deploy:staging
