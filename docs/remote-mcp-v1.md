@@ -9,6 +9,11 @@ pushes to `dev`. The Worker also answers on
 `https://omr-web-staging.21n-dev.workers.dev`, but OAuth issuer, consent, and
 management origin checks are pinned to `OMR_PUBLIC_ORIGIN`, so hosts should use
 the custom domain above.
+Staging data was not carried over from the previous account: the database was
+reset and the `OAUTH_KV` namespace and Worker secrets are new. Hosts connected
+to the old `omr-web-staging.21n.workers.dev` endpoint must be reconfigured with
+the URL above and reconnected, users must authorize again, and manual bearer
+grants created with `omr login` must be recreated.
 
 OMR's OAuth server advertises its authorization and token endpoints through
 `/.well-known/oauth-authorization-server`. A host starting from `/mcp` receives

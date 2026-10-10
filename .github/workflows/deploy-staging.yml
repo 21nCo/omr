@@ -22,16 +22,14 @@ jobs:
         working-directory: omr
     env:
       OMR_SUPERFUNCTIONS_WORKTREE: ${{ github.workspace }}/super-functions
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEV_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_DEV_ACCOUNT_ID }}
     steps:
       - name: Check out OMR
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           path: omr
           persist-credentials: false
       - name: Use Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
           cache: npm
@@ -51,6 +49,24 @@ jobs:
           npm run sf:smoke
       - name: Build
         run: npm run build
+      # Cloudflare credentials are scoped to this step only so dependency
+      # installs, Super Functions scripts and the build cannot read them.
       - name: Deploy omr-web-staging to 21n-dev
         working-directory: omr/apps/web
-        run: npx wrangler deploy --env staging
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEV_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_DEV_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error::CLOUDFLARE_DEV_API_TOKEN secret and CLOUDFLARE_DEV_ACCOUNT_ID variable must both be set" >&2
+            exit 1
+          fi
+          # wrangler.jsonc pins the staging account_id (the only account_id in
+          # the file); CLOUDFLARE_ACCOUNT_ID would override it, so refuse to
+          # deploy if the two ever drift apart.
+          if ! grep -Eq "\"account_id\": *\"${CLOUDFLARE_ACCOUNT_ID}\"" wrangler.jsonc; then
+            echo "::error::CLOUDFLARE_DEV_ACCOUNT_ID does not match the staging account_id in apps/web/wrangler.jsonc" >&2
+            exit 1
+          fi
+          # Uses the lockfile-pinned wrangler installed by npm ci (no npx download).
+          npm run deploy:staging
