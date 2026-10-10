@@ -1,0 +1,25 @@
+apps/web/src/lib/server/mcp-oauth.ts
+  s_ce12272281eb3b::t_2673371f3d88c6 51
+apps/web/src/lib/server/remote-mcp-contract.test.ts
+  s_ce12272281eb3b::t_87bd6db81d9a24 17,62,205,664-687,689-700
+docs/openrouter-vault.md
+  s_ce12272281eb3b::t_96caeca8ca4317 11
+docs/v1-live-acceptance.md
+  s_ce12272281eb3b::t_84f6177267c515 128,131
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "94b5009e3ff07640887339703dfdefd542005c71",
+  "prompts": {},
+  "sessions": {
+    "s_ce12272281eb3b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1d2376f8-4af3-4920-96da-dff6a042ab4c",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
