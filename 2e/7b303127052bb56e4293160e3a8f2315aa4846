@@ -1,0 +1,27 @@
+apps/web/src/routes/device/+page.svelte
+  s_fd2012bf034554::t_2d43d856a13559 125-126,141
+docs/openrouter-vault.md
+  s_fd2012bf034554::t_b8d1cdba5c4bcd 11
+docs/v1-live-acceptance.md
+  s_fd2012bf034554::t_d8931b9f15feae 3-12,34-36,38,40-69,71-124,127-139
+packages/identity/src/openrouter-vault.test.ts
+  s_fd2012bf034554::t_252d3809a02c02 57,180-195
+packages/identity/src/openrouter-vault.ts
+  s_fd2012bf034554::t_dc558ace6cc1af 111-112
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2e7b303127052bb56e4293160e3a8f2315aa4846",
+  "prompts": {},
+  "sessions": {
+    "s_fd2012bf034554": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bba569bd-afce-4b37-bbb1-2a85837124dd",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
