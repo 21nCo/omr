@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { superFunctionsOriginTransport } from "./superfunctions-origin.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const lockPath = join(repositoryRoot, "superfunctions.lock.json");
@@ -12,6 +13,7 @@ const superfunctionsRoot = isAbsolute(configuredRoot)
   : resolve(repositoryRoot, configuredRoot);
 const command = process.argv[2] ?? "status";
 
+/** Run a program without a shell, inheriting stdio unless `options.capture` is set. */
 function run(program, args, options = {}) {
   return execFileSync(program, args, {
     cwd: options.cwd ?? repositoryRoot,
@@ -20,10 +22,30 @@ function run(program, args, options = {}) {
   });
 }
 
+/** Run a program in the Super Functions worktree and return its trimmed stdout. */
 function capture(program, args, cwd = superfunctionsRoot) {
   return run(program, args, { cwd, capture: true }).trim();
 }
 
+/**
+ * Name the setting through which git would run a custom SSH program instead of plain `ssh`,
+ * or "" when none is configured. Only the name is returned: the value can hold credentials.
+ */
+function configuredSshCommand() {
+  for (const variable of ["GIT_SSH_COMMAND", "GIT_SSH"]) {
+    if (process.env[variable]) return variable;
+  }
+  try {
+    const value = capture("git", ["config", "--get", "core.sshCommand"]);
+    return value === "" ? "" : "core.sshCommand";
+  } catch (error) {
+    // `git config --get` exits 1 when the key is unset.
+    if (error.status === 1) return "";
+    throw error;
+  }
+}
+
+/** Refuse a missing worktree, an untrusted origin or SSH program, or mismatched package manifests. */
 function assertWorktree() {
   if (!existsSync(join(superfunctionsRoot, ".git"))) {
     throw new Error(
@@ -31,9 +53,23 @@ function assertWorktree() {
     );
   }
 
-  const repository = capture("git", ["config", "--get", "remote.origin.url"]);
-  if (!repository.endsWith("/21nCo/super-functions.git")) {
-    throw new Error(`Unexpected Super Functions origin: ${repository}`);
+  // get-url applies url.<base>.insteadOf, so this is the URL git actually fetches from.
+  const repository = capture("git", ["remote", "get-url", "origin"]);
+  const transport = superFunctionsOriginTransport(repository);
+  if (transport === null) {
+    // The rejected URL is untrusted and can hold a token anywhere, so no part of it is printed.
+    // The suggested command is fixed text: a path pasted into a shell command could run its `$()`.
+    throw new Error(
+      `Unexpected Super Functions origin in ${superfunctionsRoot} (expected ${lock.repository}); ` +
+        "run `git remote get-url origin` inside that worktree to inspect it",
+    );
+  }
+  // A custom SSH program can send an SSH origin anywhere, so only the default ssh is allowed.
+  const sshCommand = transport === "ssh" ? configuredSshCommand() : "";
+  if (sshCommand !== "") {
+    throw new Error(
+      `Unexpected Super Functions SSH command set by ${sshCommand} (use the HTTPS origin ${lock.repository} instead)`,
+    );
   }
 
   for (const dependency of lock.packages) {
@@ -50,10 +86,12 @@ function assertWorktree() {
   }
 }
 
+/** The `node_modules` path where a linked package's symlink lives. */
 function packageDestination(packageName) {
   return join(repositoryRoot, "node_modules", ...packageName.split("/"));
 }
 
+/** Symlink each locked package into `node_modules` and record the linked worktree state. */
 function linkPackages() {
   assertWorktree();
   mkdirSync(join(repositoryRoot, "node_modules"), { recursive: true });
@@ -84,6 +122,7 @@ function linkPackages() {
   printStatus(state);
 }
 
+/** Whether a path exists without following a final symlink. */
 function lstatExists(path) {
   try {
     lstatSync(path);
@@ -94,6 +133,7 @@ function lstatExists(path) {
   }
 }
 
+/** Report the worktree revision, informational `baseSha` ancestry and per-package link/build state. */
 function collectStatus() {
   assertWorktree();
   const head = capture("git", ["rev-parse", "HEAD"]);
@@ -144,15 +184,18 @@ function collectStatus() {
   };
 }
 
+/** Print a status object as JSON. */
 function printStatus(status) {
   process.stdout.write(`${JSON.stringify(status, null, 2)}\n`);
 }
 
+/** Install the worktree's dependencies without lifecycle scripts. */
 function installDependencies() {
   assertWorktree();
   run("npm", ["ci", "--ignore-scripts"], { cwd: superfunctionsRoot });
 }
 
+/** Build the locked packages and their workspace dependencies. */
 function buildPackages() {
   assertWorktree();
   if (!existsSync(join(superfunctionsRoot, "node_modules"))) {
@@ -162,6 +205,7 @@ function buildPackages() {
   run("npm", ["run", "build", "--", ...filters], { cwd: superfunctionsRoot });
 }
 
+/** Import (or resolve) every linked package to prove it is usable from OMR. */
 async function smokePackages() {
   const status = collectStatus();
   const unavailable = status.packages.filter((dependency) => !dependency.linked || !dependency.built);
