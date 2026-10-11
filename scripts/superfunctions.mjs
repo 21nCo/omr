@@ -58,9 +58,10 @@ function assertWorktree() {
   const transport = superFunctionsOriginTransport(repository);
   if (transport === null) {
     // The rejected URL is untrusted and can hold a token anywhere, so no part of it is printed.
+    // The suggested command is fixed text: a path pasted into a shell command could run its `$()`.
     throw new Error(
       `Unexpected Super Functions origin in ${superfunctionsRoot} (expected ${lock.repository}); ` +
-        `inspect it with: git -C "${superfunctionsRoot}" remote get-url origin`,
+        "run `git remote get-url origin` inside that worktree to inspect it",
     );
   }
   // A custom SSH program can send an SSH origin anywhere, so only the default ssh is allowed.

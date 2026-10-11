@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -84,10 +84,11 @@ describe("Super Functions origin guard", () => {
       for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 5 });
     });
 
-    /** Run sf:status against a fresh repo whose origin is `origin`. */
-    function status(origin, { config = [], env = {} } = {}) {
-      const root = mkdtempSync(join(tmpdir(), "omr-sf-origin-"));
-      roots.push(root);
+    /** Run sf:status against a fresh repo, in directory `dir` of a temporary root, whose origin is `origin`. */
+    function status(origin, { config = [], env = {}, dir } = {}) {
+      const tempRoot = mkdtempSync(join(tmpdir(), "omr-sf-origin-"));
+      roots.push(tempRoot);
+      const root = dir === undefined ? tempRoot : join(tempRoot, dir);
       // Hermetic: no inherited GIT_CONFIG_* overrides, user or system git config, or git SSH overrides.
       const base = Object.fromEntries(
         Object.entries(process.env).filter(
@@ -96,13 +97,15 @@ describe("Super Functions origin guard", () => {
       );
       base.GIT_CONFIG_GLOBAL = "/dev/null";
       base.GIT_CONFIG_NOSYSTEM = "1";
+      mkdirSync(root, { recursive: true });
       execFileSync("git", ["init", "--quiet", root], { env: base });
       execFileSync("git", ["-C", root, "remote", "add", "origin", origin], { env: base });
       for (const [key, value] of config) execFileSync("git", ["-C", root, "config", key, value], { env: base });
-      return spawnSync(process.execPath, [script, "status"], {
+      const result = spawnSync(process.execPath, [script, "status"], {
         encoding: "utf8",
         env: { ...base, ...env, OMR_SUPERFUNCTIONS_WORKTREE: root },
       });
+      return { ...result, tempRoot, root, env: base };
     }
 
     /** Assert the origin check passed and the run then failed on the empty checkout. */
@@ -171,6 +174,23 @@ describe("Super Functions origin guard", () => {
       });
       expectRefused(result, "Unexpected Super Functions origin in ");
       expect(result.stdout + result.stderr).not.toContain("attacker.example");
+    });
+
+    // Shell syntax in the worktree path must not reach a command the user is told to copy.
+    it.each([
+      "sf $(touch MARK)",
+      "sf `touch MARK`",
+      `sf "$(touch MARK)" 'q' $HOME`,
+    ])("suggests an inspect command that runs literally in worktree %j", (dir) => {
+      const result = status("https://attacker.example/21nCo/superfunctions.git", { dir });
+      expectRefused(result, `Unexpected Super Functions origin in ${result.root} (`);
+      expect(result.stderr).not.toContain("attacker.example");
+      const command = /run `([^`]+)` inside that worktree/.exec(result.stderr)?.[1];
+      expect(command).toBe("git remote get-url origin");
+      const output = execFileSync("sh", ["-c", command], { cwd: result.root, encoding: "utf8", env: result.env });
+      expect(output.trim()).toBe("https://attacker.example/21nCo/superfunctions.git");
+      expect(existsSync(join(result.tempRoot, "MARK"))).toBe(false);
+      expect(existsSync(join(result.root, "MARK"))).toBe(false);
     });
 
     it.each([
