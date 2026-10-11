@@ -1,7 +1,6 @@
 const owner = "21nco";
 // GitHub renamed super-functions to superfunctions; existing clones keep the legacy remote.
 const repositories = new Set(["superfunctions", "super-functions"]);
-const unrecognizedOrigin = "<unrecognized origin>";
 
 /**
  * Classify a Super Functions `origin` URL by the literal endpoint it names: `"https"` for
@@ -25,44 +24,6 @@ export function superFunctionsOriginTransport(url) {
   const match = /^\/?([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(remote.path);
   if (match?.[1].toLowerCase() !== owner || !repositories.has(match[2].toLowerCase())) return null;
   return remote.transport;
-}
-
-/**
- * Describe an origin for diagnostics using only parts parsed into a credential-free form.
- * A `scheme://` URL prints as scheme, host, port and path; a strict scp-style
- * `[user@]host:path` prints as `host:path`. Path segments outside `[A-Za-z0-9_.~-]` print as
- * `<redacted>`, and any other value prints `<unrecognized origin>`. Userinfo, query, fragment
- * and unparsed text are never echoed.
- *
- * @param {string} url
- * @returns {string}
- */
-export function describeOrigin(url) {
-  const value = url.trim();
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) {
-    try {
-      const parsed = new URL(value);
-      return `${parsed.protocol}//${parsed.host}${describePath(parsed.pathname)}`;
-    } catch {
-      return unrecognizedOrigin;
-    }
-  }
-  const scp = /^(?:[^@/]+@)?([A-Za-z0-9.-]+):(?![/:])(.+)$/.exec(value);
-  return scp ? `${scp[1]}:${describePath(scp[2])}` : unrecognizedOrigin;
-}
-
-/**
- * Keep the path segments that hold only `[A-Za-z0-9_.~-]` and redact the rest, so a
- * segment carrying userinfo (with `:` or `@`) is never echoed.
- *
- * @param {string} path
- * @returns {string}
- */
-function describePath(path) {
-  return path
-    .split("/")
-    .map((segment) => (/^[\w.~-]*$/.test(segment) ? segment : "<redacted>"))
-    .join("/");
 }
 
 /**

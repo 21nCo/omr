@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describeOrigin, superFunctionsOriginTransport } from "./superfunctions-origin.mjs";
+import { superFunctionsOriginTransport } from "./superfunctions-origin.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const lockPath = join(repositoryRoot, "superfunctions.lock.json");
@@ -57,8 +57,10 @@ function assertWorktree() {
   const repository = capture("git", ["remote", "get-url", "origin"]);
   const transport = superFunctionsOriginTransport(repository);
   if (transport === null) {
+    // The rejected URL is untrusted and can hold a token anywhere, so no part of it is printed.
     throw new Error(
-      `Unexpected Super Functions origin: ${describeOrigin(repository)} (expected ${lock.repository})`,
+      `Unexpected Super Functions origin in ${superfunctionsRoot} (expected ${lock.repository}); ` +
+        `inspect it with: git -C "${superfunctionsRoot}" remote get-url origin`,
     );
   }
   // A custom SSH program can send an SSH origin anywhere, so only the default ssh is allowed.

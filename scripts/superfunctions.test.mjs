@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { describeOrigin, superFunctionsOriginTransport } from "./superfunctions-origin.mjs";
+import { superFunctionsOriginTransport } from "./superfunctions-origin.mjs";
 
 const script = fileURLToPath(new URL("./superfunctions.mjs", import.meta.url));
 // Synthetic credentials are built at runtime so no committed file holds a credential-bearing URL.
@@ -78,37 +78,6 @@ describe("Super Functions origin guard", () => {
     expect(superFunctionsOriginTransport(url)).toBeNull();
   });
 
-  it.each([
-    [`https://${credentials("x-access-token")}github.com/21nCo/superfunctions.git`, "https://github.com/21nCo/superfunctions.git"],
-    [`https://${secret}@attacker.example:8443/a.git?token=${secret}#${secret}`, "https://attacker.example:8443/a.git"],
-    [`ssh://${credentials("git")}github.com:2222/21nCo/superfunctions.git`, "ssh://github.com:2222/21nCo/superfunctions.git"],
-    [`${credentials(secret)}github.com:21nCo/superfunctions.git`, "github.com:21nCo/superfunctions.git"],
-    [`https://github.com/${credentials("u")}x/y`, "https://github.com/<redacted>/y"],
-    [`github.com:${credentials("u")}x/y`, "github.com:<redacted>/y"],
-    [`https:${credentials("x-access-token")}github.com/21nCo/superfunctions.git`, "https:<redacted>/21nCo/superfunctions.git"],
-    [`https://${secret}@[bad/21nCo/superfunctions.git`, "<unrecognized origin>"],
-    [`https:/${credentials("x-access-token")}github.com/21nCo/superfunctions.git`, "<unrecognized origin>"],
-    [`github.com/${credentials("u")}x/y`, "<unrecognized origin>"],
-    [`./${credentials(secret)}x`, "<unrecognized origin>"],
-    [`ext::ssh -i ${secret} host`, "<unrecognized origin>"],
-    [`fd::${secret}`, "<unrecognized origin>"],
-    [`\\\\host\\${credentials("u")}x`, "<unrecognized origin>"],
-    [`/srv/${secret}/21nCo/superfunctions.git`, "<unrecognized origin>"],
-  ])("describes %s without credentials", (url, description) => {
-    expect(describeOrigin(url)).toBe(description);
-    expect(describeOrigin(url)).not.toContain(secret);
-  });
-
-  it.each([
-    "https://github.com/21nCo/superfunctions.git",
-    "https://github.com:8443/21nCo/super-functions.git",
-    "ssh://github.com:2222/21nCo/superfunctions.git",
-    "github.com:21nCo/superfunctions.git",
-    "file:///srv/mirrors/21nCo/superfunctions.git",
-  ])("describes credential-free %s verbatim", (url) => {
-    expect(describeOrigin(url)).toBe(url);
-  });
-
   describe("sf:status", () => {
     const roots = [];
     afterEach(() => {
@@ -164,26 +133,35 @@ describe("Super Functions origin guard", () => {
       "https://attacker.example/21nCo/superfunctions.git",
       "file:///21nCo/superfunctions.git",
       "https://github.com:8443/21nCo/superfunctions.git",
-    ])("refuses %s before reading packages", (origin) => {
-      expectRefused(status(origin), `Unexpected Super Functions origin: ${origin} (`);
+      "git@github-attacker.example:21nCo/superfunctions.git",
+    ])("refuses %s before reading packages, without printing it", (origin) => {
+      const result = status(origin);
+      expectRefused(result, "Unexpected Super Functions origin in ");
+      expect(result.stderr).toContain("(expected https://github.com/21nCo/superfunctions.git)");
+      expect(result.stdout + result.stderr).not.toContain(origin);
     });
 
-    it("refuses an SSH alias before reading packages, without its user", () => {
-      expectRefused(
-        status("git@github-attacker.example:21nCo/superfunctions.git"),
-        "Unexpected Super Functions origin: github-attacker.example:21nCo/superfunctions.git (",
-      );
-    });
-
+    // A token can sit in any part of an untrusted origin, so no part of a rejected one is printed.
     it.each([
+      `https://github.com/${secret}/21nCo/superfunctions.git`,
+      `git@github.com:${secret}/21nCo/superfunctions.git`,
+      `https://${secret}.example/21nCo/superfunctions.git`,
+      `https://mirror.example/${secret}/superfunctions.git`,
       `https://${credentials("x-access-token")}github.com/21nCo/superfunctions.git`,
       `https:/${credentials("x-access-token")}github.com/21nCo/superfunctions.git`,
+      `https:${credentials("x-access-token")}github.com/21nCo/superfunctions.git`,
       `https://github.com/21nCo/superfunctions.git?token=${secret}`,
+      `https://${secret}@[bad/21nCo/superfunctions.git`,
       `${secret}@github.com:21nCo/superfunctions.git`,
       `github.com/${credentials("u")}21nCo/superfunctions.git`,
-    ])("refuses %s without printing its credentials", (origin) => {
+      `ext::ssh -i ${secret} host`,
+      `fd::${secret}`,
+      `\\\\host\\${credentials("u")}x`,
+      `./${credentials(secret)}x`,
+      `/srv/${secret}/21nCo/superfunctions.git`,
+    ])("refuses %s without printing any part of it", (origin) => {
       const result = status(origin);
-      expectRefused(result, "Unexpected Super Functions origin: ");
+      expectRefused(result, "Unexpected Super Functions origin");
       expect(result.stdout + result.stderr).not.toContain(secret);
     });
 
@@ -191,7 +169,8 @@ describe("Super Functions origin guard", () => {
       const result = status("https://github.com/21nCo/superfunctions.git", {
         config: [["url.https://attacker.example/.insteadOf", "https://github.com/"]],
       });
-      expectRefused(result, "Unexpected Super Functions origin: https://attacker.example/21nCo/superfunctions.git");
+      expectRefused(result, "Unexpected Super Functions origin in ");
+      expect(result.stdout + result.stderr).not.toContain("attacker.example");
     });
 
     it.each([
