@@ -1,0 +1,25 @@
+docs/decisions/dependencies.md
+  s_49f60068c40bbc::t_e2f82a14cbd806 12
+scripts/superfunctions-origin.mjs
+  s_49f60068c40bbc::t_8ed424886bd833 11-12,19-20,24-25
+scripts/superfunctions.mjs
+  s_49f60068c40bbc::t_ca97dca6a8cc7f 57-59,73-74
+scripts/superfunctions.test.mjs
+  s_49f60068c40bbc::t_cb6d543455c5c1 15-31,87,183-184,221-222
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4da7654ae5a00981f971449c7def9c3ee90b9edc",
+  "prompts": {},
+  "sessions": {
+    "s_49f60068c40bbc": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_49f60068c40bbc",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
