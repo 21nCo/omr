@@ -12,6 +12,23 @@ const script = fileURLToPath(new URL("./superfunctions.mjs", import.meta.url));
 const secret = `synth${randomUUID().replaceAll("-", "")}`;
 /** `user:<secret>@`, the userinfo of a credential-bearing origin. */
 const credentials = (user) => `${user}:${secret}@`;
+/** Origins of every form that URL parsing or trimming would turn into github.com once `c` is dropped. */
+function unsafeOrigins(secret) {
+  return ["\\", "\t", "\n", "\r", " "].flatMap((c) => [
+    `https://git${c}hub.com/21nCo/superfunctions.git`,
+    `https://github.com${c}21nCo${c}superfunctions.git`,
+    `https://x${c}${secret}@github.com/21nCo/superfunctions.git`,
+    `https://github.com/21nCo/super${c}${secret}functions.git`,
+    `https://github.com/21nCo/superfunctions.git${c}${secret}`,
+    `${c}${secret}https://github.com/21nCo/superfunctions.git`,
+    `ssh://git@git${c}hub.com/21nCo/superfunctions.git`,
+    `ssh://g${c}${secret}it@github.com/21nCo/superfunctions.git`,
+    `ssh://git@github.com/21nCo/super${c}${secret}functions.git`,
+    `git@git${c}hub.com:21nCo/superfunctions.git`,
+    `g${c}${secret}it@github.com:21nCo/superfunctions.git`,
+    `git@github.com:21nCo/superfunctions.git${c}${secret}`,
+  ]);
+}
 const accepted = [
   ["https://github.com/21nCo/superfunctions.git", "https"],
   ["https://github.com/21nCo/superfunctions", "https"],
@@ -67,6 +84,7 @@ const rejected = [
   "git@-oProxyCommand=id:21nCo/superfunctions.git",
   "ssh://-oProxyCommand=id/21nCo/superfunctions.git",
   "",
+  ...unsafeOrigins(""),
 ];
 
 describe("Super Functions origin guard", () => {
@@ -162,7 +180,8 @@ describe("Super Functions origin guard", () => {
       `\\\\host\\${credentials("u")}x`,
       `./${credentials(secret)}x`,
       `/srv/${secret}/21nCo/superfunctions.git`,
-    ])("refuses %s without printing any part of it", (origin) => {
+      ...unsafeOrigins(secret),
+    ])("refuses %j without printing any part of it", (origin) => {
       const result = status(origin);
       expectRefused(result, "Unexpected Super Functions origin");
       expect(result.stdout + result.stderr).not.toContain(secret);
@@ -199,7 +218,8 @@ describe("Super Functions origin guard", () => {
       ["core.sshCommand", { config: [["core.sshCommand", `ssh -i /tmp/${secret}`]] }],
     ])("refuses an SSH origin when %s selects a custom SSH program, naming only the setting", (source, options) => {
       const result = status("git@github.com:21nCo/superfunctions.git", options);
-      expectRefused(result, `Unexpected Super Functions SSH command set by ${source} (`);
+      expectRefused(result, `Unexpected Super Functions SSH command set by ${source} (unset ${source}, `);
+      expect(result.stderr).toContain("remove any url.<base>.insteadOf rule");
       expect(result.stdout + result.stderr).not.toContain(secret);
     });
 

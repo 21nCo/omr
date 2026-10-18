@@ -8,18 +8,21 @@ const repositories = new Set(["superfunctions", "super-functions"]);
  * scp-style `[git@]github.com:`, and `null` for anything else. The path must be exactly
  * `21nCo/superfunctions` or the legacy `21nCo/super-functions`. SSH aliases (even ones your
  * SSH config maps to github.com), other hosts, ports, schemes, users, query strings, HTTPS
- * passwords and local paths are rejected.
+ * passwords and local paths are rejected, as is any backslash, whitespace or control character,
+ * which WHATWG URL would otherwise strip or rewrite into a github.com URL.
  *
  * This is a static misconfiguration guard, not an attestation of the endpoint git contacts:
  * local SSH config, `PATH` and git config are trusted. It does not prove package content
  * either: the developer chooses the checked-out revision, and `sf:status` only reports
  * whether it descends from the locked `baseSha` (`baseIsAncestor`); no command enforces it.
  *
- * @param {string} url Remote URL after `insteadOf` rewriting (`git remote get-url origin`).
+ * @param {string} url Remote URL after `insteadOf` rewriting (`git remote get-url origin`),
+ *   untrimmed.
  * @returns {"https" | "ssh" | null}
  */
 export function superFunctionsOriginTransport(url) {
-  const remote = parseRemote(url.trim());
+  if (/[\s\\\x00-\x1f\x7f]/.test(url)) return null;
+  const remote = parseRemote(url);
   if (remote === null) return null;
   const match = /^\/?([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(remote.path);
   if (match?.[1].toLowerCase() !== owner || !repositories.has(match[2].toLowerCase())) return null;

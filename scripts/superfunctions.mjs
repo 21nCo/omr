@@ -54,7 +54,9 @@ function assertWorktree() {
   }
 
   // get-url applies url.<base>.insteadOf, so this is the URL git actually fetches from.
-  const repository = capture("git", ["remote", "get-url", "origin"]);
+  // Only git's line terminator is dropped: trimming would hide whitespace stored in the URL.
+  const output = run("git", ["remote", "get-url", "origin"], { cwd: superfunctionsRoot, capture: true });
+  const repository = output.replace(/\n$/, "");
   const transport = superFunctionsOriginTransport(repository);
   if (transport === null) {
     // The rejected URL is untrusted and can hold a token anywhere, so no part of it is printed.
@@ -68,7 +70,8 @@ function assertWorktree() {
   const sshCommand = transport === "ssh" ? configuredSshCommand() : "";
   if (sshCommand !== "") {
     throw new Error(
-      `Unexpected Super Functions SSH command set by ${sshCommand} (use the HTTPS origin ${lock.repository} instead)`,
+      `Unexpected Super Functions SSH command set by ${sshCommand} (unset ${sshCommand}, or use the HTTPS origin ` +
+        `${lock.repository} and remove any url.<base>.insteadOf rule that rewrites it to SSH)`,
     );
   }
 
