@@ -29,6 +29,14 @@ function unsafeOrigins(secret) {
     `git@github.com:21nCo/superfunctions.git${c}${secret}`,
   ]);
 }
+/** Origins that name github.com and 21nCo/superfunctions only after WHATWG URL canonicalization. */
+function canonicalizedOrigins(user) {
+  return ["\uff47\uff49\uff54\uff48\uff55\uff42.com", "git\u00adhub.com", "git\u200bhub.com", "github.com\u200b"]
+    .concat(["github\u3002com", "git%68ub.com", "github.com/evil/..", "github.com/evil/%2e%2e"])
+    .map((host) => `https://${user}${host}/21nCo/superfunctions.git`)
+    .concat(["?", "#"].map((c) => `https://${user}github.com/21nCo/superfunctions.git${c}`))
+    .concat(["github.com:022", "github.com/evil/.."].map((host) => `ssh://${user}${host}/21nCo/superfunctions.git`));
+}
 const accepted = [
   ["https://github.com/21nCo/superfunctions.git", "https"],
   ["https://github.com/21nCo/superfunctions", "https"],
@@ -85,6 +93,8 @@ const rejected = [
   "ssh://-oProxyCommand=id/21nCo/superfunctions.git",
   "",
   ...unsafeOrigins(""),
+  ...canonicalizedOrigins(""),
+  ...canonicalizedOrigins("git@"),
 ];
 
 describe("Super Functions origin guard", () => {
@@ -107,12 +117,8 @@ describe("Super Functions origin guard", () => {
       const tempRoot = mkdtempSync(join(tmpdir(), "omr-sf-origin-"));
       roots.push(tempRoot);
       const root = dir === undefined ? tempRoot : join(tempRoot, dir);
-      // Hermetic: no inherited GIT_CONFIG_* overrides, user or system git config, or git SSH overrides.
-      const base = Object.fromEntries(
-        Object.entries(process.env).filter(
-          ([key]) => !key.startsWith("GIT_CONFIG_") && key !== "GIT_SSH_COMMAND" && key !== "GIT_SSH",
-        ),
-      );
+      // Hermetic: no inherited GIT_* variables (repository, config or SSH overrides), user or system git config.
+      const base = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
       base.GIT_CONFIG_GLOBAL = "/dev/null";
       base.GIT_CONFIG_NOSYSTEM = "1";
       mkdirSync(root, { recursive: true });
@@ -181,6 +187,7 @@ describe("Super Functions origin guard", () => {
       `./${credentials(secret)}x`,
       `/srv/${secret}/21nCo/superfunctions.git`,
       ...unsafeOrigins(secret),
+      ...canonicalizedOrigins(`${secret}@`),
     ])("refuses %j without printing any part of it", (origin) => {
       const result = status(origin);
       expectRefused(result, "Unexpected Super Functions origin");

@@ -1,15 +1,24 @@
 const owner = "21nco";
 // GitHub renamed super-functions to superfunctions; existing clones keep the legacy remote.
 const repositories = new Set(["superfunctions", "super-functions"]);
+// Host, owner and repository are captured as ASCII and compared case-insensitively below.
+const path = String.raw`([A-Za-z0-9-]+)\/([A-Za-z0-9-]+?)(?:\.git)?\/?$`;
+const forms = [
+  ["https", new RegExp(String.raw`^https:\/\/(?:[A-Za-z0-9._~-]+@)?([A-Za-z0-9.-]+)(?::443)?\/${path}`)],
+  ["ssh", new RegExp(String.raw`^ssh:\/\/(?:git@)?([A-Za-z0-9.-]+)(?::22)?\/${path}`)],
+  ["ssh", new RegExp(String.raw`^(?:git@)?([A-Za-z0-9.-]+):${path}`)],
+];
 
 /**
  * Classify a Super Functions `origin` URL by the literal endpoint it names: `"https"` for
- * `https://github.com/` on the default port, `"ssh"` for `ssh://[git@]github.com[:22]/` or
+ * `https://[user@]github.com[:443]/`, `"ssh"` for `ssh://[git@]github.com[:22]/` or
  * scp-style `[git@]github.com:`, and `null` for anything else. The path must be exactly
- * `21nCo/superfunctions` or the legacy `21nCo/super-functions`. SSH aliases (even ones your
- * SSH config maps to github.com), other hosts, ports, schemes, users, query strings, HTTPS
- * passwords and local paths are rejected, as is any backslash, whitespace or control character,
- * which WHATWG URL would otherwise strip or rewrite into a github.com URL.
+ * `21nCo/superfunctions` or the legacy `21nCo/super-functions`, optionally with `.git` and a
+ * trailing slash. The raw string is matched against this ASCII grammar, not parsed as a WHATWG
+ * URL, so text that only names github.com after URL canonicalization (non-ASCII, percent
+ * escapes, dot segments, backslashes, whitespace or control characters) is rejected, as are SSH
+ * aliases (even ones your SSH config maps to github.com), other hosts, ports, schemes, users,
+ * query strings, fragments, HTTPS passwords and local paths.
  *
  * This is a static misconfiguration guard, not an attestation of the endpoint git contacts:
  * local SSH config, `PATH` and git config are trusted. It does not prove package content
@@ -21,37 +30,10 @@ const repositories = new Set(["superfunctions", "super-functions"]);
  * @returns {"https" | "ssh" | null}
  */
 export function superFunctionsOriginTransport(url) {
-  if (/[\s\\\x00-\x1f\x7f]/.test(url)) return null;
-  const remote = parseRemote(url);
-  if (remote === null) return null;
-  const match = /^\/?([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(remote.path);
-  if (match?.[1].toLowerCase() !== owner || !repositories.has(match[2].toLowerCase())) return null;
-  return remote.transport;
-}
-
-/**
- * Split a remote into its transport and repository path when it literally targets GitHub,
- * or return `null`.
- *
- * @param {string} url
- * @returns {{ transport: "https" | "ssh", path: string } | null}
- */
-function parseRemote(url) {
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
-    let parsed;
-    try {
-      parsed = new URL(url);
-    } catch {
-      return null;
-    }
-    // WHATWG URL drops a default port, so an explicit :443 parses as "" and :22 stays "22".
-    const port = parsed.protocol === "https:" ? "" : "22";
-    if (parsed.search || parsed.hash || parsed.password || !["", port].includes(parsed.port)) return null;
-    if (parsed.hostname.toLowerCase() !== "github.com") return null;
-    if (parsed.protocol === "https:") return { transport: "https", path: parsed.pathname };
-    if (parsed.protocol !== "ssh:" || !["", "git"].includes(parsed.username)) return null;
-    return { transport: "ssh", path: parsed.pathname };
+  for (const [transport, form] of forms) {
+    const [, host, user, repository] = form.exec(url) ?? [];
+    if (host?.toLowerCase() !== "github.com" || user.toLowerCase() !== owner) continue;
+    if (repositories.has(repository.toLowerCase())) return transport;
   }
-  const scp = /^(?:git@)?([^@/:]+):(?!\/)(.+)$/.exec(url);
-  return scp?.[1].toLowerCase() === "github.com" ? { transport: "ssh", path: scp[2] } : null;
+  return null;
 }
