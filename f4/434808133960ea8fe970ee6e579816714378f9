@@ -1,0 +1,33 @@
+.github/workflows/deploy-staging.yml
+  s_92427ff18a8304::t_d21f828dd719bd 40
+.github/workflows/vault-contract.yml
+  s_92427ff18a8304::t_a3397b12756028 34,48-49
+docs/decisions/dependencies.md
+  s_92427ff18a8304::t_bbcabd6d8f37b0 3,12,26
+scripts/superfunctions-origin.mjs
+  s_92427ff18a8304::t_b37d3f01486f51 1-54
+scripts/superfunctions.mjs
+  s_92427ff18a8304::t_d57c614e267d1b 5,16,25,30-48,56-72,89,94,125,136,187,192,198,208
+scripts/superfunctions.test.mjs
+  s_92427ff18a8304::t_c9af197f464760 1-215
+superfunctions.lock.json
+  s_92427ff18a8304::t_ae65d429174dd0 4,7
+tests/acceptance/phase-00.test.ts
+  s_92427ff18a8304::t_5207df7f3236c4 28
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f4434808133960ea8fe970ee6e579816714378f9",
+  "prompts": {},
+  "sessions": {
+    "s_92427ff18a8304": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "26336501-b0e6-4534-a7c2-345f5528a4ba",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
