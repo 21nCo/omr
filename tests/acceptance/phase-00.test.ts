@@ -25,7 +25,7 @@ describe("phase 00 dependency provenance", () => {
   it("accepts the dedicated Super Functions worktree", () => {
     expect(lock.schemaVersion).toBe(1);
     expect(lock.mode).toBe("local-worktree");
-    expect(lock.repository).toBe("https://github.com/21nCo/super-functions.git");
+    expect(lock.repository).toBe("https://github.com/21nCo/superfunctions.git");
     expect(existsSync(join(superfunctionsRoot, ".git"))).toBe(true);
     expect(
       execFileSync("git", ["branch", "--show-current"], {
