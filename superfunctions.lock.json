@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "mode": "local-worktree",
-  "repository": "https://github.com/21nCo/super-functions.git",
+  "repository": "https://github.com/21nCo/superfunctions.git",
   "branch": "omr/upstream",
   "baseRef": "origin/omr/upstream",
-  "baseSha": "615d6f44e08d30166ca67b1a7dbe2251904d52e2",
+  "baseSha": "faa3042940e76d0775d38fd0d1cf712927cf6234",
   "defaultRelativePath": "../../../worktrees/superfunctions/omr-upstream",
   "packages": [
     { "name": "authfn", "path": "authfn/core" },

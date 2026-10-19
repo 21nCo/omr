@@ -37,7 +37,7 @@ jobs:
       - name: Check out locked Super Functions revision
         run: |
           locked_sha="$(node -p "require('./superfunctions.lock.json').baseSha")"
-          git clone https://github.com/21nCo/super-functions.git "$OMR_SUPERFUNCTIONS_WORKTREE"
+          git clone https://github.com/21nCo/superfunctions.git "$OMR_SUPERFUNCTIONS_WORKTREE"
           git -C "$OMR_SUPERFUNCTIONS_WORKTREE" switch -c omr/upstream "$locked_sha"
           test "$(git -C "$OMR_SUPERFUNCTIONS_WORKTREE" rev-parse HEAD)" = "$locked_sha"
       - name: Install and link locked dependencies
