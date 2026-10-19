@@ -14,6 +14,7 @@ const fixture = vi.hoisted(() => ({
   capabilities: ["tools:discover", "tools:read", "tools:write", "approvals:create"] as string[],
   catalogTools: ["fixture.read", "fixture.write"] as string[],
   apiRequests: [] as Array<{ path: string; workspaceId: string | null; credential: string | null; toolId: unknown }>,
+  grantClientName: "Fixture host",
 }));
 
 const credential = `omr_${"a".repeat(64)}`;
@@ -58,7 +59,7 @@ vi.mock("@oh-my-router/client-access/postgres", () => ({
     oauthGrants: {
       activate: async () => [],
       listActive: async () => [{
-        omrClientId, clientName: "Fixture host", workspaceId: "workspace_one",
+        omrClientId, clientName: fixture.grantClientName, workspaceId: "workspace_one",
         oauthClientId: "fixture-oauth-client", scopes: ["tools:discover"], createdAt: 1,
       }],
       revoke: async (_userId: string, clientId: string) => {
@@ -201,6 +202,7 @@ describe("remote-mcp-contract", () => {
     fixture.capabilities = ["tools:discover", "tools:read", "tools:write", "approvals:create"];
     fixture.catalogTools = ["fixture.read", "fixture.write"];
     fixture.apiRequests.length = 0;
+    fixture.grantClientName = "Fixture host";
     approvals.approvals.clear();
   });
 
@@ -657,6 +659,45 @@ describe("remote-mcp-contract", () => {
     const disabled = await handleMcpOAuth({ request: new Request(`${origin}/oauth/token`) } as never);
     expect(disabled.status).toBe(503);
     expect(fixture.apiRequests).toHaveLength(0);
+  });
+
+  it("wraps long client-supplied names and identifiers so consent and management pages fit a 375px screen", async () => {
+    const kv = kvFixture();
+    const send = (path: string) => handleMcpOAuth(event(new Request(`${origin}${path}`), kv));
+    // An unbroken name has no soft wrap point; only overflow-wrap on its container keeps it inside 375px.
+    const longName = "W".repeat(240);
+    fixture.grantClientName = longName;
+    const registration = await handleMcpOAuth(event(new Request(`${origin}/oauth/register`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        client_name: longName, redirect_uris: ["https://host.example/callback"],
+        grant_types: ["authorization_code"], response_types: ["code"], token_endpoint_auth_method: "none",
+      }),
+    }), kv));
+    expect(registration.status).toBe(201);
+    const { client_id: clientId } = await registration.json() as { client_id: string };
+    const authorizeUrl = new URL(`${origin}/oauth/authorize`);
+    for (const [key, value] of Object.entries({
+      response_type: "code", client_id: clientId, redirect_uri: "https://host.example/callback",
+      scope: "tools:discover", state: "host-state", resource: `${origin}/mcp`,
+      code_challenge: "c".repeat(43), code_challenge_method: "S256",
+    })) authorizeUrl.searchParams.set(key, value);
+    const consent = await send(authorizeUrl.pathname + authorizeUrl.search);
+    expect(consent.status).toBe(200);
+    const manage = await send("/oauth/manage");
+    expect(manage.status).toBe(200);
+    const consentBody = await consent.text();
+    const manageBody = await manage.text();
+    expect(consentBody).toContain(`<h1>Connect ${longName} to OMR?</h1>`);
+    expect(manageBody).toContain(`<h2>${longName}</h2>`);
+    expect(manageBody).toMatch(/Workspace: <code>workspace_[^<]+<\/code>/);
+    for (const body of [consentBody, manageBody]) {
+      // Wrapping must cover every client-controlled element, not only <code>.
+      expect(body).toMatch(/<style>[^<]*main\{overflow-wrap:anywhere\}/);
+      // A fieldset defaults to min-content width, which would let the workspace select overflow.
+      expect(body).toMatch(/<style>[^<]*select\{max-width:100%\}/);
+      expect(body).toMatch(/<style>[^<]*fieldset\{[^}]*min-width:0/);
+    }
   });
 
   it("requires a same-origin CSRF form to revoke an OAuth client", async () => {
