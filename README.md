@@ -109,7 +109,9 @@ after sign-out and rejected sign-in right after sign-up. Create it with
 or fix an existing one with `wrangler hyperdrive update <id> --caching-disabled`.
 Confirm `wrangler hyperdrive get <id>` reports `caching.disabled` as `true`, then
 set `OMR_HYPERDRIVE_CACHE_DISABLED_CONFIRMED=true` in that environment's vars.
-Until then the Worker refuses database requests with 503 `RUNTIME_UNAVAILABLE`.
+Until then every primary-database route fails closed with 503: `/api` and `/api/auth`
+return `RUNTIME_UNAVAILABLE`, `/mcp` returns `MCP_UNAVAILABLE` and `/oauth` returns
+plain-text `OAuth unavailable`.
 
 Persistent execution receipts and approvals additionally require a distinct 32-byte
 `EXECUTION_RESULT_WRAPPING_KEY`; provider results and approved parameters are encrypted before
