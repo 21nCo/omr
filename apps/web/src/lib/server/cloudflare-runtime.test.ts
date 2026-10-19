@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { ClientAccessAuthority } from "@oh-my-router/client-access";
 import { MemoryClientAccessStore } from "@oh-my-router/client-access/testing";
@@ -5,8 +6,8 @@ import { MemoryWorkspaceStore } from "@oh-my-router/identity/testing";
 import { WorkspaceAuthority } from "@oh-my-router/identity";
 import { LinearProviderDenial, NotionProviderDenial, SlackProviderDenial, ToolCatalog } from "@oh-my-router/tools";
 
-import { assertConnectionWorkspace, checkAuthorizedConnectionHealth, createProviderIntegrationConfig, requireExecutionOrigin, retainWorkerAction, revokeOwnBearerClient, scopedToolIds, selectAuthorizedConnection } from "./cloudflare-runtime.js";
-import { createOMRRouter, type ConnectionRouteServices } from "./router.js";
+import { assertConnectionWorkspace, checkAuthorizedConnectionHealth, createProviderIntegrationConfig, databaseConnectionString, requireExecutionOrigin, retainWorkerAction, revokeOwnBearerClient, scopedToolIds, selectAuthorizedConnection } from "./cloudflare-runtime.js";
+import { createOMRRouter, RuntimeUnavailableError, type ConnectionRouteServices } from "./router.js";
 
 describe("assisted Worker action lifetime", () => {
   it("registers settlement with the Worker context before response completion", async () => {
@@ -18,6 +19,30 @@ describe("assisted Worker action lifetime", () => {
     expect(() => retainWorkerAction(undefined, settlement)).toThrow(/Worker action retention/);
   });
 
+});
+
+describe("primary database freshness guard", () => {
+  const resolve = (env: Record<string, unknown>) => databaseConnectionString({ platform: { env } } as never);
+  const hyperdrive = { HYPERDRIVE: { connectionString: "postgres://hyperdrive" }, DATABASE_URL: "postgres://direct" };
+
+  it("refuses an unconfirmed Hyperdrive binding without falling back to DATABASE_URL", () => {
+    for (const confirmed of [undefined, "false", "TRUE", "1"]) {
+      expect(() => resolve({ ...hyperdrive, OMR_HYPERDRIVE_CACHE_DISABLED_CONFIRMED: confirmed }))
+        .toThrow(RuntimeUnavailableError);
+    }
+  });
+
+  it("uses a confirmed Hyperdrive binding and a direct local URL without confirmation", () => {
+    expect(resolve({ ...hyperdrive, OMR_HYPERDRIVE_CACHE_DISABLED_CONFIRMED: "true" })).toBe("postgres://hyperdrive");
+    expect(resolve({ DATABASE_URL: "postgres://direct" })).toBe("postgres://direct");
+  });
+
+  it("confirms staging, whose Hyperdrive read back caching.disabled=true on 2026-10-20", () => {
+    const config = JSON.parse(readFileSync(new URL("../../../wrangler.jsonc", import.meta.url), "utf8")) as {
+      env: { staging: { vars: Record<string, string>; hyperdrive: Array<{ binding: string }> } } };
+    expect(config.env.staging.hyperdrive.map(({ binding }) => binding)).toContain("HYPERDRIVE");
+    expect(config.env.staging.vars.OMR_HYPERDRIVE_CACHE_DISABLED_CONFIRMED).toBe("true");
+  });
 });
 
 /** Give catalog isolation tests identical read contracts for each selected provider. */

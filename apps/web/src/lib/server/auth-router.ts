@@ -2,6 +2,7 @@ import type { RequestEvent } from "@superfunctions/http-sveltekit";
 import { connectPostgresIdentityRuntime } from "@oh-my-router/identity/postgres";
 
 import { databaseConnectionString } from "./cloudflare-runtime.js";
+import { RuntimeUnavailableError } from "./router.js";
 
 export function toAuthFnRequest(request: Request): Request {
   const url = new URL(request.url);
@@ -19,8 +20,15 @@ export async function handleCloudflareAuth(event: RequestEvent): Promise<Respons
       headers: { "cache-control": "no-store" },
     });
   }
+  let connectionString: string;
+  try {
+    connectionString = databaseConnectionString(event);
+  } catch (error) {
+    if (!(error instanceof RuntimeUnavailableError)) throw error;
+    return Response.json({ error: error.code }, { status: 503, headers: { "cache-control": "no-store" } });
+  }
   const runtime = await connectPostgresIdentityRuntime({
-    connectionString: databaseConnectionString(event),
+    connectionString,
     environment: {
       resolve: () => ({ issuer: origin, baseUrl: origin }),
     },

@@ -102,6 +102,15 @@ The Worker expects a production `HYPERDRIVE` binding and the required
 unbound process environment variable is not exposed to the Worker. Never commit
 the wrapping key or provider credentials.
 
+The primary `HYPERDRIVE` binding serves every authorization read, so it must not
+cache queries: default Hyperdrive caching kept sessions valid for about a minute
+after sign-out and rejected sign-in right after sign-up. Create it with
+`wrangler hyperdrive create <name> --connection-string=<url> --caching-disabled`
+or fix an existing one with `wrangler hyperdrive update <id> --caching-disabled`.
+Confirm `wrangler hyperdrive get <id>` reports `caching.disabled` as `true`, then
+set `OMR_HYPERDRIVE_CACHE_DISABLED_CONFIRMED=true` in that environment's vars.
+Until then the Worker refuses database requests with 503 `RUNTIME_UNAVAILABLE`.
+
 Persistent execution receipts and approvals additionally require a distinct 32-byte
 `EXECUTION_RESULT_WRAPPING_KEY`; provider results and approved parameters are encrypted before
 PostgreSQL storage.

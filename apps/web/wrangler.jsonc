@@ -40,7 +40,8 @@
       "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
       "vars": {
         "OMR_PUBLIC_ORIGIN": "https://omr-staging.21n.dev",
-        "OMR_MCP_BROWSER_ORIGINS": "https://chatgpt.com,https://claude.ai,https://vscode.dev"
+        "OMR_MCP_BROWSER_ORIGINS": "https://chatgpt.com,https://claude.ai,https://vscode.dev",
+        "OMR_HYPERDRIVE_CACHE_DISABLED_CONFIRMED": "true"
       },
       "kv_namespaces": [
         {
