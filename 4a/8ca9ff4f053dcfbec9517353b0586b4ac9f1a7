@@ -1,0 +1,44 @@
+apps/web/src/lib/server/cloudflare-runtime.test.ts
+  s_e1c5fc1a65c0cf::t_7157bcaf93691d 9-10,24-47
+  s_1900bb15a7199a::t_5f647f4feaef65 1
+README.md
+  s_e1c5fc1a65c0cf::t_0b06f643662b5e 105-113
+docs/openrouter-vault.md
+  s_e1c5fc1a65c0cf::t_a4eed00e98ab5f 11,13
+.env.example
+  s_e1c5fc1a65c0cf::t_50d1786dff30ec 3-6
+apps/web/src/lib/server/auth-router.test.ts
+  s_e1c5fc1a65c0cf::t_d0b4bb63b0736f 1,3-6,23-34
+apps/web/src/lib/server/auth-router.ts
+  s_1900bb15a7199a::t_e67ccb27221f97 5,23-29,31
+apps/web/wrangler.jsonc
+  s_1900bb15a7199a::t_ddd8b91665099b 43-44
+apps/web/src/lib/server/cloudflare-runtime.ts
+  s_1900bb15a7199a::t_2da8f9ee71be0c 56,95-99,102-104
+apps/web/src/app.d.ts
+  s_e1c5fc1a65c0cf::t_4927ac4787b391 11
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4a8ca9ff4f053dcfbec9517353b0586b4ac9f1a7",
+  "prompts": {},
+  "sessions": {
+    "s_1900bb15a7199a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5e049926-ee38-44b5-a734-8c7117ee5ff7",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    },
+    "s_e1c5fc1a65c0cf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a13e18-4241-7662-a24f-782076addabe",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
