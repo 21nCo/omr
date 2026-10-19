@@ -53,6 +53,7 @@ type OMRBindings = Cloudflare.Env & {
   OPENROUTER_VAULT_HYPERDRIVE?: { connectionString: string };
   DATABASE_URL?: string;
   OPENROUTER_VAULT_DATABASE_URL?: string;
+  OMR_HYPERDRIVE_CACHE_DISABLED_CONFIRMED?: string;
   OMR_OPENROUTER_VAULT_ENABLED?: string;
   OMR_OPENROUTER_VAULT_CACHE_DISABLED_CONFIRMED?: string;
   OMR_ASSISTED_PLAYGROUND_ENABLED?: string;
@@ -91,9 +92,16 @@ function environment(event: RequestEvent): OMRBindings {
   return env;
 }
 
-/** Resolve the Worker database binding for a request. */
+/**
+ * Resolve the Worker database binding for a request. Every authorization read
+ * uses this binding, so a bound Hyperdrive must be confirmed cache-disabled:
+ * cached SELECTs would keep revoked sessions and grants valid until expiry.
+ */
 export function databaseConnectionString(event: RequestEvent): string {
   const env = environment(event);
+  if (env.HYPERDRIVE && env.OMR_HYPERDRIVE_CACHE_DISABLED_CONFIRMED !== "true") {
+    throw new RuntimeUnavailableError("Database Hyperdrive caching is not confirmed disabled");
+  }
   const connectionString = env.HYPERDRIVE?.connectionString ?? env.DATABASE_URL;
   if (!connectionString) {
     throw new RuntimeUnavailableError("Database binding is unavailable");
