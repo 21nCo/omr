@@ -1,0 +1,19 @@
+docs/v1-live-acceptance.md
+  s_92427ff18a8304::t_2716f730fadbef 3,30,34-37,41-42,44-46,123,151
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ca8d8d76c4c3376d352de793f529557bb9e88f7d",
+  "prompts": {},
+  "sessions": {
+    "s_92427ff18a8304": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "26336501-b0e6-4534-a7c2-345f5528a4ba",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
