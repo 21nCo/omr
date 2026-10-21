@@ -1,0 +1,31 @@
+docs/v1-live-acceptance.md
+  s_7b195fa42eff5d::t_746bdd10a4dccf 138,150
+packages/connections/src/postgres-rejoin.integration.test.ts
+  s_7b195fa42eff5d::t_d19718bc47c5eb 7,10,79,82,105,145,172,217,261
+packages/connections/src/postgres.integration.test.ts
+  s_7b195fa42eff5d::t_02cb8254764ce5 9,12,56,337,548,636
+packages/execution/src/assisted-turn-binding-postgres.integration.test.ts
+  s_7b195fa42eff5d::t_98260c05df3648 8,12,15
+packages/execution/src/postgres-approval-migration.test.ts
+  s_7b195fa42eff5d::t_a17ad5b0bb5d22 8,11,14,288,391,409
+packages/execution/src/postgres.integration.test.ts
+  s_7b195fa42eff5d::t_41d10f676b3364 11,14,18,114,124-125,348,419,480,632,643,653,668,678,734,741,772,777,786,808,820,841-842,857,867,898-899,912,915,943-944,971,992,1031-1032,1039,1052-1053,1087,1108-1109,1116,1130-1131,1138,1147,1151,1167,1188,1196,1201,1209,1227,1248-1249,1255,1258,1279,1310,1317,1322,1328,1339-1340,1353,1360,1363,1371
+tests/fixtures/postgres-fixture-timing.ts
+  s_7b195fa42eff5d::t_ec3ccc391783d8 1-45
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "15dab4e59ca1a7a82f004312b7e6e41b96fe228f",
+  "prompts": {},
+  "sessions": {
+    "s_7b195fa42eff5d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_7b195fa42eff5d",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
