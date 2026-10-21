@@ -1,0 +1,23 @@
+docs/v1-live-acceptance.md
+  s_bd9981b335eb59::t_5c6c6201673176 134
+tests/fixtures/postgres-fixture-timing.test.ts
+  s_bd9981b335eb59::t_177f1642eeaed6 1-77
+tests/fixtures/postgres-fixture-timing.ts
+  s_bd9981b335eb59::t_0a704fe181c574 10-11,28,30-31,41-81
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "13a0409b25615a655c43dacbd076f06cbfea277b",
+  "prompts": {},
+  "sessions": {
+    "s_bd9981b335eb59": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_bd9981b335eb59",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
