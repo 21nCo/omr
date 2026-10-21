@@ -5,12 +5,14 @@ import { ASSISTED_TURN_RETENTION_MS, abandonPostgresAssistedTurn,
   bindPostgresAssistedTurn, claimPostgresAssistedTurn, lookupPostgresAssistedTurn,
   startPostgresAssistedModel } from
   "./assisted-turn-binding-postgres.js";
+import { postgresFixtureTiming } from "../../../tests/fixtures/postgres-fixture-timing.js";
 
 const { Client } = pg;
 const connectionString = process.env.OMR_TEST_DATABASE_URL;
+const timing = await postgresFixtureTiming(connectionString);
 const describeDatabase = connectionString ? describe : describe.skip;
 
-describeDatabase("assisted turn PostgreSQL binding", () => {
+describeDatabase("assisted turn PostgreSQL binding", { timeout: timing.test(5_000) }, () => {
   const workspaceId = `assisted-${crypto.randomUUID()}`;
   const requestId = crypto.randomUUID();
   const wrappingKey = new Uint8Array(new ArrayBuffer(32)).fill(11);
