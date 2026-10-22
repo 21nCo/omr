@@ -7,6 +7,9 @@ const { Client } = pg;
 const MAX_STORE_CONNECTIONS = 8;
 const SOCKET_CLOSE_MS = 1_000;
 
+/** pg's connect timer is a backstop past the deadline, so the caller's deadline race reports the timeout. */
+export const connectTimeoutPastDeadline = (deadlineAt: number) => Math.max(1, deadlineAt - Date.now()) + SOCKET_CLOSE_MS;
+
 interface WaitingQuery {
   resolve: () => void;
   reject: (reason: Error) => void;
@@ -83,7 +86,7 @@ export class PostgresOwnedQueries {
     let client: InstanceType<typeof Client>;
     try {
       client = new Client({ connectionString: this.connectionString,
-        connectionTimeoutMillis: Math.max(1, remaining) });
+        connectionTimeoutMillis: connectTimeoutPastDeadline(deadlineAt) });
     } catch (error) {
       this.release();
       throw error;
