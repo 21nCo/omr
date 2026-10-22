@@ -1,0 +1,35 @@
+docs/v1-live-acceptance.md
+  s_e1c5fc1a65c0cf::t_bc4b93e428e5cb 138,151-152,168,170-171
+packages/execution/src/postgres-connect-deadline.test.ts
+  s_e1c5fc1a65c0cf::t_d6198d21bc46f1 1-106
+packages/execution/src/postgres-approval-store.ts
+  s_92427ff18a8304::t_4c1384e34277cf 20,392,602
+packages/execution/src/postgres-owned-query.ts
+  s_92427ff18a8304::t_655aaa6c44c62c 10-12,89
+packages/execution/src/postgres.ts
+  s_92427ff18a8304::t_84c4c2daac5cbb 10,114
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f250599d3506ff6a219552a185ddb54264631ce5",
+  "prompts": {},
+  "sessions": {
+    "s_92427ff18a8304": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "26336501-b0e6-4534-a7c2-345f5528a4ba",
+        "model": "unknown"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    },
+    "s_e1c5fc1a65c0cf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a13e18-4241-7662-a24f-782076addabe",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "thyaravind <samalaaravind02@gmail.com>"
+    }
+  }
+}
