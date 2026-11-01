@@ -17,7 +17,7 @@ import {
   type ExecutionReceipt,
 } from "./execution.js";
 import { decryptJson, encryptJson } from "./postgres-crypto.js";
-import { PostgresOwnedQueries } from "./postgres-owned-query.js";
+import { connectTimeoutPastDeadline, PostgresOwnedQueries } from "./postgres-owned-query.js";
 
 interface ApprovalRow {
   id: string;
@@ -389,7 +389,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     }
     const client = this.claimConnectionString
       ? new PostgresClient({ connectionString: this.claimConnectionString,
-        connectionTimeoutMillis: Math.max(1, input.deadlineAt - Date.now()) }) : this.client!;
+        connectionTimeoutMillis: connectTimeoutPastDeadline(input.deadlineAt) }) : this.client!;
     try {
       return await this.claimWithClient(input, client, false);
     } finally {
@@ -599,7 +599,7 @@ export class PostgresExecutionApprovalStore implements ExecutionApprovalStore {
     }
     const deadlineAt = input.deadlineAt;
     const client = new PostgresClient({ connectionString: this.claimConnectionString,
-      connectionTimeoutMillis: Math.max(1, deadlineAt - Date.now()) });
+      connectionTimeoutMillis: connectTimeoutPastDeadline(deadlineAt) });
     client.on("error", () => undefined);
     try {
       return await this.completeWithClient(input, client, false);

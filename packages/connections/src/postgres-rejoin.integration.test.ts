@@ -4,8 +4,10 @@ import { PostgresWorkspaceStore } from "@oh-my-router/identity/postgres";
 
 import { PostgresConnectionBindingStore } from "./postgres-store.js";
 import { ConnectionAuthority } from "./connections.js";
+import { postgresFixtureTiming } from "../../../tests/fixtures/postgres-fixture-timing.js";
 
 const connectionString = process.env.OMR_TEST_DATABASE_URL;
+const timing = await postgresFixtureTiming(connectionString);
 const describePostgres = connectionString ? describe : describe.skip;
 
 /** Seed an orphaned personal binding and a valid invitation in one disposable workspace. */
@@ -74,10 +76,10 @@ async function expectLockWait(observer: Client, blockedPid: number): Promise<voi
       `SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1`, [blockedPid],
     );
     expect(result.rows[0]?.wait_event_type).toBe("Lock");
-  }, { timeout: 5_000, interval: 20 });
+  }, { timeout: timing.deadline(5_000), interval: 20 });
 }
 
-describePostgres("orphan cleanup and membership rejoin serialization", () => {
+describePostgres("orphan cleanup and membership rejoin serialization", { timeout: timing.test(5_000) }, () => {
   it("durably records an inactive remote handle after the initiating member departs", async () => {
     const seed = new Client({ connectionString: connectionString! });
     const cleanupClient = new Client({ connectionString: connectionString! });
@@ -100,7 +102,7 @@ describePostgres("orphan cleanup and membership rejoin serialization", () => {
       await seed.query(`DELETE FROM omr_control.workspaces WHERE id = $1`, [state.workspaceId]);
       await Promise.all([seed.end(), cleanupClient.end()]);
     }
-  }, 15_000);
+  }, timing.test(15_000));
 
   it("lets a rejoined owner claim cleanup while keeping admins and selections out", async () => {
     const seed = new Client({ connectionString: connectionString! });
@@ -140,7 +142,7 @@ describePostgres("orphan cleanup and membership rejoin serialization", () => {
       await seed.query(`DELETE FROM omr_control.workspaces WHERE id = $1`, [state.workspaceId]);
       await Promise.all([seed.end(), cleanupClient.end(), invitationClient.end()]);
     }
-  }, 15_000);
+  }, timing.test(15_000));
 
   it("keeps the revocation preflight advisory while the mutation waits for the workspace lock", async () => {
     const seed = new Client({ connectionString: connectionString! });
@@ -167,7 +169,7 @@ describePostgres("orphan cleanup and membership rejoin serialization", () => {
       await seed.query(`DELETE FROM omr_control.workspaces WHERE id = $1`, [state.workspaceId]);
       await Promise.all([seed.end(), lockClient.end(), cleanupClient.end()]);
     }
-  }, 15_000);
+  }, timing.test(15_000));
 
   for (const mode of ["revoke", "revokeIf"] as const) {
     it(`${mode}: cleanup commits before rejoin without a stale authorization decision`, async () => {
@@ -212,7 +214,7 @@ describePostgres("orphan cleanup and membership rejoin serialization", () => {
         await seed.query(`DELETE FROM omr_control.workspaces WHERE id = $1`, [state.workspaceId]);
         await Promise.all([seed.end(), cleanupClient.end(), invitationClient.end()]);
       }
-    }, 15_000);
+    }, timing.test(15_000));
 
     it(`${mode}: rejoin commits first and preserves the personal binding and selection`, async () => {
       const seed = new Client({ connectionString: connectionString! });
@@ -256,6 +258,6 @@ describePostgres("orphan cleanup and membership rejoin serialization", () => {
         await seed.query(`DELETE FROM omr_control.workspaces WHERE id = $1`, [state.workspaceId]);
         await Promise.all([seed.end(), cleanupClient.end(), invitationClient.end()]);
       }
-    }, 15_000);
+    }, timing.test(15_000));
   }
 });
