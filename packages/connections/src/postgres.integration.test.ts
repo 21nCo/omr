@@ -6,8 +6,10 @@ import { PlugFnConnectionOrchestrator, type PlugFnConnection, type PlugFnConnect
 import { PostgresConnectionBindingStore } from "./postgres-store.js";
 import { connectPostgresConnections, type PostgresConnectionRuntime } from "./postgres.js";
 import { finishRaceTest, raceStep, settleRaceRequest, waitForRaceBarrier } from "../test-support/race-test-barrier.js";
+import { postgresFixtureTiming } from "../../../tests/fixtures/postgres-fixture-timing.js";
 
 const connectionString = process.env.OMR_TEST_DATABASE_URL;
+const timing = await postgresFixtureTiming(connectionString);
 const describePostgres = connectionString ? describe : describe.skip;
 
 /** Close both race clients if either setup connection fails. */
@@ -51,7 +53,7 @@ async function withConnectionMember<T>(
   }
 }
 
-describePostgres("connection authority/PostgreSQL integration", () => {
+describePostgres("connection authority/PostgreSQL integration", { timeout: timing.test(5_000) }, () => {
   let runtime: PostgresConnectionRuntime;
   let workspaceId: string;
 
@@ -332,7 +334,7 @@ describePostgres("connection authority/PostgreSQL integration", () => {
               WHERE workspace_id = $1 AND provider_connection_id = $2`, [workspaceId, providerConnectionId]);
         }, async () => { await firstClient.end(); }, async () => { await secondClient.end(); }]);
       }
-    }, 20_000);
+    }, timing.test(20_000));
   }
 
   it("keeps a cleanup reservation terminal when it claims the PostgreSQL handle first", async () => {
@@ -543,7 +545,7 @@ describePostgres("connection authority/PostgreSQL integration", () => {
           ]);
         }
       });
-    }, 15_000);
+    }, timing.test(15_000));
   }
 
   it("restores and closes the shared member fixture after lookup and race failures", async () => {
@@ -631,7 +633,7 @@ describePostgres("connection authority/PostgreSQL integration", () => {
         }
       }]);
     }
-  }, 10_000);
+  }, timing.test(10_000));
 
   it("rejects a stale PostgreSQL cleanup claim after an authorized retry takes ownership", async () => {
     const binding = await runtime.connections.attach({ actorUserId: "connection_owner", workspaceId,

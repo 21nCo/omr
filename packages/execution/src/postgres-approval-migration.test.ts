@@ -5,11 +5,13 @@ import { describe, expect, it } from "vitest";
 import { PostgresExecutionApprovalStore } from "./postgres-approval-store.js";
 import { PostgresExecutionReceiptStore } from "./postgres-store.js";
 import type { ExecutionApproval } from "./execution.js";
+import { postgresFixtureTiming } from "../../../tests/fixtures/postgres-fixture-timing.js";
 
 const databaseUrl = process.env.OMR_TEST_DATABASE_URL;
+const timing = await postgresFixtureTiming(databaseUrl);
 const describeDatabase = databaseUrl ? describe : describe.skip;
 
-describeDatabase("approval migration from origin/dev schema", () => {
+describeDatabase("approval migration from origin/dev schema", { timeout: timing.test(5_000) }, () => {
   it("rolls back atomically, reconciles duplicate legacy keys, and reserves NULL fingerprints", async () => {
     const client = new Client({ connectionString: databaseUrl! });
     const schema = `omr_approval_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -283,7 +285,7 @@ describeDatabase("approval migration from origin/dev schema", () => {
             .rejects.toMatchObject({ code: "APPROVAL_TRANSACTION_REQUIRED" });
           await expect(directStore.claim({ approvalId: blockedId, actorUserId: "user_1",
             principalKey: "web:user_1", now: Date.now(), clock: Date.now,
-            deadlineAt: Date.now() + 1_000 }))
+            deadlineAt: Date.now() + timing.deadline(1_000) }))
             .rejects.toMatchObject({ code: "APPROVAL_TRANSACTION_REQUIRED" });
           await blocker.query("ROLLBACK");
           let activeBackend = true;
@@ -386,7 +388,7 @@ describeDatabase("approval migration from origin/dev schema", () => {
       await client.query(`INSERT INTO ${qualified}.workspace_memberships VALUES ('workspace_1', 'user_1')`);
       await store.approve({ approvalId: "approval_fresh", actorUserId: "user_1", now: 5, clock: () => 5 });
       await store.claim({ approvalId: "approval_fresh", actorUserId: "user_1",
-        principalKey: "web:user_1", now: 6, deadlineAt: Date.now() + 1_000, clock: () => 6 });
+        principalKey: "web:user_1", now: 6, deadlineAt: Date.now() + timing.deadline(1_000), clock: () => 6 });
       await client.query(`INSERT INTO ${qualified}.execution_receipts
         (id, workspace_id, actor_user_id, principal_key, tool_id, manifest_hash, connection_id,
          provider_connection_id, idempotency_key, status, request_hash, started_at, created_at, updated_at)
@@ -404,7 +406,7 @@ describeDatabase("approval migration from origin/dev schema", () => {
       await expect(store.uncertain({ approvalId: "approval_fresh", receiptId: "execution_reconcile", now: 7 }))
         .resolves.toMatchObject({ status: "uncertain", executionReceiptId: "execution_reconcile" });
       await expect(store.claim({ approvalId: "approval_fresh", actorUserId: "user_1",
-        principalKey: "web:user_1", now: 8, deadlineAt: Date.now() + 1_000, clock: () => 8 })).rejects.toMatchObject({
+        principalKey: "web:user_1", now: 8, deadlineAt: Date.now() + timing.deadline(1_000), clock: () => 8 })).rejects.toMatchObject({
         code: "EXECUTION_OUTCOME_UNKNOWN", receiptId: "execution_reconcile",
       });
       const count = await client.query<{ count: string }>(

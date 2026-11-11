@@ -7,7 +7,7 @@ export { lookupPostgresAssistedTurn, bindPostgresAssistedTurn,
 import { PostgresExecutionReceiptStore } from "./postgres-store.js";
 import { PostgresExecutionApprovalStore } from "./postgres-approval-store.js";
 import { PostgresExecutionInvocationGuard } from "./postgres-invocation-guard.js";
-import { PostgresOwnedQueries } from "./postgres-owned-query.js";
+import { connectTimeoutPastDeadline, PostgresOwnedQueries } from "./postgres-owned-query.js";
 import { EXECUTION_INVOCATION_DEADLINE_MS, ExecutionInvocationDeadlineError,
   type ExecutionInvocationGuard } from "./execution.js";
 
@@ -111,7 +111,7 @@ export async function connectPostgresExecutionReceipts(input: {
     operationUrl.searchParams.set("application_name",
       `${namePrefix.slice(0, 45)}:${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`);
     const client = new Client({ connectionString: operationUrl.toString(),
-      connectionTimeoutMillis: Math.max(1, deadlineAt - Date.now()),
+      connectionTimeoutMillis: connectTimeoutPastDeadline(deadlineAt),
       statement_timeout: Math.max(1, deadlineAt - Date.now()) });
     client.on("error", () => undefined);
     const controller = new AbortController();
