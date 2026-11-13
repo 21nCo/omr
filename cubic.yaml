@@ -10,7 +10,6 @@ reviews:
     files:
       # Prose documentation. The local review runs a docs-vs-code check (cubic
       # CLI) before the PR opens and on every fix push.
-      - '**/README.md'
       - '**/CHANGELOG.md'
       - '**/CONTRIBUTING.md'
       # Recorded test data (data file types only; helper code under these folders stays reviewed)
