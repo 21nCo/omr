@@ -1,0 +1,19 @@
+cubic.yaml
+  s_ba1e39f54a564a::t_0dc1d4f1e16fa4 1-38
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d899d3c873efdf4a75d1a962e792d53c52d3ac57",
+  "prompts": {},
+  "sessions": {
+    "s_ba1e39f54a564a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "efb1e321-8423-418a-98d3-db03fe78139b",
+        "model": "unknown"
+      },
+      "human_author": "Aravind Samala <samalaaravind02@gmail.com>"
+    }
+  }
+}
